@@ -4,7 +4,9 @@ from dataclasses import dataclass
 import re
 from time import perf_counter
 from typing import Any, Literal, Optional, TypedDict
+from uuid import uuid4
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 
 from ai_agent_platform.domain import Message
@@ -42,12 +44,17 @@ class CodingAgentState(TypedDict, total=False):
 
 
 AgentRoute = Literal["retrieve_repository_context", "compose_answer"]
+AgentRunStatus = Literal["running", "completed", "failed"]
 
 
 @dataclass(frozen=True)
 class AgentRunResult:
+    run_id: str
+    thread_id: str
     conversation_id: str
     repository_id: str
+    status: AgentRunStatus
+    checkpoint_id: Optional[str]
     role: str
     objective: str
     intent: str
@@ -57,6 +64,25 @@ class AgentRunResult:
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class AgentRunRecord:
+    run_id: str
+    thread_id: str
+    conversation_id: str
+    repository_id: str
+    status: AgentRunStatus
+    checkpoint_id: Optional[str]
+    latest_node: Optional[str]
+    next_nodes: list[str]
+    trace: list[dict[str, Any]]
+    result: Optional[AgentRunResult] = None
+    error: Optional[str] = None
+
+
+class AgentRunNotFoundError(Exception):
+    pass
 
 
 class CodingAgentRuntime:
@@ -70,6 +96,8 @@ class CodingAgentRuntime:
     ) -> None:
         self._rag_service = rag_service
         self._tools = tool_registry or create_coding_tool_registry()
+        self._checkpointer = InMemorySaver()
+        self._runs: dict[str, AgentRunRecord] = {}
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
 
@@ -82,23 +110,61 @@ class CodingAgentRuntime:
         repository_id: str = "repo_main",
         focus_files: Optional[list[str]] = None,
     ) -> AgentRunResult:
-        state = self._graph.invoke(
-            {
-                "conversation_id": conversation_id,
-                "user_input": user_input,
-                "repository_id": repository_id,
-                "focus_files": focus_files or [],
-                "history": [
-                    {"role": message.role, "content": message.content}
-                    for message in history
-                ],
-                "trace": [],
-                "started_at": perf_counter(),
-            }
-        )
-        return AgentRunResult(
+        run_id = f"run_{uuid4().hex[:12]}"
+        thread_id = run_id
+        config = {"configurable": {"thread_id": thread_id}}
+        self._runs[run_id] = AgentRunRecord(
+            run_id=run_id,
+            thread_id=thread_id,
             conversation_id=conversation_id,
             repository_id=repository_id,
+            status="running",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=[],
+            trace=[],
+        )
+
+        try:
+            state = self._graph.invoke(
+                {
+                    "conversation_id": conversation_id,
+                    "user_input": user_input,
+                    "repository_id": repository_id,
+                    "focus_files": focus_files or [],
+                    "history": [
+                        {"role": message.role, "content": message.content}
+                        for message in history
+                    ],
+                    "trace": [],
+                    "started_at": perf_counter(),
+                },
+                config,
+            )
+        except Exception as exc:
+            snapshot = self._snapshot_for(config)
+            self._runs[run_id] = AgentRunRecord(
+                run_id=run_id,
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                repository_id=repository_id,
+                status="failed",
+                checkpoint_id=_checkpoint_id(snapshot),
+                latest_node=_latest_trace_node(snapshot),
+                next_nodes=_next_nodes(snapshot),
+                trace=_snapshot_trace(snapshot),
+                error=str(exc),
+            )
+            raise
+
+        snapshot = self._snapshot_for(config)
+        result = AgentRunResult(
+            run_id=run_id,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            repository_id=repository_id,
+            status="completed",
+            checkpoint_id=_checkpoint_id(snapshot),
             role=CODING_AGENT_ROLE,
             objective=CODING_AGENT_OBJECTIVE,
             intent=state.get("intent", "repository_question"),
@@ -109,6 +175,31 @@ class CodingAgentRuntime:
             tool_results=state.get("tool_results", []),
             trace=state.get("trace", []),
         )
+        self._runs[run_id] = AgentRunRecord(
+            run_id=run_id,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            repository_id=repository_id,
+            status="completed",
+            checkpoint_id=result.checkpoint_id,
+            latest_node=_latest_trace_node(snapshot),
+            next_nodes=_next_nodes(snapshot),
+            trace=result.trace,
+            result=result,
+        )
+        return result
+
+    def get_run(self, run_id: str) -> AgentRunRecord:
+        try:
+            return self._runs[run_id]
+        except KeyError as exc:
+            raise AgentRunNotFoundError(run_id) from exc
+
+    def _snapshot_for(self, config: dict[str, Any]):
+        try:
+            return self._graph.get_state(config)
+        except Exception:
+            return None
 
     def _build_graph(self):
         workflow = StateGraph(CodingAgentState)
@@ -132,7 +223,7 @@ class CodingAgentRuntime:
         workflow.add_edge("plan_tools", "inspect_repository")
         workflow.add_edge("inspect_repository", "compose_answer")
         workflow.add_edge("compose_answer", END)
-        return workflow.compile()
+        return workflow.compile(checkpointer=self._checkpointer)
 
     def _setup(self, state: CodingAgentState) -> CodingAgentState:
         history = state.get("history", [])
@@ -259,6 +350,36 @@ class CodingAgentRuntime:
                 output={"elapsed_ms": elapsed_ms, "answer_chars": len(answer)},
             ),
         }
+
+
+def _checkpoint_id(snapshot: Any) -> Optional[str]:
+    if snapshot is None:
+        return None
+    configurable = snapshot.config.get("configurable", {})
+    checkpoint_id = configurable.get("checkpoint_id")
+    return str(checkpoint_id) if checkpoint_id else None
+
+
+def _next_nodes(snapshot: Any) -> list[str]:
+    if snapshot is None:
+        return []
+    return [str(node) for node in snapshot.next]
+
+
+def _snapshot_trace(snapshot: Any) -> list[dict[str, Any]]:
+    if snapshot is None or not isinstance(snapshot.values, dict):
+        return []
+    trace = snapshot.values.get("trace", [])
+    return list(trace) if isinstance(trace, list) else []
+
+
+def _latest_trace_node(snapshot: Any) -> Optional[str]:
+    trace = _snapshot_trace(snapshot)
+    if not trace:
+        return None
+    latest = trace[-1]
+    node = latest.get("node") if isinstance(latest, dict) else None
+    return str(node) if node else None
 
 
 def create_coding_tool_registry() -> ToolRegistry:

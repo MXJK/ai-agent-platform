@@ -191,6 +191,10 @@ class APITests(unittest.TestCase):
         self.assertEqual(first_response.status_code, 200)
         body = first_response.json()
         self.assertEqual(body["graph_engine"], "langgraph")
+        self.assertTrue(body["run_id"].startswith("run_"))
+        self.assertEqual(body["thread_id"], body["run_id"])
+        self.assertEqual(body["status"], "completed")
+        self.assertIsNotNone(body["checkpoint_id"])
         self.assertEqual(body["repository_id"], "repo_main")
         self.assertEqual(body["role"], "研发助手 / 代码仓库问答 Agent")
         self.assertEqual(body["intent"], "repo_navigation")
@@ -210,6 +214,21 @@ class APITests(unittest.TestCase):
             ],
         )
         self.assertIn("ai_agent_platform/api/router.py", body["answer"])
+
+        status_response = self.client.get(f"/api/v1/agent/runs/{body['run_id']}")
+        self.assertEqual(status_response.status_code, 200)
+        status_body = status_response.json()
+        self.assertEqual(status_body["run_id"], body["run_id"])
+        self.assertEqual(status_body["thread_id"], body["thread_id"])
+        self.assertEqual(status_body["status"], "completed")
+        self.assertEqual(status_body["checkpoint_id"], body["checkpoint_id"])
+        self.assertEqual(status_body["latest_node"], "compose_answer")
+        self.assertEqual(status_body["next_nodes"], [])
+        self.assertEqual(status_body["result"]["answer"], body["answer"])
+        self.assertEqual(
+            [step["node"] for step in status_body["trace"]],
+            [step["node"] for step in body["trace"]],
+        )
 
         second_response = self.client.post(
             "/api/v1/agent/runs",
@@ -236,6 +255,12 @@ class APITests(unittest.TestCase):
             [message["role"] for message in messages],
             ["user", "assistant", "user", "assistant"],
         )
+
+    def test_agent_run_status_returns_404_for_missing_run(self) -> None:
+        response = self.client.get("/api/v1/agent/runs/run_missing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "agent run not found")
 
     def test_rag_search_is_scoped_by_knowledge_base_id(self) -> None:
         self.client.post(

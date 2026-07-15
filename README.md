@@ -85,6 +85,7 @@ POST /api/v1/sessions/{session_id}/messages
 GET  /api/v1/sessions/{session_id}/messages
 POST /api/v1/chat/stream
 POST /api/v1/agent/runs
+GET  /api/v1/agent/runs/{run_id}
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
@@ -119,6 +120,11 @@ small OpenHands/Codex-style backend loop:
 4. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
    step-by-step `trace`.
 
+The first LangGraph persistence layer is now wired in with an in-memory
+checkpointer. Each run receives a `run_id`, uses that id as the LangGraph
+`thread_id`, and returns the latest `checkpoint_id`. You can query the run later
+to inspect `status`, `latest_node`, `next_nodes`, `trace`, and the final result.
+
 Use `repository_id` as the code index id. For backward compatibility it maps to
 the same storage path as `knowledge_base_id`.
 
@@ -138,6 +144,8 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
     "focus_files": ["ai_agent_platform/api/router.py"],
     "message": "解释 chat stream 接口在哪里实现"
   }'
+
+curl http://localhost:8000/api/v1/agent/runs/run_xxx
 ```
 
 ## Minimal RAG Flow

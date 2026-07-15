@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Path, status
 from fastapi.responses import StreamingResponse
 
+from ai_agent_platform.agents.coding_agent import AgentRunNotFoundError
 from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import (
@@ -23,6 +24,7 @@ from ai_agent_platform.schemas import (
     AddMessageRequest,
     AgentRunRequest,
     AgentRunResponse,
+    AgentRunStatusResponse,
     ChatStreamRequest,
     CreateSessionRequest,
     DocumentIngestRequest,
@@ -184,6 +186,14 @@ def create_api_router(
                 content=result.answer,
             )
         return AgentRunResponse.from_domain(result)
+
+    @router.get("/agent/runs/{run_id}", response_model=AgentRunStatusResponse)
+    def get_agent_run(run_id: str) -> AgentRunStatusResponse:
+        try:
+            record = coding_agent_runtime.get_run(run_id)
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        return AgentRunStatusResponse.from_domain(record)
 
     @router.post(
         "/knowledge-bases/{knowledge_base_id}/documents",

@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from ai_agent_platform.agents.coding_agent import AgentRunResult
+from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
 from ai_agent_platform.schemas.rag import RAGChunkResponse
 
 
@@ -33,8 +33,12 @@ class AgentTraceStepResponse(BaseModel):
 
 
 class AgentRunResponse(BaseModel):
+    run_id: str
+    thread_id: str
     conversation_id: str
     repository_id: str
+    status: str
+    checkpoint_id: Optional[str]
     role: str
     objective: str
     intent: str
@@ -48,8 +52,12 @@ class AgentRunResponse(BaseModel):
     @classmethod
     def from_domain(cls, result: AgentRunResult) -> "AgentRunResponse":
         return cls(
+            run_id=result.run_id,
+            thread_id=result.thread_id,
             conversation_id=result.conversation_id,
             repository_id=result.repository_id,
+            status=result.status,
+            checkpoint_id=result.checkpoint_id,
             role=result.role,
             objective=result.objective,
             intent=result.intent,
@@ -76,4 +84,46 @@ class AgentRunResponse(BaseModel):
                 )
                 for item in result.trace
             ],
+        )
+
+
+class AgentRunStatusResponse(BaseModel):
+    run_id: str
+    thread_id: str
+    conversation_id: str
+    repository_id: str
+    status: str
+    checkpoint_id: Optional[str]
+    latest_node: Optional[str]
+    next_nodes: list[str]
+    error: Optional[str]
+    trace: list[AgentTraceStepResponse]
+    result: Optional[AgentRunResponse]
+
+    @classmethod
+    def from_domain(cls, record: AgentRunRecord) -> "AgentRunStatusResponse":
+        return cls(
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            conversation_id=record.conversation_id,
+            repository_id=record.repository_id,
+            status=record.status,
+            checkpoint_id=record.checkpoint_id,
+            latest_node=record.latest_node,
+            next_nodes=record.next_nodes,
+            error=record.error,
+            trace=[
+                AgentTraceStepResponse(
+                    step=item["step"],
+                    node=item["node"],
+                    summary=item["summary"],
+                    output=item["output"],
+                )
+                for item in record.trace
+            ],
+            result=(
+                AgentRunResponse.from_domain(record.result)
+                if record.result is not None
+                else None
+            ),
         )

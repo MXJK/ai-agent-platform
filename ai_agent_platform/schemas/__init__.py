@@ -1,6 +1,7 @@
 from .agent import (
     AgentRunRequest,
     AgentRunResponse,
+    AgentRunStatusResponse,
     AgentToolCallResponse,
     AgentTraceStepResponse,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "AddMessageRequest",
     "AgentRunRequest",
     "AgentRunResponse",
+    "AgentRunStatusResponse",
     "AgentToolCallResponse",
     "AgentTraceStepResponse",
     "ChatStreamRequest",
