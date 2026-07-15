@@ -1,7 +1,7 @@
 # AI Agent Platform
 
-This is a learning project for Python AI backend engineering and game AI agent
-engineering.
+This is a learning project for Python AI backend engineering, LLM streaming,
+RAG, and a repository QA / development assistant Agent.
 
 ## Python FastAPI Version
 
@@ -15,7 +15,8 @@ ai_agent_platform/
   domain/models.py           # Core business entities
   repositories/memory.py     # In-memory storage boundary
   services/session_service.py # Session and message use cases
-  agents/game_agent.py       # Game AI agent runtime boundary
+  agents/coding_agent.py     # Repository QA and development assistant runtime
+  agents/game_agent.py       # Legacy rule-based demo runtime
   integrations/
     llm.py                   # Future LLM API client
     rag.py                   # RAG parsing, chunking, embedding, vector search
@@ -39,9 +40,10 @@ Module roles:
   it can be replaced with PostgreSQL, Redis, MongoDB, or a vector database.
 - `services`: application use cases. It coordinates sessions, messages, and
   optional agent execution.
-- `agents`: game AI decision boundary. The first version wraps a simple
-  rule-based agent, but the boundary can later host planning, behavior trees, or
-  LLM-driven agents.
+- `agents`: agent runtime boundary. The main runtime is now a repository-aware
+  development assistant that classifies code questions, retrieves repository
+  context, plans tool calls, and returns a trace. `game_agent.py` remains as a
+  small legacy rule-based demo for the session-message exercise.
 - `integrations`: placeholders for LLM API calls, RAG retrieval, and tool
   calling. These are separate because external systems fail, timeout, and need
   retries/observability.
@@ -82,6 +84,7 @@ GET  /api/v1/sessions/{session_id}
 POST /api/v1/sessions/{session_id}/messages
 GET  /api/v1/sessions/{session_id}/messages
 POST /api/v1/chat/stream
+POST /api/v1/agent/runs
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
@@ -96,10 +99,6 @@ curl -X POST http://localhost:8000/api/v1/sessions \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"user_1"}'
 
-curl -X POST http://localhost:8000/api/v1/sessions/sess_xxx/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"role":"user","content":"攻击附近的敌人","run_agent":true}'
-
 curl http://localhost:8000/api/v1/sessions/sess_xxx/messages
 
 curl -N -X POST http://localhost:8000/api/v1/chat/stream \
@@ -107,12 +106,47 @@ curl -N -X POST http://localhost:8000/api/v1/chat/stream \
   -d '{"conversation_id":"sess_xxx","message":"你好，解释一下SSE"}'
 ```
 
+## Repository QA Agent
+
+`POST /api/v1/agent/runs` is the coding-agent endpoint. It is designed as a
+small OpenHands/Codex-style backend loop:
+
+1. classify the user request as repository navigation, code explanation, change
+   planning, bug investigation, test strategy, or general repository QA.
+2. retrieve code context from the RAG index scoped by `repository_id`.
+3. plan tool calls such as repository search, file/symbol location, code
+   explanation, change planning, bug investigation, and test design.
+4. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
+   step-by-step `trace`.
+
+Use `repository_id` as the code index id. For backward compatibility it maps to
+the same storage path as `knowledge_base_id`.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge-bases/repo_main/documents \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "filename": "ai_agent_platform/api/router.py",
+    "content": "def chat_stream(...): ...\ndef run_agent(...): ..."
+  }'
+
+curl -X POST http://localhost:8000/api/v1/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "conversation_id": "sess_xxx",
+    "repository_id": "repo_main",
+    "focus_files": ["ai_agent_platform/api/router.py"],
+    "message": "解释 chat stream 接口在哪里实现"
+  }'
+```
+
 ## Minimal RAG Flow
 
 This project includes a small RAG pipeline for learning and local experiments.
 It supports multiple `knowledge_base_id` values so one backend can isolate
-product docs, customer FAQ, HR policies, project notes, or other business
-knowledge bases.
+repository indexes, product docs, customer FAQ, HR policies, project notes, or
+other knowledge bases. The coding agent uses `repository_id`, which is the same
+scoping concept with a code-oriented name.
 
 Default settings use Google Gemini `gemini-embedding-001` for embeddings and an
 in-memory vector store for storage. Configure your Google API key before running
@@ -176,8 +210,10 @@ curl -X POST http://localhost:8000/api/v1/knowledge-bases/customer_faq/ask \
 
 RAG implementation steps:
 
-1. Document parsing accepts `.txt`, `.md`, and `.markdown` text documents. Real
-   systems need extra parsers for PDF, Word, HTML, OCR, tables, and images.
+1. Document parsing accepts common text and source-code files such as `.txt`,
+   `.md`, `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.json`, `.toml`,
+   `.yaml`, `.html`, and `.css`. Real systems need extra parsers for PDF, Word,
+   OCR, tables, and images.
 2. Chunking uses character windows with natural breakpoints and overlap. Chunks
    that are too large waste prompt space; chunks that are too small lose context.
 3. Embedding converts each chunk and query into vectors. The same embedding

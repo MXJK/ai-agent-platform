@@ -1,4 +1,4 @@
-"""Learning project for backend and game AI agent engineering."""
+"""Learning project for backend and repository-aware AI agent engineering."""
 
 from .agent import AgentAction, AgentCommand, RuleBasedAgent
 

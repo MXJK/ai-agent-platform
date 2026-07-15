@@ -8,6 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Path, status
 from fastapi.responses import StreamingResponse
 
+from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import (
     LLMClient,
@@ -20,6 +21,8 @@ from ai_agent_platform.integrations import (
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import (
     AddMessageRequest,
+    AgentRunRequest,
+    AgentRunResponse,
     ChatStreamRequest,
     CreateSessionRequest,
     DocumentIngestRequest,
@@ -46,6 +49,7 @@ def create_api_router(
     session_service: SessionService,
     llm_client: LLMClient,
     rag_service: RAGService,
+    coding_agent_runtime: CodingAgentRuntime,
     settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
@@ -147,6 +151,39 @@ def create_api_router(
             media_type="text/event-stream",
             headers=headers,
         )
+
+    @router.post("/agent/runs", response_model=AgentRunResponse)
+    def run_agent(request: AgentRunRequest) -> AgentRunResponse:
+        if len(request.message) > settings.llm_max_input_chars:
+            raise HTTPException(
+                status_code=413,
+                detail="message exceeds configured context limit",
+            )
+
+        try:
+            history = session_service.list_messages(session_id=request.conversation_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="conversation not found") from exc
+
+        result = coding_agent_runtime.run(
+            conversation_id=request.conversation_id,
+            user_input=request.message,
+            history=history,
+            repository_id=request.resolved_repository_id,
+            focus_files=request.focus_files,
+        )
+        session_service.add_message(
+            session_id=request.conversation_id,
+            role="user",
+            content=request.message,
+        )
+        if result.answer:
+            session_service.add_message(
+                session_id=request.conversation_id,
+                role="assistant",
+                content=result.answer,
+            )
+        return AgentRunResponse.from_domain(result)
 
     @router.post(
         "/knowledge-bases/{knowledge_base_id}/documents",

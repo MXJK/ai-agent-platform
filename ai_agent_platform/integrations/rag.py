@@ -13,7 +13,25 @@ from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import LLMClient
 
 
-SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".markdown"}
+SUPPORTED_TEXT_EXTENSIONS = {
+    ".css",
+    ".go",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".markdown",
+    ".py",
+    ".rs",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
 
 
 @dataclass(frozen=True)
@@ -103,6 +121,9 @@ class Reranker(Protocol):
 
 class TextDocumentParser:
     """Parses first-version text documents.
+
+    TODO: Extend this parser boundary for more document types such as PDF,
+    Word, HTML, OCR output, tables, and crawled web pages.
 
     Production systems usually add PDF, HTML, docx, OCR, tables, and image
     extraction here. The first version keeps this boundary small and explicit.

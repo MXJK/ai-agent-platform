@@ -1,3 +1,9 @@
+from .agent import (
+    AgentRunRequest,
+    AgentRunResponse,
+    AgentToolCallResponse,
+    AgentTraceStepResponse,
+)
 from .chat import ChatStreamRequest
 from .health import HealthResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
@@ -15,6 +21,10 @@ from .summary import SessionSummaryResponse
 
 __all__ = [
     "AddMessageRequest",
+    "AgentRunRequest",
+    "AgentRunResponse",
+    "AgentToolCallResponse",
+    "AgentTraceStepResponse",
     "ChatStreamRequest",
     "CreateSessionRequest",
     "DocumentIngestRequest",

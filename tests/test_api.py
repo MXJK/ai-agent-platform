@@ -158,6 +158,85 @@ class APITests(unittest.TestCase):
         self.assertGreaterEqual(len(body["citations"]), 1)
         self.assertIn("退款", body["citations"][0]["text"])
 
+    def test_runs_coding_agent_with_repo_context_tools_trace_and_memory(self) -> None:
+        create_response = self.client.post(
+            "/api/v1/sessions",
+            json={"user_id": "user_1"},
+        )
+        session_id = create_response.json()["id"]
+        ingest_response = self.client.post(
+            "/api/v1/knowledge-bases/repo_main/documents",
+            json={
+                "filename": "ai_agent_platform/api/router.py",
+                "content": (
+                    "def chat_stream(request: ChatStreamRequest) -> StreamingResponse:\n"
+                    "    return StreamingResponse(_chat_stream_events(...))\n\n"
+                    "def run_agent(request: AgentRunRequest) -> AgentRunResponse:\n"
+                    "    result = coding_agent_runtime.run(...)\n"
+                ),
+            },
+        )
+        self.assertEqual(ingest_response.status_code, 201)
+
+        first_response = self.client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "message": "解释 chat stream 接口在哪里实现，ChatStreamRequest 是怎么进入流程的？",
+                "repository_id": "repo_main",
+                "focus_files": ["ai_agent_platform/api/router.py"],
+            },
+        )
+
+        self.assertEqual(first_response.status_code, 200)
+        body = first_response.json()
+        self.assertEqual(body["graph_engine"], "langgraph")
+        self.assertEqual(body["repository_id"], "repo_main")
+        self.assertEqual(body["role"], "研发助手 / 代码仓库问答 Agent")
+        self.assertEqual(body["intent"], "repo_navigation")
+        self.assertGreaterEqual(len(body["rag_context"]), 1)
+        self.assertEqual(body["tool_calls"][0]["name"], "repository_context_search")
+        self.assertEqual(body["tool_calls"][1]["name"], "file_symbol_locator")
+        self.assertEqual(body["tool_calls"][2]["name"], "code_explainer")
+        self.assertEqual(
+            [step["node"] for step in body["trace"]],
+            [
+                "setup",
+                "classify_request",
+                "retrieve_repository_context",
+                "plan_tools",
+                "inspect_repository",
+                "compose_answer",
+            ],
+        )
+        self.assertIn("ai_agent_platform/api/router.py", body["answer"])
+
+        second_response = self.client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "message": "帮我实现 agent 支持 repository_id 参数并补测试",
+                "repository_id": "repo_main",
+            },
+        )
+
+        self.assertEqual(second_response.status_code, 200)
+        second_body = second_response.json()
+        self.assertEqual(second_body["intent"], "change_planning")
+        self.assertEqual(second_body["tool_calls"][1]["name"], "change_planner")
+        self.assertEqual(second_body["tool_calls"][2]["name"], "test_designer")
+        self.assertEqual(
+            second_body["trace"][0]["output"]["history_messages"],
+            2,
+        )
+
+        messages_response = self.client.get(f"/api/v1/sessions/{session_id}/messages")
+        messages = messages_response.json()["messages"]
+        self.assertEqual(
+            [message["role"] for message in messages],
+            ["user", "assistant", "user", "assistant"],
+        )
+
     def test_rag_search_is_scoped_by_knowledge_base_id(self) -> None:
         self.client.post(
             "/api/v1/knowledge-bases/customer_faq/documents",
