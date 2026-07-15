@@ -20,6 +20,11 @@ class AgentRunRequest(BaseModel):
         return self.repository_id or self.knowledge_base_id or "repo_main"
 
 
+class AgentRunResumeRequest(BaseModel):
+    approved: bool = True
+    feedback: Optional[str] = Field(default=None, max_length=4000)
+
+
 class AgentToolCallResponse(BaseModel):
     name: str
     arguments: dict[str, Any]
@@ -48,6 +53,8 @@ class AgentRunResponse(BaseModel):
     tool_calls: list[AgentToolCallResponse]
     tool_results: list[dict[str, Any]]
     trace: list[AgentTraceStepResponse]
+    errors: list[dict[str, Any]]
+    pending_approval: Optional[dict[str, Any]]
 
     @classmethod
     def from_domain(cls, result: AgentRunResult) -> "AgentRunResponse":
@@ -84,6 +91,8 @@ class AgentRunResponse(BaseModel):
                 )
                 for item in result.trace
             ],
+            errors=result.errors,
+            pending_approval=result.pending_approval,
         )
 
 
@@ -97,6 +106,8 @@ class AgentRunStatusResponse(BaseModel):
     latest_node: Optional[str]
     next_nodes: list[str]
     error: Optional[str]
+    pending_approval: Optional[dict[str, Any]]
+    errors: list[dict[str, Any]]
     trace: list[AgentTraceStepResponse]
     result: Optional[AgentRunResponse]
 
@@ -112,6 +123,8 @@ class AgentRunStatusResponse(BaseModel):
             latest_node=record.latest_node,
             next_nodes=record.next_nodes,
             error=record.error,
+            pending_approval=record.pending_approval,
+            errors=record.errors,
             trace=[
                 AgentTraceStepResponse(
                     step=item["step"],

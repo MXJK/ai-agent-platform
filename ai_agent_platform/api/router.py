@@ -8,7 +8,10 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Path, status
 from fastapi.responses import StreamingResponse
 
-from ai_agent_platform.agents.coding_agent import AgentRunNotFoundError
+from ai_agent_platform.agents.coding_agent import (
+    AgentRunInvalidStateError,
+    AgentRunNotFoundError,
+)
 from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import (
@@ -23,6 +26,7 @@ from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import (
     AddMessageRequest,
     AgentRunRequest,
+    AgentRunResumeRequest,
     AgentRunResponse,
     AgentRunStatusResponse,
     ChatStreamRequest,
@@ -186,9 +190,35 @@ def create_api_router(
             role="user",
             content=request.message,
         )
-        if result.answer:
+        if result.status == "completed" and result.answer:
             session_service.add_message(
                 session_id=request.conversation_id,
+                role="assistant",
+                content=result.answer,
+            )
+        return AgentRunResponse.from_domain(result)
+
+    @router.post("/agent/runs/{run_id}/resume", response_model=AgentRunResponse)
+    def resume_agent_run(
+        run_id: str, request: AgentRunResumeRequest
+    ) -> AgentRunResponse:
+        try:
+            result = coding_agent_runtime.resume(
+                run_id=run_id,
+                approved=request.approved,
+                feedback=request.feedback,
+            )
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        except AgentRunInvalidStateError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+
+        if result.status == "completed" and result.answer:
+            session_service.add_message(
+                session_id=result.conversation_id,
                 role="assistant",
                 content=result.answer,
             )

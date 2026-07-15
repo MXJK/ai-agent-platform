@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from threading import Lock
 from time import perf_counter
-from typing import Any, Literal, Optional, Protocol, TypedDict
+from typing import Any, Callable, Literal, Optional, Protocol, TypedDict
 from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
+from langgraph.types import Command, interrupt
 
 from ai_agent_platform.domain import Message
 from ai_agent_platform.integrations import (
@@ -42,10 +43,17 @@ class CodingAgentState(TypedDict, total=False):
     answer: str
     trace: list[dict[str, Any]]
     started_at: float
+    review_decision: dict[str, Any]
+    errors: list[dict[str, Any]]
 
 
 AgentRoute = Literal["retrieve_repository_context", "compose_answer"]
-AgentRunStatus = Literal["running", "completed", "failed"]
+PlanRoute = Literal["review_tool_plan", "inspect_repository"]
+ReviewRoute = Literal["inspect_repository", "compose_answer"]
+RetrievalRoute = Literal["plan_tools", "handle_error"]
+AnswerRoute = Literal["handle_error", "end"]
+AgentRunStatus = Literal["running", "waiting_approval", "completed", "failed"]
+MAX_NODE_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,8 @@ class AgentRunResult:
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    pending_approval: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -80,10 +90,19 @@ class AgentRunRecord:
     trace: list[dict[str, Any]]
     result: Optional[AgentRunResult] = None
     error: Optional[str] = None
+    pending_approval: Optional[dict[str, Any]] = None
+    errors: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentRunNotFoundError(Exception):
     pass
+
+
+class AgentRunInvalidStateError(Exception):
+    def __init__(self, run_id: str, status: str) -> None:
+        super().__init__(f"agent run {run_id} cannot be resumed from status {status}")
+        self.run_id = run_id
+        self.status = status
 
 
 class AgentRunStore(Protocol):
@@ -164,6 +183,7 @@ class CodingAgentRuntime:
                         for message in history
                     ],
                     "trace": [],
+                    "errors": [],
                     "started_at": perf_counter(),
                 },
                 config,
@@ -182,27 +202,50 @@ class CodingAgentRuntime:
                     next_nodes=_next_nodes(snapshot),
                     trace=_snapshot_trace(snapshot),
                     error=str(exc),
+                    errors=_snapshot_errors(snapshot)
+                    + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
                 )
             )
             raise
 
         snapshot = self._snapshot_for(config)
-        result = AgentRunResult(
+        pending_approval = _pending_approval(snapshot, state)
+        if pending_approval is not None:
+            result = self._build_result(
+                run_id=run_id,
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                repository_id=repository_id,
+                status="waiting_approval",
+                checkpoint_id=_checkpoint_id(snapshot),
+                state=state,
+                pending_approval=pending_approval,
+            )
+            self._run_store.save(
+                AgentRunRecord(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    conversation_id=conversation_id,
+                    repository_id=repository_id,
+                    status="waiting_approval",
+                    checkpoint_id=result.checkpoint_id,
+                    latest_node="review_tool_plan",
+                    next_nodes=_next_nodes(snapshot),
+                    trace=result.trace,
+                    result=result,
+                    pending_approval=pending_approval,
+                )
+            )
+            return result
+
+        result = self._build_result(
             run_id=run_id,
             thread_id=thread_id,
             conversation_id=conversation_id,
             repository_id=repository_id,
             status="completed",
             checkpoint_id=_checkpoint_id(snapshot),
-            role=CODING_AGENT_ROLE,
-            objective=CODING_AGENT_OBJECTIVE,
-            intent=state.get("intent", "repository_question"),
-            answer=state.get("answer", ""),
-            graph_engine=self.graph_engine,
-            rag_context=state.get("rag_context", []),
-            tool_calls=state.get("tool_calls", []),
-            tool_results=state.get("tool_results", []),
-            trace=state.get("trace", []),
+            state=state,
         )
         self._run_store.save(
             AgentRunRecord(
@@ -219,6 +262,132 @@ class CodingAgentRuntime:
             )
         )
         return result
+
+    def resume(
+        self,
+        *,
+        run_id: str,
+        approved: bool,
+        feedback: Optional[str] = None,
+    ) -> AgentRunResult:
+        record = self.get_run(run_id)
+        if record.status != "waiting_approval":
+            raise AgentRunInvalidStateError(run_id, record.status)
+
+        config = {"configurable": {"thread_id": record.thread_id}}
+        resume_payload = {
+            "approved": approved,
+            "feedback": feedback or "",
+        }
+        try:
+            state = self._graph.invoke(Command(resume=resume_payload), config)
+        except Exception as exc:
+            snapshot = self._snapshot_for(config)
+            self._run_store.save(
+                AgentRunRecord(
+                    run_id=record.run_id,
+                    thread_id=record.thread_id,
+                    conversation_id=record.conversation_id,
+                    repository_id=record.repository_id,
+                    status="failed",
+                    checkpoint_id=_checkpoint_id(snapshot),
+                    latest_node=_latest_trace_node(snapshot),
+                    next_nodes=_next_nodes(snapshot),
+                    trace=_snapshot_trace(snapshot),
+                    error=str(exc),
+                    errors=_snapshot_errors(snapshot)
+                    + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
+                )
+            )
+            raise
+
+        snapshot = self._snapshot_for(config)
+        pending_approval = _pending_approval(snapshot, state)
+        if pending_approval is not None:
+            result = self._build_result(
+                run_id=record.run_id,
+                thread_id=record.thread_id,
+                conversation_id=record.conversation_id,
+                repository_id=record.repository_id,
+                status="waiting_approval",
+                checkpoint_id=_checkpoint_id(snapshot),
+                state=state,
+                pending_approval=pending_approval,
+            )
+            self._run_store.save(
+                AgentRunRecord(
+                    run_id=record.run_id,
+                    thread_id=record.thread_id,
+                    conversation_id=record.conversation_id,
+                    repository_id=record.repository_id,
+                    status="waiting_approval",
+                    checkpoint_id=result.checkpoint_id,
+                    latest_node="review_tool_plan",
+                    next_nodes=_next_nodes(snapshot),
+                    trace=result.trace,
+                    result=result,
+                    pending_approval=pending_approval,
+                )
+            )
+            return result
+
+        result = self._build_result(
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            conversation_id=record.conversation_id,
+            repository_id=record.repository_id,
+            status="completed",
+            checkpoint_id=_checkpoint_id(snapshot),
+            state=state,
+        )
+        self._run_store.save(
+            AgentRunRecord(
+                run_id=record.run_id,
+                thread_id=record.thread_id,
+                conversation_id=record.conversation_id,
+                repository_id=record.repository_id,
+                status="completed",
+                checkpoint_id=result.checkpoint_id,
+                latest_node=_latest_trace_node(snapshot),
+                next_nodes=_next_nodes(snapshot),
+                trace=result.trace,
+                result=result,
+            )
+        )
+        return result
+
+    def _build_result(
+        self,
+        *,
+        run_id: str,
+        thread_id: str,
+        conversation_id: str,
+        repository_id: str,
+        status: AgentRunStatus,
+        checkpoint_id: Optional[str],
+        state: CodingAgentState,
+        pending_approval: Optional[dict[str, Any]] = None,
+    ) -> AgentRunResult:
+        answer = state.get("answer", "") if status == "completed" else ""
+        return AgentRunResult(
+            run_id=run_id,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            repository_id=repository_id,
+            status=status,
+            checkpoint_id=checkpoint_id,
+            role=CODING_AGENT_ROLE,
+            objective=CODING_AGENT_OBJECTIVE,
+            intent=state.get("intent", "repository_question"),
+            answer=answer,
+            graph_engine=self.graph_engine,
+            rag_context=state.get("rag_context", []),
+            tool_calls=state.get("tool_calls", []),
+            tool_results=state.get("tool_results", []),
+            trace=state.get("trace", []),
+            errors=state.get("errors", []),
+            pending_approval=pending_approval,
+        )
 
     def get_run(self, run_id: str) -> AgentRunRecord:
         try:
@@ -238,8 +407,11 @@ class CodingAgentRuntime:
         workflow.add_node("classify_request", self._classify_request)
         workflow.add_node("retrieve_repository_context", self._retrieve_repository_context)
         workflow.add_node("plan_tools", self._plan_tools)
+        workflow.add_node("review_tool_plan", self._review_tool_plan)
         workflow.add_node("inspect_repository", self._inspect_repository)
         workflow.add_node("compose_answer", self._compose_answer)
+        workflow.add_node("handle_error", self._handle_error)
+        workflow.add_node("compose_error_answer", self._compose_error_answer)
         workflow.set_entry_point("setup")
         workflow.add_edge("setup", "classify_request")
         workflow.add_conditional_edges(
@@ -250,10 +422,41 @@ class CodingAgentRuntime:
                 "compose_answer": "compose_answer",
             },
         )
-        workflow.add_edge("retrieve_repository_context", "plan_tools")
-        workflow.add_edge("plan_tools", "inspect_repository")
+        workflow.add_conditional_edges(
+            "retrieve_repository_context",
+            _route_after_retrieval,
+            {
+                "plan_tools": "plan_tools",
+                "handle_error": "handle_error",
+            },
+        )
+        workflow.add_conditional_edges(
+            "plan_tools",
+            _route_after_tool_planning,
+            {
+                "review_tool_plan": "review_tool_plan",
+                "inspect_repository": "inspect_repository",
+            },
+        )
+        workflow.add_conditional_edges(
+            "review_tool_plan",
+            _route_after_tool_plan_review,
+            {
+                "inspect_repository": "inspect_repository",
+                "compose_answer": "compose_answer",
+            },
+        )
         workflow.add_edge("inspect_repository", "compose_answer")
-        workflow.add_edge("compose_answer", END)
+        workflow.add_conditional_edges(
+            "compose_answer",
+            _route_after_answer_composition,
+            {
+                "handle_error": "handle_error",
+                "end": END,
+            },
+        )
+        workflow.add_edge("handle_error", "compose_error_answer")
+        workflow.add_edge("compose_error_answer", END)
         return workflow.compile(checkpointer=self._checkpointer)
 
     def _setup(self, state: CodingAgentState) -> CodingAgentState:
@@ -293,28 +496,38 @@ class CodingAgentRuntime:
     def _retrieve_repository_context(
         self, state: CodingAgentState
     ) -> CodingAgentState:
-        try:
-            citations = self._rag_service.search(
+        citations, errors, attempts = _run_with_retries(
+            node="retrieve_repository_context",
+            operation=lambda: self._rag_service.search(
                 knowledge_base_id=state["repository_id"],
                 query=_build_repository_query(state),
                 limit=4,
                 recall_limit=12,
-            )
+            ),
+            classify_error=_classify_rag_error,
+        )
+
+        if citations is None:
+            citations = []
             trace_output: dict[str, Any] = {
+                "repository_id": state["repository_id"],
+                "citation_count": 0,
+                "attempts": attempts,
+                "error_count": len(errors),
+                "status": "failed",
+            }
+        else:
+            trace_output = {
                 "repository_id": state["repository_id"],
                 "citation_count": len(citations),
                 "filenames": [citation.filename for citation in citations],
-            }
-        except (RAGValidationError, RAGConfigurationError, RAGProviderError) as exc:
-            citations = []
-            trace_output = {
-                "repository_id": state["repository_id"],
-                "citation_count": 0,
-                "error": str(exc),
+                "attempts": attempts,
+                "recovered_error_count": len(errors),
             }
 
         return {
             "rag_context": citations,
+            "errors": _append_errors(state, errors),
             "trace": _append_trace(
                 state,
                 node="retrieve_repository_context",
@@ -332,6 +545,30 @@ class CodingAgentRuntime:
                 node="plan_tools",
                 summary="根据意图和检索结果规划研发助手工具调用。",
                 output={"planned_tools": [tool_call.name for tool_call in tool_calls]},
+            ),
+        }
+
+    def _review_tool_plan(self, state: CodingAgentState) -> CodingAgentState:
+        approval_request = _build_tool_plan_approval_request(state)
+        decision = interrupt(approval_request)
+        if isinstance(decision, dict):
+            approved = bool(decision.get("approved"))
+            feedback = str(decision.get("feedback") or "")
+        else:
+            approved = bool(decision)
+            feedback = ""
+
+        review_decision = {
+            "approved": approved,
+            "feedback": feedback,
+        }
+        return {
+            "review_decision": review_decision,
+            "trace": _append_trace(
+                state,
+                node="review_tool_plan",
+                summary="人工审批 change_planning 工具计划，决定是否继续执行。",
+                output=review_decision,
             ),
         }
 
@@ -370,14 +607,54 @@ class CodingAgentRuntime:
         }
 
     def _compose_answer(self, state: CodingAgentState) -> CodingAgentState:
-        answer = _format_answer(state)
+        answer, errors, attempts = _run_with_retries(
+            node="compose_answer",
+            operation=lambda: _format_answer(state),
+            classify_error=_classify_answer_error,
+        )
+        elapsed_ms = int((perf_counter() - state["started_at"]) * 1000)
+        if answer is None:
+            answer = ""
+        return {
+            "answer": answer,
+            "errors": _append_errors(state, errors),
+            "trace": _append_trace(
+                state,
+                node="compose_answer",
+                summary="汇总代码上下文、工具结果和下一步研发建议。",
+                output={
+                    "elapsed_ms": elapsed_ms,
+                    "answer_chars": len(answer),
+                    "attempts": attempts,
+                    "error_count": len(errors),
+                },
+            ),
+        }
+
+    def _handle_error(self, state: CodingAgentState) -> CodingAgentState:
+        unresolved_errors = _unresolved_errors(state)
+        return {
+            "trace": _append_trace(
+                state,
+                node="handle_error",
+                summary="汇总未恢复错误，并切换到错误回答分支。",
+                output={
+                    "error_count": len(unresolved_errors),
+                    "codes": [error["code"] for error in unresolved_errors],
+                    "nodes": _unique([error["node"] for error in unresolved_errors]),
+                },
+            ),
+        }
+
+    def _compose_error_answer(self, state: CodingAgentState) -> CodingAgentState:
+        answer = _format_error_answer(state)
         elapsed_ms = int((perf_counter() - state["started_at"]) * 1000)
         return {
             "answer": answer,
             "trace": _append_trace(
                 state,
-                node="compose_answer",
-                summary="汇总代码上下文、工具结果和下一步研发建议。",
+                node="compose_error_answer",
+                summary="生成可复盘的错误回答，说明失败节点、重试情况和下一步处理建议。",
                 output={"elapsed_ms": elapsed_ms, "answer_chars": len(answer)},
             ),
         }
@@ -397,11 +674,42 @@ def _next_nodes(snapshot: Any) -> list[str]:
     return [str(node) for node in snapshot.next]
 
 
+def _pending_approval(
+    snapshot: Any, state: dict[str, Any]
+) -> Optional[dict[str, Any]]:
+    if "__interrupt__" in state:
+        interrupts = state["__interrupt__"]
+        if interrupts:
+            return _approval_payload_from_interrupt(interrupts[0])
+    if snapshot is None:
+        return None
+    for task in getattr(snapshot, "tasks", ()):
+        for task_interrupt in getattr(task, "interrupts", ()):
+            return _approval_payload_from_interrupt(task_interrupt)
+    return None
+
+
+def _approval_payload_from_interrupt(task_interrupt: Any) -> dict[str, Any]:
+    value = getattr(task_interrupt, "value", {})
+    payload = dict(value) if isinstance(value, dict) else {"message": str(value)}
+    interrupt_id = getattr(task_interrupt, "id", None)
+    if interrupt_id:
+        payload["interrupt_id"] = str(interrupt_id)
+    return payload
+
+
 def _snapshot_trace(snapshot: Any) -> list[dict[str, Any]]:
     if snapshot is None or not isinstance(snapshot.values, dict):
         return []
     trace = snapshot.values.get("trace", [])
     return list(trace) if isinstance(trace, list) else []
+
+
+def _snapshot_errors(snapshot: Any) -> list[dict[str, Any]]:
+    if snapshot is None or not isinstance(snapshot.values, dict):
+        return []
+    errors = snapshot.values.get("errors", [])
+    return list(errors) if isinstance(errors, list) else []
 
 
 def _latest_trace_node(snapshot: Any) -> Optional[str]:
@@ -411,6 +719,108 @@ def _latest_trace_node(snapshot: Any) -> Optional[str]:
     latest = trace[-1]
     node = latest.get("node") if isinstance(latest, dict) else None
     return str(node) if node else None
+
+
+def _run_with_retries(
+    *,
+    node: str,
+    operation: Callable[[], Any],
+    classify_error: Callable[[Exception], tuple[str, bool]],
+    max_retries: int = MAX_NODE_RETRIES,
+) -> tuple[Any, list[dict[str, Any]], int]:
+    errors: list[dict[str, Any]] = []
+    max_attempts = max_retries + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = operation()
+        except Exception as exc:
+            code, retryable = classify_error(exc)
+            should_retry = retryable and attempt < max_attempts
+            errors.append(
+                _structured_error(
+                    node=node,
+                    code=code,
+                    message=str(exc),
+                    retryable=retryable,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    recovered=False,
+                )
+            )
+            if not should_retry:
+                return None, errors, attempt
+            continue
+
+        if errors:
+            errors = [dict(error, recovered=True) for error in errors]
+        return result, errors, attempt
+
+    return None, errors, max_attempts
+
+
+def _classify_rag_error(exc: Exception) -> tuple[str, bool]:
+    if isinstance(exc, RAGValidationError):
+        return "rag_validation_error", False
+    if isinstance(exc, RAGConfigurationError):
+        return "rag_configuration_error", False
+    if isinstance(exc, RAGProviderError):
+        return "rag_provider_error", True
+    return "rag_unhandled_error", False
+
+
+def _classify_answer_error(exc: Exception) -> tuple[str, bool]:
+    return "answer_generation_error", True
+
+
+def _structured_error(
+    *,
+    node: str,
+    code: str,
+    message: str,
+    retryable: bool,
+    attempt: int,
+    max_attempts: int,
+    recovered: bool,
+) -> dict[str, Any]:
+    return {
+        "node": node,
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "recovered": recovered,
+    }
+
+
+def _error_from_exception(
+    node: str, exc: Exception, *, attempt: int, max_attempts: int
+) -> dict[str, Any]:
+    return _structured_error(
+        node=node,
+        code="runtime_error",
+        message=str(exc),
+        retryable=False,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        recovered=False,
+    )
+
+
+def _append_errors(
+    state: CodingAgentState, errors: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not errors:
+        return list(state.get("errors", []))
+    return list(state.get("errors", [])) + errors
+
+
+def _unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
+    return [
+        error
+        for error in state.get("errors", [])
+        if not error.get("recovered", False)
+    ]
 
 
 def create_coding_tool_registry() -> ToolRegistry:
@@ -471,12 +881,56 @@ def _next_node_for_intent(intent: str) -> AgentRoute:
     return "retrieve_repository_context"
 
 
+def _route_after_retrieval(state: CodingAgentState) -> RetrievalRoute:
+    if _unresolved_errors(state):
+        return "handle_error"
+    return "plan_tools"
+
+
+def _route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
+    if state.get("intent") == "change_planning":
+        return "review_tool_plan"
+    return "inspect_repository"
+
+
+def _route_after_tool_plan_review(state: CodingAgentState) -> ReviewRoute:
+    decision = state.get("review_decision", {})
+    if decision.get("approved"):
+        return "inspect_repository"
+    return "compose_answer"
+
+
+def _route_after_answer_composition(state: CodingAgentState) -> AnswerRoute:
+    if _unresolved_errors(state):
+        return "handle_error"
+    return "end"
+
+
 def _build_repository_query(state: CodingAgentState) -> str:
     parts = [state["user_input"]]
     focus_files = state.get("focus_files", [])
     if focus_files:
         parts.append("重点文件: " + " ".join(focus_files))
     return "\n".join(parts)
+
+
+def _build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
+    return {
+        "type": "tool_plan_review",
+        "approval_required": True,
+        "reason": "change_planning intent requires human approval before executing planned tools",
+        "intent": state.get("intent", "change_planning"),
+        "repository_id": state["repository_id"],
+        "message": state["user_input"],
+        "planned_tools": [tool_call.name for tool_call in state.get("tool_calls", [])],
+        "tool_calls": [
+            {
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+            }
+            for tool_call in state.get("tool_calls", [])
+        ],
+    }
 
 
 def _plan_tool_calls(state: CodingAgentState) -> list[ToolCall]:
@@ -644,6 +1098,14 @@ def _format_answer(state: CodingAgentState) -> str:
     history_count = len(state.get("history", []))
     lines.append(f"已读取 {history_count} 条历史消息作为上下文。")
 
+    review_decision = state.get("review_decision", {})
+    if review_decision and not review_decision.get("approved"):
+        feedback = review_decision.get("feedback") or "未提供补充说明"
+        lines.append("人工审批结果：未批准执行本轮 change_planning 工具计划。")
+        lines.append(f"审批反馈：{feedback}")
+        lines.append("我已停止执行后续仓库检查工具；可以根据反馈调整目标后重新发起 run。")
+        return "\n".join(lines)
+
     citations = state.get("rag_context", [])
     if citations:
         lines.append("我检索到的代码上下文：")
@@ -675,6 +1137,36 @@ def _format_answer(state: CodingAgentState) -> str:
         lines.append(
             "下一步建议：先通过知识库 ingest 接口索引仓库文件，再用同一个 repository_id 继续提问。"
         )
+    return "\n".join(lines)
+
+
+def _format_error_answer(state: CodingAgentState) -> str:
+    errors = _unresolved_errors(state)
+    if not errors:
+        errors = state.get("errors", [])
+
+    lines = [
+        f"我是{CODING_AGENT_ROLE}。",
+        "本轮 Agent 运行进入错误分支，未继续执行后续正常节点。",
+        f"仓库索引：`{state['repository_id']}`。",
+    ]
+    if errors:
+        lines.append("结构化错误：")
+        for index, error in enumerate(errors, start=1):
+            retry_text = "可重试" if error.get("retryable") else "不可重试"
+            recovered_text = "已恢复" if error.get("recovered") else "未恢复"
+            lines.append(
+                f"[{index}] node={error.get('node')} code={error.get('code')} "
+                f"attempt={error.get('attempt')}/{error.get('max_attempts')} "
+                f"{retry_text} {recovered_text}: {error.get('message')}"
+            )
+    else:
+        lines.append("结构化错误为空，但 graph 已切换到错误回答分支。")
+
+    lines.append(
+        "下一步建议：先根据 `errors` 中的 node/code 定位失败边界；"
+        "如果是 provider/network 类错误可以重试，如果是 configuration/validation 类错误应先修配置或输入。"
+    )
     return "\n".join(lines)
 
 

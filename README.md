@@ -193,6 +193,7 @@ POST /api/v1/sessions/{session_id}/messages
 GET  /api/v1/sessions/{session_id}/messages
 POST /api/v1/chat/stream
 POST /api/v1/agent/runs
+POST /api/v1/agent/runs/{run_id}/resume
 GET  /api/v1/agent/runs/{run_id}
 POST /api/v1/repositories/{repository_id}/index
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
@@ -226,13 +227,26 @@ small OpenHands/Codex-style backend loop:
 2. retrieve code context from the RAG index scoped by `repository_id`.
 3. plan tool calls such as repository search, file/symbol location, code
    explanation, change planning, bug investigation, and test design.
-4. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
+4. pause for human approval when `change_planning` would execute a planned tool
+   sequence.
+5. retry recoverable RAG/answer-generation failures, collect structured
+   `errors`, and route unrecoverable failures through `handle_error` and
+   `compose_error_answer`.
+6. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
    step-by-step `trace`.
 
 The first LangGraph persistence layer is now wired in with an in-memory
 checkpointer. Each run receives a `run_id`, uses that id as the LangGraph
 `thread_id`, and returns the latest `checkpoint_id`. You can query the run later
 to inspect `status`, `latest_node`, `next_nodes`, `trace`, and the final result.
+Change-planning runs now return `status=waiting_approval` with a
+`pending_approval` payload before tool execution. Resume the checkpoint with
+`POST /api/v1/agent/runs/{run_id}/resume` and an approval decision.
+Runs also expose `errors`, a structured list of `{node, code, message,
+retryable, attempt, max_attempts, recovered}` records. Recoverable RAG provider
+failures are retried before the graph continues. Unrecoverable RAG/configuration
+or answer-generation failures route to `handle_error -> compose_error_answer`
+so the API returns a diagnostic answer instead of an opaque crash.
 
 Use `repository_id` as the code index id. For backward compatibility it maps to
 the same storage path as `knowledge_base_id`.
@@ -264,6 +278,10 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   }'
 
 curl http://localhost:8000/api/v1/agent/runs/run_xxx
+
+curl -X POST http://localhost:8000/api/v1/agent/runs/run_xxx/resume \
+  -H 'Content-Type: application/json' \
+  -d '{"approved":true,"feedback":"可以执行"}'
 ```
 
 ## Minimal RAG Flow

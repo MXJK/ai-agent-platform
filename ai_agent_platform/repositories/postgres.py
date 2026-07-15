@@ -210,10 +210,14 @@ class PostgresAgentRunRepository:
                     trace,
                     result,
                     error,
+                    pending_approval,
+                    errors,
                     created_at,
                     updated_at
                 )
                 VALUES (
+                    %s,
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -239,6 +243,8 @@ class PostgresAgentRunRepository:
                     trace = EXCLUDED.trace,
                     result = EXCLUDED.result,
                     error = EXCLUDED.error,
+                    pending_approval = EXCLUDED.pending_approval,
+                    errors = EXCLUDED.errors,
                     updated_at = NOW()
                 """,
                 (
@@ -253,6 +259,8 @@ class PostgresAgentRunRepository:
                     Jsonb(record.trace),
                     Jsonb(_agent_result_to_json(record.result)),
                     record.error,
+                    Jsonb(record.pending_approval),
+                    Jsonb(record.errors),
                 ),
             )
 
@@ -271,7 +279,9 @@ class PostgresAgentRunRepository:
                     next_nodes,
                     trace,
                     result,
-                    error
+                    error,
+                    pending_approval,
+                    errors
                 FROM agent_runs
                 WHERE id = %s
                 """,
@@ -757,6 +767,7 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     payload["tool_calls"] = [
         ToolCall(**item) for item in payload.get("tool_calls", [])
     ]
+    payload.setdefault("errors", [])
     return AgentRunResult(**payload)
 
 
@@ -773,6 +784,8 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
         trace=list(row[8] or []),
         result=_agent_result_from_json(row[9]),
         error=row[10],
+        pending_approval=row[11],
+        errors=list(row[12] or []),
     )
 
 

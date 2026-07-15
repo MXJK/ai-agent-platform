@@ -5,8 +5,37 @@ import unittest
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.core import Settings
+from ai_agent_platform.integrations import RAGConfigurationError, RAGProviderError
 from ai_agent_platform.integrations.llm import _google_usage
+from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.main import create_app
+
+
+class FlakySearchRAGService:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(self, **_: object) -> list[RetrievedDocument]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RAGProviderError("temporary vector store outage")
+        return [
+            RetrievedDocument(
+                id="chunk_1",
+                knowledge_base_id="repo_main",
+                document_id="doc_1",
+                filename="agent.py",
+                chunk_index=0,
+                text="def recoverable_search(): return 'ok'",
+                score=0.91,
+                recall_score=0.91,
+            )
+        ]
+
+
+class BrokenSearchRAGService:
+    def search(self, **_: object) -> list[RetrievedDocument]:
+        raise RAGConfigurationError("vector store is not configured")
 
 
 class APITests(unittest.TestCase):
@@ -243,13 +272,66 @@ class APITests(unittest.TestCase):
 
         self.assertEqual(second_response.status_code, 200)
         second_body = second_response.json()
+        self.assertEqual(second_body["status"], "waiting_approval")
         self.assertEqual(second_body["intent"], "change_planning")
+        self.assertEqual(second_body["answer"], "")
         self.assertEqual(second_body["tool_calls"][1]["name"], "change_planner")
         self.assertEqual(second_body["tool_calls"][2]["name"], "test_designer")
+        self.assertEqual(second_body["pending_approval"]["type"], "tool_plan_review")
+        self.assertTrue(second_body["pending_approval"]["approval_required"])
+        self.assertEqual(
+            second_body["pending_approval"]["planned_tools"],
+            ["repository_context_search", "change_planner", "test_designer"],
+        )
+        self.assertEqual(
+            [step["node"] for step in second_body["trace"]],
+            [
+                "setup",
+                "classify_request",
+                "retrieve_repository_context",
+                "plan_tools",
+            ],
+        )
         self.assertEqual(
             second_body["trace"][0]["output"]["history_messages"],
             2,
         )
+
+        pending_status_response = self.client.get(
+            f"/api/v1/agent/runs/{second_body['run_id']}"
+        )
+        self.assertEqual(pending_status_response.status_code, 200)
+        pending_status_body = pending_status_response.json()
+        self.assertEqual(pending_status_body["status"], "waiting_approval")
+        self.assertEqual(pending_status_body["latest_node"], "review_tool_plan")
+        self.assertEqual(pending_status_body["next_nodes"], ["review_tool_plan"])
+        self.assertEqual(
+            pending_status_body["pending_approval"]["interrupt_id"],
+            second_body["pending_approval"]["interrupt_id"],
+        )
+
+        resume_response = self.client.post(
+            f"/api/v1/agent/runs/{second_body['run_id']}/resume",
+            json={"approved": True, "feedback": "可以执行"},
+        )
+        self.assertEqual(resume_response.status_code, 200)
+        resume_body = resume_response.json()
+        self.assertEqual(resume_body["run_id"], second_body["run_id"])
+        self.assertEqual(resume_body["status"], "completed")
+        self.assertIsNone(resume_body["pending_approval"])
+        self.assertEqual(
+            [step["node"] for step in resume_body["trace"]],
+            [
+                "setup",
+                "classify_request",
+                "retrieve_repository_context",
+                "plan_tools",
+                "review_tool_plan",
+                "inspect_repository",
+                "compose_answer",
+            ],
+        )
+        self.assertTrue(resume_body["trace"][4]["output"]["approved"])
 
         messages_response = self.client.get(f"/api/v1/sessions/{session_id}/messages")
         messages = messages_response.json()["messages"]
@@ -357,6 +439,125 @@ class APITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "agent run not found")
+
+    def test_agent_run_resume_can_reject_change_plan(self) -> None:
+        create_response = self.client.post(
+            "/api/v1/sessions",
+            json={"user_id": "user_1"},
+        )
+        session_id = create_response.json()["id"]
+
+        run_response = self.client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "message": "帮我实现审批拒绝后不要继续执行工具",
+                "repository_id": "repo_main",
+            },
+        )
+        self.assertEqual(run_response.status_code, 200)
+        run_body = run_response.json()
+        self.assertEqual(run_body["status"], "waiting_approval")
+
+        resume_response = self.client.post(
+            f"/api/v1/agent/runs/{run_body['run_id']}/resume",
+            json={"approved": False, "feedback": "目标还不清楚"},
+        )
+        self.assertEqual(resume_response.status_code, 200)
+        resume_body = resume_response.json()
+        self.assertEqual(resume_body["status"], "completed")
+        self.assertIn("未批准", resume_body["answer"])
+        self.assertIn("目标还不清楚", resume_body["answer"])
+        self.assertEqual(
+            [step["node"] for step in resume_body["trace"]],
+            [
+                "setup",
+                "classify_request",
+                "retrieve_repository_context",
+                "plan_tools",
+                "review_tool_plan",
+                "compose_answer",
+            ],
+        )
+
+        second_resume_response = self.client.post(
+            f"/api/v1/agent/runs/{run_body['run_id']}/resume",
+            json={"approved": True},
+        )
+        self.assertEqual(second_resume_response.status_code, 409)
+
+    def test_agent_rag_node_retries_recoverable_provider_errors(self) -> None:
+        rag_service = FlakySearchRAGService()
+        client = TestClient(
+            create_app(
+                settings=Settings(llm_provider="fake", embedding_provider="local"),
+                rag_service=rag_service,
+            )
+        )
+        create_response = client.post("/api/v1/sessions", json={"user_id": "user_1"})
+        session_id = create_response.json()["id"]
+
+        response = client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "repository_id": "repo_main",
+                "message": "解释 recoverable_search 在哪里实现",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(rag_service.calls, 2)
+        self.assertEqual(len(body["errors"]), 1)
+        self.assertEqual(body["errors"][0]["code"], "rag_provider_error")
+        self.assertTrue(body["errors"][0]["retryable"])
+        self.assertTrue(body["errors"][0]["recovered"])
+        self.assertIn("agent.py", body["answer"])
+        retrieve_step = body["trace"][2]
+        self.assertEqual(retrieve_step["node"], "retrieve_repository_context")
+        self.assertEqual(retrieve_step["output"]["attempts"], 2)
+        self.assertEqual(retrieve_step["output"]["recovered_error_count"], 1)
+
+    def test_agent_routes_unrecoverable_rag_errors_to_error_answer(self) -> None:
+        client = TestClient(
+            create_app(
+                settings=Settings(llm_provider="fake", embedding_provider="local"),
+                rag_service=BrokenSearchRAGService(),
+            )
+        )
+        create_response = client.post("/api/v1/sessions", json={"user_id": "user_1"})
+        session_id = create_response.json()["id"]
+
+        response = client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "repository_id": "repo_main",
+                "message": "解释配置错误时的 agent 错误分支",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["tool_calls"], [])
+        self.assertEqual(len(body["errors"]), 1)
+        self.assertEqual(body["errors"][0]["code"], "rag_configuration_error")
+        self.assertFalse(body["errors"][0]["retryable"])
+        self.assertFalse(body["errors"][0]["recovered"])
+        self.assertIn("错误分支", body["answer"])
+        self.assertEqual(
+            [step["node"] for step in body["trace"]],
+            [
+                "setup",
+                "classify_request",
+                "retrieve_repository_context",
+                "handle_error",
+                "compose_error_answer",
+            ],
+        )
 
     def test_rag_search_is_scoped_by_knowledge_base_id(self) -> None:
         self.client.post(
