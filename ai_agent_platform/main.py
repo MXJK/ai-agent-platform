@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
-from ai_agent_platform.agents import CodingAgentRuntime, GameAgentRuntime
+from ai_agent_platform.agents import (
+    CodingAgentRuntime,
+    GameAgentRuntime,
+    create_coding_tool_registry,
+)
 from ai_agent_platform.api import create_api_router
 from ai_agent_platform.core import Settings
-from ai_agent_platform.integrations import LLMClient, RAGService, create_rag_service
+from ai_agent_platform.integrations import (
+    LLMClient,
+    MCPToolProvider,
+    RAGService,
+    create_mcp_providers_from_config_file,
+    create_rag_service,
+)
 from ai_agent_platform.repositories import (
     InMemoryRepositoryIndexRepository,
     InMemorySessionRepository,
@@ -31,8 +43,11 @@ def create_app(
         settings,
         document_store=_create_document_store(settings),
     )
+    mcp_providers = _create_mcp_providers(settings)
+    tool_registry = create_coding_tool_registry(mcp_providers=mcp_providers)
     coding_agent_runtime = CodingAgentRuntime(
         rag_service=rag_service,
+        tool_registry=tool_registry,
         run_store=_create_agent_run_store(settings),
         checkpointer=_create_langgraph_checkpointer(settings),
     )
@@ -45,7 +60,18 @@ def create_app(
         agent_runtime=agent_runtime,
     )
 
-    app = FastAPI(title=settings.app_name)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            yield
+        finally:
+            for provider in app.state.mcp_providers:
+                provider.close()
+
+    app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.state.mcp_providers = mcp_providers
+    app.state.tool_registry = tool_registry
+
     app.include_router(
         create_api_router(
             session_service=session_service,
@@ -58,6 +84,17 @@ def create_app(
         prefix=settings.api_prefix,
     )
     return app
+
+
+def _create_mcp_providers(settings: Settings) -> list[MCPToolProvider]:
+    if not settings.mcp_enabled:
+        return []
+    if not settings.mcp_config_path:
+        raise ValueError("MCP_CONFIG_PATH is required when MCP_ENABLED=true")
+    return create_mcp_providers_from_config_file(
+        settings.mcp_config_path,
+        request_timeout_seconds=settings.mcp_request_timeout_seconds,
+    )
 
 
 def _create_session_repository(settings: Settings):

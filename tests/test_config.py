@@ -22,6 +22,9 @@ class SettingsTests(unittest.TestCase):
                 "QDRANT_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "qdrant-secret",
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
+                "MCP_ENABLED": "true",
+                "MCP_CONFIG_PATH": "mcp.json",
+                "MCP_REQUEST_TIMEOUT_SECONDS": "3.5",
             },
         ):
             settings = Settings.from_env()
@@ -39,6 +42,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.qdrant_url, "http://localhost:6333")
         self.assertEqual(settings.qdrant_api_key, "qdrant-secret")
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
+        self.assertTrue(settings.mcp_enabled)
+        self.assertEqual(settings.mcp_config_path, "mcp.json")
+        self.assertEqual(settings.mcp_request_timeout_seconds, 3.5)
 
 
 if __name__ == "__main__":

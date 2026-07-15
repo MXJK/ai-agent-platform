@@ -42,6 +42,9 @@ class Settings:
     rag_reranker_provider: str = "none"
     sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_max_prompt_chars: int = 6000
+    mcp_enabled: bool = False
+    mcp_config_path: str | None = None
+    mcp_request_timeout_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -118,6 +121,13 @@ class Settings:
             rag_max_prompt_chars=_int_env(
                 "RAG_MAX_PROMPT_CHARS", cls.rag_max_prompt_chars, dotenv
             ),
+            mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
+            mcp_config_path=_env("MCP_CONFIG_PATH", None, dotenv),
+            mcp_request_timeout_seconds=_float_env(
+                "MCP_REQUEST_TIMEOUT_SECONDS",
+                cls.mcp_request_timeout_seconds,
+                dotenv,
+            ),
         )
 
 
@@ -133,6 +143,18 @@ def _int_env(name: str, default: int, dotenv: dict[str, str]) -> int:
 def _float_env(name: str, default: float, dotenv: dict[str, str]) -> float:
     value = _env(name, None, dotenv)
     return float(value) if value is not None else default
+
+
+def _bool_env(name: str, default: bool, dotenv: dict[str, str]) -> bool:
+    value = _env(name, None, dotenv)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
 
 
 def _load_dotenv(path: str = ".env") -> dict[str, str]:

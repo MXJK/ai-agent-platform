@@ -24,7 +24,9 @@ from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
+    ToolSpec,
 )
+from ai_agent_platform.integrations.mcp import MCPToolProvider, register_mcp_tools
 from ai_agent_platform.tools import register_repository_tools
 
 
@@ -50,6 +52,7 @@ class CodingAgentState(TypedDict, total=False):
     trace: list[dict[str, Any]]
     started_at: float
     review_decision: dict[str, Any]
+    approval_required_tools: list[dict[str, Any]]
     errors: list[dict[str, Any]]
 
 
@@ -543,14 +546,23 @@ class CodingAgentRuntime:
         }
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
-        tool_calls = _plan_tool_calls(state)
+        tool_specs = self._tools.list_specs()
+        tool_calls = _plan_tool_calls(state, tool_specs)
+        approval_required_tools = _approval_required_tools(tool_calls, tool_specs)
         return {
             "tool_calls": tool_calls,
+            "approval_required_tools": approval_required_tools,
             "trace": _append_trace(
                 state,
                 node="plan_tools",
                 summary="根据意图和检索结果规划研发助手工具调用。",
-                output={"planned_tools": [tool_call.name for tool_call in tool_calls]},
+                output={
+                    "available_tool_count": len(tool_specs),
+                    "planned_tools": [tool_call.name for tool_call in tool_calls],
+                    "approval_required_tools": [
+                        item["name"] for item in approval_required_tools
+                    ],
+                },
             ),
         }
 
@@ -573,7 +585,7 @@ class CodingAgentRuntime:
             "trace": _append_trace(
                 state,
                 node="review_tool_plan",
-                summary="人工审批 change_planning 工具计划，决定是否继续执行。",
+                summary="人工审批需要权限确认的工具计划，决定是否继续执行。",
                 output=review_decision,
             ),
         }
@@ -819,9 +831,14 @@ def _unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
     ]
 
 
-def create_coding_tool_registry(root_path: Path | str | None = None) -> ToolRegistry:
+def create_coding_tool_registry(
+    root_path: Path | str | None = None,
+    mcp_providers: Optional[list[MCPToolProvider]] = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
     register_repository_tools(registry, root_path or Path.cwd())
+    if mcp_providers:
+        register_mcp_tools(registry, mcp_providers)
     registry.register(
         "repository_context_search",
         _repository_context_search_tool,
@@ -911,7 +928,7 @@ def _route_after_retrieval(state: CodingAgentState) -> RetrievalRoute:
 
 
 def _route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
-    if state.get("intent") == "change_planning":
+    if state.get("approval_required_tools"):
         return "review_tool_plan"
     return "inspect_repository"
 
@@ -938,14 +955,16 @@ def _build_repository_query(state: CodingAgentState) -> str:
 
 
 def _build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
+    approval_required_tools = state.get("approval_required_tools", [])
     return {
         "type": "tool_plan_review",
         "approval_required": True,
-        "reason": "change_planning intent requires human approval before executing planned tools",
+        "reason": "one or more planned tools require human approval before execution",
         "intent": state.get("intent", "change_planning"),
         "repository_id": state["repository_id"],
         "message": state["user_input"],
         "planned_tools": [tool_call.name for tool_call in state.get("tool_calls", [])],
+        "approval_required_tools": approval_required_tools,
         "tool_calls": [
             {
                 "name": tool_call.name,
@@ -956,7 +975,9 @@ def _build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]
     }
 
 
-def _plan_tool_calls(state: CodingAgentState) -> list[ToolCall]:
+def _plan_tool_calls(
+    state: CodingAgentState, tool_specs: list[ToolSpec] | None = None
+) -> list[ToolCall]:
     intent = state.get("intent", "repository_question")
     user_input = state["user_input"]
     repository_id = state["repository_id"]
@@ -1060,7 +1081,158 @@ def _plan_tool_calls(state: CodingAgentState) -> list[ToolCall]:
                 },
             )
         )
+    calls.extend(
+        _plan_dynamic_mcp_tool_calls(
+            user_input=user_input,
+            mentioned_paths=mentioned_paths,
+            symbols=symbols,
+            tool_specs=tool_specs or [],
+            already_planned={call.name for call in calls},
+        )
+    )
     return calls
+
+
+def _approval_required_tools(
+    tool_calls: list[ToolCall], tool_specs: list[ToolSpec]
+) -> list[dict[str, Any]]:
+    specs_by_name = {spec.name: spec for spec in tool_specs}
+    approval_tools: list[dict[str, Any]] = []
+    for tool_call in tool_calls:
+        spec = specs_by_name.get(tool_call.name)
+        if spec is None:
+            continue
+        if spec.requires_approval or spec.permission_level != "read_only":
+            approval_tools.append(
+                {
+                    "name": tool_call.name,
+                    "provider": spec.provider,
+                    "permission_level": spec.permission_level,
+                    "requires_approval": spec.requires_approval,
+                }
+            )
+    return approval_tools
+
+
+def _plan_dynamic_mcp_tool_calls(
+    *,
+    user_input: str,
+    mentioned_paths: list[str],
+    symbols: list[str],
+    tool_specs: list[ToolSpec],
+    already_planned: set[str],
+) -> list[ToolCall]:
+    scored_specs: list[tuple[int, ToolSpec]] = []
+    for spec in tool_specs:
+        if not spec.provider.startswith("mcp:") or spec.name in already_planned:
+            continue
+        score = _score_tool_for_request(spec, user_input)
+        if score > 0:
+            scored_specs.append((score, spec))
+
+    planned: list[ToolCall] = []
+    for _, spec in sorted(scored_specs, key=lambda item: item[0], reverse=True)[:3]:
+        arguments = _arguments_for_tool_spec(
+            spec,
+            user_input=user_input,
+            mentioned_paths=mentioned_paths,
+            symbols=symbols,
+        )
+        planned.append(
+            ToolCall(
+                name=spec.name,
+                arguments=arguments,
+                source="dynamic_tool_spec",
+            )
+        )
+    return planned
+
+
+def _score_tool_for_request(spec: ToolSpec, user_input: str) -> int:
+    normalized_input = user_input.lower()
+    tool_name = spec.name.split(".")[-1]
+    searchable_parts = [
+        tool_name,
+        spec.description,
+        " ".join(_schema_property_names(spec.input_schema)),
+    ]
+    searchable_text = " ".join(searchable_parts).lower().replace("_", " ")
+    score = 0
+    for token in _tool_match_tokens(searchable_text):
+        if token in normalized_input:
+            score += 3 if token in tool_name.lower().replace("_", " ") else 1
+    if tool_name.lower() in normalized_input:
+        score += 6
+    return score
+
+
+def _arguments_for_tool_spec(
+    spec: ToolSpec,
+    *,
+    user_input: str,
+    mentioned_paths: list[str],
+    symbols: list[str],
+) -> dict[str, Any]:
+    properties = _schema_properties(spec.input_schema)
+    required = spec.input_schema.get("required", [])
+    if not isinstance(required, list):
+        required = []
+
+    arguments: dict[str, Any] = {}
+    for name in properties:
+        if name not in required:
+            continue
+        arguments[name] = _argument_value_for_name(
+            name,
+            user_input=user_input,
+            mentioned_paths=mentioned_paths,
+            symbols=symbols,
+        )
+    return arguments
+
+
+def _argument_value_for_name(
+    name: str,
+    *,
+    user_input: str,
+    mentioned_paths: list[str],
+    symbols: list[str],
+) -> Any:
+    normalized = name.lower()
+    if normalized in {"query", "question", "prompt", "input", "message", "text"}:
+        return user_input
+    if normalized in {"title", "summary", "name"}:
+        return _snippet(user_input, limit=80)
+    if normalized in {"path", "file", "filename"}:
+        return mentioned_paths[0] if mentioned_paths else ""
+    if normalized in {"symbol", "function", "class_name"}:
+        return symbols[0] if symbols else ""
+    return user_input
+
+
+def _schema_properties(schema: dict[str, Any]) -> dict[str, Any]:
+    properties = schema.get("properties", {})
+    return properties if isinstance(properties, dict) else {}
+
+
+def _schema_property_names(schema: dict[str, Any]) -> list[str]:
+    return list(_schema_properties(schema).keys())
+
+
+def _tool_match_tokens(text: str) -> list[str]:
+    ignored = {
+        "tool",
+        "tools",
+        "the",
+        "and",
+        "for",
+        "with",
+        "object",
+        "string",
+        "payload",
+    }
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", text)
+    return _unique([token.lower() for token in tokens if token.lower() not in ignored])
 
 
 def _build_repo_tool_search_query(
@@ -1167,9 +1339,9 @@ def _format_answer(state: CodingAgentState) -> str:
     review_decision = state.get("review_decision", {})
     if review_decision and not review_decision.get("approved"):
         feedback = review_decision.get("feedback") or "未提供补充说明"
-        lines.append("人工审批结果：未批准执行本轮 change_planning 工具计划。")
+        lines.append("人工审批结果：未批准执行本轮需要权限确认的工具计划。")
         lines.append(f"审批反馈：{feedback}")
-        lines.append("我已停止执行后续仓库检查工具；可以根据反馈调整目标后重新发起 run。")
+        lines.append("我已停止执行后续工具；可以根据反馈调整目标后重新发起 run。")
         return "\n".join(lines)
 
     citations = state.get("rag_context", [])

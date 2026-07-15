@@ -69,6 +69,9 @@ LLM_PROVIDER=google
 LLM_MODEL=gemini-3.5-flash
 GOOGLE_API_KEY=your_google_ai_studio_key
 EMBEDDING_PROVIDER=local
+MCP_ENABLED=false
+MCP_CONFIG_PATH=mcp.json
+MCP_REQUEST_TIMEOUT_SECONDS=10
 ```
 
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
@@ -275,9 +278,65 @@ The local repository provider registers these read-only tools:
 All repository tools are scoped to the configured root path and reject paths
 that escape that root. Higher-level planning tools such as `change_planner`
 remain available, but now return standardized tool metadata in
-`tool_results`. This is the extension point for the next MCP phase: an MCP
-provider should expose remote MCP tools as `ToolSpec` values and return
-`ToolResult` values from the same executor.
+`tool_results`.
+
+The MCP provider boundary is available under `ai_agent_platform.integrations.mcp`.
+Any client that implements:
+
+```python
+list_tools() -> list[MCPTool]
+call_tool(name: str, arguments: dict[str, object]) -> object
+```
+
+can be wrapped by `MCPToolProvider` and registered into the same `ToolRegistry`.
+MCP tools are namespaced as `mcp.<server_name>.<tool_name>` and return the same
+`ToolResult` shape as local tools, including provider and approval metadata.
+`MCPStdioClient` now implements the core stdio transport path: launch the MCP
+server subprocess, send `initialize`, send `notifications/initialized`, call
+`tools/list` with pagination, call `tools/call`, and close the child process.
+
+Example MCP server config shape:
+
+```json
+{
+  "mcp_servers": {
+    "github": {
+      "transport": "stdio",
+      "command": "github-mcp-server",
+      "args": ["--read-only"],
+      "env": {"GITHUB_TOKEN": "token"}
+    }
+  }
+}
+```
+
+Set these environment variables to enable MCP tools at app startup:
+
+```bash
+MCP_ENABLED=true
+MCP_CONFIG_PATH=mcp.json
+MCP_REQUEST_TIMEOUT_SECONDS=10
+```
+
+When `MCP_ENABLED=true`, `create_app()` loads the configured MCP servers,
+registers their tools in the coding agent registry, and closes the providers on
+FastAPI shutdown. The default remains disabled so local development does not
+fail when optional MCP binaries are missing.
+
+The coding agent planner can now inspect registered `ToolSpec` values and add
+matching MCP tools to a run. Read-only MCP tools can execute automatically.
+Tools with `requires_approval=true` or a non-`read_only` permission level are
+routed through the existing `waiting_approval -> resume` flow before execution.
+
+You can also create providers explicitly in tests or scripts:
+
+```python
+from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
+from ai_agent_platform.integrations.mcp import create_mcp_providers_from_config_file
+
+providers = create_mcp_providers_from_config_file("mcp.json")
+registry = create_coding_tool_registry(mcp_providers=providers)
+```
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \

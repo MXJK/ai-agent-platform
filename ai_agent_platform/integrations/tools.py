@@ -93,6 +93,9 @@ class ToolRegistry:
     def list_specs(self) -> list[ToolSpec]:
         return list(self._specs.values())
 
+    def get_spec(self, name: str) -> ToolSpec | None:
+        return self._specs.get(name)
+
     def call(self, tool_call: ToolCall) -> Any:
         try:
             tool = self._tools[tool_call.name]

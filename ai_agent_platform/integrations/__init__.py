@@ -1,4 +1,16 @@
 from .llm import LLMClient, LLMProviderError, LLMResponse, LLMStreamEvent, LLMUsage
+from .mcp import (
+    MCPClient,
+    MCPServerConfig,
+    MCPStdioClient,
+    MCPStdioClientError,
+    MCPTool,
+    MCPToolProvider,
+    load_mcp_server_configs,
+    create_mcp_providers_from_config_file,
+    create_mcp_providers_from_configs,
+    register_mcp_tools,
+)
 from .rag import (
     RAGConfigurationError,
     RAGError,
@@ -16,6 +28,12 @@ __all__ = [
     "LLMResponse",
     "LLMStreamEvent",
     "LLMUsage",
+    "MCPClient",
+    "MCPServerConfig",
+    "MCPStdioClient",
+    "MCPStdioClientError",
+    "MCPTool",
+    "MCPToolProvider",
     "RAGConfigurationError",
     "RAGError",
     "RAGProviderError",
@@ -27,5 +45,9 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "ToolSpec",
+    "create_mcp_providers_from_config_file",
+    "create_mcp_providers_from_configs",
     "create_rag_service",
+    "load_mcp_server_configs",
+    "register_mcp_tools",
 ]
