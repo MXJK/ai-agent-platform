@@ -1,3 +1,5 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from fastapi.testclient import TestClient
@@ -255,6 +257,100 @@ class APITests(unittest.TestCase):
             [message["role"] for message in messages],
             ["user", "assistant", "user", "assistant"],
         )
+
+    def test_indexes_repository_files_and_skips_unchanged_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text(
+                "def build_answer():\n"
+                "    return 'repository indexing works'\n",
+                encoding="utf-8",
+            )
+            (root / "README.md").write_text(
+                "# Demo Repo\n\nRepository indexing notes.\n",
+                encoding="utf-8",
+            )
+            (root / ".venv").mkdir()
+            (root / ".venv" / "ignored.py").write_text(
+                "def ignored(): pass\n",
+                encoding="utf-8",
+            )
+
+            first_response = self.client.post(
+                "/api/v1/repositories/repo_main/index",
+                json={
+                    "root_path": str(root),
+                    "include_patterns": ["**/*.py", "**/*.md"],
+                    "max_file_size": 10000,
+                },
+            )
+
+            self.assertEqual(first_response.status_code, 201)
+            first_body = first_response.json()
+            self.assertEqual(first_body["repository_id"], "repo_main")
+            self.assertEqual(first_body["status"], "completed")
+            self.assertEqual(first_body["scanned_files"], 2)
+            self.assertEqual(first_body["indexed_files"], 2)
+            self.assertEqual(first_body["skipped_files"], 0)
+            self.assertEqual(first_body["failed_files"], 0)
+            self.assertEqual(
+                first_body["indexed_paths"],
+                ["README.md", "app.py"],
+            )
+
+            search_response = self.client.post(
+                "/api/v1/knowledge-bases/repo_main/search",
+                json={"query": "build_answer repository indexing", "limit": 3},
+            )
+            self.assertEqual(search_response.status_code, 200)
+            filenames = {
+                result["filename"] for result in search_response.json()["results"]
+            }
+            self.assertIn("app.py", filenames)
+
+            create_response = self.client.post(
+                "/api/v1/sessions",
+                json={"user_id": "user_1"},
+            )
+            session_id = create_response.json()["id"]
+            agent_response = self.client.post(
+                "/api/v1/agent/runs",
+                json={
+                    "conversation_id": session_id,
+                    "repository_id": "repo_main",
+                    "message": "解释 build_answer 在哪里实现",
+                },
+            )
+            self.assertEqual(agent_response.status_code, 200)
+            agent_body = agent_response.json()
+            self.assertEqual(agent_body["status"], "completed")
+            self.assertTrue(
+                any(
+                    item["filename"] == "app.py"
+                    for item in agent_body["rag_context"]
+                )
+            )
+
+            second_response = self.client.post(
+                "/api/v1/repositories/repo_main/index",
+                json={
+                    "root_path": str(root),
+                    "include_patterns": ["**/*.py", "**/*.md"],
+                    "max_file_size": 10000,
+                },
+            )
+
+            self.assertEqual(second_response.status_code, 201)
+            second_body = second_response.json()
+            self.assertEqual(second_body["status"], "completed")
+            self.assertEqual(second_body["scanned_files"], 2)
+            self.assertEqual(second_body["indexed_files"], 0)
+            self.assertEqual(second_body["skipped_files"], 2)
+            self.assertEqual(second_body["failed_files"], 0)
+            self.assertEqual(
+                second_body["skipped_paths"],
+                ["README.md", "app.py"],
+            )
 
     def test_agent_run_status_returns_404_for_missing_run(self) -> None:
         response = self.client.get("/api/v1/agent/runs/run_missing")

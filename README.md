@@ -74,6 +74,114 @@ EMBEDDING_PROVIDER=local
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
 ignored by git so local secrets do not get committed.
 
+## Local Data Stores
+
+This project is moving toward PostgreSQL as the structured source of truth and
+Qdrant as the dedicated vector database.
+
+PostgreSQL is intended to store structured application data:
+
+- sessions, messages, and token usage
+- agent runs, run events, traces, and LangGraph checkpoint metadata
+- repositories, repository index jobs, repository file hashes, documents, and
+  chunk metadata
+
+Qdrant is intended to store vector embeddings for repository/document chunks.
+PostgreSQL should still keep document and chunk metadata so Qdrant collections
+can be rebuilt without losing the source-of-truth records.
+
+Start the local databases:
+
+```bash
+docker compose up -d postgres qdrant
+```
+
+Check service health:
+
+```bash
+docker compose ps
+curl http://localhost:6333/readyz
+```
+
+Create local configuration:
+
+```bash
+cp .env.example .env
+```
+
+Important local values:
+
+```bash
+DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION_NAME=repo_chunks
+```
+
+Run PostgreSQL schema migrations before switching runtime stores to
+PostgreSQL:
+
+```bash
+DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
+  .venv/bin/python -m alembic upgrade head
+```
+
+If a local database was already initialized by the older repository auto-schema
+code and the tables match this initial migration, mark that existing schema as
+current once:
+
+```bash
+DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
+  .venv/bin/python -m alembic stamp head
+```
+
+Useful migration commands:
+
+```bash
+.venv/bin/python -m alembic current
+.venv/bin/python -m alembic history
+.venv/bin/python -m alembic downgrade -1
+```
+
+By default, local tests and quick demos still use in-memory storage. To switch
+structured application state to PostgreSQL, install dependencies, start
+PostgreSQL, and set:
+
+```bash
+SESSION_REPOSITORY=postgres
+AGENT_RUN_STORE=postgres
+DOCUMENT_STORE=postgres
+REPOSITORY_INDEX_STORE=postgres
+LANGGRAPH_CHECKPOINTER=postgres
+```
+
+To switch vector search to Qdrant, start Qdrant and set:
+
+```bash
+RAG_VECTOR_STORE=qdrant
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION_NAME=repo_chunks
+```
+
+`SESSION_REPOSITORY=postgres` persists sessions, messages, and token usage.
+`AGENT_RUN_STORE=postgres` persists product-level agent run status and trace
+snapshots. `DOCUMENT_STORE=postgres` persists ingested document and chunk
+metadata as the structured source of truth. `REPOSITORY_INDEX_STORE=postgres`
+persists repository roots, index jobs, and per-file hashes. `LANGGRAPH_CHECKPOINTER=postgres`
+uses LangGraph's PostgreSQL checkpointer for graph state. `RAG_VECTOR_STORE=qdrant`
+stores chunk vectors in Qdrant while keeping the same RAG service interface.
+
+The PostgreSQL schema currently includes these application-owned tables:
+
+- `sessions`, `messages`, `token_usage_records`
+- `agent_runs`
+- `documents`, `document_chunks`
+- `repositories`, `repository_index_jobs`, `repository_files`
+
+The repository indexing tables are the metadata foundation for the next API
+step: `repositories` stores the repo root, `repository_index_jobs` stores each
+scan run and counters, and `repository_files` stores per-file path/hash/document
+metadata so unchanged files can be skipped.
+
 Endpoints:
 
 ```text
@@ -86,6 +194,7 @@ GET  /api/v1/sessions/{session_id}/messages
 POST /api/v1/chat/stream
 POST /api/v1/agent/runs
 GET  /api/v1/agent/runs/{run_id}
+POST /api/v1/repositories/{repository_id}/index
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
@@ -129,6 +238,15 @@ Use `repository_id` as the code index id. For backward compatibility it maps to
 the same storage path as `knowledge_base_id`.
 
 ```bash
+curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "root_path": "/absolute/path/to/repo",
+    "include_patterns": ["**/*.py", "**/*.md", "**/*.toml"],
+    "exclude_patterns": [".git/**", ".venv/**", "__pycache__/**", "node_modules/**"],
+    "max_file_size": 200000
+  }'
+
 curl -X POST http://localhost:8000/api/v1/knowledge-bases/repo_main/documents \
   -H 'Content-Type: application/json' \
   -d '{
@@ -173,7 +291,15 @@ offline learning:
 export EMBEDDING_PROVIDER=local
 ```
 
-To use Chroma persistence instead of the in-memory vector store:
+To use Qdrant instead of the in-memory vector store:
+
+```bash
+export RAG_VECTOR_STORE=qdrant
+export QDRANT_URL=http://localhost:6333
+export QDRANT_COLLECTION_NAME=repo_chunks
+```
+
+To use Chroma persistence instead:
 
 ```bash
 export RAG_VECTOR_STORE=chroma

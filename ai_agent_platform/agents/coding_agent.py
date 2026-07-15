@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from threading import Lock
 from time import perf_counter
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Literal, Optional, Protocol, TypedDict
 from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -85,6 +86,28 @@ class AgentRunNotFoundError(Exception):
     pass
 
 
+class AgentRunStore(Protocol):
+    def save(self, record: AgentRunRecord) -> None:
+        ...
+
+    def get(self, run_id: str) -> AgentRunRecord:
+        ...
+
+
+class InMemoryAgentRunStore:
+    def __init__(self) -> None:
+        self._runs: dict[str, AgentRunRecord] = {}
+        self._lock = Lock()
+
+    def save(self, record: AgentRunRecord) -> None:
+        with self._lock:
+            self._runs[record.run_id] = record
+
+    def get(self, run_id: str) -> AgentRunRecord:
+        with self._lock:
+            return self._runs[run_id]
+
+
 class CodingAgentRuntime:
     """LangGraph runtime for a repository-aware development assistant."""
 
@@ -93,11 +116,13 @@ class CodingAgentRuntime:
         *,
         rag_service: RAGService,
         tool_registry: Optional[ToolRegistry] = None,
+        run_store: Optional[AgentRunStore] = None,
+        checkpointer: Any = None,
     ) -> None:
         self._rag_service = rag_service
         self._tools = tool_registry or create_coding_tool_registry()
-        self._checkpointer = InMemorySaver()
-        self._runs: dict[str, AgentRunRecord] = {}
+        self._checkpointer = checkpointer or InMemorySaver()
+        self._run_store = run_store or InMemoryAgentRunStore()
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
 
@@ -113,16 +138,18 @@ class CodingAgentRuntime:
         run_id = f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = {"configurable": {"thread_id": thread_id}}
-        self._runs[run_id] = AgentRunRecord(
-            run_id=run_id,
-            thread_id=thread_id,
-            conversation_id=conversation_id,
-            repository_id=repository_id,
-            status="running",
-            checkpoint_id=None,
-            latest_node=None,
-            next_nodes=[],
-            trace=[],
+        self._run_store.save(
+            AgentRunRecord(
+                run_id=run_id,
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                repository_id=repository_id,
+                status="running",
+                checkpoint_id=None,
+                latest_node=None,
+                next_nodes=[],
+                trace=[],
+            )
         )
 
         try:
@@ -143,17 +170,19 @@ class CodingAgentRuntime:
             )
         except Exception as exc:
             snapshot = self._snapshot_for(config)
-            self._runs[run_id] = AgentRunRecord(
-                run_id=run_id,
-                thread_id=thread_id,
-                conversation_id=conversation_id,
-                repository_id=repository_id,
-                status="failed",
-                checkpoint_id=_checkpoint_id(snapshot),
-                latest_node=_latest_trace_node(snapshot),
-                next_nodes=_next_nodes(snapshot),
-                trace=_snapshot_trace(snapshot),
-                error=str(exc),
+            self._run_store.save(
+                AgentRunRecord(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    conversation_id=conversation_id,
+                    repository_id=repository_id,
+                    status="failed",
+                    checkpoint_id=_checkpoint_id(snapshot),
+                    latest_node=_latest_trace_node(snapshot),
+                    next_nodes=_next_nodes(snapshot),
+                    trace=_snapshot_trace(snapshot),
+                    error=str(exc),
+                )
             )
             raise
 
@@ -175,23 +204,25 @@ class CodingAgentRuntime:
             tool_results=state.get("tool_results", []),
             trace=state.get("trace", []),
         )
-        self._runs[run_id] = AgentRunRecord(
-            run_id=run_id,
-            thread_id=thread_id,
-            conversation_id=conversation_id,
-            repository_id=repository_id,
-            status="completed",
-            checkpoint_id=result.checkpoint_id,
-            latest_node=_latest_trace_node(snapshot),
-            next_nodes=_next_nodes(snapshot),
-            trace=result.trace,
-            result=result,
+        self._run_store.save(
+            AgentRunRecord(
+                run_id=run_id,
+                thread_id=thread_id,
+                conversation_id=conversation_id,
+                repository_id=repository_id,
+                status="completed",
+                checkpoint_id=result.checkpoint_id,
+                latest_node=_latest_trace_node(snapshot),
+                next_nodes=_next_nodes(snapshot),
+                trace=result.trace,
+                result=result,
+            )
         )
         return result
 
     def get_run(self, run_id: str) -> AgentRunRecord:
         try:
-            return self._runs[run_id]
+            return self._run_store.get(run_id)
         except KeyError as exc:
             raise AgentRunNotFoundError(run_id) from exc
 

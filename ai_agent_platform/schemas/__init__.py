@@ -17,6 +17,7 @@ from .rag import (
     RAGSearchRequest,
     RAGSearchResponse,
 )
+from .repository import RepositoryIndexRequest, RepositoryIndexResponse
 from .session import CreateSessionRequest, SessionResponse, SessionsResponse
 from .summary import SessionSummaryResponse
 
@@ -39,6 +40,8 @@ __all__ = [
     "RAGChunkResponse",
     "RAGSearchRequest",
     "RAGSearchResponse",
+    "RepositoryIndexRequest",
+    "RepositoryIndexResponse",
     "SessionResponse",
     "SessionsResponse",
     "SessionSummaryResponse",

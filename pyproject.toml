@@ -4,12 +4,17 @@ version = "0.1.0"
 description = "A learning project for Python AI backend and game AI agent engineering."
 requires-python = ">=3.9"
 dependencies = [
+    "alembic>=1.13.0",
     "chromadb>=0.5.0",
     "fastapi>=0.115.0",
     "google-genai>=1.0.0",
     "httpx>=0.28.0",
     "langgraph>=0.6.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
     "pydantic>=2.8.0",
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
+    "qdrant-client>=1.11.0",
     "sentence-transformers>=3.0.0",
     "socksio>=1.0.0",
     "uvicorn[standard]>=0.30.0",

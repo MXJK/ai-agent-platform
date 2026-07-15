@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 from typing import Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 
@@ -105,6 +105,15 @@ class VectorStore(Protocol):
         query_embedding: list[float],
         limit: int,
     ) -> list[RetrievedDocument]:
+        ...
+
+
+class DocumentStore(Protocol):
+    def save_document(
+        self,
+        document: ParsedDocument,
+        chunks: list[DocumentChunk],
+    ) -> None:
         ...
 
 
@@ -523,6 +532,142 @@ class ChromaVectorStore:
         return retrieved
 
 
+class QdrantVectorStore:
+    def __init__(
+        self,
+        *,
+        url: str,
+        api_key: str | None,
+        collection_name: str,
+    ) -> None:
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError as exc:
+            raise RAGConfigurationError(
+                "qdrant-client is not installed; run pip install -r requirements.txt"
+            ) from exc
+
+        if url == ":memory:":
+            self._client = QdrantClient(location=":memory:")
+        else:
+            self._client = QdrantClient(url=url, api_key=api_key)
+        self._collection_name = collection_name
+        self._vector_size: int | None = None
+
+    def upsert_chunks(
+        self,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+    ) -> None:
+        if not chunks:
+            return
+
+        self._ensure_collection(vector_size=len(embeddings[0]))
+        PointStruct = _qdrant_model("PointStruct")
+        points = [
+            PointStruct(
+                id=_qdrant_point_id(chunk.id),
+                vector=embedding,
+                payload={
+                    "chunk_id": chunk.id,
+                    "knowledge_base_id": chunk.knowledge_base_id,
+                    "document_id": chunk.document_id,
+                    "filename": chunk.filename,
+                    "chunk_index": chunk.chunk_index,
+                    "text": chunk.text,
+                },
+            )
+            for chunk, embedding in zip(chunks, embeddings)
+        ]
+        self._client.upsert(collection_name=self._collection_name, points=points)
+
+    def search(
+        self,
+        *,
+        knowledge_base_id: str,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[RetrievedDocument]:
+        if not self._collection_exists():
+            return []
+
+        FieldCondition = _qdrant_model("FieldCondition")
+        Filter = _qdrant_model("Filter")
+        MatchValue = _qdrant_model("MatchValue")
+        query_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="knowledge_base_id",
+                    match=MatchValue(value=knowledge_base_id),
+                )
+            ]
+        )
+        if hasattr(self._client, "search"):
+            results = self._client.search(
+                collection_name=self._collection_name,
+                query_vector=query_embedding,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True,
+            )
+        else:
+            query_response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=query_embedding,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            results = query_response.points
+
+        retrieved: list[RetrievedDocument] = []
+        for point in results:
+            payload = point.payload or {}
+            retrieved.append(
+                RetrievedDocument(
+                    id=str(payload["chunk_id"]),
+                    knowledge_base_id=str(payload["knowledge_base_id"]),
+                    document_id=str(payload["document_id"]),
+                    filename=str(payload["filename"]),
+                    chunk_index=int(payload["chunk_index"]),
+                    text=str(payload["text"]),
+                    score=float(point.score),
+                    recall_score=float(point.score),
+                )
+            )
+        return retrieved
+
+    def _ensure_collection(self, *, vector_size: int) -> None:
+        if self._vector_size is not None:
+            if self._vector_size != vector_size:
+                raise RAGConfigurationError(
+                    "Qdrant collection vector size does not match embedding size"
+                )
+            return
+
+        if self._collection_exists():
+            info = self._client.get_collection(collection_name=self._collection_name)
+            configured_size = _qdrant_vector_size(info)
+            if configured_size is not None and configured_size != vector_size:
+                raise RAGConfigurationError(
+                    "Qdrant collection vector size does not match embedding size"
+                )
+            self._vector_size = configured_size or vector_size
+            return
+
+        Distance = _qdrant_model("Distance")
+        VectorParams = _qdrant_model("VectorParams")
+        self._client.create_collection(
+            collection_name=self._collection_name,
+            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+        )
+        self._vector_size = vector_size
+
+    def _collection_exists(self) -> bool:
+        collections = self._client.get_collections().collections
+        return any(item.name == self._collection_name for item in collections)
+
+
 class RAGService:
     def __init__(
         self,
@@ -534,6 +679,7 @@ class RAGService:
         reranker: Reranker,
         default_recall_limit: int,
         max_prompt_chars: int,
+        document_store: DocumentStore | None = None,
     ) -> None:
         self._parser = parser
         self._chunker = chunker
@@ -542,6 +688,7 @@ class RAGService:
         self._reranker = reranker
         self._default_recall_limit = default_recall_limit
         self._max_prompt_chars = max_prompt_chars
+        self._document_store = document_store
 
     def ingest_document(
         self,
@@ -566,6 +713,8 @@ class RAGService:
             task_type="document",
         )
         self._vector_store.upsert_chunks(chunks, embeddings)
+        if self._document_store is not None:
+            self._document_store.save_document(document, chunks)
         return IngestedDocument(
             knowledge_base_id=knowledge_base_id,
             document_id=document.id,
@@ -691,7 +840,11 @@ class RAGProviderError(RAGError):
     pass
 
 
-def create_rag_service(settings: Settings) -> RAGService:
+def create_rag_service(
+    settings: Settings,
+    *,
+    document_store: DocumentStore | None = None,
+) -> RAGService:
     if settings.embedding_provider == "openai":
         embedding_provider: EmbeddingProvider = OpenAIEmbeddingProvider(settings)
     elif settings.embedding_provider == "gemini":
@@ -709,6 +862,12 @@ def create_rag_service(settings: Settings) -> RAGService:
         vector_store: VectorStore = ChromaVectorStore(
             persist_directory=settings.chroma_persist_directory,
             collection_name=settings.chroma_collection_name,
+        )
+    elif settings.rag_vector_store == "qdrant":
+        vector_store = QdrantVectorStore(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            collection_name=settings.qdrant_collection_name,
         )
     elif settings.rag_vector_store == "memory":
         vector_store = InMemoryVectorStore()
@@ -739,6 +898,7 @@ def create_rag_service(settings: Settings) -> RAGService:
         reranker=reranker,
         default_recall_limit=settings.rag_recall_limit,
         max_prompt_chars=settings.rag_max_prompt_chars,
+        document_store=document_store,
     )
 
 
@@ -777,3 +937,33 @@ def _first_result_list(value: object) -> list:
         if isinstance(first, list):
             return first
     return []
+
+
+def _qdrant_model(name: str):
+    try:
+        from qdrant_client import models
+    except ImportError as exc:
+        raise RAGConfigurationError(
+            "qdrant-client is not installed; run pip install -r requirements.txt"
+        ) from exc
+    return getattr(models, name)
+
+
+def _qdrant_point_id(chunk_id: str) -> str:
+    return str(uuid5(NAMESPACE_URL, chunk_id))
+
+
+def _qdrant_vector_size(collection_info: object) -> int | None:
+    config = getattr(collection_info, "config", None)
+    params = getattr(config, "params", None)
+    vectors = getattr(params, "vectors", None)
+    if vectors is None:
+        return None
+    size = getattr(vectors, "size", None)
+    if size is not None:
+        return int(size)
+    if isinstance(vectors, dict) and vectors:
+        first_vector = next(iter(vectors.values()))
+        named_size = getattr(first_vector, "size", None)
+        return int(named_size) if named_size is not None else None
+    return None

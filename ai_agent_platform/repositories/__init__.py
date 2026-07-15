@@ -1,3 +1,23 @@
-from .memory import InMemorySessionRepository, SessionNotFoundError
+from .memory import (
+    InMemoryRepositoryIndexRepository,
+    InMemorySessionRepository,
+    SessionNotFoundError,
+)
+from .postgres import (
+    PostgresAgentRunRepository,
+    PostgresDependencyError,
+    PostgresDocumentRepository,
+    PostgresRepositoryIndexRepository,
+    PostgresSessionRepository,
+)
 
-__all__ = ["InMemorySessionRepository", "SessionNotFoundError"]
+__all__ = [
+    "InMemorySessionRepository",
+    "InMemoryRepositoryIndexRepository",
+    "PostgresAgentRunRepository",
+    "PostgresDependencyError",
+    "PostgresDocumentRepository",
+    "PostgresRepositoryIndexRepository",
+    "PostgresSessionRepository",
+    "SessionNotFoundError",
+]

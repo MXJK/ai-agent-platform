@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from ai_agent_platform.agents.game_agent import GameAgentRuntime
 from ai_agent_platform.domain import Message, Session, SessionSummary, TokenUsageRecord
-from ai_agent_platform.repositories import InMemorySessionRepository
 
 
 class SessionService:
@@ -10,7 +9,7 @@ class SessionService:
 
     def __init__(
         self,
-        repository: InMemorySessionRepository,
+        repository,
         agent_runtime: GameAgentRuntime,
     ) -> None:
         self._repository = repository

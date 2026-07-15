@@ -14,6 +14,14 @@ class Settings:
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     google_api_key: str | None = None
+    database_url: str = (
+        "postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform"
+    )
+    session_repository: str = "memory"
+    agent_run_store: str = "memory"
+    document_store: str = "memory"
+    repository_index_store: str = "memory"
+    langgraph_checkpointer: str = "memory"
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 2
     llm_max_input_chars: int = 8000
@@ -22,6 +30,9 @@ class Settings:
     rag_vector_store: str = "memory"
     chroma_persist_directory: str = ".chroma"
     chroma_collection_name: str = "rag_chunks"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str | None = None
+    qdrant_collection_name: str = "repo_chunks"
     embedding_provider: str = "gemini"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
@@ -47,6 +58,18 @@ class Settings:
                 _env("GEMINI_API_KEY", None, dotenv),
                 dotenv,
             ),
+            database_url=_env("DATABASE_URL", cls.database_url, dotenv),
+            session_repository=_env(
+                "SESSION_REPOSITORY", cls.session_repository, dotenv
+            ),
+            agent_run_store=_env("AGENT_RUN_STORE", cls.agent_run_store, dotenv),
+            document_store=_env("DOCUMENT_STORE", cls.document_store, dotenv),
+            repository_index_store=_env(
+                "REPOSITORY_INDEX_STORE", cls.repository_index_store, dotenv
+            ),
+            langgraph_checkpointer=_env(
+                "LANGGRAPH_CHECKPOINTER", cls.langgraph_checkpointer, dotenv
+            ),
             llm_timeout_seconds=_float_env(
                 "LLM_TIMEOUT_SECONDS", cls.llm_timeout_seconds, dotenv
             ),
@@ -66,6 +89,11 @@ class Settings:
             ),
             chroma_collection_name=_env(
                 "CHROMA_COLLECTION_NAME", cls.chroma_collection_name, dotenv
+            ),
+            qdrant_url=_env("QDRANT_URL", cls.qdrant_url, dotenv),
+            qdrant_api_key=_env("QDRANT_API_KEY", None, dotenv),
+            qdrant_collection_name=_env(
+                "QDRANT_COLLECTION_NAME", cls.qdrant_collection_name, dotenv
             ),
             embedding_provider=_env(
                 "EMBEDDING_PROVIDER", cls.embedding_provider, dotenv

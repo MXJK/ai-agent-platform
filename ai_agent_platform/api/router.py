@@ -37,11 +37,17 @@ from ai_agent_platform.schemas import (
     RAGChunkResponse,
     RAGSearchRequest,
     RAGSearchResponse,
+    RepositoryIndexRequest,
+    RepositoryIndexResponse,
     SessionResponse,
     SessionsResponse,
     SessionSummaryResponse,
 )
-from ai_agent_platform.services import SessionService
+from ai_agent_platform.services import (
+    RepositoryIndexingError,
+    RepositoryIndexingService,
+    SessionService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,7 @@ def create_api_router(
     llm_client: LLMClient,
     rag_service: RAGService,
     coding_agent_runtime: CodingAgentRuntime,
+    repository_indexing_service: RepositoryIndexingService,
     settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
@@ -194,6 +201,31 @@ def create_api_router(
         except AgentRunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="agent run not found") from exc
         return AgentRunStatusResponse.from_domain(record)
+
+    @router.post(
+        "/repositories/{repository_id}/index",
+        response_model=RepositoryIndexResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def index_repository(
+        request: RepositoryIndexRequest,
+        repository_id: str = Path(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[a-zA-Z0-9_-]+$",
+        ),
+    ) -> RepositoryIndexResponse:
+        try:
+            result = repository_indexing_service.index_repository(
+                repository_id=repository_id,
+                root_path=request.root_path,
+                include_patterns=request.include_patterns,
+                exclude_patterns=request.exclude_patterns,
+                max_file_size=request.max_file_size,
+            )
+        except RepositoryIndexingError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RepositoryIndexResponse.from_domain(result)
 
     @router.post(
         "/knowledge-bases/{knowledge_base_id}/documents",
