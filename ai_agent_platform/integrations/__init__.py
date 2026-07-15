@@ -8,7 +8,7 @@ from .rag import (
     RetrievedDocument,
     create_rag_service,
 )
-from .tools import ToolCall, ToolRegistry
+from .tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult, ToolSpec
 
 __all__ = [
     "LLMClient",
@@ -23,6 +23,9 @@ __all__ = [
     "RAGValidationError",
     "RetrievedDocument",
     "ToolCall",
+    "ToolExecutionContext",
     "ToolRegistry",
+    "ToolResult",
+    "ToolSpec",
     "create_rag_service",
 ]

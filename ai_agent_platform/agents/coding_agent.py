@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from threading import Lock
 from time import perf_counter
@@ -19,7 +20,12 @@ from ai_agent_platform.integrations import (
     RAGValidationError,
 )
 from ai_agent_platform.integrations.rag import RetrievedDocument
-from ai_agent_platform.integrations.tools import ToolCall, ToolRegistry
+from ai_agent_platform.integrations.tools import (
+    ToolCall,
+    ToolExecutionContext,
+    ToolRegistry,
+)
+from ai_agent_platform.tools import register_repository_tools
 
 
 CODING_AGENT_ROLE = "研发助手 / 代码仓库问答 Agent"
@@ -574,24 +580,14 @@ class CodingAgentRuntime:
 
     def _inspect_repository(self, state: CodingAgentState) -> CodingAgentState:
         tool_results: list[dict[str, Any]] = []
+        context = ToolExecutionContext(
+            conversation_id=state["conversation_id"],
+            repository_id=state["repository_id"],
+        )
         for tool_call in state.get("tool_calls", []):
-            try:
-                result = self._tools.call(tool_call)
-                tool_results.append(
-                    {
-                        "name": tool_call.name,
-                        "ok": True,
-                        "result": result,
-                    }
-                )
-            except Exception as exc:
-                tool_results.append(
-                    {
-                        "name": tool_call.name,
-                        "ok": False,
-                        "error": str(exc),
-                    }
-                )
+            tool_results.append(
+                self._tools.execute(tool_call, context=context).to_response()
+            )
 
         return {
             "tool_results": tool_results,
@@ -823,14 +819,41 @@ def _unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
     ]
 
 
-def create_coding_tool_registry() -> ToolRegistry:
+def create_coding_tool_registry(root_path: Path | str | None = None) -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register("repository_context_search", _repository_context_search_tool)
-    registry.register("file_symbol_locator", _file_symbol_locator_tool)
-    registry.register("code_explainer", _code_explainer_tool)
-    registry.register("change_planner", _change_planner_tool)
-    registry.register("bug_investigator", _bug_investigator_tool)
-    registry.register("test_designer", _test_designer_tool)
+    register_repository_tools(registry, root_path or Path.cwd())
+    registry.register(
+        "repository_context_search",
+        _repository_context_search_tool,
+        description="Summarize repository RAG retrieval state for answer grounding.",
+    )
+    registry.register(
+        "file_symbol_locator",
+        _file_symbol_locator_tool,
+        description="Suggest file and symbol location commands from retrieved context.",
+    )
+    registry.register(
+        "code_explainer",
+        _code_explainer_tool,
+        description="Build a structured explanation plan from retrieved snippets.",
+    )
+    registry.register(
+        "change_planner",
+        _change_planner_tool,
+        description="Plan a safe code change across candidate files.",
+        permission_level="write_safe",
+        requires_approval=True,
+    )
+    registry.register(
+        "bug_investigator",
+        _bug_investigator_tool,
+        description="Plan a focused debugging path for a reported symptom.",
+    )
+    registry.register(
+        "test_designer",
+        _test_designer_tool,
+        description="Suggest focused tests for a requested behavior or fix.",
+    )
     return registry
 
 
@@ -954,6 +977,37 @@ def _plan_tool_calls(state: CodingAgentState) -> list[ToolCall]:
             },
         )
     ]
+    if intent in {
+        "repository_question",
+        "repo_navigation",
+        "code_explanation",
+        "bug_investigation",
+        "test_strategy",
+        "change_planning",
+    }:
+        calls.append(
+            ToolCall(
+                name="repo.search_code",
+                arguments={
+                    "query": _build_repo_tool_search_query(
+                        user_input, symbols, mentioned_paths, cited_files
+                    ),
+                    "max_results": 8,
+                    "context_lines": 0,
+                },
+            )
+        )
+    files_to_read = _unique(focus_files + mentioned_paths + cited_files)[:3]
+    for file_path in files_to_read:
+        calls.append(
+            ToolCall(
+                name="repo.read_file",
+                arguments={
+                    "path": file_path,
+                    "max_chars": 6000,
+                },
+            )
+        )
     if intent in {"repo_navigation", "code_explanation", "bug_investigation"}:
         calls.append(
             ToolCall(
@@ -1007,6 +1061,18 @@ def _plan_tool_calls(state: CodingAgentState) -> list[ToolCall]:
             )
         )
     return calls
+
+
+def _build_repo_tool_search_query(
+    user_input: str,
+    symbols: list[str],
+    mentioned_paths: list[str],
+    cited_files: list[str],
+) -> str:
+    focused_terms = _unique(symbols + mentioned_paths + cited_files)
+    if focused_terms:
+        return " ".join(focused_terms)
+    return user_input
 
 
 def _repository_context_search_tool(

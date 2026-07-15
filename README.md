@@ -225,8 +225,9 @@ small OpenHands/Codex-style backend loop:
 1. classify the user request as repository navigation, code explanation, change
    planning, bug investigation, test strategy, or general repository QA.
 2. retrieve code context from the RAG index scoped by `repository_id`.
-3. plan tool calls such as repository search, file/symbol location, code
-   explanation, change planning, bug investigation, and test design.
+3. plan tool calls such as local repository search/read tools, file/symbol
+   location, code explanation, change planning, bug investigation, and test
+   design.
 4. pause for human approval when `change_planning` would execute a planned tool
    sequence.
 5. retry recoverable RAG/answer-generation failures, collect structured
@@ -250,6 +251,33 @@ so the API returns a diagnostic answer instead of an opaque crash.
 
 Use `repository_id` as the code index id. For backward compatibility it maps to
 the same storage path as `knowledge_base_id`.
+
+### Tool Layer
+
+The first tools phase standardizes local tool execution before MCP is added.
+`ai_agent_platform.integrations.tools` defines:
+
+- `ToolSpec`: name, description, JSON-style input/output schemas, provider,
+  permission level, and approval requirement.
+- `ToolCall`: the planned call name and arguments.
+- `ToolResult`: normalized execution output with `ok`, `result`/`error`,
+  provider, permission level, approval flag, and duration.
+- `ToolRegistry`: one registry that can execute local tools now and MCP-backed
+  providers later through the same result contract.
+
+The local repository provider registers these read-only tools:
+
+- `repo.list_files`: list text-oriented files under the configured repository
+  root.
+- `repo.read_file`: read a UTF-8 text file under the repository root.
+- `repo.search_code`: search repository text files by symbol, path, or keyword.
+
+All repository tools are scoped to the configured root path and reject paths
+that escape that root. Higher-level planning tools such as `change_planner`
+remain available, but now return standardized tool metadata in
+`tool_results`. This is the extension point for the next MCP phase: an MCP
+provider should expose remote MCP tools as `ToolSpec` values and return
+`ToolResult` values from the same executor.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \

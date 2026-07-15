@@ -5,9 +5,11 @@ import unittest
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.core import Settings
+from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
 from ai_agent_platform.integrations import RAGConfigurationError, RAGProviderError
 from ai_agent_platform.integrations.llm import _google_usage
 from ai_agent_platform.integrations.rag import RetrievedDocument
+from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
 
 
@@ -230,9 +232,24 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["role"], "研发助手 / 代码仓库问答 Agent")
         self.assertEqual(body["intent"], "repo_navigation")
         self.assertGreaterEqual(len(body["rag_context"]), 1)
-        self.assertEqual(body["tool_calls"][0]["name"], "repository_context_search")
-        self.assertEqual(body["tool_calls"][1]["name"], "file_symbol_locator")
-        self.assertEqual(body["tool_calls"][2]["name"], "code_explainer")
+        tool_names = [tool_call["name"] for tool_call in body["tool_calls"]]
+        self.assertEqual(tool_names[0], "repository_context_search")
+        self.assertIn("repo.search_code", tool_names)
+        self.assertIn("repo.read_file", tool_names)
+        self.assertIn("file_symbol_locator", tool_names)
+        self.assertIn("code_explainer", tool_names)
+        result_by_name = {item["name"]: item for item in body["tool_results"]}
+        self.assertTrue(result_by_name["repo.search_code"]["ok"])
+        self.assertEqual(result_by_name["repo.search_code"]["provider"], "local")
+        self.assertEqual(
+            result_by_name["repo.search_code"]["permission_level"],
+            "read_only",
+        )
+        self.assertTrue(result_by_name["repo.read_file"]["ok"])
+        self.assertIn(
+            "def run_agent",
+            result_by_name["repo.read_file"]["result"]["content"],
+        )
         self.assertEqual(
             [step["node"] for step in body["trace"]],
             [
@@ -275,13 +292,19 @@ class APITests(unittest.TestCase):
         self.assertEqual(second_body["status"], "waiting_approval")
         self.assertEqual(second_body["intent"], "change_planning")
         self.assertEqual(second_body["answer"], "")
-        self.assertEqual(second_body["tool_calls"][1]["name"], "change_planner")
-        self.assertEqual(second_body["tool_calls"][2]["name"], "test_designer")
+        second_tool_names = [tool_call["name"] for tool_call in second_body["tool_calls"]]
+        self.assertIn("repo.search_code", second_tool_names)
+        self.assertIn("change_planner", second_tool_names)
+        self.assertIn("test_designer", second_tool_names)
         self.assertEqual(second_body["pending_approval"]["type"], "tool_plan_review")
         self.assertTrue(second_body["pending_approval"]["approval_required"])
         self.assertEqual(
+            second_body["pending_approval"]["planned_tools"][0],
+            "repository_context_search",
+        )
+        self.assertIn(
+            "change_planner",
             second_body["pending_approval"]["planned_tools"],
-            ["repository_context_search", "change_planner", "test_designer"],
         )
         self.assertEqual(
             [step["node"] for step in second_body["trace"]],
@@ -332,6 +355,12 @@ class APITests(unittest.TestCase):
             ],
         )
         self.assertTrue(resume_body["trace"][4]["output"]["approved"])
+        resume_results = {item["name"]: item for item in resume_body["tool_results"]}
+        self.assertEqual(
+            resume_results["change_planner"]["permission_level"],
+            "write_safe",
+        )
+        self.assertTrue(resume_results["change_planner"]["requires_approval"])
 
         messages_response = self.client.get(f"/api/v1/sessions/{session_id}/messages")
         messages = messages_response.json()["messages"]
@@ -339,6 +368,45 @@ class APITests(unittest.TestCase):
             [message["role"] for message in messages],
             ["user", "assistant", "user", "assistant"],
         )
+
+    def test_local_repository_tools_are_scoped_to_repository_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text(
+                "def target_symbol():\n"
+                "    return 'ok'\n",
+                encoding="utf-8",
+            )
+            registry = create_coding_tool_registry(root_path=root)
+            specs = {spec.name: spec for spec in registry.list_specs()}
+            self.assertIn("repo.list_files", specs)
+            self.assertIn("repo.read_file", specs)
+            self.assertIn("repo.search_code", specs)
+            self.assertEqual(specs["repo.search_code"].permission_level, "read_only")
+
+            context = ToolExecutionContext(
+                conversation_id="sess_1",
+                repository_id="repo_main",
+            )
+            search_result = registry.execute(
+                ToolCall(
+                    name="repo.search_code",
+                    arguments={"query": "target_symbol"},
+                ),
+                context=context,
+            )
+            self.assertTrue(search_result.ok)
+            self.assertEqual(search_result.result["matches"][0]["path"], "app.py")
+
+            escaped_result = registry.execute(
+                ToolCall(
+                    name="repo.read_file",
+                    arguments={"path": "../outside.py"},
+                ),
+                context=context,
+            )
+            self.assertFalse(escaped_result.ok)
+            self.assertIn("escapes repository root", escaped_result.error)
 
     def test_indexes_repository_files_and_skips_unchanged_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
