@@ -81,6 +81,14 @@ class APITests(unittest.TestCase):
             },
         )
 
+    def test_serves_frontend_console(self) -> None:
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+        self.assertIn("AI Agent Platform", response.text)
+        self.assertIn("/static/app.js", response.text)
+
     def test_streams_chat_response_and_records_messages(self) -> None:
         create_response = self.client.post(
             "/api/v1/sessions",

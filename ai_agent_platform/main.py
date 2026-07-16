@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from ai_agent_platform.agents import (
     CodingAgentRuntime,
@@ -71,6 +74,7 @@ def create_app(
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
+    static_dir = Path(__file__).parent / "static"
 
     app.include_router(
         create_api_router(
@@ -83,6 +87,12 @@ def create_app(
         ),
         prefix=settings.api_prefix,
     )
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def frontend() -> FileResponse:
+        return FileResponse(static_dir / "index.html")
+
     return app
 
 

@@ -61,6 +61,16 @@ Run the API:
 .venv/bin/python -m uvicorn ai_agent_platform.main:app --reload
 ```
 
+Open the lightweight frontend console:
+
+```text
+http://127.0.0.1:8000/
+```
+
+The console is served by FastAPI from `ai_agent_platform/static/`. It provides a
+small debug UI for sessions, `POST /api/v1/chat/stream`, coding-agent runs, RAG
+document ingest/ask, and repository indexing.
+
 Configure a real Google Gemini model with Google AI Studio credentials by
 creating a local `.env` file:
 

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Agent Platform</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>AI Agent Platform</h1>
+        <p>Backend console</p>
+      </div>
+      <div class="header-actions">
+        <span id="health-pill" class="pill">checking</span>
+        <a class="ghost-link" href="/docs">API Docs</a>
+      </div>
+    </header>
+
+    <main class="shell">
+      <aside class="panel side-panel">
+        <section class="section">
+          <div class="section-title">
+            <h2>Session</h2>
+            <button id="create-session-btn" class="icon-button" title="Create session">
+              +
+            </button>
+          </div>
+          <label>
+            User ID
+            <input id="user-id-input" value="demo_user" autocomplete="off" />
+          </label>
+          <label>
+            Conversation ID
+            <input id="conversation-id-input" placeholder="Create or paste session id" />
+          </label>
+          <div id="session-status" class="muted">No session yet</div>
+        </section>
+
+        <section class="section">
+          <div class="section-title">
+            <h2>Model</h2>
+          </div>
+          <label>
+            Provider
+            <select id="provider-input">
+              <option value="">Default</option>
+              <option value="fake">fake</option>
+              <option value="openai">openai</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <input id="model-input" placeholder="Default model" />
+          </label>
+        </section>
+
+        <section class="section">
+          <div class="section-title">
+            <h2>Repository</h2>
+          </div>
+          <label>
+            Repository ID
+            <input id="repository-id-input" value="repo_main" />
+          </label>
+          <label>
+            Root path
+            <input id="repository-root-input" placeholder="/path/to/local/repo" />
+          </label>
+          <label>
+            Include patterns
+            <input id="include-patterns-input" value="**/*.py, **/*.md" />
+          </label>
+          <button id="index-repo-btn" class="secondary-button">Index repository</button>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <nav class="tabs" aria-label="Console modes">
+          <button class="tab active" data-tab="chat">Chat stream</button>
+          <button class="tab" data-tab="agent">Agent run</button>
+          <button class="tab" data-tab="rag">RAG</button>
+        </nav>
+
+        <section id="chat-tab" class="panel tab-panel active">
+          <div class="section-title">
+            <h2>SSE Chat</h2>
+            <button id="clear-chat-btn" class="ghost-button">Clear</button>
+          </div>
+          <textarea
+            id="chat-message-input"
+            rows="5"
+            placeholder="输入一条消息，测试 /api/v1/chat/stream"
+          >解释一下这个项目里的 SSE 流式输出是怎么工作的</textarea>
+          <div class="toolbar">
+            <button id="send-chat-btn" class="primary-button">Send stream</button>
+            <span id="chat-meta" class="muted">Idle</span>
+          </div>
+          <div id="chat-output" class="answer-box"></div>
+        </section>
+
+        <section id="agent-tab" class="panel tab-panel">
+          <div class="section-title">
+            <h2>Coding Agent</h2>
+            <button id="refresh-run-btn" class="ghost-button">Refresh run</button>
+          </div>
+          <textarea
+            id="agent-message-input"
+            rows="5"
+            placeholder="输入仓库问答或改动规划问题"
+          >解释 ai_agent_platform/api/router.py 里 chat_stream 的调用链</textarea>
+          <label>
+            Focus files
+            <input id="focus-files-input" value="ai_agent_platform/api/router.py" />
+          </label>
+          <div class="toolbar">
+            <button id="run-agent-btn" class="primary-button">Run agent</button>
+            <button id="approve-run-btn" class="secondary-button" disabled>Approve</button>
+            <button id="reject-run-btn" class="secondary-button" disabled>Reject</button>
+            <span id="agent-status" class="muted">Idle</span>
+          </div>
+          <div id="agent-answer" class="answer-box"></div>
+        </section>
+
+        <section id="rag-tab" class="panel tab-panel">
+          <div class="section-title">
+            <h2>Knowledge Base</h2>
+          </div>
+          <div class="two-column">
+            <label>
+              Knowledge Base ID
+              <input id="kb-id-input" value="demo_kb" />
+            </label>
+            <label>
+              Filename
+              <input id="document-filename-input" value="notes.md" />
+            </label>
+          </div>
+          <textarea
+            id="document-content-input"
+            rows="6"
+            placeholder="Paste markdown, txt, py, json, yaml, or other supported text"
+          ># 项目说明
+AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Agent trace 和仓库索引能力。</textarea>
+          <div class="toolbar">
+            <button id="ingest-doc-btn" class="secondary-button">Ingest document</button>
+            <span id="rag-status" class="muted">Idle</span>
+          </div>
+          <textarea
+            id="rag-question-input"
+            rows="4"
+            placeholder="Ask this knowledge base"
+          >这个项目主要包含哪些后端能力？</textarea>
+          <div class="toolbar">
+            <button id="ask-rag-btn" class="primary-button">Ask RAG</button>
+          </div>
+          <div id="rag-answer" class="answer-box"></div>
+        </section>
+      </section>
+
+      <aside class="panel detail-panel">
+        <div class="section-title">
+          <h2>Trace</h2>
+          <button id="clear-detail-btn" class="ghost-button">Clear</button>
+        </div>
+        <div id="trace-list" class="trace-list"></div>
+        <div class="section-title compact-title">
+          <h2>Raw</h2>
+        </div>
+        <pre id="raw-output" class="raw-output"></pre>
+      </aside>
+    </main>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
