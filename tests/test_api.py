@@ -40,6 +40,11 @@ class BrokenSearchRAGService:
         raise RAGConfigurationError("vector store is not configured")
 
 
+class FailingCodingAgentRuntime:
+    def run(self, **_: object) -> object:
+        raise RuntimeError("agent runtime exploded")
+
+
 class APITests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(
@@ -515,6 +520,34 @@ class APITests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "agent run not found")
+
+    def test_agent_run_records_user_message_before_runtime_failure(self) -> None:
+        client = TestClient(
+            create_app(
+                settings=Settings(llm_provider="fake", embedding_provider="local"),
+                coding_agent_runtime=FailingCodingAgentRuntime(),
+            )
+        )
+        create_response = client.post("/api/v1/sessions", json={"user_id": "user_1"})
+        session_id = create_response.json()["id"]
+
+        with self.assertRaises(RuntimeError):
+            client.post(
+                "/api/v1/agent/runs",
+                json={
+                    "conversation_id": session_id,
+                    "repository_id": "repo_main",
+                    "message": "这条消息即使 agent 失败也要保留",
+                },
+            )
+
+        messages_response = client.get(f"/api/v1/sessions/{session_id}/messages")
+        messages = messages_response.json()["messages"]
+        self.assertEqual([message["role"] for message in messages], ["user"])
+        self.assertEqual(
+            messages[0]["content"],
+            "这条消息即使 agent 失败也要保留",
+        )
 
     def test_agent_run_resume_can_reject_change_plan(self) -> None:
         create_response = self.client.post(

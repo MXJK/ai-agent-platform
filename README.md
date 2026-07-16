@@ -71,6 +71,10 @@ The console is served by FastAPI from `ai_agent_platform/static/`. It provides a
 small debug UI for sessions, `POST /api/v1/chat/stream`, coding-agent runs, RAG
 document ingest/ask, and repository indexing.
 
+By default, local runs use the fake LLM provider and local deterministic
+embeddings, so the basic API, RAG, and repository indexing flows work without
+external API keys.
+
 Configure a real Google Gemini model with Google AI Studio credentials by
 creating a local `.env` file:
 

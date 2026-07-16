@@ -6,6 +6,11 @@ from ai_agent_platform.core import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_default_embedding_provider_is_local_for_offline_development(self) -> None:
+        settings = Settings()
+
+        self.assertEqual(settings.embedding_provider, "local")
+
     def test_reads_database_and_qdrant_settings_from_environment(self) -> None:
         with patch.dict(
             os.environ,

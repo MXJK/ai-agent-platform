@@ -178,17 +178,17 @@ def create_api_router(
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
 
+        session_service.add_message(
+            session_id=request.conversation_id,
+            role="user",
+            content=request.message,
+        )
         result = coding_agent_runtime.run(
             conversation_id=request.conversation_id,
             user_input=request.message,
             history=history,
             repository_id=request.resolved_repository_id,
             focus_files=request.focus_files,
-        )
-        session_service.add_message(
-            session_id=request.conversation_id,
-            role="user",
-            content=request.message,
         )
         if result.status == "completed" and result.answer:
             session_service.add_message(

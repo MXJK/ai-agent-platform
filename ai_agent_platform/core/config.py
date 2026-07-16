@@ -33,7 +33,7 @@ class Settings:
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection_name: str = "repo_chunks"
-    embedding_provider: str = "gemini"
+    embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
     rag_chunk_size: int = 800

@@ -38,6 +38,7 @@ def create_app(
     settings: Settings | None = None,
     llm_client: LLMClient | None = None,
     rag_service: RAGService | None = None,
+    coding_agent_runtime: CodingAgentRuntime | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
 
@@ -50,13 +51,15 @@ def create_app(
     )
     mcp_providers = _create_mcp_providers(settings)
     tool_registry = create_coding_tool_registry(mcp_providers=mcp_providers)
-    checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
-    coding_agent_runtime = CodingAgentRuntime(
-        rag_service=rag_service,
-        tool_registry=tool_registry,
-        run_store=_create_agent_run_store(settings),
-        checkpointer=checkpointer,
-    )
+    close_checkpointer = None
+    if coding_agent_runtime is None:
+        checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
+        coding_agent_runtime = CodingAgentRuntime(
+            rag_service=rag_service,
+            tool_registry=tool_registry,
+            run_store=_create_agent_run_store(settings),
+            checkpointer=checkpointer,
+        )
     repository_indexing_service = RepositoryIndexingService(
         rag_service=rag_service,
         index_store=_create_repository_index_store(settings),
