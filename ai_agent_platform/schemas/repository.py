@@ -29,6 +29,7 @@ class RepositoryIndexResponse(BaseModel):
     indexed_paths: list[str]
     skipped_paths: list[str]
     failed_paths: list[str]
+    failed_file_errors: list[dict[str, str]]
 
     @classmethod
     def from_domain(cls, result: RepositoryIndexResult) -> "RepositoryIndexResponse":
@@ -45,4 +46,5 @@ class RepositoryIndexResponse(BaseModel):
             indexed_paths=result.indexed_files,
             skipped_paths=result.skipped_files,
             failed_paths=result.failed_files,
+            failed_file_errors=result.failed_file_errors,
         )

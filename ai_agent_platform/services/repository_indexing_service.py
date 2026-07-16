@@ -95,6 +95,7 @@ class RepositoryIndexResult:
     indexed_files: list[str]
     skipped_files: list[str]
     failed_files: list[str]
+    failed_file_errors: list[dict[str, str]]
 
 
 class RepositoryIndexingService:
@@ -142,6 +143,7 @@ class RepositoryIndexingService:
         indexed_paths: list[str] = []
         skipped_paths: list[str] = []
         failed_paths: list[str] = []
+        failed_file_errors: list[dict[str, str]] = []
         fatal_error: str | None = None
 
         try:
@@ -190,12 +192,28 @@ class RepositoryIndexingService:
                         document_id=None,
                         skipped_reason="not_utf8_text",
                     )
-                except (OSError, RAGValidationError, RAGConfigurationError, RAGProviderError):
+                except (
+                    OSError,
+                    RAGValidationError,
+                    RAGConfigurationError,
+                    RAGProviderError,
+                ) as exc:
                     failed_paths.append(relative_path)
+                    failed_file_errors.append(
+                        {
+                            "path": relative_path,
+                            "error": str(exc),
+                        }
+                    )
         except Exception as exc:
             fatal_error = str(exc)
 
-        final_status = "failed" if fatal_error else "completed"
+        if fatal_error:
+            final_status = "failed"
+        elif failed_paths:
+            final_status = "completed_with_errors"
+        else:
+            final_status = "completed"
         job = self._index_store.update_index_job(
             job_id=job.id,
             status=final_status,
@@ -210,6 +228,7 @@ class RepositoryIndexingService:
             indexed_files=indexed_paths,
             skipped_files=skipped_paths,
             failed_files=failed_paths,
+            failed_file_errors=failed_file_errors,
         )
 
 

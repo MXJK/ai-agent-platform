@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4
@@ -23,6 +24,7 @@ class ToolSpec:
     provider: str
     permission_level: str = "read_only"
     requires_approval: bool = False
+    accepts_context: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ class ToolRegistry:
         provider: str = "local",
         permission_level: str = "read_only",
         requires_approval: bool = False,
+        accepts_context: bool | None = None,
     ) -> None:
         self._tools[name] = tool
         self._specs[name] = ToolSpec(
@@ -88,6 +91,9 @@ class ToolRegistry:
             provider=provider,
             permission_level=permission_level,
             requires_approval=requires_approval,
+            accepts_context=(
+                _accepts_context(tool) if accepts_context is None else accepts_context
+            ),
         )
 
     def list_specs(self) -> list[ToolSpec]:
@@ -138,13 +144,10 @@ class ToolRegistry:
         try:
             if context is None:
                 result = tool(**tool_call.arguments)
+            elif spec.accepts_context:
+                result = tool(context=context, **tool_call.arguments)
             else:
-                try:
-                    result = tool(context=context, **tool_call.arguments)
-                except TypeError as exc:
-                    if "context" not in str(exc):
-                        raise
-                    result = tool(**tool_call.arguments)
+                result = tool(**tool_call.arguments)
         except Exception as exc:
             duration_ms = int((perf_counter() - started_at) * 1000)
             return ToolResult(
@@ -169,3 +172,16 @@ class ToolRegistry:
             requires_approval=spec.requires_approval,
             duration_ms=duration_ms,
         )
+
+
+def _accepts_context(tool: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(tool)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "context":
+            return True
+    return False

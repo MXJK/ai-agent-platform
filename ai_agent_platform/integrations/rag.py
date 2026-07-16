@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 from typing import Protocol
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 
@@ -91,6 +91,9 @@ class EmbeddingProvider(Protocol):
 
 
 class VectorStore(Protocol):
+    def delete_document(self, *, document_id: str) -> None:
+        ...
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -159,7 +162,11 @@ class TextDocumentParser:
             raise RAGValidationError("document text is empty")
 
         return ParsedDocument(
-            id=f"doc_{uuid4().hex[:12]}",
+            id=_document_id(
+                knowledge_base_id=knowledge_base_id,
+                filename=filename,
+                source_uri=source_uri,
+            ),
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             text=text,
@@ -189,7 +196,10 @@ class RecursiveCharacterChunker:
             if chunk_text:
                 chunks.append(
                     DocumentChunk(
-                        id=f"chk_{uuid4().hex[:12]}",
+                        id=_chunk_id(
+                            document_id=document.id,
+                            chunk_index=len(chunks),
+                        ),
                         knowledge_base_id=document.knowledge_base_id,
                         document_id=document.id,
                         filename=document.filename,
@@ -414,6 +424,13 @@ class InMemoryVectorStore:
     def __init__(self) -> None:
         self._rows: list[tuple[DocumentChunk, list[float]]] = []
 
+    def delete_document(self, *, document_id: str) -> None:
+        self._rows = [
+            (chunk, embedding)
+            for chunk, embedding in self._rows
+            if chunk.document_id != document_id
+        ]
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -469,6 +486,9 @@ class ChromaVectorStore:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+
+    def delete_document(self, *, document_id: str) -> None:
+        self._collection.delete(where={"document_id": document_id})
 
     def upsert_chunks(
         self,
@@ -553,6 +573,27 @@ class QdrantVectorStore:
             self._client = QdrantClient(url=url, api_key=api_key)
         self._collection_name = collection_name
         self._vector_size: int | None = None
+
+    def delete_document(self, *, document_id: str) -> None:
+        if not self._collection_exists():
+            return
+        FieldCondition = _qdrant_model("FieldCondition")
+        Filter = _qdrant_model("Filter")
+        MatchValue = _qdrant_model("MatchValue")
+        FilterSelector = _qdrant_model("FilterSelector")
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id),
+                        )
+                    ]
+                )
+            ),
+        )
 
     def upsert_chunks(
         self,
@@ -712,9 +753,17 @@ class RAGService:
             [chunk.text for chunk in chunks],
             task_type="document",
         )
+        self._vector_store.delete_document(document_id=document.id)
         self._vector_store.upsert_chunks(chunks, embeddings)
         if self._document_store is not None:
-            self._document_store.save_document(document, chunks)
+            try:
+                self._document_store.save_document(document, chunks)
+            except Exception:
+                try:
+                    self._vector_store.delete_document(document_id=document.id)
+                except Exception:
+                    pass
+                raise
         return IngestedDocument(
             knowledge_base_id=knowledge_base_id,
             document_id=document.id,
@@ -913,6 +962,20 @@ def _file_extension(filename: str) -> str:
     if "." not in filename:
         return ""
     return "." + filename.rsplit(".", 1)[1].lower()
+
+
+def _document_id(
+    *,
+    knowledge_base_id: str,
+    filename: str,
+    source_uri: str | None,
+) -> str:
+    key = f"{knowledge_base_id}:{filename}:{source_uri or ''}"
+    return f"doc_{uuid5(NAMESPACE_URL, key).hex[:16]}"
+
+
+def _chunk_id(*, document_id: str, chunk_index: int) -> str:
+    return f"chk_{uuid5(NAMESPACE_URL, f'{document_id}:{chunk_index}').hex[:16]}"
 
 
 def _tokenize(text: str) -> list[str]:

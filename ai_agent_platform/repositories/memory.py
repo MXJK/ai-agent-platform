@@ -185,7 +185,10 @@ class InMemoryRepositoryIndexRepository:
             existing = self._jobs[job_id]
             now = _now()
             completed_at = existing.completed_at
-            if status in {"completed", "failed"} and completed_at is None:
+            if (
+                status in {"completed", "completed_with_errors", "failed"}
+                and completed_at is None
+            ):
                 completed_at = now
             record = replace(
                 existing,
@@ -199,7 +202,7 @@ class InMemoryRepositoryIndexRepository:
                 completed_at=completed_at,
             )
             self._jobs[job_id] = record
-            if status == "completed":
+            if status in {"completed", "completed_with_errors"}:
                 repository = self._repositories.get(record.repository_id)
                 if repository is not None:
                     self._repositories[record.repository_id] = replace(

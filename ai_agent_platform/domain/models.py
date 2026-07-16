@@ -47,7 +47,13 @@ class AgentDecision:
     reason: str
 
 
-RepositoryIndexJobStatus = Literal["pending", "running", "completed", "failed"]
+RepositoryIndexJobStatus = Literal[
+    "pending",
+    "running",
+    "completed",
+    "completed_with_errors",
+    "failed",
+]
 
 
 @dataclass(frozen=True)

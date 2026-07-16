@@ -485,7 +485,7 @@ class PostgresRepositoryIndexRepository:
         failed_files: int,
         error: str | None = None,
     ) -> RepositoryIndexJobRecord:
-        completed_statuses = {"completed", "failed"}
+        completed_statuses = {"completed", "completed_with_errors", "failed"}
         with self._connect() as conn:
             row = conn.execute(
                 """

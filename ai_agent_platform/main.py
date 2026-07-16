@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
+from typing import Callable
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -48,11 +50,12 @@ def create_app(
     )
     mcp_providers = _create_mcp_providers(settings)
     tool_registry = create_coding_tool_registry(mcp_providers=mcp_providers)
+    checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
     coding_agent_runtime = CodingAgentRuntime(
         rag_service=rag_service,
         tool_registry=tool_registry,
         run_store=_create_agent_run_store(settings),
-        checkpointer=_create_langgraph_checkpointer(settings),
+        checkpointer=checkpointer,
     )
     repository_indexing_service = RepositoryIndexingService(
         rag_service=rag_service,
@@ -68,6 +71,8 @@ def create_app(
         try:
             yield
         finally:
+            if close_checkpointer is not None:
+                close_checkpointer()
             for provider in app.state.mcp_providers:
                 provider.close()
 
@@ -143,7 +148,7 @@ def _create_repository_index_store(settings: Settings):
 
 def _create_langgraph_checkpointer(settings: Settings):
     if settings.langgraph_checkpointer == "memory":
-        return None
+        return None, None
     if settings.langgraph_checkpointer == "postgres":
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
@@ -160,10 +165,32 @@ def _create_langgraph_checkpointer(settings: Settings):
         )
         checkpointer = PostgresSaver(pool)
         checkpointer.setup()
-        return checkpointer
+        return checkpointer, pool.close
     raise ValueError(
         f"unsupported LangGraph checkpointer: {settings.langgraph_checkpointer}"
     )
 
 
-app = create_app()
+class LazyASGIApp:
+    """Creates the real FastAPI app on first ASGI use or attribute access."""
+
+    def __init__(self, factory: Callable[[], FastAPI]) -> None:
+        self._factory = factory
+        self._app: FastAPI | None = None
+        self._lock = Lock()
+
+    def _get_app(self) -> FastAPI:
+        if self._app is None:
+            with self._lock:
+                if self._app is None:
+                    self._app = self._factory()
+        return self._app
+
+    async def __call__(self, scope, receive, send):
+        await self._get_app()(scope, receive, send)
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_app(), name)
+
+
+app = LazyASGIApp(create_app)
