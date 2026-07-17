@@ -1634,9 +1634,11 @@ def _format_answer(state: CodingAgentState) -> str:
         lines.append("我检索到的代码上下文：")
         for index, citation in enumerate(citations, start=1):
             snippet = _snippet(citation.text, limit=140)
+            line_range = _citation_line_range(citation)
+            symbols = _citation_symbols(citation)
             lines.append(
                 f"[{index}] {citation.filename} chunk={citation.chunk_index} "
-                f"score={citation.score:.3f}: {snippet}"
+                f"{line_range}{symbols}score={citation.score:.3f}: {snippet}"
             )
     else:
         lines.append(
@@ -1740,6 +1742,18 @@ def _extract_symbols(text: str) -> list[str]:
 
 def _snippet(text: str, *, limit: int = 120) -> str:
     return text.strip().replace("\n", " ")[:limit]
+
+
+def _citation_line_range(citation: RetrievedDocument) -> str:
+    if citation.start_line is None or citation.end_line is None:
+        return ""
+    return f"lines={citation.start_line}-{citation.end_line} "
+
+
+def _citation_symbols(citation: RetrievedDocument) -> str:
+    if not citation.symbols:
+        return ""
+    return "symbols=" + ",".join(citation.symbols[:3]) + " "
 
 
 def _unique(items: list[str]) -> list[str]:

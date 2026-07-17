@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import math
 import re
@@ -32,6 +32,16 @@ SUPPORTED_TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+CODE_TEXT_EXTENSIONS = {
+    ".go",
+    ".java",
+    ".js",
+    ".jsx",
+    ".py",
+    ".rs",
+    ".ts",
+    ".tsx",
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,9 @@ class DocumentChunk:
     filename: str
     chunk_index: int
     text: str
+    start_line: int | None = None
+    end_line: int | None = None
+    symbols: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -62,6 +75,9 @@ class RetrievedDocument:
     chunk_index: int
     text: str
     score: float
+    start_line: int | None = None
+    end_line: int | None = None
+    symbols: list[str] = field(default_factory=list)
     recall_score: float | None = None
     rerank_score: float | None = None
 
@@ -157,7 +173,10 @@ class TextDocumentParser:
                 f"supported types: {supported}"
             )
 
-        text = _normalize_text(content)
+        if extension in CODE_TEXT_EXTENSIONS:
+            text = _normalize_code_text(content)
+        else:
+            text = _normalize_text(content)
         if not text:
             raise RAGValidationError("document text is empty")
 
@@ -184,6 +203,14 @@ class RecursiveCharacterChunker:
         self._chunk_overlap = chunk_overlap
 
     def split(self, document: ParsedDocument) -> list[DocumentChunk]:
+        if _file_extension(document.filename) in CODE_TEXT_EXTENSIONS:
+            code_chunks = self._split_code_document(document)
+            if code_chunks:
+                return code_chunks
+            return self._split_text_with_line_ranges(document)
+        return self._split_text(document)
+
+    def _split_text(self, document: ParsedDocument) -> list[DocumentChunk]:
         text = document.text
         chunks: list[DocumentChunk] = []
         start = 0
@@ -205,6 +232,8 @@ class RecursiveCharacterChunker:
                         filename=document.filename,
                         chunk_index=len(chunks),
                         text=chunk_text,
+                        start_line=_line_number_for_offset(text, start),
+                        end_line=_line_number_for_offset(text, end),
                     )
                 )
             if end >= text_length:
@@ -212,6 +241,118 @@ class RecursiveCharacterChunker:
             start = max(end - self._chunk_overlap, start + 1)
 
         return chunks
+
+    def _split_code_document(self, document: ParsedDocument) -> list[DocumentChunk]:
+        lines = document.text.splitlines()
+        starts = _code_symbol_starts(lines, document.filename)
+        chunks: list[DocumentChunk] = []
+
+        if starts and starts[0][0] > 1:
+            preamble_text = "\n".join(lines[: starts[0][0] - 1]).strip()
+            if preamble_text:
+                chunks.extend(
+                    self._chunks_from_line_block(
+                        document=document,
+                        lines=lines[: starts[0][0] - 1],
+                        start_line=1,
+                        symbols=[],
+                        start_index=len(chunks),
+                    )
+                )
+
+        for index, (start_line, symbol) in enumerate(starts):
+            next_start = starts[index + 1][0] if index + 1 < len(starts) else len(lines) + 1
+            block_lines = lines[start_line - 1 : next_start - 1]
+            chunks.extend(
+                self._chunks_from_line_block(
+                    document=document,
+                    lines=block_lines,
+                    start_line=start_line,
+                    symbols=[symbol],
+                    start_index=len(chunks),
+                )
+            )
+        return chunks
+
+    def _split_text_with_line_ranges(self, document: ParsedDocument) -> list[DocumentChunk]:
+        lines = document.text.splitlines()
+        return self._chunks_from_line_block(
+            document=document,
+            lines=lines,
+            start_line=1,
+            symbols=[],
+            start_index=0,
+        )
+
+    def _chunks_from_line_block(
+        self,
+        *,
+        document: ParsedDocument,
+        lines: list[str],
+        start_line: int,
+        symbols: list[str],
+        start_index: int,
+    ) -> list[DocumentChunk]:
+        chunks: list[DocumentChunk] = []
+        current_lines: list[str] = []
+        current_start_line = start_line
+        current_chars = 0
+
+        for offset, line in enumerate(lines):
+            line_length = len(line) + 1
+            if current_lines and current_chars + line_length > self._chunk_size:
+                chunks.append(
+                    self._build_line_chunk(
+                        document=document,
+                        chunk_index=start_index + len(chunks),
+                        lines=current_lines,
+                        start_line=current_start_line,
+                        symbols=symbols,
+                    )
+                )
+                overlap_lines = _line_overlap(current_lines, self._chunk_overlap)
+                current_start_line = start_line + offset - len(overlap_lines)
+                current_lines = overlap_lines
+                current_chars = sum(len(item) + 1 for item in current_lines)
+            current_lines.append(line)
+            current_chars += line_length
+
+        if current_lines and "\n".join(current_lines).strip():
+            chunks.append(
+                self._build_line_chunk(
+                    document=document,
+                    chunk_index=start_index + len(chunks),
+                    lines=current_lines,
+                    start_line=current_start_line,
+                    symbols=symbols,
+                )
+            )
+        return chunks
+
+    def _build_line_chunk(
+        self,
+        *,
+        document: ParsedDocument,
+        chunk_index: int,
+        lines: list[str],
+        start_line: int,
+        symbols: list[str],
+    ) -> DocumentChunk:
+        chunk_text = "\n".join(lines).strip()
+        return DocumentChunk(
+            id=_chunk_id(
+                document_id=document.id,
+                chunk_index=chunk_index,
+            ),
+            knowledge_base_id=document.knowledge_base_id,
+            document_id=document.id,
+            filename=document.filename,
+            chunk_index=chunk_index,
+            text=chunk_text,
+            start_line=start_line,
+            end_line=start_line + len(lines) - 1,
+            symbols=symbols,
+        )
 
     def _best_breakpoint(self, text: str, start: int, raw_end: int) -> int:
         if raw_end >= len(text):
@@ -465,6 +606,9 @@ class InMemoryVectorStore:
                     chunk_index=chunk.chunk_index,
                     text=chunk.text,
                     score=score,
+                    start_line=chunk.start_line,
+                    end_line=chunk.end_line,
+                    symbols=chunk.symbols,
                     recall_score=score,
                 )
             )
@@ -502,15 +646,7 @@ class ChromaVectorStore:
             ids=[chunk.id for chunk in chunks],
             embeddings=embeddings,
             documents=[chunk.text for chunk in chunks],
-            metadatas=[
-                {
-                    "knowledge_base_id": chunk.knowledge_base_id,
-                    "document_id": chunk.document_id,
-                    "filename": chunk.filename,
-                    "chunk_index": chunk.chunk_index,
-                }
-                for chunk in chunks
-            ],
+            metadatas=[_chroma_chunk_metadata(chunk) for chunk in chunks],
         )
 
     def search(
@@ -546,6 +682,9 @@ class ChromaVectorStore:
                     chunk_index=int(metadata["chunk_index"]),
                     text=str(documents[index]),
                     score=score,
+                    start_line=_optional_int(metadata.get("start_line")),
+                    end_line=_optional_int(metadata.get("end_line")),
+                    symbols=_metadata_symbols(metadata.get("symbols")),
                     recall_score=score,
                 )
             )
@@ -615,6 +754,9 @@ class QdrantVectorStore:
                     "document_id": chunk.document_id,
                     "filename": chunk.filename,
                     "chunk_index": chunk.chunk_index,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "symbols": chunk.symbols,
                     "text": chunk.text,
                 },
             )
@@ -673,6 +815,9 @@ class QdrantVectorStore:
                     chunk_index=int(payload["chunk_index"]),
                     text=str(payload["text"]),
                     score=float(point.score),
+                    start_line=_optional_int(payload.get("start_line")),
+                    end_line=_optional_int(payload.get("end_line")),
+                    symbols=_metadata_symbols(payload.get("symbols")),
                     recall_score=float(point.score),
                 )
             )
@@ -859,6 +1004,8 @@ class RAGService:
             header = (
                 f"[{index}] file={item.filename}; "
                 f"document_id={item.document_id}; chunk={item.chunk_index}; "
+                f"{_line_range_label(item)}"
+                f"{_symbols_label(item)}"
                 f"score={item.score:.3f}\n"
             )
             body = item.text.strip()
@@ -958,10 +1105,130 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
+def _normalize_code_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    normalized = "\n".join(lines)
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    return normalized.strip()
+
+
 def _file_extension(filename: str) -> str:
     if "." not in filename:
         return ""
     return "." + filename.rsplit(".", 1)[1].lower()
+
+
+def _line_number_for_offset(text: str, offset: int) -> int:
+    return text.count("\n", 0, max(offset, 0)) + 1
+
+
+def _code_symbol_starts(lines: list[str], filename: str) -> list[tuple[int, str]]:
+    starts: list[tuple[int, str]] = []
+    for index, line in enumerate(lines, start=1):
+        symbol = _code_symbol_name(line, filename)
+        if symbol is not None:
+            starts.append((index, symbol))
+    return starts
+
+
+def _code_symbol_name(line: str, filename: str) -> str | None:
+    extension = _file_extension(filename)
+    patterns = _code_symbol_patterns(extension)
+    for pattern in patterns:
+        match = re.match(pattern, line)
+        if match:
+            return str(match.group("name"))
+    return None
+
+
+def _code_symbol_patterns(extension: str) -> list[str]:
+    if extension == ".py":
+        return [
+            r"^\s*(?:async\s+def|def)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"^\s*class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
+        ]
+    if extension in {".js", ".jsx", ".ts", ".tsx"}:
+        return [
+            r"^\s*(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
+            r"^\s*(?:export\s+)?class\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\b",
+            r"^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>",
+        ]
+    if extension == ".go":
+        return [r"^\s*func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("]
+    if extension == ".rs":
+        return [
+            r"^\s*(?:pub\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            r"^\s*(?:pub\s+)?(?:struct|enum|trait|impl)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
+        ]
+    if extension == ".java":
+        return [
+            r"^\s*(?:public|private|protected)?\s*(?:class|interface|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b",
+            r"^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\]]+\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        ]
+    return []
+
+
+def _line_overlap(lines: list[str], max_chars: int) -> list[str]:
+    if max_chars <= 0:
+        return []
+    overlap: list[str] = []
+    used_chars = 0
+    for line in reversed(lines):
+        line_chars = len(line) + 1
+        if overlap and used_chars + line_chars > max_chars:
+            break
+        overlap.append(line)
+        used_chars += line_chars
+    overlap.reverse()
+    return overlap
+
+
+def _chroma_chunk_metadata(chunk: DocumentChunk) -> dict[str, str | int]:
+    metadata: dict[str, str | int] = {
+        "knowledge_base_id": chunk.knowledge_base_id,
+        "document_id": chunk.document_id,
+        "filename": chunk.filename,
+        "chunk_index": chunk.chunk_index,
+    }
+    if chunk.start_line is not None:
+        metadata["start_line"] = chunk.start_line
+    if chunk.end_line is not None:
+        metadata["end_line"] = chunk.end_line
+    if chunk.symbols:
+        metadata["symbols"] = ",".join(chunk.symbols)
+    return metadata
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _metadata_symbols(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str):
+        return [item for item in value.split(",") if item]
+    return []
+
+
+def _line_range_label(item: RetrievedDocument) -> str:
+    if item.start_line is None or item.end_line is None:
+        return ""
+    return f"lines={item.start_line}-{item.end_line}; "
+
+
+def _symbols_label(item: RetrievedDocument) -> str:
+    if not item.symbols:
+        return ""
+    return "symbols=" + ",".join(item.symbols[:3]) + "; "
 
 
 def _document_id(

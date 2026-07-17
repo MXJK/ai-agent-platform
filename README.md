@@ -480,8 +480,11 @@ RAG implementation steps:
    `.md`, `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.json`, `.toml`,
    `.yaml`, `.html`, and `.css`. Real systems need extra parsers for PDF, Word,
    OCR, tables, and images.
-2. Chunking uses character windows with natural breakpoints and overlap. Chunks
-   that are too large waste prompt space; chunks that are too small lose context.
+2. Chunking uses code-aware boundaries for source files where possible, splitting
+   around functions, classes, methods, and similar symbols while preserving code
+   indentation. Non-code documents still use character windows with natural
+   breakpoints and overlap. Chunks that are too large waste prompt space; chunks
+   that are too small lose context.
 3. Embedding converts each chunk and query into vectors. The same embedding
    model must be used for ingestion and search.
 4. Vector storage can use the local in-memory store for tests or Chroma for
@@ -490,8 +493,9 @@ RAG implementation steps:
    optionally reranks candidates before selecting the final chunks.
 6. The top reranked chunks are formatted into the LLM prompt as numbered
    references.
-7. `/ask` returns both the answer and `citations`, so callers can show the
-   source snippets behind the answer.
+7. `/search` and `/ask` return both snippets and precise citation metadata such
+   as `start_line`, `end_line`, and `symbols` when the source is code, so callers
+   can jump directly to the relevant implementation block.
 
 Run tests that do not require FastAPI to be installed:
 

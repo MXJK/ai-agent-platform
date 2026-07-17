@@ -17,6 +17,9 @@ class QdrantVectorStoreTests(unittest.TestCase):
             filename="app.py",
             chunk_index=0,
             text="def hello(): return 'world'",
+            start_line=10,
+            end_line=12,
+            symbols=["hello"],
         )
 
         store.upsert_chunks([chunk], [[1.0, 0.0, 0.0]])
@@ -35,6 +38,9 @@ class QdrantVectorStoreTests(unittest.TestCase):
         self.assertEqual(results[0].id, "chk_1")
         self.assertEqual(results[0].filename, "app.py")
         self.assertEqual(results[0].text, "def hello(): return 'world'")
+        self.assertEqual(results[0].start_line, 10)
+        self.assertEqual(results[0].end_line, 12)
+        self.assertEqual(results[0].symbols, ["hello"])
         self.assertEqual(scoped_results, [])
 
 

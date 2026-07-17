@@ -43,6 +43,9 @@ class RAGChunkResponse(BaseModel):
     chunk_index: int
     text: str
     score: float
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    symbols: list[str] = Field(default_factory=list)
     recall_score: Optional[float] = None
     rerank_score: Optional[float] = None
 
@@ -56,6 +59,9 @@ class RAGChunkResponse(BaseModel):
             chunk_index=chunk.chunk_index,
             text=chunk.text,
             score=chunk.score,
+            start_line=chunk.start_line,
+            end_line=chunk.end_line,
+            symbols=chunk.symbols,
             recall_score=chunk.recall_score,
             rerank_score=chunk.rerank_score,
         )

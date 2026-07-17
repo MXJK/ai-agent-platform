@@ -289,6 +289,42 @@ class APITests(unittest.TestCase):
         self.assertGreaterEqual(len(body["citations"]), 1)
         self.assertIn("退款", body["citations"][0]["text"])
 
+    def test_code_rag_returns_line_ranges_and_symbols(self) -> None:
+        ingest_response = self.client.post(
+            "/api/v1/knowledge-bases/repo_main/documents",
+            json={
+                "filename": "app.py",
+                "content": (
+                    "import os\n\n\n"
+                    "class DemoService:\n"
+                    "    def build_answer(self):\n"
+                    "        return 'answer from service'\n\n"
+                    "def helper_function():\n"
+                    "    return 'helper'\n"
+                ),
+            },
+        )
+        self.assertEqual(ingest_response.status_code, 201)
+
+        search_response = self.client.post(
+            "/api/v1/knowledge-bases/repo_main/search",
+            json={"query": "build_answer service", "limit": 5},
+        )
+
+        self.assertEqual(search_response.status_code, 200)
+        results = search_response.json()["results"]
+        service_result = next(
+            result
+            for result in results
+            if "DemoService" in result["symbols"]
+            or "build_answer" in result["symbols"]
+        )
+        self.assertEqual(service_result["filename"], "app.py")
+        self.assertIsNotNone(service_result["start_line"])
+        self.assertIsNotNone(service_result["end_line"])
+        self.assertLessEqual(service_result["start_line"], 5)
+        self.assertGreaterEqual(service_result["end_line"], 5)
+
     def test_runs_coding_agent_with_repo_context_tools_trace_and_memory(self) -> None:
         create_response = self.client.post(
             "/api/v1/sessions",
