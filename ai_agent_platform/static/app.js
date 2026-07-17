@@ -241,6 +241,7 @@ async function runAgent() {
       body: JSON.stringify(payload),
     });
     renderAgentRun(body);
+    pollRunUntilTerminal();
   } catch (error) {
     status.textContent = "Error";
     answer.textContent = error.message;
@@ -251,17 +252,18 @@ async function runAgent() {
 }
 
 function renderAgentRun(body) {
+  const result = body.result || body;
   state.latestRunId = body.run_id || "";
   state.latestRunStatus = body.status || "";
   $("agent-status").textContent = `${body.status || "unknown"} ${body.run_id || ""}`;
   $("agent-answer").textContent =
-    body.answer ||
+    result.answer ||
     (body.pending_approval
       ? `Waiting approval for: ${body.pending_approval.planned_tools.join(", ")}`
       : "No answer");
   $("approve-run-btn").disabled = body.status !== "waiting_approval";
   $("reject-run-btn").disabled = body.status !== "waiting_approval";
-  setTrace(body.trace || []);
+  setTrace(body.trace || result.trace || []);
   setRaw(body);
 }
 
@@ -271,7 +273,7 @@ async function refreshRun() {
     return;
   }
   const body = await fetchJson(`/agent/runs/${state.latestRunId}`);
-  renderAgentRun(body.result || body);
+  renderAgentRun(body);
 }
 
 async function resumeRun(approved) {
@@ -287,6 +289,20 @@ async function resumeRun(approved) {
     }),
   });
   renderAgentRun(body);
+  pollRunUntilTerminal();
+}
+
+async function pollRunUntilTerminal(attempt = 0) {
+  if (!state.latestRunId || attempt >= 20) {
+    return;
+  }
+  const terminalStatuses = new Set(["completed", "failed", "waiting_approval"]);
+  if (terminalStatuses.has(state.latestRunStatus)) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await refreshRun();
+  pollRunUntilTerminal(attempt + 1);
 }
 
 async function ingestDocument() {

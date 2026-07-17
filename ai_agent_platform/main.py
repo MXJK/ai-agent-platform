@@ -31,7 +31,11 @@ from ai_agent_platform.repositories import (
     PostgresRepositoryIndexRepository,
     PostgresSessionRepository,
 )
-from ai_agent_platform.services import RepositoryIndexingService, SessionService
+from ai_agent_platform.services import (
+    AgentRunService,
+    RepositoryIndexingService,
+    SessionService,
+)
 
 
 def create_app(
@@ -68,12 +72,17 @@ def create_app(
         repository=repository,
         agent_runtime=agent_runtime,
     )
+    agent_run_service = AgentRunService(
+        runtime=coding_agent_runtime,
+        session_service=session_service,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            app.state.agent_run_service.close()
             if close_checkpointer is not None:
                 close_checkpointer()
             for provider in app.state.mcp_providers:
@@ -82,6 +91,7 @@ def create_app(
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
+    app.state.agent_run_service = agent_run_service
     static_dir = Path(__file__).parent / "static"
 
     app.include_router(
@@ -89,7 +99,7 @@ def create_app(
             session_service=session_service,
             llm_client=llm_client,
             rag_service=rag_service,
-            coding_agent_runtime=coding_agent_runtime,
+            agent_run_service=agent_run_service,
             repository_indexing_service=repository_indexing_service,
             settings=settings,
         ),

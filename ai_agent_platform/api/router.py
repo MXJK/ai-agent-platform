@@ -12,7 +12,6 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunInvalidStateError,
     AgentRunNotFoundError,
 )
-from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import (
     LLMClient,
@@ -25,9 +24,9 @@ from ai_agent_platform.integrations import (
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import (
     AddMessageRequest,
+    AgentRunEventsResponse,
     AgentRunRequest,
     AgentRunResumeRequest,
-    AgentRunResponse,
     AgentRunStatusResponse,
     ChatStreamRequest,
     CreateSessionRequest,
@@ -48,6 +47,7 @@ from ai_agent_platform.schemas import (
     SessionSummaryResponse,
 )
 from ai_agent_platform.services import (
+    AgentRunService,
     RepositoryIndexingError,
     RepositoryIndexingService,
     SessionService,
@@ -61,7 +61,7 @@ def create_api_router(
     session_service: SessionService,
     llm_client: LLMClient,
     rag_service: RAGService,
-    coding_agent_runtime: CodingAgentRuntime,
+    agent_run_service: AgentRunService,
     repository_indexing_service: RepositoryIndexingService,
     settings: Settings,
 ) -> APIRouter:
@@ -165,8 +165,12 @@ def create_api_router(
             headers=headers,
         )
 
-    @router.post("/agent/runs", response_model=AgentRunResponse)
-    def run_agent(request: AgentRunRequest) -> AgentRunResponse:
+    @router.post(
+        "/agent/runs",
+        response_model=AgentRunStatusResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:
         if len(request.message) > settings.llm_max_input_chars:
             raise HTTPException(
                 status_code=413,
@@ -174,36 +178,26 @@ def create_api_router(
             )
 
         try:
-            history = session_service.list_messages(session_id=request.conversation_id)
+            record = agent_run_service.submit_run(
+                conversation_id=request.conversation_id,
+                message=request.message,
+                repository_id=request.resolved_repository_id,
+                focus_files=request.focus_files,
+            )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
+        return AgentRunStatusResponse.from_domain(record)
 
-        session_service.add_message(
-            session_id=request.conversation_id,
-            role="user",
-            content=request.message,
-        )
-        result = coding_agent_runtime.run(
-            conversation_id=request.conversation_id,
-            user_input=request.message,
-            history=history,
-            repository_id=request.resolved_repository_id,
-            focus_files=request.focus_files,
-        )
-        if result.status == "completed" and result.answer:
-            session_service.add_message(
-                session_id=request.conversation_id,
-                role="assistant",
-                content=result.answer,
-            )
-        return AgentRunResponse.from_domain(result)
-
-    @router.post("/agent/runs/{run_id}/resume", response_model=AgentRunResponse)
+    @router.post(
+        "/agent/runs/{run_id}/resume",
+        response_model=AgentRunStatusResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
     def resume_agent_run(
         run_id: str, request: AgentRunResumeRequest
-    ) -> AgentRunResponse:
+    ) -> AgentRunStatusResponse:
         try:
-            result = coding_agent_runtime.resume(
+            record = agent_run_service.resume_run(
                 run_id=run_id,
                 approved=request.approved,
                 feedback=request.feedback,
@@ -215,22 +209,26 @@ def create_api_router(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(exc),
             ) from exc
-
-        if result.status == "completed" and result.answer:
-            session_service.add_message(
-                session_id=result.conversation_id,
-                role="assistant",
-                content=result.answer,
-            )
-        return AgentRunResponse.from_domain(result)
+        return AgentRunStatusResponse.from_domain(record)
 
     @router.get("/agent/runs/{run_id}", response_model=AgentRunStatusResponse)
     def get_agent_run(run_id: str) -> AgentRunStatusResponse:
         try:
-            record = coding_agent_runtime.get_run(run_id)
+            record = agent_run_service.get_run(run_id)
         except AgentRunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="agent run not found") from exc
         return AgentRunStatusResponse.from_domain(record)
+
+    @router.get(
+        "/agent/runs/{run_id}/events",
+        response_model=AgentRunEventsResponse,
+    )
+    def get_agent_run_events(run_id: str) -> AgentRunEventsResponse:
+        try:
+            record = agent_run_service.get_run(run_id)
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        return AgentRunEventsResponse.from_domain(record)
 
     @router.post(
         "/repositories/{repository_id}/index",

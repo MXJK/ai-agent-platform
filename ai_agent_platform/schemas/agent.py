@@ -140,3 +140,98 @@ class AgentRunStatusResponse(BaseModel):
                 else None
             ),
         )
+
+
+class AgentRunEventResponse(BaseModel):
+    sequence: int
+    type: str
+    status: str
+    node: Optional[str]
+    summary: str
+    output: dict[str, Any]
+
+
+class AgentRunEventsResponse(BaseModel):
+    run_id: str
+    events: list[AgentRunEventResponse]
+
+    @classmethod
+    def from_domain(cls, record: AgentRunRecord) -> "AgentRunEventsResponse":
+        events: list[AgentRunEventResponse] = [
+            AgentRunEventResponse(
+                sequence=1,
+                type="run_queued",
+                status="queued",
+                node=None,
+                summary="Agent run accepted and queued for background execution.",
+                output={
+                    "run_id": record.run_id,
+                    "conversation_id": record.conversation_id,
+                    "repository_id": record.repository_id,
+                },
+            )
+        ]
+
+        if record.status in {"running", "waiting_approval", "completed", "failed"}:
+            events.append(
+                AgentRunEventResponse(
+                    sequence=len(events) + 1,
+                    type="run_started",
+                    status="running",
+                    node="setup",
+                    summary="Background worker started executing the Agent graph.",
+                    output={"thread_id": record.thread_id},
+                )
+            )
+
+        for item in record.trace:
+            events.append(
+                AgentRunEventResponse(
+                    sequence=len(events) + 1,
+                    type="node_completed",
+                    status="running",
+                    node=item["node"],
+                    summary=item["summary"],
+                    output=item["output"],
+                )
+            )
+
+        if record.status == "waiting_approval":
+            events.append(
+                AgentRunEventResponse(
+                    sequence=len(events) + 1,
+                    type="approval_required",
+                    status=record.status,
+                    node=record.latest_node,
+                    summary="Agent run is paused until the planned tools are reviewed.",
+                    output=record.pending_approval or {},
+                )
+            )
+        elif record.status == "completed":
+            answer = record.result.answer if record.result is not None else ""
+            events.append(
+                AgentRunEventResponse(
+                    sequence=len(events) + 1,
+                    type="run_completed",
+                    status=record.status,
+                    node=record.latest_node,
+                    summary="Agent run completed.",
+                    output={"answer_chars": len(answer)},
+                )
+            )
+        elif record.status == "failed":
+            events.append(
+                AgentRunEventResponse(
+                    sequence=len(events) + 1,
+                    type="run_failed",
+                    status=record.status,
+                    node=record.latest_node,
+                    summary="Agent run failed.",
+                    output={
+                        "error": record.error,
+                        "errors": record.errors,
+                    },
+                )
+            )
+
+        return cls(run_id=record.run_id, events=events)

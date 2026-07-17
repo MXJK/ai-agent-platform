@@ -1,11 +1,16 @@
 from pathlib import Path
+from dataclasses import replace
 from tempfile import TemporaryDirectory
+import time
 import unittest
 
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.core import Settings
-from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
+from ai_agent_platform.agents.coding_agent import (
+    AgentRunRecord,
+    create_coding_tool_registry,
+)
 from ai_agent_platform.integrations import RAGConfigurationError, RAGProviderError
 from ai_agent_platform.integrations.llm import _google_usage
 from ai_agent_platform.integrations.rag import RetrievedDocument
@@ -41,7 +46,47 @@ class BrokenSearchRAGService:
 
 
 class FailingCodingAgentRuntime:
+    def __init__(self) -> None:
+        self.records = {}
+
+    def create_queued_run(
+        self, *, conversation_id: str, repository_id: str
+    ) -> AgentRunRecord:
+        record = AgentRunRecord(
+            run_id="run_failing",
+            thread_id="run_failing",
+            conversation_id=conversation_id,
+            repository_id=repository_id,
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup"],
+            trace=[],
+        )
+        self.records[record.run_id] = record
+        return record
+
+    def get_run(self, run_id: str) -> AgentRunRecord:
+        return self.records[run_id]
+
     def run(self, **_: object) -> object:
+        run_id = str(_.get("run_id"))
+        self.records[run_id] = replace(
+            self.records[run_id],
+            status="failed",
+            error="agent runtime exploded",
+            errors=[
+                {
+                    "node": "runtime",
+                    "code": "runtime_error",
+                    "message": "agent runtime exploded",
+                    "retryable": False,
+                    "attempt": 1,
+                    "max_attempts": 1,
+                    "recovered": False,
+                }
+            ],
+        )
         raise RuntimeError("agent runtime exploded")
 
 
@@ -55,6 +100,21 @@ class APITests(unittest.TestCase):
                 )
             )
         )
+
+    def wait_for_agent_run(
+        self,
+        client: TestClient,
+        run_id: str,
+        terminal_statuses: tuple[str, ...] = ("completed", "failed", "waiting_approval"),
+    ) -> dict:
+        for _ in range(100):
+            response = client.get(f"/api/v1/agent/runs/{run_id}")
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            if body["status"] in terminal_statuses:
+                return body
+            time.sleep(0.02)
+        self.fail(f"agent run {run_id} did not reach {terminal_statuses}")
 
     def test_gets_session_summary(self) -> None:
         create_response = self.client.post(
@@ -234,8 +294,17 @@ class APITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(first_response.status_code, 200)
-        body = first_response.json()
+        self.assertEqual(first_response.status_code, 202)
+        first_queued_body = first_response.json()
+        self.assertEqual(first_queued_body["status"], "queued")
+        self.assertTrue(first_queued_body["run_id"].startswith("run_"))
+
+        status_body = self.wait_for_agent_run(
+            self.client,
+            first_queued_body["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        body = status_body["result"]
         self.assertEqual(body["graph_engine"], "langgraph")
         self.assertTrue(body["run_id"].startswith("run_"))
         self.assertEqual(body["thread_id"], body["run_id"])
@@ -276,9 +345,6 @@ class APITests(unittest.TestCase):
         )
         self.assertIn("ai_agent_platform/api/router.py", body["answer"])
 
-        status_response = self.client.get(f"/api/v1/agent/runs/{body['run_id']}")
-        self.assertEqual(status_response.status_code, 200)
-        status_body = status_response.json()
         self.assertEqual(status_body["run_id"], body["run_id"])
         self.assertEqual(status_body["thread_id"], body["thread_id"])
         self.assertEqual(status_body["status"], "completed")
@@ -290,6 +356,12 @@ class APITests(unittest.TestCase):
             [step["node"] for step in status_body["trace"]],
             [step["node"] for step in body["trace"]],
         )
+        events_response = self.client.get(f"/api/v1/agent/runs/{body['run_id']}/events")
+        self.assertEqual(events_response.status_code, 200)
+        event_types = [event["type"] for event in events_response.json()["events"]]
+        self.assertEqual(event_types[0], "run_queued")
+        self.assertIn("node_completed", event_types)
+        self.assertEqual(event_types[-1], "run_completed")
 
         second_response = self.client.post(
             "/api/v1/agent/runs",
@@ -300,27 +372,34 @@ class APITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(second_response.status_code, 200)
-        second_body = second_response.json()
-        self.assertEqual(second_body["status"], "waiting_approval")
+        self.assertEqual(second_response.status_code, 202)
+        second_status_body = self.wait_for_agent_run(
+            self.client,
+            second_response.json()["run_id"],
+        )
+        second_body = second_status_body["result"]
+        self.assertEqual(second_status_body["status"], "waiting_approval")
         self.assertEqual(second_body["intent"], "change_planning")
         self.assertEqual(second_body["answer"], "")
         second_tool_names = [tool_call["name"] for tool_call in second_body["tool_calls"]]
         self.assertIn("repo.search_code", second_tool_names)
         self.assertIn("change_planner", second_tool_names)
         self.assertIn("test_designer", second_tool_names)
-        self.assertEqual(second_body["pending_approval"]["type"], "tool_plan_review")
-        self.assertTrue(second_body["pending_approval"]["approval_required"])
         self.assertEqual(
-            second_body["pending_approval"]["planned_tools"][0],
+            second_status_body["pending_approval"]["type"],
+            "tool_plan_review",
+        )
+        self.assertTrue(second_status_body["pending_approval"]["approval_required"])
+        self.assertEqual(
+            second_status_body["pending_approval"]["planned_tools"][0],
             "repository_context_search",
         )
         self.assertIn(
             "change_planner",
-            second_body["pending_approval"]["planned_tools"],
+            second_status_body["pending_approval"]["planned_tools"],
         )
         self.assertEqual(
-            [step["node"] for step in second_body["trace"]],
+            [step["node"] for step in second_status_body["trace"]],
             [
                 "setup",
                 "classify_request",
@@ -329,7 +408,7 @@ class APITests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            second_body["trace"][0]["output"]["history_messages"],
+            second_status_body["trace"][0]["output"]["history_messages"],
             2,
         )
 
@@ -343,15 +422,20 @@ class APITests(unittest.TestCase):
         self.assertEqual(pending_status_body["next_nodes"], ["review_tool_plan"])
         self.assertEqual(
             pending_status_body["pending_approval"]["interrupt_id"],
-            second_body["pending_approval"]["interrupt_id"],
+            second_status_body["pending_approval"]["interrupt_id"],
         )
 
         resume_response = self.client.post(
             f"/api/v1/agent/runs/{second_body['run_id']}/resume",
             json={"approved": True, "feedback": "可以执行"},
         )
-        self.assertEqual(resume_response.status_code, 200)
-        resume_body = resume_response.json()
+        self.assertEqual(resume_response.status_code, 202)
+        resume_status_body = self.wait_for_agent_run(
+            self.client,
+            second_body["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        resume_body = resume_status_body["result"]
         self.assertEqual(resume_body["run_id"], second_body["run_id"])
         self.assertEqual(resume_body["status"], "completed")
         self.assertIsNone(resume_body["pending_approval"])
@@ -484,8 +568,13 @@ class APITests(unittest.TestCase):
                     "message": "解释 build_answer 在哪里实现",
                 },
             )
-            self.assertEqual(agent_response.status_code, 200)
-            agent_body = agent_response.json()
+            self.assertEqual(agent_response.status_code, 202)
+            agent_status_body = self.wait_for_agent_run(
+                self.client,
+                agent_response.json()["run_id"],
+                terminal_statuses=("completed", "failed"),
+            )
+            agent_body = agent_status_body["result"]
             self.assertEqual(agent_body["status"], "completed")
             self.assertTrue(
                 any(
@@ -531,15 +620,21 @@ class APITests(unittest.TestCase):
         create_response = client.post("/api/v1/sessions", json={"user_id": "user_1"})
         session_id = create_response.json()["id"]
 
-        with self.assertRaises(RuntimeError):
-            client.post(
-                "/api/v1/agent/runs",
-                json={
-                    "conversation_id": session_id,
-                    "repository_id": "repo_main",
-                    "message": "这条消息即使 agent 失败也要保留",
-                },
-            )
+        response = client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "repository_id": "repo_main",
+                "message": "这条消息即使 agent 失败也要保留",
+            },
+        )
+        self.assertEqual(response.status_code, 202)
+        status_body = self.wait_for_agent_run(
+            client,
+            response.json()["run_id"],
+            terminal_statuses=("failed",),
+        )
+        self.assertEqual(status_body["error"], "agent runtime exploded")
 
         messages_response = client.get(f"/api/v1/sessions/{session_id}/messages")
         messages = messages_response.json()["messages"]
@@ -564,16 +659,25 @@ class APITests(unittest.TestCase):
                 "repository_id": "repo_main",
             },
         )
-        self.assertEqual(run_response.status_code, 200)
-        run_body = run_response.json()
-        self.assertEqual(run_body["status"], "waiting_approval")
+        self.assertEqual(run_response.status_code, 202)
+        run_status_body = self.wait_for_agent_run(
+            self.client,
+            run_response.json()["run_id"],
+        )
+        run_body = run_status_body["result"]
+        self.assertEqual(run_status_body["status"], "waiting_approval")
 
         resume_response = self.client.post(
             f"/api/v1/agent/runs/{run_body['run_id']}/resume",
             json={"approved": False, "feedback": "目标还不清楚"},
         )
-        self.assertEqual(resume_response.status_code, 200)
-        resume_body = resume_response.json()
+        self.assertEqual(resume_response.status_code, 202)
+        resume_status_body = self.wait_for_agent_run(
+            self.client,
+            run_body["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        resume_body = resume_status_body["result"]
         self.assertEqual(resume_body["status"], "completed")
         self.assertIn("未批准", resume_body["answer"])
         self.assertIn("目标还不清楚", resume_body["answer"])
@@ -615,8 +719,13 @@ class APITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+        self.assertEqual(response.status_code, 202)
+        status_body = self.wait_for_agent_run(
+            client,
+            response.json()["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        body = status_body["result"]
         self.assertEqual(body["status"], "completed")
         self.assertEqual(rag_service.calls, 2)
         self.assertEqual(len(body["errors"]), 1)
@@ -648,8 +757,13 @@ class APITests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
+        self.assertEqual(response.status_code, 202)
+        status_body = self.wait_for_agent_run(
+            client,
+            response.json()["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        body = status_body["result"]
         self.assertEqual(body["status"], "completed")
         self.assertEqual(body["tool_calls"], [])
         self.assertEqual(len(body["errors"]), 1)

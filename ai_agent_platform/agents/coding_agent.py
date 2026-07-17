@@ -61,7 +61,7 @@ PlanRoute = Literal["review_tool_plan", "inspect_repository"]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
 RetrievalRoute = Literal["plan_tools", "handle_error"]
 AnswerRoute = Literal["handle_error", "end"]
-AgentRunStatus = Literal["running", "waiting_approval", "completed", "failed"]
+AgentRunStatus = Literal["queued", "running", "waiting_approval", "completed", "failed"]
 MAX_NODE_RETRIES = 2
 
 
@@ -162,8 +162,9 @@ class CodingAgentRuntime:
         history: list[Message],
         repository_id: str = "repo_main",
         focus_files: Optional[list[str]] = None,
+        run_id: Optional[str] = None,
     ) -> AgentRunResult:
-        run_id = f"run_{uuid4().hex[:12]}"
+        run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = {"configurable": {"thread_id": thread_id}}
         self._run_store.save(
@@ -175,7 +176,7 @@ class CodingAgentRuntime:
                 status="running",
                 checkpoint_id=None,
                 latest_node=None,
-                next_nodes=[],
+                next_nodes=["setup"],
                 trace=[],
             )
         )
@@ -271,6 +272,27 @@ class CodingAgentRuntime:
             )
         )
         return result
+
+    def create_queued_run(
+        self,
+        *,
+        conversation_id: str,
+        repository_id: str,
+    ) -> AgentRunRecord:
+        run_id = f"run_{uuid4().hex[:12]}"
+        record = AgentRunRecord(
+            run_id=run_id,
+            thread_id=run_id,
+            conversation_id=conversation_id,
+            repository_id=repository_id,
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup"],
+            trace=[],
+        )
+        self._run_store.save(record)
+        return record
 
     def resume(
         self,

@@ -212,6 +212,7 @@ POST /api/v1/chat/stream
 POST /api/v1/agent/runs
 POST /api/v1/agent/runs/{run_id}/resume
 GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/agent/runs/{run_id}/events
 POST /api/v1/repositories/{repository_id}/index
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
@@ -236,8 +237,12 @@ curl -N -X POST http://localhost:8000/api/v1/chat/stream \
 
 ## Repository QA Agent
 
-`POST /api/v1/agent/runs` is the coding-agent endpoint. It is designed as a
-small OpenHands/Codex-style backend loop:
+`POST /api/v1/agent/runs` is the coding-agent endpoint. It creates a background
+Agent run and returns `202 Accepted` with a `run_id`. Call
+`GET /api/v1/agent/runs/{run_id}` to poll status and
+`GET /api/v1/agent/runs/{run_id}/events` to render a timeline from queued,
+started, node-completed, approval-required, completed, or failed events. The run
+itself is designed as a small OpenHands/Codex-style backend loop:
 
 1. classify the user request as repository navigation, code explanation, change
    planning, bug investigation, test strategy, or general repository QA.
@@ -256,7 +261,8 @@ small OpenHands/Codex-style backend loop:
 The first LangGraph persistence layer is now wired in with an in-memory
 checkpointer. Each run receives a `run_id`, uses that id as the LangGraph
 `thread_id`, and returns the latest `checkpoint_id`. You can query the run later
-to inspect `status`, `latest_node`, `next_nodes`, `trace`, and the final result.
+to inspect `status`, `latest_node`, `next_nodes`, `trace`, timeline `events`,
+and the final result.
 Change-planning runs now return `status=waiting_approval` with a
 `pending_approval` payload before tool execution. Resume the checkpoint with
 `POST /api/v1/agent/runs/{run_id}/resume` and an approval decision.
@@ -379,6 +385,8 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   }'
 
 curl http://localhost:8000/api/v1/agent/runs/run_xxx
+
+curl http://localhost:8000/api/v1/agent/runs/run_xxx/events
 
 curl -X POST http://localhost:8000/api/v1/agent/runs/run_xxx/resume \
   -H 'Content-Type: application/json' \

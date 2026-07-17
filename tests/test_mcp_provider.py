@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+import time
 import unittest
 
 from fastapi.testclient import TestClient
@@ -16,6 +17,21 @@ from ai_agent_platform.integrations.mcp import (
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
+
+
+def wait_for_agent_run(
+    client: TestClient,
+    run_id: str,
+    terminal_statuses: tuple[str, ...] = ("completed", "failed", "waiting_approval"),
+) -> dict:
+    for _ in range(100):
+        response = client.get(f"/api/v1/agent/runs/{run_id}")
+        if response.status_code == 200:
+            body = response.json()
+            if body["status"] in terminal_statuses:
+                return body
+        time.sleep(0.02)
+    raise AssertionError(f"agent run {run_id} did not reach {terminal_statuses}")
 
 
 class FakeMCPClient:
@@ -245,9 +261,14 @@ class MCPProviderTests(unittest.TestCase):
                         "repository_id": "repo_main",
                     },
                 )
+                run_status_body = wait_for_agent_run(
+                    client,
+                    run_response.json()["run_id"],
+                    terminal_statuses=("completed", "failed"),
+                )
 
-            self.assertEqual(run_response.status_code, 200)
-            body = run_response.json()
+            self.assertEqual(run_response.status_code, 202)
+            body = run_status_body["result"]
             self.assertEqual(body["status"], "completed")
             tool_names = [tool_call["name"] for tool_call in body["tool_calls"]]
             self.assertIn("mcp.dynamic_demo.echo", tool_names)
@@ -280,14 +301,23 @@ class MCPProviderTests(unittest.TestCase):
                         "repository_id": "repo_main",
                     },
                 )
-                run_body = run_response.json()
+                run_status_body = wait_for_agent_run(
+                    client,
+                    run_response.json()["run_id"],
+                )
+                run_body = run_status_body["result"]
                 resume_response = client.post(
                     f"/api/v1/agent/runs/{run_body['run_id']}/resume",
                     json={"approved": True, "feedback": "approved for test"},
                 )
+                resume_status_body = wait_for_agent_run(
+                    client,
+                    run_body["run_id"],
+                    terminal_statuses=("completed", "failed"),
+                )
 
-            self.assertEqual(run_response.status_code, 200)
-            body = run_body
+            self.assertEqual(run_response.status_code, 202)
+            body = run_status_body
             self.assertEqual(body["status"], "waiting_approval")
             self.assertIn(
                 "mcp.approval_demo.create_issue",
@@ -307,8 +337,8 @@ class MCPProviderTests(unittest.TestCase):
                 approval_item["permission_level"],
                 "external_side_effect",
             )
-            self.assertEqual(resume_response.status_code, 200)
-            resume_body = resume_response.json()
+            self.assertEqual(resume_response.status_code, 202)
+            resume_body = resume_status_body["result"]
             self.assertEqual(resume_body["status"], "completed")
             result_by_name = {item["name"]: item for item in resume_body["tool_results"]}
             self.assertTrue(result_by_name["mcp.approval_demo.create_issue"]["ok"])
