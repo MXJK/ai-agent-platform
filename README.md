@@ -512,6 +512,16 @@ Run tests that do not require FastAPI to be installed:
 .venv/bin/python -m unittest discover -s tests
 ```
 
+Run the offline Agent eval suite:
+
+```bash
+.venv/bin/python evals/run_evals.py
+```
+
+The eval suite ingests deterministic fixture files and checks intent
+classification, tool planning, RAG retrieval, code citation symbols, and
+approval pause behavior.
+
 ## Small Exercise
 
 Add a new endpoint:
