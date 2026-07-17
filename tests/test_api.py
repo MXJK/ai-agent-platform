@@ -459,6 +459,17 @@ class APITests(unittest.TestCase):
             "change_planner",
             second_status_body["pending_approval"]["planned_tools"],
         )
+        approval_item = next(
+            item
+            for item in second_status_body["pending_approval"]["approval_required_tools"]
+            if item["name"] == "change_planner"
+        )
+        self.assertEqual(approval_item["permission_level"], "write_safe")
+        self.assertIn("human review", approval_item["risk_summary"])
+        self.assertEqual(
+            approval_item["arguments_summary"]["goal"],
+            "帮我实现 agent 支持 repository_id 参数并补测试",
+        )
         self.assertEqual(
             [step["node"] for step in second_status_body["trace"]],
             [
@@ -596,6 +607,22 @@ class APITests(unittest.TestCase):
             )
             self.assertTrue(search_result.ok)
             self.assertEqual(search_result.result["matches"][0]["path"], "app.py")
+            search_payload = search_result.to_response()
+            self.assertEqual(
+                search_payload["arguments_summary"],
+                {"query": "target_symbol"},
+            )
+            self.assertIn("repository root", search_payload["risk_summary"])
+
+            invalid_result = registry.execute(
+                ToolCall(
+                    name="repo.search_code",
+                    arguments={"query": "target_symbol", "max_results": "many"},
+                ),
+                context=context,
+            )
+            self.assertFalse(invalid_result.ok)
+            self.assertIn("invalid type", invalid_result.error)
 
             escaped_result = registry.execute(
                 ToolCall(
@@ -606,6 +633,20 @@ class APITests(unittest.TestCase):
             )
             self.assertFalse(escaped_result.ok)
             self.assertIn("escapes repository root", escaped_result.error)
+
+            registry.register(
+                "demo.large_output",
+                lambda: {"content": "x" * 200},
+                max_output_chars=40,
+            )
+            large_result = registry.execute(
+                ToolCall(name="demo.large_output", arguments={}),
+                context=context,
+            )
+            large_payload = large_result.to_response()
+            self.assertTrue(large_payload["ok"])
+            self.assertTrue(large_payload["output_truncated"])
+            self.assertIn("truncated_output_preview", large_payload["result"])
 
     def test_indexes_repository_files_and_skips_unchanged_files(self) -> None:
         with TemporaryDirectory() as temp_dir:

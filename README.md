@@ -289,9 +289,18 @@ The first tools phase standardizes local tool execution before MCP is added.
   permission level, and approval requirement.
 - `ToolCall`: the planned call name and arguments.
 - `ToolResult`: normalized execution output with `ok`, `result`/`error`,
-  provider, permission level, approval flag, and duration.
+  provider, permission level, approval flag, duration, risk summary, sanitized
+  argument summary, and output truncation flag.
 - `ToolRegistry`: one registry that can execute local tools now and MCP-backed
   providers later through the same result contract.
+
+Before a tool executes, `ToolRegistry` validates required JSON-schema arguments
+and basic argument types. Tool results are capped by each tool's
+`max_output_chars` so a single call cannot flood the Agent context. Tool
+responses include sanitized `arguments_summary` values with sensitive names such
+as tokens, passwords, secrets, and API keys redacted. Approval payloads include
+each risky tool's permission level, risk summary, and sanitized arguments so the
+human reviewer can audit what would run before approving it.
 
 The local repository provider registers these read-only tools:
 

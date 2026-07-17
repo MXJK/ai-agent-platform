@@ -26,6 +26,7 @@ from ai_agent_platform.integrations.tools import (
     ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
+    summarize_tool_arguments,
 )
 from ai_agent_platform.integrations.mcp import MCPToolProvider, register_mcp_tools
 from ai_agent_platform.tools import register_repository_tools
@@ -990,6 +991,10 @@ def create_coding_tool_registry(
         description="Plan a safe code change across candidate files.",
         permission_level="write_safe",
         requires_approval=True,
+        risk_summary=(
+            "Plans implementation work that may lead to code edits; human review "
+            "is required before execution."
+        ),
     )
     registry.register(
         "bug_investigator",
@@ -1382,6 +1387,7 @@ def _approval_required_tools(
     tool_calls: list[ToolCall], tool_specs: list[ToolSpec]
 ) -> list[dict[str, Any]]:
     specs_by_name = {spec.name: spec for spec in tool_specs}
+    calls_by_name = {tool_call.name: tool_call for tool_call in tool_calls}
     approval_tools: list[dict[str, Any]] = []
     for tool_call in tool_calls:
         spec = specs_by_name.get(tool_call.name)
@@ -1394,6 +1400,10 @@ def _approval_required_tools(
                     "provider": spec.provider,
                     "permission_level": spec.permission_level,
                     "requires_approval": spec.requires_approval,
+                    "risk_summary": spec.risk_summary,
+                    "arguments_summary": summarize_tool_arguments(
+                        calls_by_name[tool_call.name].arguments
+                    ),
                 }
             )
     return approval_tools

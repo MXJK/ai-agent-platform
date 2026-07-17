@@ -20,7 +20,14 @@ from .rag import (
     RetrievedDocument,
     create_rag_service,
 )
-from .tools import ToolCall, ToolExecutionContext, ToolRegistry, ToolResult, ToolSpec
+from .tools import (
+    ToolCall,
+    ToolExecutionContext,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+    summarize_tool_arguments,
+)
 
 __all__ = [
     "LLMClient",
@@ -50,4 +57,5 @@ __all__ = [
     "create_rag_service",
     "load_mcp_server_configs",
     "register_mcp_tools",
+    "summarize_tool_arguments",
 ]

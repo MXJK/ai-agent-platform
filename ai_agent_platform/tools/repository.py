@@ -168,6 +168,7 @@ def register_repository_tools(
         },
         provider="local",
         permission_level="read_only",
+        risk_summary="Lists repository file paths under the configured root only.",
     )
     registry.register(
         "repo.read_file",
@@ -183,6 +184,8 @@ def register_repository_tools(
         },
         provider="local",
         permission_level="read_only",
+        risk_summary="Reads a UTF-8 text file under the configured repository root.",
+        max_output_chars=12000,
     )
     registry.register(
         "repo.search_code",
@@ -200,6 +203,8 @@ def register_repository_tools(
         },
         provider="local",
         permission_level="read_only",
+        risk_summary="Searches text files under the configured repository root.",
+        max_output_chars=12000,
     )
 
 

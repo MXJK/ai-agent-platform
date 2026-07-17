@@ -111,6 +111,8 @@ class MCPProviderTests(unittest.TestCase):
         self.assertEqual(result.result, {"echo": "hello MCP"})
         self.assertEqual(result.provider, "mcp:demo_server")
         self.assertEqual(result.permission_level, "read_only")
+        self.assertIn("MCP tool demo_server.echo", result.risk_summary)
+        self.assertEqual(result.arguments_summary, {"text": "hello MCP"})
         self.assertEqual(client.calls, [("echo", {"text": "hello MCP"})])
 
     def test_loads_mcp_server_configs_from_json(self) -> None:
@@ -337,6 +339,8 @@ class MCPProviderTests(unittest.TestCase):
                 approval_item["permission_level"],
                 "external_side_effect",
             )
+            self.assertIn("MCP tool approval_demo.create_issue", approval_item["risk_summary"])
+            self.assertIn("title", approval_item["arguments_summary"])
             self.assertEqual(resume_response.status_code, 202)
             resume_body = resume_status_body["result"]
             self.assertEqual(resume_body["status"], "completed")

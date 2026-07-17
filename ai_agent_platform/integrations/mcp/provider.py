@@ -40,6 +40,10 @@ class MCPToolProvider:
                 provider=f"mcp:{self.server_name}",
                 permission_level=tool.permission_level,
                 requires_approval=tool.requires_approval,
+                risk_summary=(
+                    f"MCP tool {self.server_name}.{tool.name} requests "
+                    f"{tool.permission_level} permission."
+                ),
             )
 
     def _callable_for(self, tool_name: str):
