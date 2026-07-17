@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from threading import Lock
@@ -35,6 +36,15 @@ CODING_AGENT_OBJECTIVE = (
     "围绕代码仓库检索上下文、解释实现、定位文件/符号、规划安全改动，"
     "并输出可复盘的执行轨迹。"
 )
+VALID_AGENT_INTENTS = {
+    "repository_question",
+    "repo_navigation",
+    "code_explanation",
+    "change_planning",
+    "bug_investigation",
+    "test_strategy",
+    "small_talk",
+}
 
 
 class CodingAgentState(TypedDict, total=False):
@@ -45,6 +55,8 @@ class CodingAgentState(TypedDict, total=False):
     focus_files: list[str]
     intent: str
     intent_reason: str
+    intent_confidence: float
+    planner_source: str
     rag_context: list[RetrievedDocument]
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
@@ -122,6 +134,91 @@ class AgentRunStore(Protocol):
         ...
 
 
+class LLMCompletionClient(Protocol):
+    def complete(self, prompt: str) -> Any:
+        ...
+
+
+class AgentPlanner(Protocol):
+    def classify_intent(self, user_input: str) -> dict[str, Any]:
+        ...
+
+    def plan_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        ...
+
+
+class RuleBasedAgentPlanner:
+    source = "rules"
+
+    def classify_intent(self, user_input: str) -> dict[str, Any]:
+        intent, reason = _classify_intent(user_input)
+        return {
+            "intent": intent,
+            "reason": reason,
+            "confidence": 0.72,
+            "source": self.source,
+        }
+
+    def plan_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        return _plan_rule_based_tool_calls(state, tool_specs)
+
+
+class LLMStructuredAgentPlanner:
+    """Uses structured LLM JSON for agent decisions with rule-based fallback."""
+
+    source = "llm_structured"
+
+    def __init__(
+        self,
+        llm_client: LLMCompletionClient,
+        *,
+        fallback: AgentPlanner | None = None,
+    ) -> None:
+        self._llm_client = llm_client
+        self._fallback = fallback or RuleBasedAgentPlanner()
+
+    def classify_intent(self, user_input: str) -> dict[str, Any]:
+        try:
+            body = _json_object_from_llm(
+                self._llm_client.complete(_intent_classification_prompt(user_input)).text
+            )
+            intent = str(body.get("intent", ""))
+            if intent not in VALID_AGENT_INTENTS:
+                raise ValueError(f"unsupported intent: {intent}")
+            return {
+                "intent": intent,
+                "reason": str(body.get("reason") or "LLM structured decision"),
+                "confidence": _bounded_confidence(body.get("confidence")),
+                "source": self.source,
+            }
+        except Exception:
+            return self._fallback.classify_intent(user_input)
+
+    def plan_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        try:
+            body = _json_object_from_llm(
+                self._llm_client.complete(_tool_planning_prompt(state, tool_specs)).text
+            )
+            calls = _tool_calls_from_structured_plan(body, state, tool_specs)
+            if not calls:
+                raise ValueError("LLM returned no executable tool calls")
+            return calls
+        except Exception:
+            return self._fallback.plan_tool_calls(state, tool_specs)
+
+
 class InMemoryAgentRunStore:
     def __init__(self) -> None:
         self._runs: dict[str, AgentRunRecord] = {}
@@ -146,11 +243,13 @@ class CodingAgentRuntime:
         tool_registry: Optional[ToolRegistry] = None,
         run_store: Optional[AgentRunStore] = None,
         checkpointer: Any = None,
+        planner: AgentPlanner | None = None,
     ) -> None:
         self._rag_service = rag_service
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
         self._run_store = run_store or InMemoryAgentRunStore()
+        self._planner = planner or RuleBasedAgentPlanner()
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
 
@@ -508,10 +607,16 @@ class CodingAgentRuntime:
         }
 
     def _classify_request(self, state: CodingAgentState) -> CodingAgentState:
-        intent, reason = _classify_intent(state["user_input"])
+        decision = self._planner.classify_intent(state["user_input"])
+        intent = str(decision.get("intent") or "repository_question")
+        reason = str(decision.get("reason") or "")
+        confidence = _bounded_confidence(decision.get("confidence"))
+        source = str(decision.get("source") or "unknown")
         return {
             "intent": intent,
             "intent_reason": reason,
+            "intent_confidence": confidence,
+            "planner_source": source,
             "trace": _append_trace(
                 state,
                 node="classify_request",
@@ -519,6 +624,8 @@ class CodingAgentRuntime:
                 output={
                     "intent": intent,
                     "reason": reason,
+                    "confidence": confidence,
+                    "planner_source": source,
                     "next_node": _next_node_for_intent(intent),
                 },
             ),
@@ -569,7 +676,7 @@ class CodingAgentRuntime:
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         tool_specs = self._tools.list_specs()
-        tool_calls = _plan_tool_calls(state, tool_specs)
+        tool_calls = self._planner.plan_tool_calls(state, tool_specs)
         approval_required_tools = _approval_required_tools(tool_calls, tool_specs)
         return {
             "tool_calls": tool_calls,
@@ -581,6 +688,7 @@ class CodingAgentRuntime:
                 output={
                     "available_tool_count": len(tool_specs),
                     "planned_tools": [tool_call.name for tool_call in tool_calls],
+                    "planner_source": state.get("planner_source", "unknown"),
                     "approval_required_tools": [
                         item["name"] for item in approval_required_tools
                     ],
@@ -997,7 +1105,162 @@ def _build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]
     }
 
 
-def _plan_tool_calls(
+def _intent_classification_prompt(user_input: str) -> str:
+    intents = ", ".join(sorted(VALID_AGENT_INTENTS))
+    return (
+        "You are classifying a coding-agent user request. "
+        "Return only one JSON object with keys intent, reason, confidence. "
+        f"Allowed intent values: {intents}.\n"
+        f"User request:\n{user_input}"
+    )
+
+
+def _tool_planning_prompt(
+    state: CodingAgentState,
+    tool_specs: list[ToolSpec],
+) -> str:
+    tool_payload = [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+            "provider": spec.provider,
+            "permission_level": spec.permission_level,
+            "requires_approval": spec.requires_approval,
+        }
+        for spec in tool_specs
+    ]
+    citations = [
+        {
+            "filename": citation.filename,
+            "chunk_index": citation.chunk_index,
+            "score": citation.score,
+            "snippet": _snippet(citation.text, limit=180),
+        }
+        for citation in state.get("rag_context", [])
+    ]
+    payload = {
+        "user_input": state["user_input"],
+        "intent": state.get("intent", "repository_question"),
+        "repository_id": state["repository_id"],
+        "focus_files": state.get("focus_files", []),
+        "retrieved_context": citations,
+        "available_tools": tool_payload,
+    }
+    return (
+        "You are planning tool calls for a coding-agent backend. "
+        "Return only one JSON object: {\"tool_calls\": [{\"name\": string, "
+        "\"arguments\": object}]}. Use only available tool names. Prefer "
+        "read-only tools unless the intent needs change planning.\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def _json_object_from_llm(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?", "", stripped).strip()
+        stripped = re.sub(r"```$", "", stripped).strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(stripped[start : end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("structured LLM response must be a JSON object")
+    return parsed
+
+
+def _bounded_confidence(value: Any) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return max(0.0, min(confidence, 1.0))
+
+
+def _tool_calls_from_structured_plan(
+    body: dict[str, Any],
+    state: CodingAgentState,
+    tool_specs: list[ToolSpec],
+) -> list[ToolCall]:
+    raw_calls = body.get("tool_calls", [])
+    if not isinstance(raw_calls, list):
+        raise ValueError("tool_calls must be a list")
+
+    specs_by_name = {spec.name: spec for spec in tool_specs}
+    planned: list[ToolCall] = []
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        name = str(raw_call.get("name") or "")
+        spec = specs_by_name.get(name)
+        if spec is None:
+            continue
+        raw_arguments = raw_call.get("arguments", {})
+        arguments = dict(raw_arguments) if isinstance(raw_arguments, dict) else {}
+        arguments = _complete_tool_arguments(
+            spec,
+            arguments,
+            state=state,
+        )
+        planned.append(
+            ToolCall(
+                name=name,
+                arguments=arguments,
+                source="llm_structured",
+            )
+        )
+    return _unique_tool_calls(planned)
+
+
+def _complete_tool_arguments(
+    spec: ToolSpec,
+    arguments: dict[str, Any],
+    *,
+    state: CodingAgentState,
+) -> dict[str, Any]:
+    if spec.name == "repository_context_search":
+        arguments.setdefault("query", state["user_input"])
+        arguments.setdefault("repository_id", state["repository_id"])
+        citations = state.get("rag_context", [])
+        arguments.setdefault("citation_count", len(citations))
+        arguments.setdefault(
+            "candidate_files",
+            _unique([citation.filename for citation in citations]),
+        )
+    required = spec.input_schema.get("required", [])
+    if not isinstance(required, list):
+        return arguments
+    mentioned_paths = _extract_paths(state["user_input"])
+    symbols = _extract_symbols(state["user_input"])
+    for name in required:
+        if name in arguments:
+            continue
+        arguments[name] = _argument_value_for_name(
+            str(name),
+            user_input=state["user_input"],
+            mentioned_paths=mentioned_paths,
+            symbols=symbols,
+        )
+    return arguments
+
+
+def _unique_tool_calls(tool_calls: list[ToolCall]) -> list[ToolCall]:
+    seen: set[str] = set()
+    unique_calls: list[ToolCall] = []
+    for tool_call in tool_calls:
+        if tool_call.name in seen:
+            continue
+        seen.add(tool_call.name)
+        unique_calls.append(tool_call)
+    return unique_calls
+
+
+def _plan_rule_based_tool_calls(
     state: CodingAgentState, tool_specs: list[ToolSpec] | None = None
 ) -> list[ToolCall]:
     intent = state.get("intent", "repository_question")

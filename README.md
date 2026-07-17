@@ -245,11 +245,16 @@ started, node-completed, approval-required, completed, or failed events. The run
 itself is designed as a small OpenHands/Codex-style backend loop:
 
 1. classify the user request as repository navigation, code explanation, change
-   planning, bug investigation, test strategy, or general repository QA.
+   planning, bug investigation, test strategy, or general repository QA. The
+   default planner asks the configured LLM for structured JSON
+   (`intent`, `reason`, `confidence`) and falls back to deterministic rules when
+   the model response is unavailable or invalid.
 2. retrieve code context from the RAG index scoped by `repository_id`.
-3. plan tool calls such as local repository search/read tools, file/symbol
-   location, code explanation, change planning, bug investigation, and test
-   design.
+3. plan tool calls with structured JSON over the registered `ToolSpec` list,
+   while rejecting unknown tools and falling back to the rule-based planner if
+   the model output cannot be validated. Planned calls can include local
+   repository search/read tools, file/symbol location, code explanation, change
+   planning, bug investigation, and test design.
 4. pause for human approval when `change_planning` would execute a planned tool
    sequence.
 5. retry recoverable RAG/answer-generation failures, collect structured

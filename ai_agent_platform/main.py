@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from ai_agent_platform.agents import (
     CodingAgentRuntime,
     GameAgentRuntime,
+    LLMStructuredAgentPlanner,
     create_coding_tool_registry,
 )
 from ai_agent_platform.api import create_api_router
@@ -63,6 +64,7 @@ def create_app(
             tool_registry=tool_registry,
             run_store=_create_agent_run_store(settings),
             checkpointer=checkpointer,
+            planner=LLMStructuredAgentPlanner(llm_client),
         )
     repository_indexing_service = RepositoryIndexingService(
         rag_service=rag_service,

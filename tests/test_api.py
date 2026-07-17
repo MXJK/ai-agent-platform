@@ -12,7 +12,7 @@ from ai_agent_platform.agents.coding_agent import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.integrations import RAGConfigurationError, RAGProviderError
-from ai_agent_platform.integrations.llm import _google_usage
+from ai_agent_platform.integrations.llm import LLMResponse, _google_usage
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
@@ -43,6 +43,31 @@ class FlakySearchRAGService:
 class BrokenSearchRAGService:
     def search(self, **_: object) -> list[RetrievedDocument]:
         raise RAGConfigurationError("vector store is not configured")
+
+
+class StructuredPlanningLLMClient:
+    def complete(self, prompt: str) -> LLMResponse:
+        if "classifying a coding-agent user request" in prompt:
+            return LLMResponse(
+                text=(
+                    '{"intent":"test_strategy","reason":"LLM chose test planning",'
+                    '"confidence":0.91}'
+                ),
+                model="structured-test-model",
+            )
+        if "planning tool calls for a coding-agent backend" in prompt:
+            return LLMResponse(
+                text=(
+                    '{"tool_calls":['
+                    '{"name":"repository_context_search","arguments":{}},'
+                    '{"name":"test_designer","arguments":{'
+                    '"goal":"cover async agent runs",'
+                    '"candidate_files":["tests/test_api.py"]'
+                    "}}]}"
+                ),
+                model="structured-test-model",
+            )
+        return LLMResponse(text="{}", model="structured-test-model")
 
 
 class FailingCodingAgentRuntime:
@@ -465,6 +490,47 @@ class APITests(unittest.TestCase):
             [message["role"] for message in messages],
             ["user", "assistant", "user", "assistant"],
         )
+
+    def test_agent_uses_structured_llm_for_intent_and_tool_planning(self) -> None:
+        client = TestClient(
+            create_app(
+                settings=Settings(llm_provider="fake", embedding_provider="local"),
+                llm_client=StructuredPlanningLLMClient(),
+            )
+        )
+        create_response = client.post("/api/v1/sessions", json={"user_id": "user_1"})
+        session_id = create_response.json()["id"]
+
+        run_response = client.post(
+            "/api/v1/agent/runs",
+            json={
+                "conversation_id": session_id,
+                "repository_id": "repo_main",
+                "message": "帮我设计 agent run 异步流程的测试",
+            },
+        )
+
+        self.assertEqual(run_response.status_code, 202)
+        status_body = self.wait_for_agent_run(
+            client,
+            run_response.json()["run_id"],
+            terminal_statuses=("completed", "failed"),
+        )
+        body = status_body["result"]
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["intent"], "test_strategy")
+        classify_step = body["trace"][1]
+        self.assertEqual(classify_step["output"]["planner_source"], "llm_structured")
+        self.assertEqual(classify_step["output"]["confidence"], 0.91)
+        plan_step = body["trace"][3]
+        self.assertEqual(plan_step["output"]["planner_source"], "llm_structured")
+        self.assertEqual(
+            [tool_call["name"] for tool_call in body["tool_calls"]],
+            ["repository_context_search", "test_designer"],
+        )
+        result_by_name = {item["name"]: item for item in body["tool_results"]}
+        self.assertTrue(result_by_name["repository_context_search"]["ok"])
+        self.assertTrue(result_by_name["test_designer"]["ok"])
 
     def test_local_repository_tools_are_scoped_to_repository_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
