@@ -3,17 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Agent Platform</title>
+    <title>AI Agent Platform Debug Console</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <header class="app-header">
       <div>
         <h1>AI Agent Platform</h1>
-        <p>Backend console</p>
+        <p>Debug console for sessions, streaming, agent runs, RAG, and repository indexing</p>
       </div>
       <div class="header-actions">
         <span id="health-pill" class="pill">checking</span>
+        <button id="refresh-health-btn" class="ghost-button">Refresh</button>
         <a class="ghost-link" href="/docs">API Docs</a>
       </div>
     </header>
@@ -23,9 +24,7 @@
         <section class="section">
           <div class="section-title">
             <h2>Session</h2>
-            <button id="create-session-btn" class="icon-button" title="Create session">
-              +
-            </button>
+            <button id="create-session-btn" class="icon-button" title="Create session">+</button>
           </div>
           <label>
             User ID
@@ -33,9 +32,35 @@
           </label>
           <label>
             Conversation ID
-            <input id="conversation-id-input" placeholder="Create or paste session id" />
+            <input id="conversation-id-input" placeholder="Create, paste, or select session id" />
           </label>
+          <div class="button-row">
+            <button id="load-session-btn" class="secondary-button">Load</button>
+            <button id="list-sessions-btn" class="secondary-button">List</button>
+            <button id="summary-session-btn" class="secondary-button">Summary</button>
+          </div>
           <div id="session-status" class="muted">No session yet</div>
+        </section>
+
+        <section class="section">
+          <div class="section-title">
+            <h2>Add Message</h2>
+          </div>
+          <label>
+            Role
+            <select id="message-role-input">
+              <option value="user">user</option>
+              <option value="assistant">assistant</option>
+              <option value="system">system</option>
+              <option value="tool">tool</option>
+            </select>
+          </label>
+          <label class="check-label">
+            <input id="message-run-agent-input" type="checkbox" />
+            Run legacy agent
+          </label>
+          <textarea id="message-content-input" rows="4">调试消息：请记录当前会话状态</textarea>
+          <button id="add-message-btn" class="secondary-button">Add message</button>
         </section>
 
         <section class="section">
@@ -49,6 +74,7 @@
               <option value="fake">fake</option>
               <option value="openai">openai</option>
               <option value="anthropic">anthropic</option>
+              <option value="google">google</option>
             </select>
           </label>
           <label>
@@ -73,18 +99,89 @@
             Include patterns
             <input id="include-patterns-input" value="**/*.py, **/*.md" />
           </label>
+          <label>
+            Exclude patterns
+            <input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" />
+          </label>
+          <label>
+            Max file size
+            <input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" />
+          </label>
           <button id="index-repo-btn" class="secondary-button">Index repository</button>
         </section>
       </aside>
 
       <section class="workspace">
         <nav class="tabs" aria-label="Console modes">
-          <button class="tab active" data-tab="chat">Chat stream</button>
+          <button class="tab active" data-tab="overview">Overview</button>
+          <button class="tab" data-tab="sessions">Sessions</button>
+          <button class="tab" data-tab="chat">Chat stream</button>
           <button class="tab" data-tab="agent">Agent run</button>
           <button class="tab" data-tab="rag">RAG</button>
+          <button class="tab" data-tab="repository">Repository</button>
         </nav>
 
-        <section id="chat-tab" class="panel tab-panel active">
+        <section id="overview-tab" class="panel tab-panel active">
+          <div class="section-title">
+            <h2>Diagnostics</h2>
+            <button id="refresh-overview-btn" class="ghost-button">Refresh</button>
+          </div>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <span>API</span>
+              <strong id="metric-api">checking</strong>
+            </div>
+            <div class="metric-card">
+              <span>Sessions</span>
+              <strong id="metric-sessions">0</strong>
+            </div>
+            <div class="metric-card">
+              <span>Latest run</span>
+              <strong id="metric-run">none</strong>
+            </div>
+            <div class="metric-card">
+              <span>Last request</span>
+              <strong id="metric-request">none</strong>
+            </div>
+          </div>
+          <div class="coverage-grid">
+            <div class="coverage-item ok">Health</div>
+            <div class="coverage-item ok">Sessions</div>
+            <div class="coverage-item ok">Messages</div>
+            <div class="coverage-item ok">SSE Chat</div>
+            <div class="coverage-item ok">Agent Runs</div>
+            <div class="coverage-item ok">Agent Events</div>
+            <div class="coverage-item ok">RAG Ingest</div>
+            <div class="coverage-item ok">RAG Search</div>
+            <div class="coverage-item ok">RAG Ask</div>
+            <div class="coverage-item ok">Repo Index</div>
+          </div>
+          <div class="section-title compact-title">
+            <h2>Request Log</h2>
+            <button id="clear-log-btn" class="ghost-button">Clear log</button>
+          </div>
+          <div id="request-log" class="data-list"></div>
+        </section>
+
+        <section id="sessions-tab" class="panel tab-panel">
+          <div class="section-title">
+            <h2>Sessions & Messages</h2>
+            <button id="refresh-messages-btn" class="ghost-button">Refresh messages</button>
+          </div>
+          <div class="split-grid">
+            <div>
+              <div class="mini-title">Available sessions</div>
+              <div id="sessions-list" class="data-list"></div>
+            </div>
+            <div>
+              <div class="mini-title">Active session</div>
+              <div id="session-summary" class="summary-box"></div>
+              <div id="messages-list" class="message-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="chat-tab" class="panel tab-panel">
           <div class="section-title">
             <h2>SSE Chat</h2>
             <button id="clear-chat-btn" class="ghost-button">Clear</button>
@@ -104,7 +201,10 @@
         <section id="agent-tab" class="panel tab-panel">
           <div class="section-title">
             <h2>Coding Agent</h2>
-            <button id="refresh-run-btn" class="ghost-button">Refresh run</button>
+            <div class="button-row">
+              <button id="refresh-run-btn" class="ghost-button">Refresh run</button>
+              <button id="refresh-events-btn" class="ghost-button">Events</button>
+            </div>
           </div>
           <textarea
             id="agent-message-input"
@@ -121,7 +221,16 @@
             <button id="reject-run-btn" class="secondary-button" disabled>Reject</button>
             <span id="agent-status" class="muted">Idle</span>
           </div>
-          <div id="agent-answer" class="answer-box"></div>
+          <div class="split-grid">
+            <div>
+              <div class="mini-title">Answer</div>
+              <div id="agent-answer" class="answer-box"></div>
+            </div>
+            <div>
+              <div class="mini-title">Events</div>
+              <div id="agent-events" class="data-list"></div>
+            </div>
+          </div>
         </section>
 
         <section id="rag-tab" class="panel tab-panel">
@@ -148,15 +257,44 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
             <button id="ingest-doc-btn" class="secondary-button">Ingest document</button>
             <span id="rag-status" class="muted">Idle</span>
           </div>
-          <textarea
-            id="rag-question-input"
-            rows="4"
-            placeholder="Ask this knowledge base"
-          >这个项目主要包含哪些后端能力？</textarea>
+          <div class="two-column">
+            <label>
+              Query / Question
+              <textarea id="rag-question-input" rows="4">这个项目主要包含哪些后端能力？</textarea>
+            </label>
+            <div class="two-column nested-inputs">
+              <label>
+                Limit
+                <input id="rag-limit-input" type="number" min="1" max="20" value="5" />
+              </label>
+              <label>
+                Recall limit
+                <input id="rag-recall-limit-input" type="number" min="1" max="100" value="10" />
+              </label>
+            </div>
+          </div>
           <div class="toolbar">
+            <button id="search-rag-btn" class="secondary-button">Search RAG</button>
             <button id="ask-rag-btn" class="primary-button">Ask RAG</button>
           </div>
           <div id="rag-answer" class="answer-box"></div>
+        </section>
+
+        <section id="repository-tab" class="panel tab-panel">
+          <div class="section-title">
+            <h2>Repository Index Result</h2>
+          </div>
+          <div id="repository-result" class="summary-box"></div>
+          <div class="split-grid">
+            <div>
+              <div class="mini-title">Indexed paths</div>
+              <div id="indexed-paths" class="data-list"></div>
+            </div>
+            <div>
+              <div class="mini-title">Skipped / failed paths</div>
+              <div id="skipped-paths" class="data-list"></div>
+            </div>
+          </div>
         </section>
       </section>
 
