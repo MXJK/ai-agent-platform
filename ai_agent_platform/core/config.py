@@ -45,6 +45,10 @@ class Settings:
     mcp_enabled: bool = False
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
+    sandbox_mode: str = "local"
+    sandbox_docker_image: str = "python:3.11-slim"
+    sandbox_command_timeout_seconds: float = 30.0
+    sandbox_workspace_parent: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -128,6 +132,18 @@ class Settings:
                 cls.mcp_request_timeout_seconds,
                 dotenv,
             ),
+            sandbox_mode=_env("SANDBOX_MODE", cls.sandbox_mode, dotenv),
+            sandbox_docker_image=_env(
+                "SANDBOX_DOCKER_IMAGE",
+                cls.sandbox_docker_image,
+                dotenv,
+            ),
+            sandbox_command_timeout_seconds=_float_env(
+                "SANDBOX_COMMAND_TIMEOUT_SECONDS",
+                cls.sandbox_command_timeout_seconds,
+                dotenv,
+            ),
+            sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
         )
 
 

@@ -79,6 +79,7 @@ class ToolResult:
 class ToolExecutionContext:
     conversation_id: str
     repository_id: str
+    run_id: str | None = None
 
 
 class ToolRegistry:

@@ -30,6 +30,10 @@ class SettingsTests(unittest.TestCase):
                 "MCP_ENABLED": "true",
                 "MCP_CONFIG_PATH": "mcp.json",
                 "MCP_REQUEST_TIMEOUT_SECONDS": "3.5",
+                "SANDBOX_MODE": "docker",
+                "SANDBOX_DOCKER_IMAGE": "python:3.12-slim",
+                "SANDBOX_COMMAND_TIMEOUT_SECONDS": "7.5",
+                "SANDBOX_WORKSPACE_PARENT": "/tmp/agent-workspaces",
             },
         ):
             settings = Settings.from_env()
@@ -50,6 +54,10 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.mcp_enabled)
         self.assertEqual(settings.mcp_config_path, "mcp.json")
         self.assertEqual(settings.mcp_request_timeout_seconds, 3.5)
+        self.assertEqual(settings.sandbox_mode, "docker")
+        self.assertEqual(settings.sandbox_docker_image, "python:3.12-slim")
+        self.assertEqual(settings.sandbox_command_timeout_seconds, 7.5)
+        self.assertEqual(settings.sandbox_workspace_parent, "/tmp/agent-workspaces")
 
 
 if __name__ == "__main__":

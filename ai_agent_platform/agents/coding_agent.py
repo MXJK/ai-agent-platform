@@ -29,7 +29,7 @@ from ai_agent_platform.integrations.tools import (
     summarize_tool_arguments,
 )
 from ai_agent_platform.integrations.mcp import MCPToolProvider, register_mcp_tools
-from ai_agent_platform.tools import register_repository_tools
+from ai_agent_platform.tools import register_repository_tools, register_sandbox_tools
 
 
 CODING_AGENT_ROLE = "研发助手 / 代码仓库问答 Agent"
@@ -49,6 +49,7 @@ VALID_AGENT_INTENTS = {
 
 
 class CodingAgentState(TypedDict, total=False):
+    run_id: str
     conversation_id: str
     user_input: str
     repository_id: str
@@ -285,6 +286,7 @@ class CodingAgentRuntime:
             state = self._graph.invoke(
                 {
                     "conversation_id": conversation_id,
+                    "run_id": run_id,
                     "user_input": user_input,
                     "repository_id": repository_id,
                     "focus_files": focus_files or [],
@@ -726,6 +728,7 @@ class CodingAgentRuntime:
         context = ToolExecutionContext(
             conversation_id=state["conversation_id"],
             repository_id=state["repository_id"],
+            run_id=state.get("run_id"),
         )
         for tool_call in state.get("tool_calls", []):
             tool_results.append(
@@ -965,9 +968,22 @@ def _unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
 def create_coding_tool_registry(
     root_path: Path | str | None = None,
     mcp_providers: Optional[list[MCPToolProvider]] = None,
+    sandbox_mode: str = "local",
+    sandbox_docker_image: str = "python:3.11-slim",
+    sandbox_command_timeout_seconds: float = 30.0,
+    sandbox_workspace_parent: Path | str | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    register_repository_tools(registry, root_path or Path.cwd())
+    resolved_root_path = root_path or Path.cwd()
+    register_repository_tools(registry, resolved_root_path)
+    register_sandbox_tools(
+        registry,
+        root_path=resolved_root_path,
+        mode=sandbox_mode,
+        docker_image=sandbox_docker_image,
+        command_timeout_seconds=sandbox_command_timeout_seconds,
+        workspace_parent=sandbox_workspace_parent,
+    )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
     registry.register(

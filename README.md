@@ -86,6 +86,9 @@ EMBEDDING_PROVIDER=local
 MCP_ENABLED=false
 MCP_CONFIG_PATH=mcp.json
 MCP_REQUEST_TIMEOUT_SECONDS=10
+SANDBOX_MODE=local
+SANDBOX_DOCKER_IMAGE=python:3.11-slim
+SANDBOX_COMMAND_TIMEOUT_SECONDS=30
 ```
 
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
@@ -313,6 +316,25 @@ All repository tools are scoped to the configured root path and reject paths
 that escape that root. Higher-level planning tools such as `change_planner`
 remain available, but now return standardized tool metadata in
 `tool_results`.
+
+The sandbox provider adds the code-modification loop tools. Every agent run gets
+an isolated temporary workspace copied from the configured repository root. The
+real repository is not modified directly; writable tools change only the
+sandbox workspace, and `sandbox.git_diff` returns the patch for review.
+
+- `sandbox.workspace_status`: inspect the current sandbox workspace and changed
+  files.
+- `sandbox.write_file`: write a UTF-8 file inside the sandbox workspace.
+- `sandbox.apply_patch`: apply a unified diff inside the sandbox workspace.
+- `sandbox.run_command`: run a command in the sandbox workspace.
+- `sandbox.git_diff`: return the unified diff from the sandbox baseline.
+
+Writable sandbox tools use `permission_level=write_safe` and
+`requires_approval=true`, so they pause in the same
+`waiting_approval -> resume` flow as risky MCP tools. Set `SANDBOX_MODE=docker`
+to execute commands through Docker with no network access, CPU and memory
+limits, and the sandbox workspace mounted at `/workspace`. The default
+`SANDBOX_MODE=local` is intended for unit tests and lightweight development.
 
 The MCP provider boundary is available under `ai_agent_platform.integrations.mcp`.
 Any client that implements:

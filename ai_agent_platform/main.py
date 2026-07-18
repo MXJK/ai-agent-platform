@@ -55,7 +55,13 @@ def create_app(
         document_store=_create_document_store(settings),
     )
     mcp_providers = _create_mcp_providers(settings)
-    tool_registry = create_coding_tool_registry(mcp_providers=mcp_providers)
+    tool_registry = create_coding_tool_registry(
+        mcp_providers=mcp_providers,
+        sandbox_mode=settings.sandbox_mode,
+        sandbox_docker_image=settings.sandbox_docker_image,
+        sandbox_command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+        sandbox_workspace_parent=settings.sandbox_workspace_parent,
+    )
     close_checkpointer = None
     if coding_agent_runtime is None:
         checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
