@@ -16,7 +16,12 @@ from ai_agent_platform.agents import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.api import create_api_router
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import (
+    MetricsRegistry,
+    RequestObservabilityMiddleware,
+    Settings,
+    configure_logging,
+)
 from ai_agent_platform.integrations import (
     LLMClient,
     MCPToolProvider,
@@ -46,6 +51,8 @@ def create_app(
     coding_agent_runtime: CodingAgentRuntime | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    configure_logging(level=settings.log_level, log_format=settings.log_format)
+    metrics = MetricsRegistry()
 
     repository = _create_session_repository(settings)
     agent_runtime = GameAgentRuntime()
@@ -83,6 +90,7 @@ def create_app(
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
         session_service=session_service,
+        metrics=metrics,
     )
 
     @asynccontextmanager
@@ -97,6 +105,8 @@ def create_app(
                 provider.close()
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.add_middleware(RequestObservabilityMiddleware, metrics=metrics)
+    app.state.metrics = metrics
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
@@ -110,6 +120,7 @@ def create_app(
             agent_run_service=agent_run_service,
             repository_indexing_service=repository_indexing_service,
             settings=settings,
+            metrics=metrics,
         ),
         prefix=settings.api_prefix,
     )

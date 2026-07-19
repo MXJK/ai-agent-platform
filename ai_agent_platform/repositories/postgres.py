@@ -6,7 +6,11 @@ import hashlib
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
+from ai_agent_platform.agents.coding.models import (
+    AgentRunMetrics,
+    AgentRunRecord,
+    AgentRunResult,
+)
 from ai_agent_platform.domain import (
     Message,
     RepositoryFileRecord,
@@ -767,6 +771,9 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     payload["tool_calls"] = [
         ToolCall(**item) for item in payload.get("tool_calls", [])
     ]
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        payload["metrics"] = AgentRunMetrics(**metrics)
     payload.setdefault("errors", [])
     return AgentRunResult(**payload)
 

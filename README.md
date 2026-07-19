@@ -13,6 +13,10 @@ ai_agent_platform/
   api/
     router.py                # Versioned API composition root
     routes/                  # Resource routers: sessions, chat, runs, repos, RAG
+  core/
+    config.py                # Validated environment configuration
+    observability.py         # JSON logging and request correlation middleware
+    metrics.py               # Thread-safe counters and duration summaries
   schemas/                   # Pydantic request and response models
   domain/models.py           # Core business entities
   repositories/memory.py     # In-memory storage boundary
@@ -93,6 +97,8 @@ MCP_REQUEST_TIMEOUT_SECONDS=10
 SANDBOX_MODE=local
 SANDBOX_DOCKER_IMAGE=python:3.11-slim
 SANDBOX_COMMAND_TIMEOUT_SECONDS=30
+LOG_LEVEL=INFO
+LOG_FORMAT=json
 ```
 
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
@@ -210,6 +216,7 @@ Endpoints:
 
 ```text
 GET  /api/v1/health
+GET  /api/v1/metrics
 POST /api/v1/sessions
 GET  /api/v1/sessions
 GET  /api/v1/sessions/{session_id}
@@ -231,6 +238,8 @@ Example requests:
 ```bash
 curl http://localhost:8000/api/v1/health
 
+curl http://localhost:8000/api/v1/metrics
+
 curl -X POST http://localhost:8000/api/v1/sessions \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"user_1"}'
@@ -241,6 +250,24 @@ curl -N -X POST http://localhost:8000/api/v1/chat/stream \
   -H 'Content-Type: application/json' \
   -d '{"conversation_id":"sess_xxx","message":"你好，解释一下SSE"}'
 ```
+
+## Observability and Configuration Safety
+
+Every HTTP response includes an `X-Request-ID`. A valid incoming
+`X-Request-ID` is propagated; otherwise the server generates one. Project logs
+can use JSON or text output through `LOG_FORMAT`, and background Agent workers
+bind `run_id`, `conversation_id`, and `repository_id` to their log context.
+Request bodies and tool secrets are not written to access logs.
+
+`GET /api/v1/metrics` exposes dependency-free process-local counters and timing
+summaries for HTTP requests and Agent executions. Agent run responses also
+contain a `metrics` object with elapsed time, node/tool counts, retries, and
+recovered errors. This local registry is intentionally small; a production
+deployment can replace the registry boundary with Prometheus or OpenTelemetry.
+
+`Settings` validates storage backends, sandbox mode, logging options, positive
+timeouts/limits, and RAG chunk overlap during startup. Invalid configuration
+fails before repositories, model clients, or background workers are created.
 
 ## Repository QA Agent
 

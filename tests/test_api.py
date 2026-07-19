@@ -208,6 +208,10 @@ class APITests(unittest.TestCase):
         messages = messages_response.json()["messages"]
         self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
         self.assertIn("fake model reply to", messages[1]["content"])
+        metrics = self.client.get("/api/v1/metrics").json()["counters"]
+        self.assertEqual(metrics["chat_streams_completed_total"], 1)
+        self.assertGreater(metrics["llm_input_tokens_total"], 0)
+        self.assertGreater(metrics["llm_output_tokens_total"], 0)
 
     def test_chat_stream_returns_404_for_missing_conversation(self) -> None:
         response = self.client.post(
@@ -370,6 +374,18 @@ class APITests(unittest.TestCase):
         self.assertTrue(body["run_id"].startswith("run_"))
         self.assertEqual(body["thread_id"], body["run_id"])
         self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["metrics"]["node_count"], 6)
+        self.assertEqual(
+            body["metrics"]["tool_call_count"],
+            len(body["tool_calls"]),
+        )
+        self.assertGreaterEqual(body["metrics"]["elapsed_ms"], 0)
+        process_metrics = self.client.get("/api/v1/metrics").json()["counters"]
+        self.assertEqual(process_metrics["agent_runs_submitted_total"], 1)
+        self.assertEqual(
+            process_metrics["agent_run_executions_completed_total"],
+            1,
+        )
         self.assertIsNotNone(body["checkpoint_id"])
         self.assertEqual(body["repository_id"], "repo_main")
         self.assertEqual(body["role"], "研发助手 / 代码仓库问答 Agent")
@@ -875,6 +891,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["errors"][0]["code"], "rag_provider_error")
         self.assertTrue(body["errors"][0]["retryable"])
         self.assertTrue(body["errors"][0]["recovered"])
+        self.assertEqual(body["metrics"]["retry_count"], 1)
+        self.assertEqual(body["metrics"]["recovered_error_count"], 1)
         self.assertIn("agent.py", body["answer"])
         retrieve_step = body["trace"][2]
         self.assertEqual(retrieve_step["node"], "retrieve_repository_context")

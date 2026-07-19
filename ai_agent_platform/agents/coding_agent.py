@@ -17,6 +17,7 @@ from ai_agent_platform.agents.coding.models import (
     CODING_AGENT_ROLE,
     AgentPlanner,
     AgentRunInvalidStateError,
+    AgentRunMetrics,
     AgentRunNotFoundError,
     AgentRunRecord,
     AgentRunResult,
@@ -35,6 +36,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_errors as _append_errors,
     append_trace as _append_trace,
     build_repository_query as _build_repository_query,
+    build_run_metrics as _build_run_metrics,
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
     checkpoint_id as _checkpoint_id,
     classify_answer_error as _classify_answer_error,
@@ -348,6 +350,7 @@ class CodingAgentRuntime:
             tool_results=state.get("tool_results", []),
             trace=state.get("trace", []),
             errors=state.get("errors", []),
+            metrics=_build_run_metrics(state),
             pending_approval=pending_approval,
         )
 

@@ -57,6 +57,17 @@ MAX_NODE_RETRIES = 2
 
 
 @dataclass(frozen=True)
+class AgentRunMetrics:
+    elapsed_ms: int = 0
+    node_count: int = 0
+    tool_call_count: int = 0
+    successful_tool_call_count: int = 0
+    retry_count: int = 0
+    error_count: int = 0
+    recovered_error_count: int = 0
+
+
+@dataclass(frozen=True)
 class AgentRunResult:
     run_id: str
     thread_id: str
@@ -74,6 +85,7 @@ class AgentRunResult:
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
     errors: list[dict[str, Any]] = field(default_factory=list)
+    metrics: AgentRunMetrics = field(default_factory=AgentRunMetrics)
     pending_approval: Optional[dict[str, Any]] = None
 
 

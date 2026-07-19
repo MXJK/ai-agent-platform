@@ -9,6 +9,8 @@ from pathlib import Path
 class Settings:
     app_name: str = "ai-agent-platform"
     api_prefix: str = "/api/v1"
+    log_level: str = "WARNING"
+    log_format: str = "json"
     llm_provider: str = "fake"
     llm_model: str = "demo-stream-model"
     openai_api_key: str | None = None
@@ -50,12 +52,66 @@ class Settings:
     sandbox_command_timeout_seconds: float = 30.0
     sandbox_workspace_parent: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.api_prefix.startswith("/"):
+            raise ValueError("api_prefix must start with '/'")
+        _require_choice(
+            "log_level",
+            self.log_level.upper(),
+            {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+        )
+        _require_choice("log_format", self.log_format, {"json", "text"})
+        for name, value in (
+            ("session_repository", self.session_repository),
+            ("agent_run_store", self.agent_run_store),
+            ("document_store", self.document_store),
+            ("repository_index_store", self.repository_index_store),
+        ):
+            _require_choice(name, value, {"memory", "postgres"})
+        _require_choice(
+            "langgraph_checkpointer",
+            self.langgraph_checkpointer,
+            {"memory", "postgres"},
+        )
+        _require_choice(
+            "rag_vector_store",
+            self.rag_vector_store,
+            {"memory", "chroma", "qdrant"},
+        )
+        _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
+        for name, value in (
+            ("llm_timeout_seconds", self.llm_timeout_seconds),
+            ("llm_max_input_chars", self.llm_max_input_chars),
+            ("llm_max_context_messages", self.llm_max_context_messages),
+            ("llm_max_output_tokens", self.llm_max_output_tokens),
+            ("local_embedding_dimensions", self.local_embedding_dimensions),
+            ("rag_chunk_size", self.rag_chunk_size),
+            ("rag_recall_limit", self.rag_recall_limit),
+            ("rag_max_prompt_chars", self.rag_max_prompt_chars),
+            ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
+            (
+                "sandbox_command_timeout_seconds",
+                self.sandbox_command_timeout_seconds,
+            ),
+        ):
+            _require_positive(name, value)
+        if self.llm_max_retries < 0:
+            raise ValueError("llm_max_retries must be greater than or equal to 0")
+        if self.rag_chunk_overlap < 0:
+            raise ValueError("rag_chunk_overlap must be greater than or equal to 0")
+        if self.rag_chunk_overlap >= self.rag_chunk_size:
+            raise ValueError("rag_chunk_overlap must be smaller than rag_chunk_size")
+        if self.mcp_enabled and not self.mcp_config_path:
+            raise ValueError("mcp_config_path is required when mcp_enabled is true")
+
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv = _load_dotenv()
         return cls(
             app_name=_env("APP_NAME", cls.app_name, dotenv),
             api_prefix=_env("API_PREFIX", cls.api_prefix, dotenv),
+            log_level=_env("LOG_LEVEL", cls.log_level, dotenv),
+            log_format=_env("LOG_FORMAT", cls.log_format, dotenv),
             llm_provider=_env("LLM_PROVIDER", cls.llm_provider, dotenv),
             llm_model=_env("LLM_MODEL", cls.llm_model, dotenv),
             openai_api_key=_env("OPENAI_API_KEY", None, dotenv),
@@ -145,6 +201,17 @@ class Settings:
             ),
             sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
         )
+
+
+def _require_choice(name: str, value: str, allowed: set[str]) -> None:
+    if value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ValueError(f"{name} must be one of: {choices}")
+
+
+def _require_positive(name: str, value: float | int) -> None:
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than 0")
 
 
 def _env(name: str, default: str | None, dotenv: dict[str, str]) -> str | None:

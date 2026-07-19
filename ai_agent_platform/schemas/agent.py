@@ -37,6 +37,16 @@ class AgentTraceStepResponse(BaseModel):
     output: dict[str, Any]
 
 
+class AgentRunMetricsResponse(BaseModel):
+    elapsed_ms: int
+    node_count: int
+    tool_call_count: int
+    successful_tool_call_count: int
+    retry_count: int
+    error_count: int
+    recovered_error_count: int
+
+
 class AgentRunResponse(BaseModel):
     run_id: str
     thread_id: str
@@ -54,6 +64,7 @@ class AgentRunResponse(BaseModel):
     tool_results: list[dict[str, Any]]
     trace: list[AgentTraceStepResponse]
     errors: list[dict[str, Any]]
+    metrics: AgentRunMetricsResponse
     pending_approval: Optional[dict[str, Any]]
 
     @classmethod
@@ -92,6 +103,17 @@ class AgentRunResponse(BaseModel):
                 for item in result.trace
             ],
             errors=result.errors,
+            metrics=AgentRunMetricsResponse(
+                elapsed_ms=result.metrics.elapsed_ms,
+                node_count=result.metrics.node_count,
+                tool_call_count=result.metrics.tool_call_count,
+                successful_tool_call_count=(
+                    result.metrics.successful_tool_call_count
+                ),
+                retry_count=result.metrics.retry_count,
+                error_count=result.metrics.error_count,
+                recovered_error_count=result.metrics.recovered_error_count,
+            ),
             pending_approval=result.pending_approval,
         )
 

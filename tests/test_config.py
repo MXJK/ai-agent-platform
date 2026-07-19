@@ -27,6 +27,8 @@ class SettingsTests(unittest.TestCase):
                 "QDRANT_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "qdrant-secret",
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
+                "LOG_LEVEL": "INFO",
+                "LOG_FORMAT": "text",
                 "MCP_ENABLED": "true",
                 "MCP_CONFIG_PATH": "mcp.json",
                 "MCP_REQUEST_TIMEOUT_SECONDS": "3.5",
@@ -51,6 +53,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.qdrant_url, "http://localhost:6333")
         self.assertEqual(settings.qdrant_api_key, "qdrant-secret")
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
+        self.assertEqual(settings.log_level, "INFO")
+        self.assertEqual(settings.log_format, "text")
         self.assertTrue(settings.mcp_enabled)
         self.assertEqual(settings.mcp_config_path, "mcp.json")
         self.assertEqual(settings.mcp_request_timeout_seconds, 3.5)
@@ -58,6 +62,18 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sandbox_docker_image, "python:3.12-slim")
         self.assertEqual(settings.sandbox_command_timeout_seconds, 7.5)
         self.assertEqual(settings.sandbox_workspace_parent, "/tmp/agent-workspaces")
+
+    def test_rejects_overlapping_chunks_larger_than_each_chunk(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rag_chunk_overlap"):
+            Settings(rag_chunk_size=100, rag_chunk_overlap=100)
+
+    def test_rejects_unknown_storage_backend(self) -> None:
+        with self.assertRaisesRegex(ValueError, "session_repository"):
+            Settings(session_repository="redis")
+
+    def test_requires_mcp_config_when_mcp_is_enabled(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mcp_config_path"):
+            Settings(mcp_enabled=True, mcp_config_path=None)
 
 
 if __name__ == "__main__":

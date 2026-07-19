@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any, Callable, Optional
 
 from ai_agent_platform.agents.coding.models import (
     MAX_NODE_RETRIES,
     AgentRoute,
+    AgentRunMetrics,
     AnswerRoute,
     CodingAgentState,
     PlanRoute,
@@ -235,6 +237,34 @@ def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
             for call in state.get("tool_calls", [])
         ],
     }
+
+
+def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
+    started_at = state.get("started_at")
+    elapsed_ms = (
+        int((perf_counter() - started_at) * 1000)
+        if isinstance(started_at, (int, float))
+        else 0
+    )
+    tool_results = state.get("tool_results", [])
+    errors = state.get("errors", [])
+    return AgentRunMetrics(
+        elapsed_ms=max(0, elapsed_ms),
+        node_count=len(state.get("trace", [])),
+        tool_call_count=len(state.get("tool_calls", [])),
+        successful_tool_call_count=sum(
+            1 for result in tool_results if result.get("ok")
+        ),
+        retry_count=sum(
+            1
+            for error in errors
+            if int(error.get("attempt", 1)) < int(error.get("max_attempts", 1))
+        ),
+        error_count=len(errors),
+        recovered_error_count=sum(
+            1 for error in errors if error.get("recovered", False)
+        ),
+    )
 
 
 def append_trace(

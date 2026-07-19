@@ -8,7 +8,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import MetricsRegistry, Settings
 from ai_agent_platform.integrations import LLMClient, LLMProviderError
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import ChatStreamRequest
@@ -22,6 +22,7 @@ def create_chat_router(
     session_service: SessionService,
     llm_client: LLMClient,
     settings: Settings,
+    metrics: MetricsRegistry,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -45,6 +46,7 @@ def create_chat_router(
                 session_service=session_service,
                 llm_client=llm_client,
                 settings=settings,
+                metrics=metrics,
             ),
             media_type="text/event-stream",
             headers={
@@ -64,6 +66,7 @@ def chat_stream_events(
     session_service: SessionService,
     llm_client: LLMClient,
     settings: Settings,
+    metrics: MetricsRegistry,
 ):
     started_at = perf_counter()
     provider = request.provider or settings.llm_provider
@@ -71,6 +74,7 @@ def chat_stream_events(
     answer_parts: list[str] = []
     latest_input_tokens = 0
     latest_output_tokens = 0
+    metrics.increment("chat_streams_started_total")
 
     logger.info(
         "chat stream started",
@@ -135,6 +139,9 @@ def chat_stream_events(
             )
 
         elapsed_ms = int((perf_counter() - started_at) * 1000)
+        metrics.increment("chat_streams_completed_total")
+        metrics.increment("llm_input_tokens_total", latest_input_tokens)
+        metrics.increment("llm_output_tokens_total", latest_output_tokens)
         logger.info(
             "chat stream completed",
             extra={
@@ -157,6 +164,8 @@ def chat_stream_events(
             },
         )
     except LLMProviderError as exc:
+        metrics.increment("chat_streams_failed_total")
+        metrics.increment("llm_provider_errors_total")
         logger.warning(
             "chat stream provider error",
             extra={
@@ -177,6 +186,7 @@ def chat_stream_events(
             },
         )
     except Exception:
+        metrics.increment("chat_streams_failed_total")
         logger.exception(
             "chat stream unexpected error",
             extra={
@@ -192,6 +202,11 @@ def chat_stream_events(
                 "message": "chat stream failed",
                 "retryable": False,
             },
+        )
+    finally:
+        metrics.observe_ms(
+            "chat_stream_duration_ms",
+            int((perf_counter() - started_at) * 1000),
         )
 
 
