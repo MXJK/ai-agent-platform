@@ -1,4 +1,5 @@
 from .agent import (
+    AgentChangeSummaryResponse,
     AgentRunRequest,
     AgentRunEventsResponse,
     AgentRunMetricsResponse,
@@ -26,6 +27,7 @@ from .summary import SessionSummaryResponse
 
 __all__ = [
     "AddMessageRequest",
+    "AgentChangeSummaryResponse",
     "AgentRunRequest",
     "AgentRunEventsResponse",
     "AgentRunMetricsResponse",

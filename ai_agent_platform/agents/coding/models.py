@@ -38,11 +38,22 @@ class CodingAgentState(TypedDict, total=False):
     planner_source: str
     rag_context: list[RetrievedDocument]
     tool_calls: list[ToolCall]
+    analysis_tool_calls: list[ToolCall]
+    change_tool_calls: list[ToolCall]
+    validation_tool_calls: list[ToolCall]
+    repair_tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
+    validation_results: list[dict[str, Any]]
+    validation_history: list[dict[str, Any]]
+    artifacts: list[dict[str, Any]]
+    changed_files: list[str]
+    change_status: str
+    change_iteration: int
     answer: str
     trace: list[dict[str, Any]]
     started_at: float
     review_decision: dict[str, Any]
+    repair_review_decision: dict[str, Any]
     approval_required_tools: list[dict[str, Any]]
     errors: list[dict[str, Any]]
 
@@ -52,6 +63,12 @@ PlanRoute = Literal["review_tool_plan", "inspect_repository"]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
 RetrievalRoute = Literal["plan_tools", "handle_error"]
 AnswerRoute = Literal["handle_error", "end"]
+InspectionRoute = Literal[
+    "execute_changes", "validate_changes", "collect_artifacts", "compose_answer"
+]
+ValidationRoute = Literal["review_repair_plan", "collect_artifacts"]
+RepairReviewRoute = Literal["execute_changes", "collect_artifacts"]
+ChangeExecutionRoute = Literal["validate_changes", "collect_artifacts"]
 AgentRunStatus = Literal["queued", "running", "waiting_approval", "completed", "failed"]
 MAX_NODE_RETRIES = 2
 
@@ -65,6 +82,17 @@ class AgentRunMetrics:
     retry_count: int = 0
     error_count: int = 0
     recovered_error_count: int = 0
+    change_iteration_count: int = 0
+    changed_file_count: int = 0
+
+
+@dataclass(frozen=True)
+class AgentChangeSummary:
+    status: str = "not_requested"
+    iteration_count: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    validation_command_count: int = 0
+    validation_passed: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +114,8 @@ class AgentRunResult:
     trace: list[dict[str, Any]]
     errors: list[dict[str, Any]] = field(default_factory=list)
     metrics: AgentRunMetrics = field(default_factory=AgentRunMetrics)
+    change_summary: AgentChangeSummary = field(default_factory=AgentChangeSummary)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
     pending_approval: Optional[dict[str, Any]] = None
 
 
@@ -135,6 +165,13 @@ class AgentPlanner(Protocol):
         ...
 
     def plan_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        ...
+
+    def plan_repair_tool_calls(
         self,
         state: CodingAgentState,
         tool_specs: list[ToolSpec],

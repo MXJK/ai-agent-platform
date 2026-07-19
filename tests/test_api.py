@@ -663,6 +663,7 @@ class APITests(unittest.TestCase):
             self.assertTrue(large_payload["ok"])
             self.assertTrue(large_payload["output_truncated"])
             self.assertIn("truncated_output_preview", large_payload["result"])
+            self.assertNotIn("content", large_payload["result"])
 
     def test_indexes_repository_files_and_skips_unchanged_files(self) -> None:
         with TemporaryDirectory() as temp_dir:

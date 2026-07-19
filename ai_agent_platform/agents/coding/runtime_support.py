@@ -7,14 +7,20 @@ from typing import Any, Callable, Optional
 
 from ai_agent_platform.agents.coding.models import (
     MAX_NODE_RETRIES,
+    AgentChangeSummary,
     AgentRoute,
     AgentRunMetrics,
     AnswerRoute,
     CodingAgentState,
+    ChangeExecutionRoute,
+    InspectionRoute,
     PlanRoute,
+    RepairReviewRoute,
     RetrievalRoute,
     ReviewRoute,
+    ValidationRoute,
 )
+from ai_agent_platform.agents.coding.change_loop import SANDBOX_LIFECYCLE_TOOLS
 from ai_agent_platform.integrations import (
     RAGConfigurationError,
     RAGProviderError,
@@ -34,6 +40,11 @@ def next_nodes(snapshot: Any) -> list[str]:
     if snapshot is None:
         return []
     return [str(node) for node in snapshot.next]
+
+
+def waiting_node(snapshot: Any) -> Optional[str]:
+    nodes = next_nodes(snapshot)
+    return nodes[0] if nodes else latest_trace_node(snapshot)
 
 
 def pending_approval(
@@ -210,6 +221,36 @@ def route_after_tool_plan_review(state: CodingAgentState) -> ReviewRoute:
     return "inspect_repository" if decision.get("approved") else "compose_answer"
 
 
+def route_after_inspection(state: CodingAgentState) -> InspectionRoute:
+    if state.get("change_tool_calls"):
+        return "execute_changes"
+    if state.get("validation_tool_calls"):
+        return "validate_changes"
+    if any(
+        call.name in SANDBOX_LIFECYCLE_TOOLS
+        for call in state.get("tool_calls", [])
+    ):
+        return "collect_artifacts"
+    return "compose_answer"
+
+
+def route_after_change_execution(state: CodingAgentState) -> ChangeExecutionRoute:
+    return (
+        "validate_changes"
+        if state.get("validation_tool_calls")
+        else "collect_artifacts"
+    )
+
+
+def route_after_validation(state: CodingAgentState) -> ValidationRoute:
+    return "review_repair_plan" if state.get("repair_tool_calls") else "collect_artifacts"
+
+
+def route_after_repair_review(state: CodingAgentState) -> RepairReviewRoute:
+    decision = state.get("repair_review_decision", {})
+    return "execute_changes" if decision.get("approved") else "collect_artifacts"
+
+
 def route_after_answer_composition(state: CodingAgentState) -> AnswerRoute:
     return "handle_error" if unresolved_errors(state) else "end"
 
@@ -263,6 +304,25 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
         error_count=len(errors),
         recovered_error_count=sum(
             1 for error in errors if error.get("recovered", False)
+        ),
+        change_iteration_count=state.get("change_iteration", 0),
+        changed_file_count=len(state.get("changed_files", [])),
+    )
+
+
+def build_change_summary(state: CodingAgentState) -> AgentChangeSummary:
+    validations = state.get("validation_results", [])
+    return AgentChangeSummary(
+        status=state.get("change_status", "not_requested"),
+        iteration_count=state.get("change_iteration", 0),
+        changed_files=list(state.get("changed_files", [])),
+        validation_command_count=len(validations),
+        validation_passed=bool(validations)
+        and all(
+            result.get("ok")
+            and isinstance(result.get("result"), dict)
+            and result["result"].get("exit_code") == 0
+            for result in validations
         ),
     )
 

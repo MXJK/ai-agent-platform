@@ -12,9 +12,14 @@ from ai_agent_platform.agents.coding.formatting import (
     format_answer,
     format_error_answer,
 )
+from ai_agent_platform.agents.coding.change_loop import (
+    ChangeLoopExecutor,
+    partition_tool_calls,
+)
 from ai_agent_platform.agents.coding.models import (
     CODING_AGENT_OBJECTIVE,
     CODING_AGENT_ROLE,
+    AgentChangeSummary,
     AgentPlanner,
     AgentRunInvalidStateError,
     AgentRunMetrics,
@@ -36,6 +41,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_errors as _append_errors,
     append_trace as _append_trace,
     build_repository_query as _build_repository_query,
+    build_change_summary as _build_change_summary,
     build_run_metrics as _build_run_metrics,
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
     checkpoint_id as _checkpoint_id,
@@ -48,22 +54,24 @@ from ai_agent_platform.agents.coding.runtime_support import (
     pending_approval as _pending_approval,
     route_after_answer_composition as _route_after_answer_composition,
     route_after_classification as _route_after_classification,
+    route_after_change_execution as _route_after_change_execution,
+    route_after_inspection as _route_after_inspection,
+    route_after_repair_review as _route_after_repair_review,
     route_after_retrieval as _route_after_retrieval,
     route_after_tool_plan_review as _route_after_tool_plan_review,
     route_after_tool_planning as _route_after_tool_planning,
+    route_after_validation as _route_after_validation,
     run_with_retries as _run_with_retries,
     snapshot_errors as _snapshot_errors,
     snapshot_trace as _snapshot_trace,
     unresolved_errors as _unresolved_errors,
+    waiting_node as _waiting_node,
 )
 from ai_agent_platform.agents.coding.text import unique
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.domain import Message
 from ai_agent_platform.integrations import RAGService
-from ai_agent_platform.integrations.tools import (
-    ToolExecutionContext,
-    ToolRegistry,
-)
+from ai_agent_platform.integrations.tools import ToolRegistry
 
 
 class CodingAgentRuntime:
@@ -83,6 +91,10 @@ class CodingAgentRuntime:
         self._checkpointer = checkpointer or InMemorySaver()
         self._run_store = run_store or InMemoryAgentRunStore()
         self._planner = planner or RuleBasedAgentPlanner()
+        self._change_loop = ChangeLoopExecutor(
+            tools=self._tools,
+            planner=self._planner,
+        )
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
 
@@ -127,6 +139,10 @@ class CodingAgentRuntime:
                     ],
                     "trace": [],
                     "errors": [],
+                    "artifacts": [],
+                    "change_iteration": 0,
+                    "changed_files": [],
+                    "validation_history": [],
                     "started_at": perf_counter(),
                 },
                 config,
@@ -172,7 +188,7 @@ class CodingAgentRuntime:
                     repository_id=repository_id,
                     status="waiting_approval",
                     checkpoint_id=result.checkpoint_id,
-                    latest_node="review_tool_plan",
+                    latest_node=_waiting_node(snapshot),
                     next_nodes=_next_nodes(snapshot),
                     trace=result.trace,
                     result=result,
@@ -286,7 +302,7 @@ class CodingAgentRuntime:
                     repository_id=record.repository_id,
                     status="waiting_approval",
                     checkpoint_id=result.checkpoint_id,
-                    latest_node="review_tool_plan",
+                    latest_node=_waiting_node(snapshot),
                     next_nodes=_next_nodes(snapshot),
                     trace=result.trace,
                     result=result,
@@ -351,6 +367,8 @@ class CodingAgentRuntime:
             trace=state.get("trace", []),
             errors=state.get("errors", []),
             metrics=_build_run_metrics(state),
+            change_summary=_build_change_summary(state),
+            artifacts=state.get("artifacts", []),
             pending_approval=pending_approval,
         )
 
@@ -374,6 +392,13 @@ class CodingAgentRuntime:
         workflow.add_node("plan_tools", self._plan_tools)
         workflow.add_node("review_tool_plan", self._review_tool_plan)
         workflow.add_node("inspect_repository", self._inspect_repository)
+        workflow.add_node("execute_changes", self._change_loop.execute_changes)
+        workflow.add_node("validate_changes", self._change_loop.validate_changes)
+        workflow.add_node(
+            "review_repair_plan",
+            self._change_loop.review_repair_plan,
+        )
+        workflow.add_node("collect_artifacts", self._change_loop.collect_artifacts)
         workflow.add_node("compose_answer", self._compose_answer)
         workflow.add_node("handle_error", self._handle_error)
         workflow.add_node("compose_error_answer", self._compose_error_answer)
@@ -411,7 +436,41 @@ class CodingAgentRuntime:
                 "compose_answer": "compose_answer",
             },
         )
-        workflow.add_edge("inspect_repository", "compose_answer")
+        workflow.add_conditional_edges(
+            "inspect_repository",
+            _route_after_inspection,
+            {
+                "execute_changes": "execute_changes",
+                "validate_changes": "validate_changes",
+                "collect_artifacts": "collect_artifacts",
+                "compose_answer": "compose_answer",
+            },
+        )
+        workflow.add_conditional_edges(
+            "execute_changes",
+            _route_after_change_execution,
+            {
+                "validate_changes": "validate_changes",
+                "collect_artifacts": "collect_artifacts",
+            },
+        )
+        workflow.add_conditional_edges(
+            "validate_changes",
+            _route_after_validation,
+            {
+                "review_repair_plan": "review_repair_plan",
+                "collect_artifacts": "collect_artifacts",
+            },
+        )
+        workflow.add_conditional_edges(
+            "review_repair_plan",
+            _route_after_repair_review,
+            {
+                "execute_changes": "execute_changes",
+                "collect_artifacts": "collect_artifacts",
+            },
+        )
+        workflow.add_edge("collect_artifacts", "compose_answer")
         workflow.add_conditional_edges(
             "compose_answer",
             _route_after_answer_composition,
@@ -512,11 +571,18 @@ class CodingAgentRuntime:
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         tool_specs = self._tools.list_specs()
         tool_calls = self._planner.plan_tool_calls(state, tool_specs)
+        analysis_calls, change_calls, validation_calls = partition_tool_calls(
+            tool_calls
+        )
         approval_required_tools = collect_approval_required_tools(
             tool_calls, tool_specs
         )
         return {
             "tool_calls": tool_calls,
+            "analysis_tool_calls": analysis_calls,
+            "change_tool_calls": change_calls,
+            "validation_tool_calls": validation_calls,
+            "repair_tool_calls": [],
             "approval_required_tools": approval_required_tools,
             "trace": _append_trace(
                 state,
@@ -525,6 +591,8 @@ class CodingAgentRuntime:
                 output={
                     "available_tool_count": len(tool_specs),
                     "planned_tools": [tool_call.name for tool_call in tool_calls],
+                    "change_tools": [call.name for call in change_calls],
+                    "validation_tools": [call.name for call in validation_calls],
                     "planner_source": state.get("planner_source", "unknown"),
                     "approval_required_tools": [
                         item["name"] for item in approval_required_tools
@@ -558,16 +626,10 @@ class CodingAgentRuntime:
         }
 
     def _inspect_repository(self, state: CodingAgentState) -> CodingAgentState:
-        tool_results: list[dict[str, Any]] = []
-        context = ToolExecutionContext(
-            conversation_id=state["conversation_id"],
-            repository_id=state["repository_id"],
-            run_id=state.get("run_id"),
+        tool_results = self._change_loop.execute_tool_calls(
+            state,
+            state.get("analysis_tool_calls", state.get("tool_calls", [])),
         )
-        for tool_call in state.get("tool_calls", []):
-            tool_results.append(
-                self._tools.execute(tool_call, context=context).to_response()
-            )
 
         return {
             "tool_results": tool_results,
@@ -581,6 +643,7 @@ class CodingAgentRuntime:
                 },
             ),
         }
+
 
     def _compose_answer(self, state: CodingAgentState) -> CodingAgentState:
         answer, errors, attempts = _run_with_retries(

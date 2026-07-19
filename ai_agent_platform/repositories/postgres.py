@@ -7,6 +7,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from ai_agent_platform.agents.coding.models import (
+    AgentChangeSummary,
     AgentRunMetrics,
     AgentRunRecord,
     AgentRunResult,
@@ -774,6 +775,10 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
         payload["metrics"] = AgentRunMetrics(**metrics)
+    change_summary = payload.get("change_summary")
+    if isinstance(change_summary, dict):
+        payload["change_summary"] = AgentChangeSummary(**change_summary)
+    payload.setdefault("artifacts", [])
     payload.setdefault("errors", [])
     return AgentRunResult(**payload)
 

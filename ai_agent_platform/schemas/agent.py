@@ -45,6 +45,16 @@ class AgentRunMetricsResponse(BaseModel):
     retry_count: int
     error_count: int
     recovered_error_count: int
+    change_iteration_count: int
+    changed_file_count: int
+
+
+class AgentChangeSummaryResponse(BaseModel):
+    status: str
+    iteration_count: int
+    changed_files: list[str]
+    validation_command_count: int
+    validation_passed: bool
 
 
 class AgentRunResponse(BaseModel):
@@ -65,6 +75,8 @@ class AgentRunResponse(BaseModel):
     trace: list[AgentTraceStepResponse]
     errors: list[dict[str, Any]]
     metrics: AgentRunMetricsResponse
+    change_summary: AgentChangeSummaryResponse
+    artifacts: list[dict[str, Any]]
     pending_approval: Optional[dict[str, Any]]
 
     @classmethod
@@ -113,7 +125,19 @@ class AgentRunResponse(BaseModel):
                 retry_count=result.metrics.retry_count,
                 error_count=result.metrics.error_count,
                 recovered_error_count=result.metrics.recovered_error_count,
+                change_iteration_count=result.metrics.change_iteration_count,
+                changed_file_count=result.metrics.changed_file_count,
             ),
+            change_summary=AgentChangeSummaryResponse(
+                status=result.change_summary.status,
+                iteration_count=result.change_summary.iteration_count,
+                changed_files=result.change_summary.changed_files,
+                validation_command_count=(
+                    result.change_summary.validation_command_count
+                ),
+                validation_passed=result.change_summary.validation_passed,
+            ),
+            artifacts=result.artifacts,
             pending_approval=result.pending_approval,
         )
 
@@ -231,6 +255,9 @@ class AgentRunEventsResponse(BaseModel):
             )
         elif record.status == "completed":
             answer = record.result.answer if record.result is not None else ""
+            change_summary = (
+                record.result.change_summary if record.result is not None else None
+            )
             events.append(
                 AgentRunEventResponse(
                     sequence=len(events) + 1,
@@ -238,7 +265,17 @@ class AgentRunEventsResponse(BaseModel):
                     status=record.status,
                     node=record.latest_node,
                     summary="Agent run completed.",
-                    output={"answer_chars": len(answer)},
+                    output={
+                        "answer_chars": len(answer),
+                        "change_status": (
+                            change_summary.status if change_summary is not None else None
+                        ),
+                        "changed_files": (
+                            change_summary.changed_files
+                            if change_summary is not None
+                            else []
+                        ),
+                    },
                 )
             )
         elif record.status == "failed":

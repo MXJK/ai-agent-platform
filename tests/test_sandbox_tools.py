@@ -141,6 +141,35 @@ class SandboxToolTests(unittest.TestCase):
             )
             self.assertIn("+value = 'new'", diff_result.result["diff"])
 
+    def test_large_command_output_is_capped_without_losing_exit_code(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            registry = create_coding_tool_registry(root_path=root)
+            context = ToolExecutionContext(
+                conversation_id="sess_1",
+                repository_id="repo_main",
+                run_id="run_large_output",
+            )
+            output_script = "print('x' * 25000)"
+            command = (
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(output_script)}"
+            )
+
+            result = registry.execute(
+                ToolCall(
+                    name="sandbox.run_command",
+                    arguments={"command": command},
+                ),
+                context=context,
+            )
+
+            self.assertTrue(result.ok)
+            self.assertTrue(result.output_truncated)
+            self.assertEqual(result.result["exit_code"], 0)
+            self.assertNotIn("stdout", result.result)
+            self.assertIn("truncated_output_preview", result.result)
+
 
 if __name__ == "__main__":
     unittest.main()

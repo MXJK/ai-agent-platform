@@ -12,6 +12,7 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
     LLMCompletionClient,
 )
+from ai_agent_platform.agents.coding.change_loop import SANDBOX_MUTATION_TOOLS
 from ai_agent_platform.agents.coding.text import (
     extract_paths,
     extract_symbols,
@@ -43,6 +44,13 @@ class RuleBasedAgentPlanner:
         tool_specs: list[ToolSpec],
     ) -> list[ToolCall]:
         return plan_rule_based_tool_calls(state, tool_specs)
+
+    def plan_repair_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        return []
 
 
 class LLMStructuredAgentPlanner:
@@ -91,6 +99,21 @@ class LLMStructuredAgentPlanner:
             return calls
         except Exception:
             return self._fallback.plan_tool_calls(state, tool_specs)
+
+    def plan_repair_tool_calls(
+        self,
+        state: CodingAgentState,
+        tool_specs: list[ToolSpec],
+    ) -> list[ToolCall]:
+        try:
+            body = json_object_from_llm(
+                self._llm_client.complete(repair_planning_prompt(state, tool_specs)).text
+            )
+            calls = tool_calls_from_structured_plan(body, state, tool_specs)
+            return [call for call in calls if call.name in SANDBOX_MUTATION_TOOLS]
+        except Exception:
+            fallback = getattr(self._fallback, "plan_repair_tool_calls", None)
+            return fallback(state, tool_specs) if callable(fallback) else []
 
 
 def classify_intent(text: str) -> tuple[str, str]:
@@ -177,6 +200,43 @@ def tool_planning_prompt(
         "Return only one JSON object: {\"tool_calls\": [{\"name\": string, "
         "\"arguments\": object}]}. Use only available tool names. Prefer "
         "read-only tools unless the intent needs change planning.\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def repair_planning_prompt(
+    state: CodingAgentState,
+    tool_specs: list[ToolSpec],
+) -> str:
+    mutation_tools = [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "input_schema": spec.input_schema,
+        }
+        for spec in tool_specs
+        if spec.name in SANDBOX_MUTATION_TOOLS
+    ]
+    failed_validations = [
+        {
+            "name": result.get("name"),
+            "error": result.get("error"),
+            "output": result.get("result"),
+        }
+        for result in state.get("validation_results", [])
+    ]
+    payload = {
+        "user_input": state["user_input"],
+        "focus_files": state.get("focus_files", []),
+        "iteration": state.get("change_iteration", 0),
+        "failed_validations": failed_validations,
+        "available_mutation_tools": mutation_tools,
+    }
+    return (
+        "You are repairing a sandboxed code change after validation failed. "
+        "Return only one JSON object: {\"tool_calls\": [{\"name\": string, "
+        "\"arguments\": object}]}. Use only the available mutation tools, make "
+        "the smallest repair, and do not include test commands or external tools.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
 

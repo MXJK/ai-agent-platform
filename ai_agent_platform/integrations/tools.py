@@ -335,7 +335,19 @@ def _truncate_output(result: Any, *, max_chars: int) -> tuple[Any, bool]:
     if len(encoded) <= max_chars:
         return result, False
     if isinstance(result, dict):
-        truncated = dict(result)
-        truncated["truncated_output_preview"] = encoded[:max_chars]
-        return truncated, True
+        metadata = {
+            name: value
+            for name, value in result.items()
+            if value is None or isinstance(value, (bool, int, float))
+        }
+        for name in ("changed_files", "command"):
+            value = result.get(name)
+            if isinstance(value, list):
+                candidate = json.dumps(value, ensure_ascii=False)
+                if len(candidate) <= max_chars // 2:
+                    metadata[name] = value
+        metadata_size = len(json.dumps(metadata, ensure_ascii=False))
+        preview_size = max(0, max_chars - metadata_size - 40)
+        metadata["truncated_output_preview"] = encoded[:preview_size]
+        return metadata, True
     return {"truncated_output_preview": encoded[:max_chars]}, True

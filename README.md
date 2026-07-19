@@ -23,7 +23,7 @@ ai_agent_platform/
   services/session_service.py # Session and message use cases
   agents/
     coding_agent.py          # LangGraph runtime and node orchestration
-    coding/                  # State, planners, tools, formatting, run stores
+    coding/                  # State, planners, change loop, tools, formatting
   agents/game_agent.py       # Legacy rule-based demo runtime
   integrations/
     llm.py                   # LLM provider adapters and streaming client
@@ -289,12 +289,19 @@ itself is designed as a small OpenHands/Codex-style backend loop:
    the model output cannot be validated. Planned calls can include local
    repository search/read tools, file/symbol location, code explanation, change
    planning, bug investigation, and test design.
-4. pause for human approval when `change_planning` would execute a planned tool
-   sequence.
-5. retry recoverable RAG/answer-generation failures, collect structured
+4. pause for human approval before writable Sandbox or external-side-effect
+   tools execute.
+5. when Sandbox lifecycle tools are present, separate repository inspection,
+   code mutation, validation, and artifact collection into graph nodes. Failed
+   validation can produce one bounded repair plan, which requires a second
+   human approval before another write.
+6. collect test reports and the final unified Diff in `artifacts`, with a
+   `change_summary` that reports validation status, iterations, and changed
+   files.
+7. retry recoverable RAG/answer-generation failures, collect structured
    `errors`, and route unrecoverable failures through `handle_error` and
    `compose_error_answer`.
-6. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
+8. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
    step-by-step `trace`.
 
 The first LangGraph persistence layer is now wired in with an in-memory
@@ -366,6 +373,19 @@ Writable sandbox tools use `permission_level=write_safe` and
 to execute commands through Docker with no network access, CPU and memory
 limits, and the sandbox workspace mounted at `/workspace`. The default
 `SANDBOX_MODE=local` is intended for unit tests and lightweight development.
+
+When a structured planner selects Sandbox lifecycle tools, the graph follows:
+
+```text
+inspect_repository -> execute_changes -> validate_changes
+  -> collect_artifacts -> compose_answer
+```
+
+If validation fails and the planner can propose a minimal repair, the graph
+pauses at `review_repair_plan`. Approval resumes another Sandbox mutation and
+validation cycle. The loop is capped at two mutation iterations, and the real
+repository is never modified; callers receive `test_report` and `code_diff`
+artifacts for review.
 
 The MCP provider boundary is available under `ai_agent_platform.integrations.mcp`.
 Any client that implements:

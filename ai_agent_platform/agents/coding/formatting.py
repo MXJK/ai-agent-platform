@@ -31,6 +31,12 @@ def format_answer(state: CodingAgentState) -> str:
         lines.append("我已停止执行后续工具；可以根据反馈调整目标后重新发起 run。")
         return "\n".join(lines)
 
+    repair_review_decision = state.get("repair_review_decision", {})
+    if repair_review_decision and not repair_review_decision.get("approved"):
+        feedback = repair_review_decision.get("feedback") or "未提供补充说明"
+        lines.append("测试失败后的修复方案未获批准，已停止第二次代码修改。")
+        lines.append(f"修复审批反馈：{feedback}")
+
     citations = state.get("rag_context", [])
     if citations:
         lines.append("我检索到的代码上下文：")
@@ -49,10 +55,20 @@ def format_answer(state: CodingAgentState) -> str:
     if tool_results:
         lines.append("工具复盘：")
         for item in tool_results:
-            if item.get("ok"):
-                lines.append(f"- {item['name']}: {item['result']}")
-            else:
-                lines.append(f"- {item['name']}: failed, {item.get('error')}")
+            lines.append(_tool_result_summary(item))
+
+    change_status = state.get("change_status")
+    if change_status:
+        lines.append(
+            "代码修改闭环："
+            f"status={change_status}，"
+            f"iterations={state.get('change_iteration', 0)}，"
+            f"changed_files={state.get('changed_files', [])}。"
+        )
+        lines.append(
+            "变更产物已写入 `artifacts`，"
+            "其中包含测试报告和可人工审查的统一 Diff。"
+        )
 
     if citations:
         lines.append(
@@ -105,3 +121,23 @@ def citation_symbols(citation: RetrievedDocument) -> str:
     if not citation.symbols:
         return ""
     return "symbols=" + ",".join(citation.symbols[:3]) + " "
+
+
+def _tool_result_summary(item: dict[str, object]) -> str:
+    name = str(item.get("name", "unknown"))
+    if not item.get("ok"):
+        return f"- {name}: failed, {item.get('error')}"
+    result = item.get("result")
+    if name == "sandbox.run_command" and isinstance(result, dict):
+        return (
+            f"- {name}: exit_code={result.get('exit_code')} "
+            f"command={result.get('command')}"
+        )
+    if name == "sandbox.git_diff" and isinstance(result, dict):
+        return (
+            f"- {name}: changed_files={result.get('changed_files', [])} "
+            f"truncated={result.get('truncated', False)}"
+        )
+    if name == "sandbox.workspace_status" and isinstance(result, dict):
+        return f"- {name}: changed_files={result.get('changed_files', [])}"
+    return f"- {name}: {result}"
