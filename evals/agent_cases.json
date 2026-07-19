@@ -2,8 +2,8 @@
   "repository_id": "repo_main",
   "fixtures": [
     {
-      "filename": "ai_agent_platform/api/router.py",
-      "content": "from fastapi.responses import StreamingResponse\n\n\ndef chat_stream(request: ChatStreamRequest) -> StreamingResponse:\n    \"\"\"SSE chat endpoint that streams model deltas.\"\"\"\n    return StreamingResponse(_chat_stream_events(request), media_type=\"text/event-stream\")\n\n\ndef run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:\n    \"\"\"Create an asynchronous agent run and return a run id.\"\"\"\n    return agent_run_service.submit_run(request)\n"
+      "filename": "ai_agent_platform/api/routes/agent_runs.py",
+      "content": "def run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:\n    \"\"\"Create an asynchronous agent run and return a run id.\"\"\"\n    return agent_run_service.submit_run(request)\n"
     },
     {
       "filename": "ai_agent_platform/agents/coding_agent.py",
@@ -16,14 +16,14 @@
   ],
   "cases": [
     {
-      "id": "agent_locates_chat_stream",
+      "id": "agent_locates_run_agent",
       "type": "agent",
-      "message": "解释 chat_stream 接口在哪里实现",
+      "message": "解释 run_agent 接口在哪里实现",
       "expected_status": "completed",
       "expected_intent": "repo_navigation",
       "expected_tools": ["repo.search_code", "repo.read_file", "code_explainer"],
-      "expected_files": ["ai_agent_platform/api/router.py"],
-      "expected_answer_keywords": ["chat_stream", "router.py"]
+      "expected_files": ["ai_agent_platform/api/routes/agent_runs.py"],
+      "expected_answer_keywords": ["run_agent", "agent_runs.py"]
     },
     {
       "id": "agent_waits_for_change_approval",

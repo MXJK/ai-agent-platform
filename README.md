@@ -10,17 +10,21 @@ Project structure:
 ```text
 ai_agent_platform/
   main.py                    # FastAPI application entrypoint
-  api/router.py              # HTTP routes
+  api/
+    router.py                # Versioned API composition root
+    routes/                  # Resource routers: sessions, chat, runs, repos, RAG
   schemas/                   # Pydantic request and response models
   domain/models.py           # Core business entities
   repositories/memory.py     # In-memory storage boundary
   services/session_service.py # Session and message use cases
-  agents/coding_agent.py     # Repository QA and development assistant runtime
+  agents/
+    coding_agent.py          # LangGraph runtime and node orchestration
+    coding/                  # State, planners, tools, formatting, run stores
   agents/game_agent.py       # Legacy rule-based demo runtime
   integrations/
-    llm.py                   # Future LLM API client
-    rag.py                   # RAG parsing, chunking, embedding, vector search
-    tools.py                 # Future tool-calling registry
+    llm.py                   # LLM provider adapters and streaming client
+    rag/                     # RAG models, errors, factory, and service implementations
+    tools.py                 # Validated and auditable tool registry
 tests/
   test_agent.py
   test_session_service.py
@@ -44,9 +48,9 @@ Module roles:
   development assistant that classifies code questions, retrieves repository
   context, plans tool calls, and returns a trace. `game_agent.py` remains as a
   small legacy rule-based demo for the session-message exercise.
-- `integrations`: placeholders for LLM API calls, RAG retrieval, and tool
-  calling. These are separate because external systems fail, timeout, and need
-  retries/observability.
+- `integrations`: LLM APIs, RAG retrieval, MCP providers, sandbox execution, and
+  tool calling. These boundaries isolate external failures, timeouts, retries,
+  and observability from the application layer.
 
 Install dependencies:
 
@@ -407,8 +411,8 @@ curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \
 curl -X POST http://localhost:8000/api/v1/knowledge-bases/repo_main/documents \
   -H 'Content-Type: application/json' \
   -d '{
-    "filename": "ai_agent_platform/api/router.py",
-    "content": "def chat_stream(...): ...\ndef run_agent(...): ..."
+    "filename": "ai_agent_platform/api/routes/chat.py",
+    "content": "def chat_stream(...): ..."
   }'
 
 curl -X POST http://localhost:8000/api/v1/agent/runs \
@@ -416,7 +420,7 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   -d '{
     "conversation_id": "sess_xxx",
     "repository_id": "repo_main",
-    "focus_files": ["ai_agent_platform/api/router.py"],
+    "focus_files": ["ai_agent_platform/api/routes/chat.py"],
     "message": "解释 chat stream 接口在哪里实现"
   }'
 

@@ -334,12 +334,12 @@ class APITests(unittest.TestCase):
         ingest_response = self.client.post(
             "/api/v1/knowledge-bases/repo_main/documents",
             json={
-                "filename": "ai_agent_platform/api/router.py",
+                "filename": "ai_agent_platform/api/routes/chat.py",
                 "content": (
                     "def chat_stream(request: ChatStreamRequest) -> StreamingResponse:\n"
                     "    return StreamingResponse(_chat_stream_events(...))\n\n"
-                    "def run_agent(request: AgentRunRequest) -> AgentRunResponse:\n"
-                    "    result = coding_agent_runtime.run(...)\n"
+                    "def _chat_stream_events(request: ChatStreamRequest):\n"
+                    "    yield from llm_client.stream_chat(...)\n"
                 ),
             },
         )
@@ -351,7 +351,7 @@ class APITests(unittest.TestCase):
                 "conversation_id": session_id,
                 "message": "解释 chat stream 接口在哪里实现，ChatStreamRequest 是怎么进入流程的？",
                 "repository_id": "repo_main",
-                "focus_files": ["ai_agent_platform/api/router.py"],
+                "focus_files": ["ai_agent_platform/api/routes/chat.py"],
             },
         )
 
@@ -390,7 +390,7 @@ class APITests(unittest.TestCase):
         )
         self.assertTrue(result_by_name["repo.read_file"]["ok"])
         self.assertIn(
-            "def run_agent",
+            "def chat_stream",
             result_by_name["repo.read_file"]["result"]["content"],
         )
         self.assertEqual(
@@ -404,7 +404,7 @@ class APITests(unittest.TestCase):
                 "compose_answer",
             ],
         )
-        self.assertIn("ai_agent_platform/api/router.py", body["answer"])
+        self.assertIn("ai_agent_platform/api/routes/chat.py", body["answer"])
 
         self.assertEqual(status_body["run_id"], body["run_id"])
         self.assertEqual(status_body["thread_id"], body["thread_id"])
