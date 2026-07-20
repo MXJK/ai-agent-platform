@@ -5,6 +5,7 @@ from dataclasses import replace
 import hashlib
 import math
 import re
+from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
@@ -482,26 +483,29 @@ class SentenceTransformerCrossEncoderReranker:
 class InMemoryVectorStore:
     def __init__(self) -> None:
         self._rows: list[tuple[DocumentChunk, list[float]]] = []
+        self._lock = Lock()
 
     def delete_document(self, *, document_id: str) -> None:
-        self._rows = [
-            (chunk, embedding)
-            for chunk, embedding in self._rows
-            if chunk.document_id != document_id
-        ]
+        with self._lock:
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.document_id != document_id
+            ]
 
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
         embeddings: list[list[float]],
     ) -> None:
-        existing_ids = {chunk.id for chunk in chunks}
-        self._rows = [
-            (chunk, embedding)
-            for chunk, embedding in self._rows
-            if chunk.id not in existing_ids
-        ]
-        self._rows.extend(zip(chunks, embeddings))
+        with self._lock:
+            existing_ids = {chunk.id for chunk in chunks}
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.id not in existing_ids
+            ]
+            self._rows.extend(zip(chunks, embeddings))
 
     def search(
         self,
@@ -511,7 +515,9 @@ class InMemoryVectorStore:
         limit: int,
     ) -> list[RetrievedDocument]:
         scored: list[RetrievedDocument] = []
-        for chunk, embedding in self._rows:
+        with self._lock:
+            rows = list(self._rows)
+        for chunk, embedding in rows:
             if chunk.knowledge_base_id != knowledge_base_id:
                 continue
             score = _cosine_similarity(query_embedding, embedding)

@@ -17,6 +17,7 @@ ai_agent_platform/
     config.py                # Validated environment configuration
     observability.py         # JSON logging and request correlation middleware
     metrics.py               # Thread-safe counters and duration summaries
+    task_queue.py            # Bounded background task execution boundary
   schemas/                   # Pydantic request and response models
   domain/models.py           # Core business entities
   repositories/memory.py     # In-memory storage boundary
@@ -269,6 +270,26 @@ deployment can replace the registry boundary with Prometheus or OpenTelemetry.
 timeouts/limits, and RAG chunk overlap during startup. Invalid configuration
 fails before repositories, model clients, or background workers are created.
 
+## Asynchronous Tasks
+
+Agent runs and repository indexing share a bounded `TaskQueue` protocol. The
+default `InProcessTaskQueue` uses worker threads for local development, rejects
+submissions with `503` when capacity is exhausted, records per-task counters and
+durations, and drains accepted work during application shutdown. Services no
+longer depend directly on `ThreadPoolExecutor`, so a durable Redis/Celery or
+cloud-queue adapter can replace the local implementation without changing the
+HTTP or business layers.
+
+Repository indexing is asynchronous: `POST /repositories/{id}/index` returns
+`202 Accepted` and a pending `job_id`; poll
+`GET /repositories/{id}/index-jobs/{job_id}` for running counters and the final
+status. Only one index job per repository runs in a process at a time, avoiding
+concurrent writes to the same repository index.
+
+Tune the local executor with `BACKGROUND_TASK_WORKERS` and
+`BACKGROUND_TASK_QUEUE_CAPACITY`. The defaults are `4` workers and `100`
+accepted waiting tasks beyond the active workers.
+
 ## Repository QA Agent
 
 `POST /api/v1/agent/runs` is the coding-agent endpoint. It creates a background
@@ -454,6 +475,8 @@ curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \
     "exclude_patterns": [".git/**", ".venv/**", "__pycache__/**", "node_modules/**"],
     "max_file_size": 200000
   }'
+
+curl http://localhost:8000/api/v1/repositories/repo_main/index-jobs/idxjob_xxx
 
 curl -X POST http://localhost:8000/api/v1/knowledge-bases/repo_main/documents \
   -H 'Content-Type: application/json' \

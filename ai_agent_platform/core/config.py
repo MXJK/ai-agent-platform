@@ -45,6 +45,8 @@ class Settings:
     rag_reranker_provider: str = "none"
     sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_max_prompt_chars: int = 6000
+    background_task_workers: int = 4
+    background_task_queue_capacity: int = 100
     mcp_enabled: bool = False
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
@@ -89,6 +91,7 @@ class Settings:
             ("rag_chunk_size", self.rag_chunk_size),
             ("rag_recall_limit", self.rag_recall_limit),
             ("rag_max_prompt_chars", self.rag_max_prompt_chars),
+            ("background_task_workers", self.background_task_workers),
             ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
             (
                 "sandbox_command_timeout_seconds",
@@ -104,6 +107,10 @@ class Settings:
             raise ValueError("rag_chunk_overlap must be smaller than rag_chunk_size")
         if not 0.0 <= self.rag_lexical_weight <= 1.0:
             raise ValueError("rag_lexical_weight must be between 0 and 1")
+        if self.background_task_queue_capacity < 0:
+            raise ValueError(
+                "background_task_queue_capacity must be greater than or equal to 0"
+            )
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
@@ -186,6 +193,14 @@ class Settings:
             ),
             rag_max_prompt_chars=_int_env(
                 "RAG_MAX_PROMPT_CHARS", cls.rag_max_prompt_chars, dotenv
+            ),
+            background_task_workers=_int_env(
+                "BACKGROUND_TASK_WORKERS", cls.background_task_workers, dotenv
+            ),
+            background_task_queue_capacity=_int_env(
+                "BACKGROUND_TASK_QUEUE_CAPACITY",
+                cls.background_task_queue_capacity,
+                dotenv,
             ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
             mcp_config_path=_env("MCP_CONFIG_PATH", None, dotenv),

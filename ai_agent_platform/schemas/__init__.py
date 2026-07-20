@@ -21,7 +21,11 @@ from .rag import (
     RAGSearchRequest,
     RAGSearchResponse,
 )
-from .repository import RepositoryIndexRequest, RepositoryIndexResponse
+from .repository import (
+    RepositoryIndexJobResponse,
+    RepositoryIndexRequest,
+    RepositoryIndexResponse,
+)
 from .session import CreateSessionRequest, SessionResponse, SessionsResponse
 from .summary import SessionSummaryResponse
 
@@ -50,6 +54,7 @@ __all__ = [
     "RAGSearchRequest",
     "RAGSearchResponse",
     "RepositoryIndexRequest",
+    "RepositoryIndexJobResponse",
     "RepositoryIndexResponse",
     "SessionResponse",
     "SessionsResponse",

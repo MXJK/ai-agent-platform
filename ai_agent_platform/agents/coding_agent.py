@@ -243,6 +243,33 @@ class CodingAgentRuntime:
         self._run_store.save(record)
         return record
 
+    def mark_queued_run_failed(self, *, run_id: str, error: str) -> AgentRunRecord:
+        record = self.get_run(run_id)
+        if record.status != "queued":
+            return record
+        failed_record = AgentRunRecord(
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            conversation_id=record.conversation_id,
+            repository_id=record.repository_id,
+            status="failed",
+            checkpoint_id=record.checkpoint_id,
+            latest_node=record.latest_node,
+            next_nodes=[],
+            trace=record.trace,
+            error=error,
+            errors=[
+                _error_from_exception(
+                    "task_queue",
+                    RuntimeError(error),
+                    attempt=1,
+                    max_attempts=1,
+                )
+            ],
+        )
+        self._run_store.save(failed_record)
+        return failed_record
+
     def resume(
         self,
         *,

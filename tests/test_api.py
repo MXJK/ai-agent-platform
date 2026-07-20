@@ -141,6 +141,23 @@ class APITests(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"agent run {run_id} did not reach {terminal_statuses}")
 
+    def wait_for_index_job(
+        self,
+        client: TestClient,
+        repository_id: str,
+        job_id: str,
+    ) -> dict:
+        for _ in range(100):
+            response = client.get(
+                f"/api/v1/repositories/{repository_id}/index-jobs/{job_id}"
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            if body["status"] in {"completed", "completed_with_errors", "failed"}:
+                return body
+            time.sleep(0.02)
+        self.fail(f"repository index job {job_id} did not finish")
+
     def test_gets_session_summary(self) -> None:
         create_response = self.client.post(
             "/api/v1/sessions",
@@ -694,18 +711,26 @@ class APITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(first_response.status_code, 201)
-            first_body = first_response.json()
-            self.assertEqual(first_body["repository_id"], "repo_main")
+            self.assertEqual(first_response.status_code, 202)
+            submitted_body = first_response.json()
+            self.assertTrue(
+                first_response.headers["location"].endswith(
+                    f"/index-jobs/{submitted_body['job_id']}"
+                )
+            )
+            self.assertEqual(submitted_body["repository_id"], "repo_main")
+            self.assertEqual(submitted_body["status"], "pending")
+            first_body = self.wait_for_index_job(
+                self.client,
+                "repo_main",
+                submitted_body["job_id"],
+            )
             self.assertEqual(first_body["status"], "completed")
             self.assertEqual(first_body["scanned_files"], 2)
             self.assertEqual(first_body["indexed_files"], 2)
             self.assertEqual(first_body["skipped_files"], 0)
             self.assertEqual(first_body["failed_files"], 0)
-            self.assertEqual(
-                first_body["indexed_paths"],
-                ["README.md", "app.py"],
-            )
+            self.assertIsNotNone(first_body["completed_at"])
 
             search_response = self.client.post(
                 "/api/v1/knowledge-bases/repo_main/search",
@@ -754,17 +779,31 @@ class APITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(second_response.status_code, 201)
-            second_body = second_response.json()
+            self.assertEqual(second_response.status_code, 202)
+            second_body = self.wait_for_index_job(
+                self.client,
+                "repo_main",
+                second_response.json()["job_id"],
+            )
             self.assertEqual(second_body["status"], "completed")
             self.assertEqual(second_body["scanned_files"], 2)
             self.assertEqual(second_body["indexed_files"], 0)
             self.assertEqual(second_body["skipped_files"], 2)
             self.assertEqual(second_body["failed_files"], 0)
-            self.assertEqual(
-                second_body["skipped_paths"],
-                ["README.md", "app.py"],
+
+            metrics = self.client.get("/api/v1/metrics").json()["counters"]
+            self.assertGreaterEqual(
+                metrics["background_task_repository_index_completed_total"],
+                2,
             )
+
+    def test_repository_index_job_returns_404_when_missing(self) -> None:
+        response = self.client.get(
+            "/api/v1/repositories/repo_main/index-jobs/idxjob_missing"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "index job not found")
 
     def test_agent_run_status_returns_404_for_missing_run(self) -> None:
         response = self.client.get("/api/v1/agent/runs/run_missing")

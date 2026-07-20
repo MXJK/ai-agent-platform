@@ -17,6 +17,7 @@ from ai_agent_platform.agents import (
 )
 from ai_agent_platform.api import create_api_router
 from ai_agent_platform.core import (
+    InProcessTaskQueue,
     MetricsRegistry,
     RequestObservabilityMiddleware,
     Settings,
@@ -53,6 +54,11 @@ def create_app(
     settings = settings or Settings.from_env()
     configure_logging(level=settings.log_level, log_format=settings.log_format)
     metrics = MetricsRegistry()
+    task_queue = InProcessTaskQueue(
+        max_workers=settings.background_task_workers,
+        max_queue_size=settings.background_task_queue_capacity,
+        metrics=metrics,
+    )
 
     repository = _create_session_repository(settings)
     agent_runtime = GameAgentRuntime()
@@ -82,6 +88,7 @@ def create_app(
     repository_indexing_service = RepositoryIndexingService(
         rag_service=rag_service,
         index_store=_create_repository_index_store(settings),
+        task_queue=task_queue,
     )
     session_service = SessionService(
         repository=repository,
@@ -91,6 +98,7 @@ def create_app(
         runtime=coding_agent_runtime,
         session_service=session_service,
         metrics=metrics,
+        task_queue=task_queue,
     )
 
     @asynccontextmanager
@@ -99,6 +107,8 @@ def create_app(
             yield
         finally:
             app.state.agent_run_service.close()
+            app.state.repository_indexing_service.close()
+            app.state.task_queue.close()
             if close_checkpointer is not None:
                 close_checkpointer()
             for provider in app.state.mcp_providers:
@@ -110,6 +120,8 @@ def create_app(
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
+    app.state.repository_indexing_service = repository_indexing_service
+    app.state.task_queue = task_queue
     static_dir = Path(__file__).parent / "static"
 
     app.include_router(

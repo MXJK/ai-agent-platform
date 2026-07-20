@@ -25,6 +25,8 @@ class SettingsTests(unittest.TestCase):
                 "LANGGRAPH_CHECKPOINTER": "postgres",
                 "RAG_VECTOR_STORE": "qdrant",
                 "RAG_LEXICAL_WEIGHT": "0.45",
+                "BACKGROUND_TASK_WORKERS": "6",
+                "BACKGROUND_TASK_QUEUE_CAPACITY": "25",
                 "QDRANT_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "qdrant-secret",
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
@@ -52,6 +54,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.langgraph_checkpointer, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.rag_lexical_weight, 0.45)
+        self.assertEqual(settings.background_task_workers, 6)
+        self.assertEqual(settings.background_task_queue_capacity, 25)
         self.assertEqual(settings.qdrant_url, "http://localhost:6333")
         self.assertEqual(settings.qdrant_api_key, "qdrant-secret")
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
@@ -76,6 +80,10 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_rag_lexical_weight(self) -> None:
         with self.assertRaisesRegex(ValueError, "rag_lexical_weight"):
             Settings(rag_lexical_weight=1.1)
+
+    def test_rejects_invalid_background_task_capacity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "background_task_queue_capacity"):
+            Settings(background_task_queue_capacity=-1)
 
     def test_requires_mcp_config_when_mcp_is_enabled(self) -> None:
         with self.assertRaisesRegex(ValueError, "mcp_config_path"):

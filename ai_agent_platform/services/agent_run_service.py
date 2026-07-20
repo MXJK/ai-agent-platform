@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import logging
 from time import perf_counter
 from typing import Optional
@@ -12,7 +11,13 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunResult,
     CodingAgentRuntime,
 )
-from ai_agent_platform.core import MetricsRegistry, log_context
+from ai_agent_platform.core import (
+    InProcessTaskQueue,
+    MetricsRegistry,
+    TaskQueue,
+    TaskQueueError,
+    log_context,
+)
 from ai_agent_platform.services.session_service import SessionService
 
 
@@ -29,13 +34,15 @@ class AgentRunService:
         session_service: SessionService,
         max_workers: int = 4,
         metrics: MetricsRegistry | None = None,
+        task_queue: TaskQueue | None = None,
     ) -> None:
         self._runtime = runtime
         self._session_service = session_service
         self._metrics = metrics or MetricsRegistry()
-        self._executor = ThreadPoolExecutor(
+        self._owns_task_queue = task_queue is None
+        self._task_queue = task_queue or InProcessTaskQueue(
             max_workers=max_workers,
-            thread_name_prefix="agent-run",
+            metrics=self._metrics,
         )
 
     def submit_run(
@@ -56,16 +63,22 @@ class AgentRunService:
             conversation_id=conversation_id,
             repository_id=repository_id,
         )
+        try:
+            self._task_queue.submit(
+                "agent_run",
+                self._execute_run,
+                run_id=record.run_id,
+                conversation_id=conversation_id,
+                message=message,
+                history=history,
+                repository_id=repository_id,
+                focus_files=focus_files or [],
+            )
+        except TaskQueueError as exc:
+            self._metrics.increment("agent_runs_rejected_total")
+            self._mark_queued_run_failed(record.run_id, str(exc))
+            raise
         self._metrics.increment("agent_runs_submitted_total")
-        self._executor.submit(
-            self._execute_run,
-            run_id=record.run_id,
-            conversation_id=conversation_id,
-            message=message,
-            history=history,
-            repository_id=repository_id,
-            focus_files=focus_files or [],
-        )
         return record
 
     def resume_run(
@@ -78,20 +91,31 @@ class AgentRunService:
         record = self.get_run(run_id)
         if record.status != "waiting_approval":
             raise AgentRunInvalidStateError(run_id, record.status)
+        try:
+            self._task_queue.submit(
+                "agent_resume",
+                self._execute_resume,
+                run_id=run_id,
+                approved=approved,
+                feedback=feedback,
+            )
+        except TaskQueueError:
+            self._metrics.increment("agent_run_resumes_rejected_total")
+            raise
         self._metrics.increment("agent_run_resumes_submitted_total")
-        self._executor.submit(
-            self._execute_resume,
-            run_id=run_id,
-            approved=approved,
-            feedback=feedback,
-        )
         return record
 
     def get_run(self, run_id: str) -> AgentRunRecord:
         return self._runtime.get_run(run_id)
 
     def close(self) -> None:
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        if self._owns_task_queue:
+            self._task_queue.close()
+
+    def _mark_queued_run_failed(self, run_id: str, error: str) -> None:
+        mark_failed = getattr(self._runtime, "mark_queued_run_failed", None)
+        if callable(mark_failed):
+            mark_failed(run_id=run_id, error=error)
 
     def _execute_run(
         self,

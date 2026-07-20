@@ -4,7 +4,7 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunInvalidStateError,
     AgentRunNotFoundError,
 )
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import Settings, TaskQueueError
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import (
     AgentRunEventsResponse,
@@ -41,6 +41,11 @@ def create_agent_runs_router(
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
+        except TaskQueueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         return AgentRunStatusResponse.from_domain(record)
 
     @router.post(
@@ -63,6 +68,11 @@ def create_agent_runs_router(
         except AgentRunInvalidStateError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except TaskQueueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(exc),
             ) from exc
         return AgentRunStatusResponse.from_domain(record)

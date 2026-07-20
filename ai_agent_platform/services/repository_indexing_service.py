@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 import hashlib
 from pathlib import Path
+from threading import Lock
 from typing import Protocol
 
+from ai_agent_platform.core import InProcessTaskQueue, TaskQueue, TaskQueueError
 from ai_agent_platform.domain import RepositoryFileRecord, RepositoryIndexJobRecord
 from ai_agent_platform.integrations.rag import (
     RAGConfigurationError,
@@ -67,6 +69,9 @@ class RepositoryIndexStore(Protocol):
     ) -> RepositoryIndexJobRecord:
         ...
 
+    def get_index_job(self, job_id: str) -> RepositoryIndexJobRecord:
+        ...
+
     def get_file(
         self,
         *,
@@ -104,9 +109,81 @@ class RepositoryIndexingService:
         *,
         rag_service: RAGService,
         index_store: RepositoryIndexStore,
+        task_queue: TaskQueue | None = None,
     ) -> None:
         self._rag_service = rag_service
         self._index_store = index_store
+        self._owns_task_queue = task_queue is None
+        self._task_queue = task_queue or InProcessTaskQueue(max_workers=2)
+        self._active_repositories: set[str] = set()
+        self._active_lock = Lock()
+
+    def submit_index_repository(
+        self,
+        *,
+        repository_id: str,
+        root_path: str,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+        max_file_size: int = 200_000,
+    ) -> RepositoryIndexJobRecord:
+        root = _resolve_repository_root(root_path)
+        normalized_include_patterns = list(include_patterns or [])
+        normalized_exclude_patterns = _combined_exclude_patterns(
+            exclude_patterns or []
+        )
+        with self._active_lock:
+            if repository_id in self._active_repositories:
+                raise RepositoryIndexConflictError(
+                    f"repository {repository_id} already has an active index job"
+                )
+            job = self._index_store.create_index_job(
+                repository_id=repository_id,
+                root_path=str(root),
+                include_patterns=normalized_include_patterns,
+                exclude_patterns=normalized_exclude_patterns,
+                max_file_size=max_file_size,
+            )
+            self._active_repositories.add(repository_id)
+        try:
+            self._task_queue.submit(
+                "repository_index",
+                self._execute_submitted_job,
+                job_id=job.id,
+                repository_id=repository_id,
+            )
+        except TaskQueueError as exc:
+            with self._active_lock:
+                self._active_repositories.discard(repository_id)
+            self._index_store.update_index_job(
+                job_id=job.id,
+                status="failed",
+                scanned_files=0,
+                indexed_files=0,
+                skipped_files=0,
+                failed_files=0,
+                error=str(exc),
+            )
+            raise
+        return job
+
+    def get_index_job(
+        self,
+        *,
+        repository_id: str,
+        job_id: str,
+    ) -> RepositoryIndexJobRecord:
+        try:
+            job = self._index_store.get_index_job(job_id)
+        except KeyError as exc:
+            raise RepositoryIndexJobNotFoundError(job_id) from exc
+        if job.repository_id != repository_id:
+            raise RepositoryIndexJobNotFoundError(job_id)
+        return job
+
+    def close(self) -> None:
+        if self._owns_task_queue:
+            self._task_queue.close()
 
     def index_repository(
         self,
@@ -117,10 +194,7 @@ class RepositoryIndexingService:
         exclude_patterns: list[str] | None = None,
         max_file_size: int = 200_000,
     ) -> RepositoryIndexResult:
-        root = Path(root_path).expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            raise RepositoryIndexingError("root_path must be an existing directory")
-
+        root = _resolve_repository_root(root_path)
         normalized_include_patterns = list(include_patterns or [])
         normalized_exclude_patterns = _combined_exclude_patterns(exclude_patterns or [])
         job = self._index_store.create_index_job(
@@ -130,6 +204,26 @@ class RepositoryIndexingService:
             exclude_patterns=normalized_exclude_patterns,
             max_file_size=max_file_size,
         )
+        return self._run_index_job(job)
+
+    def _execute_submitted_job(
+        self,
+        *,
+        job_id: str,
+        repository_id: str,
+    ) -> None:
+        try:
+            job = self._index_store.get_index_job(job_id)
+            self._run_index_job(job)
+        finally:
+            with self._active_lock:
+                self._active_repositories.discard(repository_id)
+
+    def _run_index_job(
+        self,
+        job: RepositoryIndexJobRecord,
+    ) -> RepositoryIndexResult:
+        root = Path(job.root_path)
         job = self._index_store.update_index_job(
             job_id=job.id,
             status="running",
@@ -147,11 +241,15 @@ class RepositoryIndexingService:
         fatal_error: str | None = None
 
         try:
+            if not root.exists() or not root.is_dir():
+                raise RepositoryIndexingError(
+                    "repository root no longer exists when the index job starts"
+                )
             for file_path in _iter_candidate_files(
                 root=root,
-                include_patterns=normalized_include_patterns,
-                exclude_patterns=normalized_exclude_patterns,
-                max_file_size=max_file_size,
+                include_patterns=job.include_patterns,
+                exclude_patterns=job.exclude_patterns,
+                max_file_size=job.max_file_size,
             ):
                 scanned_count += 1
                 relative_path = _relative_posix_path(root=root, path=file_path)
@@ -159,7 +257,7 @@ class RepositoryIndexingService:
                     file_bytes = file_path.read_bytes()
                     content_hash = hashlib.sha256(file_bytes).hexdigest()
                     existing = self._index_store.get_file(
-                        repository_id=repository_id,
+                        repository_id=job.repository_id,
                         path=relative_path,
                     )
                     if existing is not None and existing.content_hash == content_hash:
@@ -168,13 +266,13 @@ class RepositoryIndexingService:
 
                     content = file_bytes.decode("utf-8")
                     ingested = self._rag_service.ingest_document(
-                        knowledge_base_id=repository_id,
+                        knowledge_base_id=job.repository_id,
                         filename=relative_path,
                         content=content,
                         source_uri=file_path.as_uri(),
                     )
                     self._index_store.upsert_file(
-                        repository_id=repository_id,
+                        repository_id=job.repository_id,
                         path=relative_path,
                         content_hash=content_hash,
                         size_bytes=len(file_bytes),
@@ -185,7 +283,7 @@ class RepositoryIndexingService:
                 except UnicodeDecodeError:
                     skipped_paths.append(relative_path)
                     self._index_store.upsert_file(
-                        repository_id=repository_id,
+                        repository_id=job.repository_id,
                         path=relative_path,
                         content_hash=_file_hash(file_path),
                         size_bytes=file_path.stat().st_size,
@@ -204,6 +302,15 @@ class RepositoryIndexingService:
                             "path": relative_path,
                             "error": str(exc),
                         }
+                    )
+                finally:
+                    self._index_store.update_index_job(
+                        job_id=job.id,
+                        status="running",
+                        scanned_files=scanned_count,
+                        indexed_files=len(indexed_paths),
+                        skipped_files=len(skipped_paths),
+                        failed_files=len(failed_paths),
                     )
         except Exception as exc:
             fatal_error = str(exc)
@@ -234,6 +341,21 @@ class RepositoryIndexingService:
 
 class RepositoryIndexingError(Exception):
     pass
+
+
+class RepositoryIndexConflictError(RepositoryIndexingError):
+    pass
+
+
+class RepositoryIndexJobNotFoundError(RepositoryIndexingError):
+    pass
+
+
+def _resolve_repository_root(root_path: str) -> Path:
+    root = Path(root_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise RepositoryIndexingError("root_path must be an existing directory")
+    return root
 
 
 def _iter_candidate_files(
