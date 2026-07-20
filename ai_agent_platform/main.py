@@ -58,8 +58,16 @@ def create_app(
     if settings.task_queue_backend == "celery":
         task_queue = CeleryTaskQueue(
             broker_url=settings.redis_url,
+            result_backend_url=settings.celery_result_backend_url,
             visibility_timeout_seconds=(
                 settings.celery_visibility_timeout_seconds
+            ),
+            publish_max_retries=settings.celery_task_max_retries,
+            publish_retry_backoff_seconds=(
+                settings.celery_task_retry_backoff_seconds
+            ),
+            publish_retry_backoff_max_seconds=(
+                settings.celery_task_retry_backoff_max_seconds
             ),
             metrics=metrics,
         )

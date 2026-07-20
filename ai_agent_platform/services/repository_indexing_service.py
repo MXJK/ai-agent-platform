@@ -206,13 +206,34 @@ class RepositoryIndexingService:
         *,
         job_id: str,
         repository_id: str,
+        recover_running: bool = False,
     ) -> None:
         job = self._index_store.get_index_job(job_id)
         if job.repository_id != repository_id:
             raise RepositoryIndexJobNotFoundError(job_id)
-        if job.status != "pending":
+        if job.status != "pending" and not (
+            recover_running and job.status == "running"
+        ):
             return
-        self._run_index_job(job)
+        result = self._run_index_job(job)
+        if result.job.status == "failed":
+            raise RepositoryIndexingError(
+                result.job.error or "repository index task failed"
+            )
+
+    def fail_index_task(self, *, job_id: str, error: str) -> None:
+        job = self._index_store.get_index_job(job_id)
+        if job.status not in {"pending", "running"}:
+            return
+        self._index_store.update_index_job(
+            job_id=job.id,
+            status="failed",
+            scanned_files=job.scanned_files,
+            indexed_files=job.indexed_files,
+            skipped_files=job.skipped_files,
+            failed_files=job.failed_files,
+            error=error,
+        )
 
     def _run_index_job(
         self,

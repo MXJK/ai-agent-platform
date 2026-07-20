@@ -1,9 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from uuid import UUID
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord
 from ai_agent_platform.core import (
@@ -179,6 +181,55 @@ class RepositoryIndexTaskTests(unittest.TestCase):
             )
             self.assertEqual(completed.status, "completed")
 
+    def test_redelivery_recovers_a_running_repository_job(self) -> None:
+        class RecordingRAGService:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def ingest_document(self, **_: object) -> SimpleNamespace:
+                self.calls += 1
+                return SimpleNamespace(document_id="doc_test")
+
+        with TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "app.py").write_text("print('ok')\n", encoding="utf-8")
+            store = InMemoryRepositoryIndexRepository()
+            job = store.create_index_job(
+                repository_id="repo_main",
+                root_path=temp_dir,
+                include_patterns=[],
+                exclude_patterns=[],
+                max_file_size=1024,
+            )
+            store.update_index_job(
+                job_id=job.id,
+                status="running",
+                scanned_files=0,
+                indexed_files=0,
+                skipped_files=0,
+                failed_files=0,
+            )
+            rag_service = RecordingRAGService()
+            service = RepositoryIndexingService(
+                rag_service=rag_service,
+                index_store=store,
+            )
+
+            service.execute_index_job(
+                job_id=job.id,
+                repository_id="repo_main",
+            )
+            self.assertEqual(rag_service.calls, 0)
+
+            service.execute_index_job(
+                job_id=job.id,
+                repository_id="repo_main",
+                recover_running=True,
+            )
+            service.close()
+
+        self.assertEqual(rag_service.calls, 1)
+        self.assertEqual(store.get_index_job(job.id).status, "completed")
+
 
 class CeleryTaskQueueTests(unittest.TestCase):
     def test_publishes_named_json_task_to_celery(self) -> None:
@@ -198,14 +249,39 @@ class CeleryTaskQueueTests(unittest.TestCase):
             queue.close()
 
         self.assertIs(result, celery_result)
-        celery_app.send_task.assert_called_once_with(
-            "ai_agent_platform.repository_index",
-            kwargs={
+        celery_app.send_task.assert_called_once()
+        call = celery_app.send_task.call_args
+        self.assertEqual(call.args, ("ai_agent_platform.repository_index",))
+        self.assertEqual(
+            call.kwargs["kwargs"],
+            {
                 "job_id": "idxjob_1",
                 "repository_id": "repo_main",
             },
         )
+        UUID(call.kwargs["task_id"])
+        self.assertIn("repository_index", call.kwargs["headers"]["idempotency_key"])
+        self.assertTrue(call.kwargs["retry"])
+        self.assertEqual(call.kwargs["retry_policy"]["max_retries"], 3)
         celery_app.close.assert_called_once_with()
+
+    def test_uses_same_task_id_for_duplicate_payloads(self) -> None:
+        with patch("celery.Celery") as celery_factory:
+            celery_app = celery_factory.return_value
+            queue = CeleryTaskQueue(broker_url="redis://localhost:6379/0")
+
+            for _ in range(2):
+                queue.submit(
+                    "agent_run",
+                    lambda: None,
+                    run_id="run_1",
+                    conversation_id="session_1",
+                )
+
+        task_ids = [
+            call.kwargs["task_id"] for call in celery_app.send_task.call_args_list
+        ]
+        self.assertEqual(task_ids[0], task_ids[1])
 
     def test_rejects_unknown_distributed_task_name(self) -> None:
         with patch("celery.Celery"):
@@ -213,6 +289,66 @@ class CeleryTaskQueueTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskQueueError, "unsupported distributed task"):
             queue.submit("unknown_task", lambda: None)
+
+
+class AgentWorkerLossTests(unittest.TestCase):
+    def test_redelivered_running_agent_is_failed_without_replaying_tools(self) -> None:
+        class RuntimeStub:
+            def __init__(self) -> None:
+                self.run_calls = 0
+                self.record = AgentRunRecord(
+                    run_id="run_1",
+                    thread_id="run_1",
+                    conversation_id="session_1",
+                    repository_id="repo_main",
+                    status="running",
+                    checkpoint_id=None,
+                    latest_node="execute_changes",
+                    next_nodes=["validate_changes"],
+                    trace=[],
+                )
+
+            def get_run(self, run_id: str) -> AgentRunRecord:
+                self.assert_run_id(run_id)
+                return self.record
+
+            def mark_run_failed(self, *, run_id: str, error: str, **_: object):
+                self.assert_run_id(run_id)
+                self.record = replace(
+                    self.record,
+                    status="failed",
+                    error=error,
+                )
+                return self.record
+
+            def run(self, **_: object) -> None:
+                self.run_calls += 1
+
+            @staticmethod
+            def assert_run_id(run_id: str) -> None:
+                if run_id != "run_1":
+                    raise AssertionError(run_id)
+
+        runtime = RuntimeStub()
+        service = AgentRunService(
+            runtime=runtime,
+            session_service=SimpleNamespace(),
+        )
+
+        service.execute_run_task(
+            run_id="run_1",
+            conversation_id="session_1",
+            message="change the repository",
+            history=[],
+            repository_id="repo_main",
+            focus_files=[],
+            broker_redelivered=True,
+        )
+        service.close()
+
+        self.assertEqual(runtime.run_calls, 0)
+        self.assertEqual(runtime.record.status, "failed")
+        self.assertIn("duplicate side effects", runtime.record.error or "")
 
 
 if __name__ == "__main__":

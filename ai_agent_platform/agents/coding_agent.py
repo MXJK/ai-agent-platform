@@ -255,8 +255,25 @@ class CodingAgentRuntime:
         return record
 
     def mark_queued_run_failed(self, *, run_id: str, error: str) -> AgentRunRecord:
+        return self.mark_run_failed(
+            run_id=run_id,
+            error=error,
+            node="task_queue",
+            attempt=1,
+            max_attempts=1,
+        )
+
+    def mark_run_failed(
+        self,
+        *,
+        run_id: str,
+        error: str,
+        node: str = "task_execution",
+        attempt: int = 1,
+        max_attempts: int = 1,
+    ) -> AgentRunRecord:
         record = self.get_run(run_id)
-        if record.status != "queued":
+        if record.status in {"completed", "failed"}:
             return record
         failed_record = AgentRunRecord(
             run_id=record.run_id,
@@ -269,12 +286,13 @@ class CodingAgentRuntime:
             next_nodes=[],
             trace=record.trace,
             error=error,
-            errors=[
+            errors=record.errors
+            + [
                 _error_from_exception(
-                    "task_queue",
+                    node,
                     RuntimeError(error),
-                    attempt=1,
-                    max_attempts=1,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
                 )
             ],
         )

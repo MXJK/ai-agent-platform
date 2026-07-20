@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+import hashlib
+import json
 import logging
 import re
 from threading import BoundedSemaphore, Lock
 from time import perf_counter
 from typing import Any, Callable, Protocol
+from uuid import NAMESPACE_URL, uuid5
 
 from ai_agent_platform.core.metrics import MetricsRegistry
 
@@ -167,7 +170,11 @@ class CeleryTaskQueue:
         self,
         *,
         broker_url: str,
+        result_backend_url: str | None = None,
         visibility_timeout_seconds: int = 3600,
+        publish_max_retries: int = 3,
+        publish_retry_backoff_seconds: int = 2,
+        publish_retry_backoff_max_seconds: int = 60,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         try:
@@ -178,7 +185,17 @@ class CeleryTaskQueue:
                 "run pip install -r requirements.txt"
             ) from exc
         self._metrics = metrics or MetricsRegistry()
-        self._app = Celery("ai_agent_platform_publisher", broker=broker_url)
+        self._app = Celery(
+            "ai_agent_platform_publisher",
+            broker=broker_url,
+            backend=result_backend_url,
+        )
+        self._publish_retry_policy = {
+            "max_retries": publish_max_retries,
+            "interval_start": 0,
+            "interval_step": publish_retry_backoff_seconds,
+            "interval_max": publish_retry_backoff_max_seconds,
+        }
         self._app.conf.update(
             task_serializer="json",
             accept_content=["json"],
@@ -205,8 +222,17 @@ class CeleryTaskQueue:
             if self._closed:
                 raise TaskQueueClosedError("background task queue is closed")
         started_at = perf_counter()
+        idempotency_key = _task_idempotency_key(task_name, kwargs)
+        task_id = str(uuid5(NAMESPACE_URL, idempotency_key))
         try:
-            result = self._app.send_task(celery_task_name, kwargs=kwargs)
+            result = self._app.send_task(
+                celery_task_name,
+                kwargs=kwargs,
+                task_id=task_id,
+                headers={"idempotency_key": idempotency_key},
+                retry=True,
+                retry_policy=self._publish_retry_policy,
+            )
         except Exception as exc:
             self._metrics.increment("background_tasks_rejected_total")
             self._metrics.increment(
@@ -230,3 +256,14 @@ class CeleryTaskQueue:
                 return
             self._closed = True
         self._app.close()
+
+
+def _task_idempotency_key(task_name: str, payload: dict[str, Any]) -> str:
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+    return f"ai-agent-platform:{task_name}:{payload_digest}"

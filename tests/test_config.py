@@ -29,7 +29,15 @@ class SettingsTests(unittest.TestCase):
                 "BACKGROUND_TASK_QUEUE_CAPACITY": "25",
                 "TASK_QUEUE_BACKEND": "celery",
                 "REDIS_URL": "redis://127.0.0.1:6379/2",
+                "CELERY_RESULT_BACKEND_URL": "redis://127.0.0.1:6379/3",
                 "CELERY_VISIBILITY_TIMEOUT_SECONDS": "7200",
+                "CELERY_TASK_MAX_RETRIES": "4",
+                "CELERY_TASK_RETRY_BACKOFF_SECONDS": "3",
+                "CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS": "90",
+                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS": "1200",
+                "CELERY_TASK_TIME_LIMIT_SECONDS": "1260",
+                "CELERY_RESULT_EXPIRES_SECONDS": "43200",
+                "CELERY_WORKER_MAX_TASKS_PER_CHILD": "50",
                 "QDRANT_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "qdrant-secret",
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
@@ -61,7 +69,18 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.background_task_queue_capacity, 25)
         self.assertEqual(settings.task_queue_backend, "celery")
         self.assertEqual(settings.redis_url, "redis://127.0.0.1:6379/2")
+        self.assertEqual(
+            settings.celery_result_backend_url,
+            "redis://127.0.0.1:6379/3",
+        )
         self.assertEqual(settings.celery_visibility_timeout_seconds, 7200)
+        self.assertEqual(settings.celery_task_max_retries, 4)
+        self.assertEqual(settings.celery_task_retry_backoff_seconds, 3)
+        self.assertEqual(settings.celery_task_retry_backoff_max_seconds, 90)
+        self.assertEqual(settings.celery_task_soft_time_limit_seconds, 1200)
+        self.assertEqual(settings.celery_task_time_limit_seconds, 1260)
+        self.assertEqual(settings.celery_result_expires_seconds, 43200)
+        self.assertEqual(settings.celery_worker_max_tasks_per_child, 50)
         self.assertEqual(settings.qdrant_url, "http://localhost:6333")
         self.assertEqual(settings.qdrant_api_key, "qdrant-secret")
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
@@ -107,6 +126,21 @@ class SettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.task_queue_backend, "celery")
+
+    def test_rejects_celery_hard_limit_not_above_soft_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "time_limit_seconds"):
+            Settings(
+                celery_task_soft_time_limit_seconds=60,
+                celery_task_time_limit_seconds=60,
+            )
+
+    def test_rejects_visibility_timeout_below_task_time_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "visibility_timeout_seconds"):
+            Settings(
+                celery_task_soft_time_limit_seconds=50,
+                celery_task_time_limit_seconds=60,
+                celery_visibility_timeout_seconds=60,
+            )
 
     def test_requires_mcp_config_when_mcp_is_enabled(self) -> None:
         with self.assertRaisesRegex(ValueError, "mcp_config_path"):

@@ -49,7 +49,15 @@ class Settings:
     background_task_queue_capacity: int = 100
     task_queue_backend: str = "in_process"
     redis_url: str = "redis://localhost:6379/0"
+    celery_result_backend_url: str = "redis://localhost:6379/1"
     celery_visibility_timeout_seconds: int = 3600
+    celery_task_max_retries: int = 3
+    celery_task_retry_backoff_seconds: int = 2
+    celery_task_retry_backoff_max_seconds: int = 60
+    celery_task_soft_time_limit_seconds: int = 900
+    celery_task_time_limit_seconds: int = 960
+    celery_result_expires_seconds: int = 86400
+    celery_worker_max_tasks_per_child: int = 100
     mcp_enabled: bool = False
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
@@ -104,6 +112,27 @@ class Settings:
                 "celery_visibility_timeout_seconds",
                 self.celery_visibility_timeout_seconds,
             ),
+            (
+                "celery_task_retry_backoff_seconds",
+                self.celery_task_retry_backoff_seconds,
+            ),
+            (
+                "celery_task_retry_backoff_max_seconds",
+                self.celery_task_retry_backoff_max_seconds,
+            ),
+            (
+                "celery_task_soft_time_limit_seconds",
+                self.celery_task_soft_time_limit_seconds,
+            ),
+            (
+                "celery_task_time_limit_seconds",
+                self.celery_task_time_limit_seconds,
+            ),
+            ("celery_result_expires_seconds", self.celery_result_expires_seconds),
+            (
+                "celery_worker_max_tasks_per_child",
+                self.celery_worker_max_tasks_per_child,
+            ),
             ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
             (
                 "sandbox_command_timeout_seconds",
@@ -123,10 +152,44 @@ class Settings:
             raise ValueError(
                 "background_task_queue_capacity must be greater than or equal to 0"
             )
+        if self.celery_task_max_retries < 0:
+            raise ValueError(
+                "celery_task_max_retries must be greater than or equal to 0"
+            )
+        if (
+            self.celery_task_retry_backoff_max_seconds
+            < self.celery_task_retry_backoff_seconds
+        ):
+            raise ValueError(
+                "celery_task_retry_backoff_max_seconds must be greater than or "
+                "equal to celery_task_retry_backoff_seconds"
+            )
+        if (
+            self.celery_task_time_limit_seconds
+            <= self.celery_task_soft_time_limit_seconds
+        ):
+            raise ValueError(
+                "celery_task_time_limit_seconds must be greater than "
+                "celery_task_soft_time_limit_seconds"
+            )
+        if (
+            self.celery_visibility_timeout_seconds
+            <= self.celery_task_time_limit_seconds
+        ):
+            raise ValueError(
+                "celery_visibility_timeout_seconds must be greater than "
+                "celery_task_time_limit_seconds"
+            )
         if self.task_queue_backend == "celery":
             if not self.redis_url.startswith(("redis://", "rediss://")):
                 raise ValueError(
                     "redis_url must start with redis:// or rediss:// for Celery"
+                )
+            if not self.celery_result_backend_url.startswith(
+                ("redis://", "rediss://")
+            ):
+                raise ValueError(
+                    "celery_result_backend_url must start with redis:// or rediss://"
                 )
             self._validate_distributed_task_storage()
         if self.mcp_enabled and not self.mcp_config_path:
@@ -224,9 +287,49 @@ class Settings:
                 "TASK_QUEUE_BACKEND", cls.task_queue_backend, dotenv
             ),
             redis_url=_env("REDIS_URL", cls.redis_url, dotenv),
+            celery_result_backend_url=_env(
+                "CELERY_RESULT_BACKEND_URL",
+                cls.celery_result_backend_url,
+                dotenv,
+            ),
             celery_visibility_timeout_seconds=_int_env(
                 "CELERY_VISIBILITY_TIMEOUT_SECONDS",
                 cls.celery_visibility_timeout_seconds,
+                dotenv,
+            ),
+            celery_task_max_retries=_int_env(
+                "CELERY_TASK_MAX_RETRIES",
+                cls.celery_task_max_retries,
+                dotenv,
+            ),
+            celery_task_retry_backoff_seconds=_int_env(
+                "CELERY_TASK_RETRY_BACKOFF_SECONDS",
+                cls.celery_task_retry_backoff_seconds,
+                dotenv,
+            ),
+            celery_task_retry_backoff_max_seconds=_int_env(
+                "CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS",
+                cls.celery_task_retry_backoff_max_seconds,
+                dotenv,
+            ),
+            celery_task_soft_time_limit_seconds=_int_env(
+                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS",
+                cls.celery_task_soft_time_limit_seconds,
+                dotenv,
+            ),
+            celery_task_time_limit_seconds=_int_env(
+                "CELERY_TASK_TIME_LIMIT_SECONDS",
+                cls.celery_task_time_limit_seconds,
+                dotenv,
+            ),
+            celery_result_expires_seconds=_int_env(
+                "CELERY_RESULT_EXPIRES_SECONDS",
+                cls.celery_result_expires_seconds,
+                dotenv,
+            ),
+            celery_worker_max_tasks_per_child=_int_env(
+                "CELERY_WORKER_MAX_TASKS_PER_CHILD",
+                cls.celery_worker_max_tasks_per_child,
                 dotenv,
             ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),

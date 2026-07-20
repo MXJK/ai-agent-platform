@@ -41,11 +41,29 @@ class CeleryWorkerTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                ("run", {"run_id": "run_1", "history": []}),
-                ("resume", {"run_id": "run_1", "approved": True}),
+                (
+                    "run",
+                    {
+                        "run_id": "run_1",
+                        "history": [],
+                        "broker_redelivered": False,
+                    },
+                ),
+                (
+                    "resume",
+                    {
+                        "run_id": "run_1",
+                        "approved": True,
+                        "broker_redelivered": False,
+                    },
+                ),
                 (
                     "index",
-                    {"job_id": "idxjob_1", "repository_id": "repo_main"},
+                    {
+                        "job_id": "idxjob_1",
+                        "repository_id": "repo_main",
+                        "recover_running": False,
+                    },
                 ),
             ],
         )

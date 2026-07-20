@@ -24,6 +24,10 @@ from ai_agent_platform.services.session_service import SessionService
 logger = logging.getLogger(__name__)
 
 
+class AgentRunExecutionError(RuntimeError):
+    """Signals a completed business failure that must not be blindly retried."""
+
+
 class AgentRunService:
     """Submits coding-agent runs to a background executor and records outcomes."""
 
@@ -120,6 +124,26 @@ class AgentRunService:
         if callable(mark_failed):
             mark_failed(run_id=run_id, error=error)
 
+    def fail_run_task(
+        self,
+        *,
+        run_id: str,
+        error: str,
+        attempt: int,
+        max_attempts: int,
+    ) -> None:
+        mark_failed = getattr(self._runtime, "mark_run_failed", None)
+        if callable(mark_failed):
+            mark_failed(
+                run_id=run_id,
+                error=error,
+                node="task_execution",
+                attempt=attempt,
+                max_attempts=max_attempts,
+            )
+            return
+        self._mark_queued_run_failed(run_id, error)
+
     def execute_run_task(
         self,
         *,
@@ -129,9 +153,22 @@ class AgentRunService:
         history: list[dict[str, str]],
         repository_id: str,
         focus_files: list[str],
+        broker_redelivered: bool = False,
     ) -> None:
         started_at = perf_counter()
         record = self.get_run(run_id)
+        if broker_redelivered and record.status == "running":
+            self._metrics.increment("agent_run_worker_lost_total")
+            self.fail_run_task(
+                run_id=run_id,
+                error=(
+                    "worker was lost during Agent execution; automatic replay was "
+                    "blocked to prevent duplicate side effects"
+                ),
+                attempt=1,
+                max_attempts=1,
+            )
+            return
         if record.status != "queued":
             self._metrics.increment("agent_run_duplicate_deliveries_total")
             logger.info(
@@ -154,13 +191,13 @@ class AgentRunService:
                     repository_id=repository_id,
                     focus_files=focus_files,
                 )
-            except Exception:
+            except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
                     started_at=started_at,
                 )
                 logger.exception("agent run failed")
-                return
+                raise AgentRunExecutionError(str(exc)) from exc
             self._record_execution_metrics(
                 status=result.status,
                 started_at=started_at,
@@ -174,9 +211,22 @@ class AgentRunService:
         run_id: str,
         approved: bool,
         feedback: Optional[str],
+        broker_redelivered: bool = False,
     ) -> None:
         started_at = perf_counter()
         record = self.get_run(run_id)
+        if broker_redelivered and record.status == "waiting_approval":
+            self._metrics.increment("agent_resume_worker_lost_total")
+            self.fail_run_task(
+                run_id=run_id,
+                error=(
+                    "worker was lost during Agent resume; automatic replay was "
+                    "blocked to prevent duplicate side effects"
+                ),
+                attempt=1,
+                max_attempts=1,
+            )
+            return
         if record.status != "waiting_approval":
             self._metrics.increment("agent_resume_duplicate_deliveries_total")
             logger.info(
@@ -196,13 +246,13 @@ class AgentRunService:
                     approved=approved,
                     feedback=feedback,
                 )
-            except Exception:
+            except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
                     started_at=started_at,
                 )
                 logger.exception("agent run resume failed")
-                return
+                raise AgentRunExecutionError(str(exc)) from exc
             self._record_execution_metrics(
                 status=result.status,
                 started_at=started_at,

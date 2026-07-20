@@ -286,6 +286,22 @@ shared vector store. Distributed mode fails configuration validation unless all
 of those shared stores are selected, preventing the API and worker from silently
 using different in-memory state.
 
+Distributed tasks use an at-least-once delivery model with application-level
+idempotency. Each canonical JSON payload receives a deterministic Celery task ID,
+while Agent run and repository job status guards prevent completed work from
+being applied twice. Publish failures and transient worker infrastructure errors
+use bounded retries with exponential backoff and jitter. Business execution
+failures are persisted and are not blindly replayed, because Agent tools may
+have external side effects.
+
+Workers enforce soft and hard task time limits, recycle child processes after a
+bounded number of tasks, and store ignored-task failure diagnostics temporarily
+in Redis database 1. PostgreSQL remains the product-visible task status store.
+The Redis visibility timeout must be greater than the hard task time limit; this
+is validated at startup to prevent a long-running task from being delivered to
+two workers. A redelivered repository job may recover from `running` because
+file hashes make repository indexing resumable.
+
 Repository indexing is asynchronous: `POST /repositories/{id}/index` returns
 `202 Accepted` and a pending `job_id`; poll
 `GET /repositories/{id}/index-jobs/{job_id}` for running counters and the final
@@ -303,6 +319,7 @@ docker compose up -d postgres qdrant redis
 
 export TASK_QUEUE_BACKEND=celery
 export REDIS_URL=redis://localhost:6379/0
+export CELERY_RESULT_BACKEND_URL=redis://localhost:6379/1
 export SESSION_REPOSITORY=postgres
 export AGENT_RUN_STORE=postgres
 export DOCUMENT_STORE=postgres
@@ -318,9 +335,25 @@ export RAG_VECTOR_STORE=qdrant
 
 Start Uvicorn in a second terminal with the same environment. The API and worker
 must also share the same LLM, embedding, Qdrant collection, and storage settings.
-If they later run inside Compose, use `redis://redis:6379/0`; `localhost` is for
-processes running on the host. The development Compose file exposes port 6379
-without authentication, so it should not be copied unchanged to a public host.
+If they later run inside Compose, use `redis://redis:6379/0` for `REDIS_URL` and
+`redis://redis:6379/1` for `CELERY_RESULT_BACKEND_URL`; `localhost` is for host
+processes. The development Compose file exposes port 6379 without authentication,
+so it should not be copied unchanged to a public host.
+The Redis development container enables AOF persistence and `noeviction` so
+broker keys are not discarded under memory pressure.
+
+Reliability settings and their local defaults:
+
+```text
+CELERY_TASK_MAX_RETRIES=3
+CELERY_TASK_RETRY_BACKOFF_SECONDS=2
+CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS=60
+CELERY_TASK_SOFT_TIME_LIMIT_SECONDS=900
+CELERY_TASK_TIME_LIMIT_SECONDS=960
+CELERY_VISIBILITY_TIMEOUT_SECONDS=3600
+CELERY_RESULT_EXPIRES_SECONDS=86400
+CELERY_WORKER_MAX_TASKS_PER_CHILD=100
+```
 
 ## Repository QA Agent
 
