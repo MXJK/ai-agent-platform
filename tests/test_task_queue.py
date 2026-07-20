@@ -3,12 +3,15 @@ from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord
 from ai_agent_platform.core import (
+    CeleryTaskQueue,
     InProcessTaskQueue,
     MetricsRegistry,
     TaskQueueClosedError,
+    TaskQueueError,
     TaskQueueFullError,
 )
 from ai_agent_platform.repositories import InMemoryRepositoryIndexRepository
@@ -175,6 +178,41 @@ class RepositoryIndexTaskTests(unittest.TestCase):
                 job_id=first_job.id,
             )
             self.assertEqual(completed.status, "completed")
+
+
+class CeleryTaskQueueTests(unittest.TestCase):
+    def test_publishes_named_json_task_to_celery(self) -> None:
+        with patch("celery.Celery") as celery_factory:
+            celery_app = celery_factory.return_value
+            celery_result = celery_app.send_task.return_value
+            queue = CeleryTaskQueue(
+                broker_url="redis://localhost:6379/0",
+            )
+
+            result = queue.submit(
+                "repository_index",
+                lambda: None,
+                job_id="idxjob_1",
+                repository_id="repo_main",
+            )
+            queue.close()
+
+        self.assertIs(result, celery_result)
+        celery_app.send_task.assert_called_once_with(
+            "ai_agent_platform.repository_index",
+            kwargs={
+                "job_id": "idxjob_1",
+                "repository_id": "repo_main",
+            },
+        )
+        celery_app.close.assert_called_once_with()
+
+    def test_rejects_unknown_distributed_task_name(self) -> None:
+        with patch("celery.Celery"):
+            queue = CeleryTaskQueue(broker_url="redis://localhost:6379/0")
+
+        with self.assertRaisesRegex(TaskQueueError, "unsupported distributed task"):
+            queue.submit("unknown_task", lambda: None)
 
 
 if __name__ == "__main__":

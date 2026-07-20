@@ -17,6 +17,7 @@ from ai_agent_platform.agents import (
 )
 from ai_agent_platform.api import create_api_router
 from ai_agent_platform.core import (
+    CeleryTaskQueue,
     InProcessTaskQueue,
     MetricsRegistry,
     RequestObservabilityMiddleware,
@@ -54,11 +55,20 @@ def create_app(
     settings = settings or Settings.from_env()
     configure_logging(level=settings.log_level, log_format=settings.log_format)
     metrics = MetricsRegistry()
-    task_queue = InProcessTaskQueue(
-        max_workers=settings.background_task_workers,
-        max_queue_size=settings.background_task_queue_capacity,
-        metrics=metrics,
-    )
+    if settings.task_queue_backend == "celery":
+        task_queue = CeleryTaskQueue(
+            broker_url=settings.redis_url,
+            visibility_timeout_seconds=(
+                settings.celery_visibility_timeout_seconds
+            ),
+            metrics=metrics,
+        )
+    else:
+        task_queue = InProcessTaskQueue(
+            max_workers=settings.background_task_workers,
+            max_queue_size=settings.background_task_queue_capacity,
+            metrics=metrics,
+        )
 
     repository = _create_session_repository(settings)
     agent_runtime = GameAgentRuntime()

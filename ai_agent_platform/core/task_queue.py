@@ -33,7 +33,7 @@ class TaskQueue(Protocol):
         task_name: str,
         function: Callable[..., None],
         **kwargs: Any,
-    ) -> Future[None]:
+    ) -> Any:
         ...
 
     def close(self) -> None:
@@ -152,3 +152,81 @@ class InProcessTaskQueue:
 def _metric_task_name(task_name: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", task_name.lower()).strip("_")
     return normalized or "unknown"
+
+
+class CeleryTaskQueue:
+    """Publishes named JSON tasks to Celery through a Redis broker."""
+
+    TASK_NAMES = {
+        "agent_run": "ai_agent_platform.agent_run",
+        "agent_resume": "ai_agent_platform.agent_resume",
+        "repository_index": "ai_agent_platform.repository_index",
+    }
+
+    def __init__(
+        self,
+        *,
+        broker_url: str,
+        visibility_timeout_seconds: int = 3600,
+        metrics: MetricsRegistry | None = None,
+    ) -> None:
+        try:
+            from celery import Celery
+        except ImportError as exc:
+            raise TaskQueueError(
+                "celery redis dependencies are not installed; "
+                "run pip install -r requirements.txt"
+            ) from exc
+        self._metrics = metrics or MetricsRegistry()
+        self._app = Celery("ai_agent_platform_publisher", broker=broker_url)
+        self._app.conf.update(
+            task_serializer="json",
+            accept_content=["json"],
+            result_serializer="json",
+            broker_connection_retry_on_startup=True,
+            broker_transport_options={
+                "visibility_timeout": visibility_timeout_seconds,
+            },
+        )
+        self._closed = False
+        self._lock = Lock()
+
+    def submit(
+        self,
+        task_name: str,
+        function: Callable[..., None],
+        **kwargs: Any,
+    ) -> Any:
+        del function
+        celery_task_name = self.TASK_NAMES.get(task_name)
+        if celery_task_name is None:
+            raise TaskQueueError(f"unsupported distributed task: {task_name}")
+        with self._lock:
+            if self._closed:
+                raise TaskQueueClosedError("background task queue is closed")
+        started_at = perf_counter()
+        try:
+            result = self._app.send_task(celery_task_name, kwargs=kwargs)
+        except Exception as exc:
+            self._metrics.increment("background_tasks_rejected_total")
+            self._metrics.increment(
+                f"background_task_{_metric_task_name(task_name)}_rejected_total"
+            )
+            raise TaskQueueError(f"failed to publish {task_name}: {exc}") from exc
+        publish_duration_ms = int((perf_counter() - started_at) * 1000)
+        self._metrics.increment("background_tasks_submitted_total")
+        self._metrics.increment(
+            f"background_task_{_metric_task_name(task_name)}_submitted_total"
+        )
+        self._metrics.observe_ms(
+            "background_task_publish_duration_ms",
+            publish_duration_ms,
+        )
+        return result
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._app.close()

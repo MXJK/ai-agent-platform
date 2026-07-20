@@ -103,7 +103,7 @@ class CodingAgentRuntime:
         *,
         conversation_id: str,
         user_input: str,
-        history: list[Message],
+        history: list[Message | dict[str, str]],
         repository_id: str = "repo_main",
         focus_files: Optional[list[str]] = None,
         run_id: Optional[str] = None,
@@ -134,7 +134,18 @@ class CodingAgentRuntime:
                     "repository_id": repository_id,
                     "focus_files": focus_files or [],
                     "history": [
-                        {"role": message.role, "content": message.content}
+                        {
+                            "role": (
+                                message["role"]
+                                if isinstance(message, dict)
+                                else message.role
+                            ),
+                            "content": (
+                                message["content"]
+                                if isinstance(message, dict)
+                                else message.content
+                            ),
+                        }
                         for message in history
                     ],
                     "trace": [],

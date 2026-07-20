@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 import hashlib
 from pathlib import Path
-from threading import Lock
 from typing import Protocol
 
 from ai_agent_platform.core import InProcessTaskQueue, TaskQueue, TaskQueueError
@@ -17,6 +16,7 @@ from ai_agent_platform.integrations.rag import (
     RAGValidationError,
     SUPPORTED_TEXT_EXTENSIONS,
 )
+from ai_agent_platform.repositories import RepositoryIndexStoreConflictError
 
 
 DEFAULT_EXCLUDED_DIRS = {
@@ -115,8 +115,6 @@ class RepositoryIndexingService:
         self._index_store = index_store
         self._owns_task_queue = task_queue is None
         self._task_queue = task_queue or InProcessTaskQueue(max_workers=2)
-        self._active_repositories: set[str] = set()
-        self._active_lock = Lock()
 
     def submit_index_repository(
         self,
@@ -132,11 +130,7 @@ class RepositoryIndexingService:
         normalized_exclude_patterns = _combined_exclude_patterns(
             exclude_patterns or []
         )
-        with self._active_lock:
-            if repository_id in self._active_repositories:
-                raise RepositoryIndexConflictError(
-                    f"repository {repository_id} already has an active index job"
-                )
+        try:
             job = self._index_store.create_index_job(
                 repository_id=repository_id,
                 root_path=str(root),
@@ -144,17 +138,18 @@ class RepositoryIndexingService:
                 exclude_patterns=normalized_exclude_patterns,
                 max_file_size=max_file_size,
             )
-            self._active_repositories.add(repository_id)
+        except RepositoryIndexStoreConflictError as exc:
+            raise RepositoryIndexConflictError(
+                f"repository {repository_id} already has an active index job"
+            ) from exc
         try:
             self._task_queue.submit(
                 "repository_index",
-                self._execute_submitted_job,
+                self.execute_index_job,
                 job_id=job.id,
                 repository_id=repository_id,
             )
         except TaskQueueError as exc:
-            with self._active_lock:
-                self._active_repositories.discard(repository_id)
             self._index_store.update_index_job(
                 job_id=job.id,
                 status="failed",
@@ -206,18 +201,18 @@ class RepositoryIndexingService:
         )
         return self._run_index_job(job)
 
-    def _execute_submitted_job(
+    def execute_index_job(
         self,
         *,
         job_id: str,
         repository_id: str,
     ) -> None:
-        try:
-            job = self._index_store.get_index_job(job_id)
-            self._run_index_job(job)
-        finally:
-            with self._active_lock:
-                self._active_repositories.discard(repository_id)
+        job = self._index_store.get_index_job(job_id)
+        if job.repository_id != repository_id:
+            raise RepositoryIndexJobNotFoundError(job_id)
+        if job.status != "pending":
+            return
+        self._run_index_job(job)
 
     def _run_index_job(
         self,

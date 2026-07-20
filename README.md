@@ -124,7 +124,7 @@ can be rebuilt without losing the source-of-truth records.
 Start the local databases:
 
 ```bash
-docker compose up -d postgres qdrant
+docker compose up -d postgres qdrant redis
 ```
 
 Check service health:
@@ -157,12 +157,14 @@ DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_pla
 ```
 
 If a local database was already initialized by the older repository auto-schema
-code and the tables match this initial migration, mark that existing schema as
-current once:
+code and the tables match the initial migration, mark only that baseline and
+then apply later migrations:
 
 ```bash
 DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
-  .venv/bin/python -m alembic stamp head
+  .venv/bin/python -m alembic stamp 20260715_0001
+DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
+  .venv/bin/python -m alembic upgrade head
 ```
 
 Useful migration commands:
@@ -275,20 +277,50 @@ fails before repositories, model clients, or background workers are created.
 Agent runs and repository indexing share a bounded `TaskQueue` protocol. The
 default `InProcessTaskQueue` uses worker threads for local development, rejects
 submissions with `503` when capacity is exhausted, records per-task counters and
-durations, and drains accepted work during application shutdown. Services no
-longer depend directly on `ThreadPoolExecutor`, so a durable Redis/Celery or
-cloud-queue adapter can replace the local implementation without changing the
-HTTP or business layers.
+durations, and drains accepted work during application shutdown.
+
+Set `TASK_QUEUE_BACKEND=celery` to publish JSON tasks through the Redis container
+to an independent Celery worker. Redis is the broker; PostgreSQL remains the
+source of truth for Agent runs and repository index jobs, and Qdrant remains the
+shared vector store. Distributed mode fails configuration validation unless all
+of those shared stores are selected, preventing the API and worker from silently
+using different in-memory state.
 
 Repository indexing is asynchronous: `POST /repositories/{id}/index` returns
 `202 Accepted` and a pending `job_id`; poll
 `GET /repositories/{id}/index-jobs/{job_id}` for running counters and the final
-status. Only one index job per repository runs in a process at a time, avoiding
-concurrent writes to the same repository index.
+status. A PostgreSQL partial unique index prevents multiple pending/running jobs
+for the same repository across API and worker processes.
 
 Tune the local executor with `BACKGROUND_TASK_WORKERS` and
 `BACKGROUND_TASK_QUEUE_CAPACITY`. The defaults are `4` workers and `100`
 accepted waiting tasks beyond the active workers.
+
+Run the distributed stack locally:
+
+```bash
+docker compose up -d postgres qdrant redis
+
+export TASK_QUEUE_BACKEND=celery
+export REDIS_URL=redis://localhost:6379/0
+export SESSION_REPOSITORY=postgres
+export AGENT_RUN_STORE=postgres
+export DOCUMENT_STORE=postgres
+export REPOSITORY_INDEX_STORE=postgres
+export LANGGRAPH_CHECKPOINTER=postgres
+export RAG_VECTOR_STORE=qdrant
+
+.venv/bin/python -m alembic upgrade head
+.venv/bin/celery \
+  -A ai_agent_platform.workers.celery_app:celery_app \
+  worker --loglevel=INFO
+```
+
+Start Uvicorn in a second terminal with the same environment. The API and worker
+must also share the same LLM, embedding, Qdrant collection, and storage settings.
+If they later run inside Compose, use `redis://redis:6379/0`; `localhost` is for
+processes running on the host. The development Compose file exposes port 6379
+without authentication, so it should not be copied unchanged to a public host.
 
 ## Repository QA Agent
 

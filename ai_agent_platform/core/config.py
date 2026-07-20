@@ -47,6 +47,9 @@ class Settings:
     rag_max_prompt_chars: int = 6000
     background_task_workers: int = 4
     background_task_queue_capacity: int = 100
+    task_queue_backend: str = "in_process"
+    redis_url: str = "redis://localhost:6379/0"
+    celery_visibility_timeout_seconds: int = 3600
     mcp_enabled: bool = False
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
@@ -82,6 +85,11 @@ class Settings:
             {"memory", "chroma", "qdrant"},
         )
         _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
+        _require_choice(
+            "task_queue_backend",
+            self.task_queue_backend,
+            {"celery", "in_process"},
+        )
         for name, value in (
             ("llm_timeout_seconds", self.llm_timeout_seconds),
             ("llm_max_input_chars", self.llm_max_input_chars),
@@ -92,6 +100,10 @@ class Settings:
             ("rag_recall_limit", self.rag_recall_limit),
             ("rag_max_prompt_chars", self.rag_max_prompt_chars),
             ("background_task_workers", self.background_task_workers),
+            (
+                "celery_visibility_timeout_seconds",
+                self.celery_visibility_timeout_seconds,
+            ),
             ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
             (
                 "sandbox_command_timeout_seconds",
@@ -111,6 +123,12 @@ class Settings:
             raise ValueError(
                 "background_task_queue_capacity must be greater than or equal to 0"
             )
+        if self.task_queue_backend == "celery":
+            if not self.redis_url.startswith(("redis://", "rediss://")):
+                raise ValueError(
+                    "redis_url must start with redis:// or rediss:// for Celery"
+                )
+            self._validate_distributed_task_storage()
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
@@ -202,6 +220,15 @@ class Settings:
                 cls.background_task_queue_capacity,
                 dotenv,
             ),
+            task_queue_backend=_env(
+                "TASK_QUEUE_BACKEND", cls.task_queue_backend, dotenv
+            ),
+            redis_url=_env("REDIS_URL", cls.redis_url, dotenv),
+            celery_visibility_timeout_seconds=_int_env(
+                "CELERY_VISIBILITY_TIMEOUT_SECONDS",
+                cls.celery_visibility_timeout_seconds,
+                dotenv,
+            ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
             mcp_config_path=_env("MCP_CONFIG_PATH", None, dotenv),
             mcp_request_timeout_seconds=_float_env(
@@ -222,6 +249,31 @@ class Settings:
             ),
             sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
         )
+
+    def _validate_distributed_task_storage(self) -> None:
+        required_values = {
+            "session_repository": (self.session_repository, "postgres"),
+            "agent_run_store": (self.agent_run_store, "postgres"),
+            "document_store": (self.document_store, "postgres"),
+            "repository_index_store": (
+                self.repository_index_store,
+                "postgres",
+            ),
+            "langgraph_checkpointer": (
+                self.langgraph_checkpointer,
+                "postgres",
+            ),
+            "rag_vector_store": (self.rag_vector_store, "qdrant"),
+        }
+        invalid = [
+            f"{name}={actual} (expected {expected})"
+            for name, (actual, expected) in required_values.items()
+            if actual != expected
+        ]
+        if invalid:
+            raise ValueError(
+                "celery task queue requires shared storage: " + ", ".join(invalid)
+            )
 
 
 def _require_choice(name: str, value: str, allowed: set[str]) -> None:

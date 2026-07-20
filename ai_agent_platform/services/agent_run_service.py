@@ -66,11 +66,14 @@ class AgentRunService:
         try:
             self._task_queue.submit(
                 "agent_run",
-                self._execute_run,
+                self.execute_run_task,
                 run_id=record.run_id,
                 conversation_id=conversation_id,
                 message=message,
-                history=history,
+                history=[
+                    {"role": item.role, "content": item.content}
+                    for item in history
+                ],
                 repository_id=repository_id,
                 focus_files=focus_files or [],
             )
@@ -94,7 +97,7 @@ class AgentRunService:
         try:
             self._task_queue.submit(
                 "agent_resume",
-                self._execute_resume,
+                self.execute_resume_task,
                 run_id=run_id,
                 approved=approved,
                 feedback=feedback,
@@ -117,17 +120,25 @@ class AgentRunService:
         if callable(mark_failed):
             mark_failed(run_id=run_id, error=error)
 
-    def _execute_run(
+    def execute_run_task(
         self,
         *,
         run_id: str,
         conversation_id: str,
         message: str,
-        history,
+        history: list[dict[str, str]],
         repository_id: str,
         focus_files: list[str],
     ) -> None:
         started_at = perf_counter()
+        record = self.get_run(run_id)
+        if record.status != "queued":
+            self._metrics.increment("agent_run_duplicate_deliveries_total")
+            logger.info(
+                "agent run delivery skipped",
+                extra={"run_id": run_id, "status": record.status},
+            )
+            return
         with log_context(
             run_id=run_id,
             conversation_id=conversation_id,
@@ -157,7 +168,7 @@ class AgentRunService:
             logger.info("agent run finished", extra={"status": result.status})
             self._record_assistant_message(result)
 
-    def _execute_resume(
+    def execute_resume_task(
         self,
         *,
         run_id: str,
@@ -166,6 +177,13 @@ class AgentRunService:
     ) -> None:
         started_at = perf_counter()
         record = self.get_run(run_id)
+        if record.status != "waiting_approval":
+            self._metrics.increment("agent_resume_duplicate_deliveries_total")
+            logger.info(
+                "agent resume delivery skipped",
+                extra={"run_id": run_id, "status": record.status},
+            )
+            return
         with log_context(
             run_id=run_id,
             conversation_id=record.conversation_id,
