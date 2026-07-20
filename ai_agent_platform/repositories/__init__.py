@@ -1,3 +1,4 @@
+from .errors import RepositoryIndexStoreConflictError
 from .memory import (
     InMemoryRepositoryIndexRepository,
     InMemorySessionRepository,
@@ -19,5 +20,6 @@ __all__ = [
     "PostgresDocumentRepository",
     "PostgresRepositoryIndexRepository",
     "PostgresSessionRepository",
+    "RepositoryIndexStoreConflictError",
     "SessionNotFoundError",
 ]

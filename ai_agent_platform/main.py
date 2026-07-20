@@ -16,7 +16,14 @@ from ai_agent_platform.agents import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.api import create_api_router
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import (
+    CeleryTaskQueue,
+    InProcessTaskQueue,
+    MetricsRegistry,
+    RequestObservabilityMiddleware,
+    Settings,
+    configure_logging,
+)
 from ai_agent_platform.integrations import (
     LLMClient,
     MCPToolProvider,
@@ -46,6 +53,30 @@ def create_app(
     coding_agent_runtime: CodingAgentRuntime | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
+    configure_logging(level=settings.log_level, log_format=settings.log_format)
+    metrics = MetricsRegistry()
+    if settings.task_queue_backend == "celery":
+        task_queue = CeleryTaskQueue(
+            broker_url=settings.redis_url,
+            result_backend_url=settings.celery_result_backend_url,
+            visibility_timeout_seconds=(
+                settings.celery_visibility_timeout_seconds
+            ),
+            publish_max_retries=settings.celery_task_max_retries,
+            publish_retry_backoff_seconds=(
+                settings.celery_task_retry_backoff_seconds
+            ),
+            publish_retry_backoff_max_seconds=(
+                settings.celery_task_retry_backoff_max_seconds
+            ),
+            metrics=metrics,
+        )
+    else:
+        task_queue = InProcessTaskQueue(
+            max_workers=settings.background_task_workers,
+            max_queue_size=settings.background_task_queue_capacity,
+            metrics=metrics,
+        )
 
     repository = _create_session_repository(settings)
     agent_runtime = GameAgentRuntime()
@@ -75,6 +106,7 @@ def create_app(
     repository_indexing_service = RepositoryIndexingService(
         rag_service=rag_service,
         index_store=_create_repository_index_store(settings),
+        task_queue=task_queue,
     )
     session_service = SessionService(
         repository=repository,
@@ -83,6 +115,8 @@ def create_app(
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
         session_service=session_service,
+        metrics=metrics,
+        task_queue=task_queue,
     )
 
     @asynccontextmanager
@@ -91,15 +125,21 @@ def create_app(
             yield
         finally:
             app.state.agent_run_service.close()
+            app.state.repository_indexing_service.close()
+            app.state.task_queue.close()
             if close_checkpointer is not None:
                 close_checkpointer()
             for provider in app.state.mcp_providers:
                 provider.close()
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    app.add_middleware(RequestObservabilityMiddleware, metrics=metrics)
+    app.state.metrics = metrics
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
+    app.state.repository_indexing_service = repository_indexing_service
+    app.state.task_queue = task_queue
     static_dir = Path(__file__).parent / "static"
 
     app.include_router(
@@ -110,6 +150,7 @@ def create_app(
             agent_run_service=agent_run_service,
             repository_indexing_service=repository_indexing_service,
             settings=settings,
+            metrics=metrics,
         ),
         prefix=settings.api_prefix,
     )

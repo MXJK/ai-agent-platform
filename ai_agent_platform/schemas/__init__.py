@@ -1,6 +1,8 @@
 from .agent import (
+    AgentChangeSummaryResponse,
     AgentRunRequest,
     AgentRunEventsResponse,
+    AgentRunMetricsResponse,
     AgentRunResumeRequest,
     AgentRunResponse,
     AgentRunStatusResponse,
@@ -8,7 +10,7 @@ from .agent import (
     AgentTraceStepResponse,
 )
 from .chat import ChatStreamRequest
-from .health import HealthResponse
+from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
 from .rag import (
     DocumentIngestRequest,
@@ -19,14 +21,20 @@ from .rag import (
     RAGSearchRequest,
     RAGSearchResponse,
 )
-from .repository import RepositoryIndexRequest, RepositoryIndexResponse
+from .repository import (
+    RepositoryIndexJobResponse,
+    RepositoryIndexRequest,
+    RepositoryIndexResponse,
+)
 from .session import CreateSessionRequest, SessionResponse, SessionsResponse
 from .summary import SessionSummaryResponse
 
 __all__ = [
     "AddMessageRequest",
+    "AgentChangeSummaryResponse",
     "AgentRunRequest",
     "AgentRunEventsResponse",
+    "AgentRunMetricsResponse",
     "AgentRunResumeRequest",
     "AgentRunResponse",
     "AgentRunStatusResponse",
@@ -39,14 +47,17 @@ __all__ = [
     "HealthResponse",
     "MessageResponse",
     "MessagesResponse",
+    "MetricsResponse",
     "RAGAskRequest",
     "RAGAskResponse",
     "RAGChunkResponse",
     "RAGSearchRequest",
     "RAGSearchResponse",
     "RepositoryIndexRequest",
+    "RepositoryIndexJobResponse",
     "RepositoryIndexResponse",
     "SessionResponse",
     "SessionsResponse",
     "SessionSummaryResponse",
+    "TimingMetricResponse",
 ]

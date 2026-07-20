@@ -141,6 +141,23 @@ class APITests(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"agent run {run_id} did not reach {terminal_statuses}")
 
+    def wait_for_index_job(
+        self,
+        client: TestClient,
+        repository_id: str,
+        job_id: str,
+    ) -> dict:
+        for _ in range(100):
+            response = client.get(
+                f"/api/v1/repositories/{repository_id}/index-jobs/{job_id}"
+            )
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            if body["status"] in {"completed", "completed_with_errors", "failed"}:
+                return body
+            time.sleep(0.02)
+        self.fail(f"repository index job {job_id} did not finish")
+
     def test_gets_session_summary(self) -> None:
         create_response = self.client.post(
             "/api/v1/sessions",
@@ -208,6 +225,10 @@ class APITests(unittest.TestCase):
         messages = messages_response.json()["messages"]
         self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
         self.assertIn("fake model reply to", messages[1]["content"])
+        metrics = self.client.get("/api/v1/metrics").json()["counters"]
+        self.assertEqual(metrics["chat_streams_completed_total"], 1)
+        self.assertGreater(metrics["llm_input_tokens_total"], 0)
+        self.assertGreater(metrics["llm_output_tokens_total"], 0)
 
     def test_chat_stream_returns_404_for_missing_conversation(self) -> None:
         response = self.client.post(
@@ -277,6 +298,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(results[0]["filename"], "refund.md")
         self.assertIn("退款", results[0]["text"])
         self.assertIsNotNone(results[0]["recall_score"])
+        self.assertIsNotNone(results[0]["lexical_score"])
+        self.assertIsNotNone(results[0]["hybrid_score"])
 
         ask_response = self.client.post(
             "/api/v1/knowledge-bases/customer_faq/ask",
@@ -334,12 +357,12 @@ class APITests(unittest.TestCase):
         ingest_response = self.client.post(
             "/api/v1/knowledge-bases/repo_main/documents",
             json={
-                "filename": "ai_agent_platform/api/router.py",
+                "filename": "ai_agent_platform/api/routes/chat.py",
                 "content": (
                     "def chat_stream(request: ChatStreamRequest) -> StreamingResponse:\n"
                     "    return StreamingResponse(_chat_stream_events(...))\n\n"
-                    "def run_agent(request: AgentRunRequest) -> AgentRunResponse:\n"
-                    "    result = coding_agent_runtime.run(...)\n"
+                    "def _chat_stream_events(request: ChatStreamRequest):\n"
+                    "    yield from llm_client.stream_chat(...)\n"
                 ),
             },
         )
@@ -351,7 +374,7 @@ class APITests(unittest.TestCase):
                 "conversation_id": session_id,
                 "message": "解释 chat stream 接口在哪里实现，ChatStreamRequest 是怎么进入流程的？",
                 "repository_id": "repo_main",
-                "focus_files": ["ai_agent_platform/api/router.py"],
+                "focus_files": ["ai_agent_platform/api/routes/chat.py"],
             },
         )
 
@@ -370,6 +393,18 @@ class APITests(unittest.TestCase):
         self.assertTrue(body["run_id"].startswith("run_"))
         self.assertEqual(body["thread_id"], body["run_id"])
         self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["metrics"]["node_count"], 6)
+        self.assertEqual(
+            body["metrics"]["tool_call_count"],
+            len(body["tool_calls"]),
+        )
+        self.assertGreaterEqual(body["metrics"]["elapsed_ms"], 0)
+        process_metrics = self.client.get("/api/v1/metrics").json()["counters"]
+        self.assertEqual(process_metrics["agent_runs_submitted_total"], 1)
+        self.assertEqual(
+            process_metrics["agent_run_executions_completed_total"],
+            1,
+        )
         self.assertIsNotNone(body["checkpoint_id"])
         self.assertEqual(body["repository_id"], "repo_main")
         self.assertEqual(body["role"], "研发助手 / 代码仓库问答 Agent")
@@ -390,7 +425,7 @@ class APITests(unittest.TestCase):
         )
         self.assertTrue(result_by_name["repo.read_file"]["ok"])
         self.assertIn(
-            "def run_agent",
+            "def chat_stream",
             result_by_name["repo.read_file"]["result"]["content"],
         )
         self.assertEqual(
@@ -404,7 +439,7 @@ class APITests(unittest.TestCase):
                 "compose_answer",
             ],
         )
-        self.assertIn("ai_agent_platform/api/router.py", body["answer"])
+        self.assertIn("ai_agent_platform/api/routes/chat.py", body["answer"])
 
         self.assertEqual(status_body["run_id"], body["run_id"])
         self.assertEqual(status_body["thread_id"], body["thread_id"])
@@ -647,6 +682,7 @@ class APITests(unittest.TestCase):
             self.assertTrue(large_payload["ok"])
             self.assertTrue(large_payload["output_truncated"])
             self.assertIn("truncated_output_preview", large_payload["result"])
+            self.assertNotIn("content", large_payload["result"])
 
     def test_indexes_repository_files_and_skips_unchanged_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -675,18 +711,26 @@ class APITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(first_response.status_code, 201)
-            first_body = first_response.json()
-            self.assertEqual(first_body["repository_id"], "repo_main")
+            self.assertEqual(first_response.status_code, 202)
+            submitted_body = first_response.json()
+            self.assertTrue(
+                first_response.headers["location"].endswith(
+                    f"/index-jobs/{submitted_body['job_id']}"
+                )
+            )
+            self.assertEqual(submitted_body["repository_id"], "repo_main")
+            self.assertEqual(submitted_body["status"], "pending")
+            first_body = self.wait_for_index_job(
+                self.client,
+                "repo_main",
+                submitted_body["job_id"],
+            )
             self.assertEqual(first_body["status"], "completed")
             self.assertEqual(first_body["scanned_files"], 2)
             self.assertEqual(first_body["indexed_files"], 2)
             self.assertEqual(first_body["skipped_files"], 0)
             self.assertEqual(first_body["failed_files"], 0)
-            self.assertEqual(
-                first_body["indexed_paths"],
-                ["README.md", "app.py"],
-            )
+            self.assertIsNotNone(first_body["completed_at"])
 
             search_response = self.client.post(
                 "/api/v1/knowledge-bases/repo_main/search",
@@ -735,17 +779,31 @@ class APITests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(second_response.status_code, 201)
-            second_body = second_response.json()
+            self.assertEqual(second_response.status_code, 202)
+            second_body = self.wait_for_index_job(
+                self.client,
+                "repo_main",
+                second_response.json()["job_id"],
+            )
             self.assertEqual(second_body["status"], "completed")
             self.assertEqual(second_body["scanned_files"], 2)
             self.assertEqual(second_body["indexed_files"], 0)
             self.assertEqual(second_body["skipped_files"], 2)
             self.assertEqual(second_body["failed_files"], 0)
-            self.assertEqual(
-                second_body["skipped_paths"],
-                ["README.md", "app.py"],
+
+            metrics = self.client.get("/api/v1/metrics").json()["counters"]
+            self.assertGreaterEqual(
+                metrics["background_task_repository_index_completed_total"],
+                2,
             )
+
+    def test_repository_index_job_returns_404_when_missing(self) -> None:
+        response = self.client.get(
+            "/api/v1/repositories/repo_main/index-jobs/idxjob_missing"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "index job not found")
 
     def test_agent_run_status_returns_404_for_missing_run(self) -> None:
         response = self.client.get("/api/v1/agent/runs/run_missing")
@@ -875,6 +933,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(body["errors"][0]["code"], "rag_provider_error")
         self.assertTrue(body["errors"][0]["retryable"])
         self.assertTrue(body["errors"][0]["recovered"])
+        self.assertEqual(body["metrics"]["retry_count"], 1)
+        self.assertEqual(body["metrics"]["recovered_error_count"], 1)
         self.assertIn("agent.py", body["answer"])
         retrieve_step = body["trace"][2]
         self.assertEqual(retrieve_step["node"], "retrieve_repository_context")

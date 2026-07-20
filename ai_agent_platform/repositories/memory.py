@@ -15,6 +15,7 @@ from ai_agent_platform.domain import (
     Session,
     TokenUsageRecord,
 )
+from ai_agent_platform.repositories.errors import RepositoryIndexStoreConflictError
 
 
 class SessionNotFoundError(Exception):
@@ -141,6 +142,12 @@ class InMemoryRepositoryIndexRepository:
         max_file_size: int,
     ) -> RepositoryIndexJobRecord:
         with self._lock:
+            if any(
+                job.repository_id == repository_id
+                and job.status in {"pending", "running"}
+                for job in self._jobs.values()
+            ):
+                raise RepositoryIndexStoreConflictError(repository_id)
             now = _now()
             existing = self._repositories.get(repository_id)
             self._repositories[repository_id] = RepositoryRecord(

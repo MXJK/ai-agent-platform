@@ -1,0 +1,17 @@
+"""Resource-oriented FastAPI router factories."""
+
+from ai_agent_platform.api.routes.agent_runs import create_agent_runs_router
+from ai_agent_platform.api.routes.chat import create_chat_router
+from ai_agent_platform.api.routes.health import create_health_router
+from ai_agent_platform.api.routes.knowledge_bases import create_knowledge_bases_router
+from ai_agent_platform.api.routes.repositories import create_repositories_router
+from ai_agent_platform.api.routes.sessions import create_sessions_router
+
+__all__ = [
+    "create_agent_runs_router",
+    "create_chat_router",
+    "create_health_router",
+    "create_knowledge_bases_router",
+    "create_repositories_router",
+    "create_sessions_router",
+]

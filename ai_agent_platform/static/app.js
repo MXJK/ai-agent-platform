@@ -670,15 +670,21 @@ async function indexRepository() {
   }
   status.textContent = "Indexing repository...";
   try {
-    const body = await fetchJson(`/repositories/${encodeURIComponent(repositoryId)}/index`, {
-      method: "POST",
-      body: JSON.stringify({
-        root_path: rootPath,
-        include_patterns: csvValues($("include-patterns-input").value),
-        exclude_patterns: csvValues($("exclude-patterns-input").value),
-        max_file_size: numberValue("max-file-size-input", 200000),
-      }),
-    });
+    const submitted = await fetchJson(
+      `/repositories/${encodeURIComponent(repositoryId)}/index`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          root_path: rootPath,
+          include_patterns: csvValues($("include-patterns-input").value),
+          exclude_patterns: csvValues($("exclude-patterns-input").value),
+          max_file_size: numberValue("max-file-size-input", 200000),
+        }),
+      }
+    );
+    renderRepositoryResult(submitted);
+    status.textContent = `Index job ${submitted.job_id} queued`;
+    const body = await waitForRepositoryIndex(repositoryId, submitted.job_id);
     state.latestRepositoryIndex = body;
     status.textContent = `indexed ${body.indexed_files}, skipped ${body.skipped_files}`;
     renderRepositoryResult(body);
@@ -692,6 +698,27 @@ async function indexRepository() {
   }
 }
 
+async function waitForRepositoryIndex(repositoryId, jobId) {
+  const terminalStatuses = new Set([
+    "completed",
+    "completed_with_errors",
+    "failed",
+  ]);
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const body = await fetchJson(
+      `/repositories/${encodeURIComponent(repositoryId)}/index-jobs/${encodeURIComponent(jobId)}`
+    );
+    renderRepositoryResult(body);
+    $("session-status").textContent =
+      `Index ${body.status}: scanned ${body.scanned_files}, indexed ${body.indexed_files}`;
+    if (terminalStatuses.has(body.status)) {
+      return body;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`index job ${jobId} did not finish before the polling timeout`);
+}
+
 function renderRepositoryResult(body) {
   $("repository-result").innerHTML = `
     <div class="summary-row"><span>Job</span><strong>${escapeHtml(body.job_id)}</strong></div>
@@ -701,7 +728,11 @@ function renderRepositoryResult(body) {
     <div class="summary-row"><span>Skipped</span><strong>${escapeHtml(body.skipped_files)}</strong></div>
     <div class="summary-row"><span>Failed</span><strong>${escapeHtml(body.failed_files)}</strong></div>
   `;
-  renderPathList("indexed-paths", body.indexed_paths || [], "No indexed paths");
+  renderPathList(
+    "indexed-paths",
+    body.indexed_paths || [],
+    "Path details are not persisted"
+  );
   renderPathList(
     "skipped-paths",
     [...(body.skipped_paths || []), ...(body.failed_paths || [])],

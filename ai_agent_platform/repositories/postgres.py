@@ -6,7 +6,12 @@ import hashlib
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
+from ai_agent_platform.agents.coding.models import (
+    AgentChangeSummary,
+    AgentRunMetrics,
+    AgentRunRecord,
+    AgentRunResult,
+)
 from ai_agent_platform.domain import (
     Message,
     RepositoryFileRecord,
@@ -18,6 +23,7 @@ from ai_agent_platform.domain import (
 )
 from ai_agent_platform.integrations.rag import DocumentChunk, ParsedDocument, RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.repositories.errors import RepositoryIndexStoreConflictError
 from ai_agent_platform.repositories.memory import SessionNotFoundError
 
 
@@ -417,61 +423,69 @@ class PostgresRepositoryIndexRepository:
     ) -> RepositoryIndexJobRecord:
         Jsonb = _require_jsonb()
         job_id = f"idxjob_{uuid4().hex[:12]}"
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO repositories (id, root_path, created_at, updated_at)
-                VALUES (%s, %s, NOW(), NOW())
-                ON CONFLICT (id) DO UPDATE SET
-                    root_path = EXCLUDED.root_path,
-                    updated_at = NOW()
-                """,
-                (repository_id, root_path),
-            )
-            row = conn.execute(
-                """
-                INSERT INTO repository_index_jobs (
-                    id,
-                    repository_id,
-                    root_path,
-                    include_patterns,
-                    exclude_patterns,
-                    max_file_size,
-                    status,
-                    scanned_files,
-                    indexed_files,
-                    skipped_files,
-                    failed_files,
-                    created_at,
-                    updated_at
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO repositories (id, root_path, created_at, updated_at)
+                    VALUES (%s, %s, NOW(), NOW())
+                    ON CONFLICT (id) DO UPDATE SET
+                        root_path = EXCLUDED.root_path,
+                        updated_at = NOW()
+                    """,
+                    (repository_id, root_path),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0, 0, 0, NOW(), NOW())
-                RETURNING
-                    id,
-                    repository_id,
-                    root_path,
-                    include_patterns,
-                    exclude_patterns,
-                    max_file_size,
-                    status,
-                    scanned_files,
-                    indexed_files,
-                    skipped_files,
-                    failed_files,
-                    error,
-                    created_at,
-                    updated_at,
-                    completed_at
-                """,
-                (
-                    job_id,
-                    repository_id,
-                    root_path,
-                    Jsonb(include_patterns),
-                    Jsonb(exclude_patterns),
-                    max_file_size,
-                ),
-            ).fetchone()
+                row = conn.execute(
+                    """
+                    INSERT INTO repository_index_jobs (
+                        id,
+                        repository_id,
+                        root_path,
+                        include_patterns,
+                        exclude_patterns,
+                        max_file_size,
+                        status,
+                        scanned_files,
+                        indexed_files,
+                        skipped_files,
+                        failed_files,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s,
+                        'pending', 0, 0, 0, 0, NOW(), NOW()
+                    )
+                    RETURNING
+                        id,
+                        repository_id,
+                        root_path,
+                        include_patterns,
+                        exclude_patterns,
+                        max_file_size,
+                        status,
+                        scanned_files,
+                        indexed_files,
+                        skipped_files,
+                        failed_files,
+                        error,
+                        created_at,
+                        updated_at,
+                        completed_at
+                    """,
+                    (
+                        job_id,
+                        repository_id,
+                        root_path,
+                        Jsonb(include_patterns),
+                        Jsonb(exclude_patterns),
+                        max_file_size,
+                    ),
+                ).fetchone()
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) == "23505":
+                raise RepositoryIndexStoreConflictError(repository_id) from exc
+            raise
         return _repository_index_job_from_row(row)
 
     def update_index_job(
@@ -767,6 +781,13 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     payload["tool_calls"] = [
         ToolCall(**item) for item in payload.get("tool_calls", [])
     ]
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        payload["metrics"] = AgentRunMetrics(**metrics)
+    change_summary = payload.get("change_summary")
+    if isinstance(change_summary, dict):
+        payload["change_summary"] = AgentChangeSummary(**change_summary)
+    payload.setdefault("artifacts", [])
     payload.setdefault("errors", [])
     return AgentRunResult(**payload)
 

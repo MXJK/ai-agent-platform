@@ -1,16 +1,34 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import ast
+from dataclasses import replace
 import hashlib
 import math
 import re
-from typing import Protocol
+from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import LLMClient
+from ai_agent_platform.integrations.rag.errors import (
+    RAGConfigurationError,
+    RAGError,
+    RAGProviderError,
+    RAGValidationError,
+)
+from ai_agent_platform.integrations.rag.models import (
+    DocumentChunk,
+    DocumentStore,
+    EmbeddingProvider,
+    IngestedDocument,
+    ParsedDocument,
+    RAGAnswer,
+    Reranker,
+    RetrievedDocument,
+    VectorStore,
+)
 
 
 SUPPORTED_TEXT_EXTENSIONS = {
@@ -42,109 +60,6 @@ CODE_TEXT_EXTENSIONS = {
     ".ts",
     ".tsx",
 }
-
-
-@dataclass(frozen=True)
-class ParsedDocument:
-    id: str
-    knowledge_base_id: str
-    filename: str
-    text: str
-    source_uri: str | None = None
-
-
-@dataclass(frozen=True)
-class DocumentChunk:
-    id: str
-    knowledge_base_id: str
-    document_id: str
-    filename: str
-    chunk_index: int
-    text: str
-    start_line: int | None = None
-    end_line: int | None = None
-    symbols: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class RetrievedDocument:
-    id: str
-    knowledge_base_id: str
-    document_id: str
-    filename: str
-    chunk_index: int
-    text: str
-    score: float
-    start_line: int | None = None
-    end_line: int | None = None
-    symbols: list[str] = field(default_factory=list)
-    recall_score: float | None = None
-    rerank_score: float | None = None
-
-
-@dataclass(frozen=True)
-class IngestedDocument:
-    knowledge_base_id: str
-    document_id: str
-    filename: str
-    chunk_count: int
-
-
-@dataclass(frozen=True)
-class RAGAnswer:
-    answer: str
-    citations: list[RetrievedDocument]
-
-
-class EmbeddingProvider(Protocol):
-    def embed_texts(
-        self,
-        texts: list[str],
-        *,
-        task_type: str = "document",
-    ) -> list[list[float]]:
-        ...
-
-
-class VectorStore(Protocol):
-    def delete_document(self, *, document_id: str) -> None:
-        ...
-
-    def upsert_chunks(
-        self,
-        chunks: list[DocumentChunk],
-        embeddings: list[list[float]],
-    ) -> None:
-        ...
-
-    def search(
-        self,
-        *,
-        knowledge_base_id: str,
-        query_embedding: list[float],
-        limit: int,
-    ) -> list[RetrievedDocument]:
-        ...
-
-
-class DocumentStore(Protocol):
-    def save_document(
-        self,
-        document: ParsedDocument,
-        chunks: list[DocumentChunk],
-    ) -> None:
-        ...
-
-
-class Reranker(Protocol):
-    def rerank(
-        self,
-        *,
-        query: str,
-        candidates: list[RetrievedDocument],
-        limit: int,
-    ) -> list[RetrievedDocument]:
-        ...
 
 
 class TextDocumentParser:
@@ -260,7 +175,7 @@ class RecursiveCharacterChunker:
                     )
                 )
 
-        for index, (start_line, symbol) in enumerate(starts):
+        for index, (start_line, symbols) in enumerate(starts):
             next_start = starts[index + 1][0] if index + 1 < len(starts) else len(lines) + 1
             block_lines = lines[start_line - 1 : next_start - 1]
             chunks.extend(
@@ -268,7 +183,7 @@ class RecursiveCharacterChunker:
                     document=document,
                     lines=block_lines,
                     start_line=start_line,
-                    symbols=[symbol],
+                    symbols=symbols,
                     start_index=len(chunks),
                 )
             )
@@ -552,7 +467,11 @@ class SentenceTransformerCrossEncoderReranker:
             replace(
                 candidate,
                 score=float(score),
-                recall_score=candidate.score,
+                recall_score=(
+                    candidate.recall_score
+                    if candidate.recall_score is not None
+                    else candidate.score
+                ),
                 rerank_score=float(score),
             )
             for candidate, score in zip(candidates, raw_scores)
@@ -564,26 +483,29 @@ class SentenceTransformerCrossEncoderReranker:
 class InMemoryVectorStore:
     def __init__(self) -> None:
         self._rows: list[tuple[DocumentChunk, list[float]]] = []
+        self._lock = Lock()
 
     def delete_document(self, *, document_id: str) -> None:
-        self._rows = [
-            (chunk, embedding)
-            for chunk, embedding in self._rows
-            if chunk.document_id != document_id
-        ]
+        with self._lock:
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.document_id != document_id
+            ]
 
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
         embeddings: list[list[float]],
     ) -> None:
-        existing_ids = {chunk.id for chunk in chunks}
-        self._rows = [
-            (chunk, embedding)
-            for chunk, embedding in self._rows
-            if chunk.id not in existing_ids
-        ]
-        self._rows.extend(zip(chunks, embeddings))
+        with self._lock:
+            existing_ids = {chunk.id for chunk in chunks}
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.id not in existing_ids
+            ]
+            self._rows.extend(zip(chunks, embeddings))
 
     def search(
         self,
@@ -593,7 +515,9 @@ class InMemoryVectorStore:
         limit: int,
     ) -> list[RetrievedDocument]:
         scored: list[RetrievedDocument] = []
-        for chunk, embedding in self._rows:
+        with self._lock:
+            rows = list(self._rows)
+        for chunk, embedding in rows:
             if chunk.knowledge_base_id != knowledge_base_id:
                 continue
             score = _cosine_similarity(query_embedding, embedding)
@@ -865,8 +789,11 @@ class RAGService:
         reranker: Reranker,
         default_recall_limit: int,
         max_prompt_chars: int,
+        lexical_weight: float = 0.35,
         document_store: DocumentStore | None = None,
     ) -> None:
+        if not 0.0 <= lexical_weight <= 1.0:
+            raise ValueError("lexical_weight must be between 0 and 1")
         self._parser = parser
         self._chunker = chunker
         self._embedding_provider = embedding_provider
@@ -874,6 +801,7 @@ class RAGService:
         self._reranker = reranker
         self._default_recall_limit = default_recall_limit
         self._max_prompt_chars = max_prompt_chars
+        self._lexical_weight = lexical_weight
         self._document_store = document_store
 
     def ingest_document(
@@ -937,6 +865,11 @@ class RAGService:
             knowledge_base_id=knowledge_base_id,
             query_embedding=query_embedding,
             limit=candidate_limit,
+        )
+        candidates = _hybrid_rank_candidates(
+            query=query,
+            candidates=candidates,
+            lexical_weight=self._lexical_weight,
         )
         return self._reranker.rerank(
             query=query,
@@ -1020,84 +953,6 @@ class RAGService:
         return "\n\n".join(parts)
 
 
-class RAGError(Exception):
-    pass
-
-
-class RAGValidationError(RAGError):
-    pass
-
-
-class RAGConfigurationError(RAGError):
-    pass
-
-
-class RAGProviderError(RAGError):
-    pass
-
-
-def create_rag_service(
-    settings: Settings,
-    *,
-    document_store: DocumentStore | None = None,
-) -> RAGService:
-    if settings.embedding_provider == "openai":
-        embedding_provider: EmbeddingProvider = OpenAIEmbeddingProvider(settings)
-    elif settings.embedding_provider == "gemini":
-        embedding_provider = GeminiEmbeddingProvider(settings)
-    elif settings.embedding_provider == "local":
-        embedding_provider = HashingEmbeddingProvider(
-            dimensions=settings.local_embedding_dimensions
-        )
-    else:
-        raise RAGConfigurationError(
-            f"unsupported embedding provider: {settings.embedding_provider}"
-        )
-
-    if settings.rag_vector_store == "chroma":
-        vector_store: VectorStore = ChromaVectorStore(
-            persist_directory=settings.chroma_persist_directory,
-            collection_name=settings.chroma_collection_name,
-        )
-    elif settings.rag_vector_store == "qdrant":
-        vector_store = QdrantVectorStore(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key,
-            collection_name=settings.qdrant_collection_name,
-        )
-    elif settings.rag_vector_store == "memory":
-        vector_store = InMemoryVectorStore()
-    else:
-        raise RAGConfigurationError(
-            f"unsupported RAG vector store: {settings.rag_vector_store}"
-        )
-
-    if settings.rag_reranker_provider == "sentence_transformer":
-        reranker: Reranker = SentenceTransformerCrossEncoderReranker(
-            model_name=settings.sentence_transformer_reranker_model
-        )
-    elif settings.rag_reranker_provider == "none":
-        reranker = NoopReranker()
-    else:
-        raise RAGConfigurationError(
-            f"unsupported RAG reranker provider: {settings.rag_reranker_provider}"
-        )
-
-    return RAGService(
-        parser=TextDocumentParser(),
-        chunker=RecursiveCharacterChunker(
-            chunk_size=settings.rag_chunk_size,
-            chunk_overlap=settings.rag_chunk_overlap,
-        ),
-        embedding_provider=embedding_provider,
-        vector_store=vector_store,
-        reranker=reranker,
-        default_recall_limit=settings.rag_recall_limit,
-        max_prompt_chars=settings.rag_max_prompt_chars,
-        document_store=document_store,
-    )
-
-
 def _normalize_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
@@ -1123,12 +978,51 @@ def _line_number_for_offset(text: str, offset: int) -> int:
     return text.count("\n", 0, max(offset, 0)) + 1
 
 
-def _code_symbol_starts(lines: list[str], filename: str) -> list[tuple[int, str]]:
-    starts: list[tuple[int, str]] = []
+def _code_symbol_starts(
+    lines: list[str],
+    filename: str,
+) -> list[tuple[int, list[str]]]:
+    if _file_extension(filename) == ".py":
+        python_starts = _python_symbol_starts(lines)
+        if python_starts:
+            return python_starts
+
+    starts: list[tuple[int, list[str]]] = []
     for index, line in enumerate(lines, start=1):
         symbol = _code_symbol_name(line, filename)
         if symbol is not None:
-            starts.append((index, symbol))
+            starts.append((index, [symbol]))
+    return starts
+
+
+def _python_symbol_starts(lines: list[str]) -> list[tuple[int, list[str]]]:
+    """Return top-level Python blocks with class-qualified child symbols.
+
+    AST boundaries keep a class and its methods in one semantic block. Invalid
+    or incomplete Python falls back to the language-neutral regex scanner.
+    """
+
+    try:
+        tree = ast.parse("\n".join(lines))
+    except SyntaxError:
+        return []
+
+    starts: list[tuple[int, list[str]]] = []
+    symbol_nodes = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    function_nodes = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in tree.body:
+        if not isinstance(node, symbol_nodes):
+            continue
+        decorator_lines = [item.lineno for item in node.decorator_list]
+        start_line = min([node.lineno, *decorator_lines])
+        symbols = [node.name]
+        if isinstance(node, ast.ClassDef):
+            symbols.extend(
+                f"{node.name}.{child.name}"
+                for child in node.body
+                if isinstance(child, function_nodes)
+            )
+        starts.append((start_line, symbols))
     return starts
 
 
@@ -1247,6 +1141,92 @@ def _chunk_id(*, document_id: str, chunk_index: int) -> str:
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]", text.lower())
+
+
+def _hybrid_rank_candidates(
+    *,
+    query: str,
+    candidates: list[RetrievedDocument],
+    lexical_weight: float,
+) -> list[RetrievedDocument]:
+    """Blend vector recall with exact code, symbol, and path matches."""
+
+    query_terms = _search_terms(query)
+    ranked: list[RetrievedDocument] = []
+    for candidate in candidates:
+        recall_score = (
+            candidate.recall_score
+            if candidate.recall_score is not None
+            else candidate.score
+        )
+        vector_score = max(0.0, min(1.0, (recall_score + 1.0) / 2.0))
+        lexical_score = _lexical_relevance(query_terms, candidate)
+        hybrid_score = (
+            (1.0 - lexical_weight) * vector_score
+            + lexical_weight * lexical_score
+        )
+        ranked.append(
+            replace(
+                candidate,
+                score=hybrid_score,
+                recall_score=recall_score,
+                lexical_score=lexical_score,
+                hybrid_score=hybrid_score,
+            )
+        )
+    ranked.sort(
+        key=lambda item: (
+            item.score,
+            item.recall_score if item.recall_score is not None else -1.0,
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _lexical_relevance(
+    query_terms: set[str],
+    candidate: RetrievedDocument,
+) -> float:
+    if not query_terms:
+        return 0.0
+
+    text_terms = _search_terms(candidate.text)
+    symbol_terms = _search_terms(" ".join(candidate.symbols))
+    filename_terms = _search_terms(candidate.filename)
+    text_coverage = len(query_terms & text_terms) / len(query_terms)
+    symbol_coverage = _metadata_coverage(query_terms, symbol_terms)
+    filename_coverage = _metadata_coverage(query_terms, filename_terms)
+    return min(
+        1.0,
+        0.55 * text_coverage
+        + 0.35 * symbol_coverage
+        + 0.10 * filename_coverage,
+    )
+
+
+def _metadata_coverage(query_terms: set[str], metadata_terms: set[str]) -> float:
+    meaningful_terms = {term for term in metadata_terms if len(term) > 1}
+    if not meaningful_terms:
+        return 0.0
+    return len(query_terms & meaningful_terms) / len(meaningful_terms)
+
+
+def _search_terms(text: str) -> set[str]:
+    terms: set[str] = set()
+    for raw_term in _tokenize(text):
+        if not raw_term:
+            continue
+        terms.add(raw_term)
+        for snake_part in raw_term.split("_"):
+            if snake_part:
+                terms.add(snake_part)
+        for camel_part in re.findall(
+            r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+",
+            raw_term,
+        ):
+            terms.add(camel_part.lower())
+    return terms
 
 
 def _gemini_task_type(task_type: str) -> str:

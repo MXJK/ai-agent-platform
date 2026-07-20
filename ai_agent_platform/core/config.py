@@ -9,6 +9,8 @@ from pathlib import Path
 class Settings:
     app_name: str = "ai-agent-platform"
     api_prefix: str = "/api/v1"
+    log_level: str = "WARNING"
+    log_format: str = "json"
     llm_provider: str = "fake"
     llm_model: str = "demo-stream-model"
     openai_api_key: str | None = None
@@ -39,9 +41,23 @@ class Settings:
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
     rag_recall_limit: int = 20
+    rag_lexical_weight: float = 0.35
     rag_reranker_provider: str = "none"
     sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_max_prompt_chars: int = 6000
+    background_task_workers: int = 4
+    background_task_queue_capacity: int = 100
+    task_queue_backend: str = "in_process"
+    redis_url: str = "redis://localhost:6379/0"
+    celery_result_backend_url: str = "redis://localhost:6379/1"
+    celery_visibility_timeout_seconds: int = 3600
+    celery_task_max_retries: int = 3
+    celery_task_retry_backoff_seconds: int = 2
+    celery_task_retry_backoff_max_seconds: int = 60
+    celery_task_soft_time_limit_seconds: int = 900
+    celery_task_time_limit_seconds: int = 960
+    celery_result_expires_seconds: int = 86400
+    celery_worker_max_tasks_per_child: int = 100
     mcp_enabled: bool = False
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
@@ -50,12 +66,143 @@ class Settings:
     sandbox_command_timeout_seconds: float = 30.0
     sandbox_workspace_parent: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.api_prefix.startswith("/"):
+            raise ValueError("api_prefix must start with '/'")
+        _require_choice(
+            "log_level",
+            self.log_level.upper(),
+            {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+        )
+        _require_choice("log_format", self.log_format, {"json", "text"})
+        for name, value in (
+            ("session_repository", self.session_repository),
+            ("agent_run_store", self.agent_run_store),
+            ("document_store", self.document_store),
+            ("repository_index_store", self.repository_index_store),
+        ):
+            _require_choice(name, value, {"memory", "postgres"})
+        _require_choice(
+            "langgraph_checkpointer",
+            self.langgraph_checkpointer,
+            {"memory", "postgres"},
+        )
+        _require_choice(
+            "rag_vector_store",
+            self.rag_vector_store,
+            {"memory", "chroma", "qdrant"},
+        )
+        _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
+        _require_choice(
+            "task_queue_backend",
+            self.task_queue_backend,
+            {"celery", "in_process"},
+        )
+        for name, value in (
+            ("llm_timeout_seconds", self.llm_timeout_seconds),
+            ("llm_max_input_chars", self.llm_max_input_chars),
+            ("llm_max_context_messages", self.llm_max_context_messages),
+            ("llm_max_output_tokens", self.llm_max_output_tokens),
+            ("local_embedding_dimensions", self.local_embedding_dimensions),
+            ("rag_chunk_size", self.rag_chunk_size),
+            ("rag_recall_limit", self.rag_recall_limit),
+            ("rag_max_prompt_chars", self.rag_max_prompt_chars),
+            ("background_task_workers", self.background_task_workers),
+            (
+                "celery_visibility_timeout_seconds",
+                self.celery_visibility_timeout_seconds,
+            ),
+            (
+                "celery_task_retry_backoff_seconds",
+                self.celery_task_retry_backoff_seconds,
+            ),
+            (
+                "celery_task_retry_backoff_max_seconds",
+                self.celery_task_retry_backoff_max_seconds,
+            ),
+            (
+                "celery_task_soft_time_limit_seconds",
+                self.celery_task_soft_time_limit_seconds,
+            ),
+            (
+                "celery_task_time_limit_seconds",
+                self.celery_task_time_limit_seconds,
+            ),
+            ("celery_result_expires_seconds", self.celery_result_expires_seconds),
+            (
+                "celery_worker_max_tasks_per_child",
+                self.celery_worker_max_tasks_per_child,
+            ),
+            ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
+            (
+                "sandbox_command_timeout_seconds",
+                self.sandbox_command_timeout_seconds,
+            ),
+        ):
+            _require_positive(name, value)
+        if self.llm_max_retries < 0:
+            raise ValueError("llm_max_retries must be greater than or equal to 0")
+        if self.rag_chunk_overlap < 0:
+            raise ValueError("rag_chunk_overlap must be greater than or equal to 0")
+        if self.rag_chunk_overlap >= self.rag_chunk_size:
+            raise ValueError("rag_chunk_overlap must be smaller than rag_chunk_size")
+        if not 0.0 <= self.rag_lexical_weight <= 1.0:
+            raise ValueError("rag_lexical_weight must be between 0 and 1")
+        if self.background_task_queue_capacity < 0:
+            raise ValueError(
+                "background_task_queue_capacity must be greater than or equal to 0"
+            )
+        if self.celery_task_max_retries < 0:
+            raise ValueError(
+                "celery_task_max_retries must be greater than or equal to 0"
+            )
+        if (
+            self.celery_task_retry_backoff_max_seconds
+            < self.celery_task_retry_backoff_seconds
+        ):
+            raise ValueError(
+                "celery_task_retry_backoff_max_seconds must be greater than or "
+                "equal to celery_task_retry_backoff_seconds"
+            )
+        if (
+            self.celery_task_time_limit_seconds
+            <= self.celery_task_soft_time_limit_seconds
+        ):
+            raise ValueError(
+                "celery_task_time_limit_seconds must be greater than "
+                "celery_task_soft_time_limit_seconds"
+            )
+        if (
+            self.celery_visibility_timeout_seconds
+            <= self.celery_task_time_limit_seconds
+        ):
+            raise ValueError(
+                "celery_visibility_timeout_seconds must be greater than "
+                "celery_task_time_limit_seconds"
+            )
+        if self.task_queue_backend == "celery":
+            if not self.redis_url.startswith(("redis://", "rediss://")):
+                raise ValueError(
+                    "redis_url must start with redis:// or rediss:// for Celery"
+                )
+            if not self.celery_result_backend_url.startswith(
+                ("redis://", "rediss://")
+            ):
+                raise ValueError(
+                    "celery_result_backend_url must start with redis:// or rediss://"
+                )
+            self._validate_distributed_task_storage()
+        if self.mcp_enabled and not self.mcp_config_path:
+            raise ValueError("mcp_config_path is required when mcp_enabled is true")
+
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv = _load_dotenv()
         return cls(
             app_name=_env("APP_NAME", cls.app_name, dotenv),
             api_prefix=_env("API_PREFIX", cls.api_prefix, dotenv),
+            log_level=_env("LOG_LEVEL", cls.log_level, dotenv),
+            log_format=_env("LOG_FORMAT", cls.log_format, dotenv),
             llm_provider=_env("LLM_PROVIDER", cls.llm_provider, dotenv),
             llm_model=_env("LLM_MODEL", cls.llm_model, dotenv),
             openai_api_key=_env("OPENAI_API_KEY", None, dotenv),
@@ -114,6 +261,9 @@ class Settings:
                 "RAG_CHUNK_OVERLAP", cls.rag_chunk_overlap, dotenv
             ),
             rag_recall_limit=_int_env("RAG_RECALL_LIMIT", cls.rag_recall_limit, dotenv),
+            rag_lexical_weight=_float_env(
+                "RAG_LEXICAL_WEIGHT", cls.rag_lexical_weight, dotenv
+            ),
             rag_reranker_provider=_env(
                 "RAG_RERANKER_PROVIDER", cls.rag_reranker_provider, dotenv
             ),
@@ -124,6 +274,63 @@ class Settings:
             ),
             rag_max_prompt_chars=_int_env(
                 "RAG_MAX_PROMPT_CHARS", cls.rag_max_prompt_chars, dotenv
+            ),
+            background_task_workers=_int_env(
+                "BACKGROUND_TASK_WORKERS", cls.background_task_workers, dotenv
+            ),
+            background_task_queue_capacity=_int_env(
+                "BACKGROUND_TASK_QUEUE_CAPACITY",
+                cls.background_task_queue_capacity,
+                dotenv,
+            ),
+            task_queue_backend=_env(
+                "TASK_QUEUE_BACKEND", cls.task_queue_backend, dotenv
+            ),
+            redis_url=_env("REDIS_URL", cls.redis_url, dotenv),
+            celery_result_backend_url=_env(
+                "CELERY_RESULT_BACKEND_URL",
+                cls.celery_result_backend_url,
+                dotenv,
+            ),
+            celery_visibility_timeout_seconds=_int_env(
+                "CELERY_VISIBILITY_TIMEOUT_SECONDS",
+                cls.celery_visibility_timeout_seconds,
+                dotenv,
+            ),
+            celery_task_max_retries=_int_env(
+                "CELERY_TASK_MAX_RETRIES",
+                cls.celery_task_max_retries,
+                dotenv,
+            ),
+            celery_task_retry_backoff_seconds=_int_env(
+                "CELERY_TASK_RETRY_BACKOFF_SECONDS",
+                cls.celery_task_retry_backoff_seconds,
+                dotenv,
+            ),
+            celery_task_retry_backoff_max_seconds=_int_env(
+                "CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS",
+                cls.celery_task_retry_backoff_max_seconds,
+                dotenv,
+            ),
+            celery_task_soft_time_limit_seconds=_int_env(
+                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS",
+                cls.celery_task_soft_time_limit_seconds,
+                dotenv,
+            ),
+            celery_task_time_limit_seconds=_int_env(
+                "CELERY_TASK_TIME_LIMIT_SECONDS",
+                cls.celery_task_time_limit_seconds,
+                dotenv,
+            ),
+            celery_result_expires_seconds=_int_env(
+                "CELERY_RESULT_EXPIRES_SECONDS",
+                cls.celery_result_expires_seconds,
+                dotenv,
+            ),
+            celery_worker_max_tasks_per_child=_int_env(
+                "CELERY_WORKER_MAX_TASKS_PER_CHILD",
+                cls.celery_worker_max_tasks_per_child,
+                dotenv,
             ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
             mcp_config_path=_env("MCP_CONFIG_PATH", None, dotenv),
@@ -145,6 +352,42 @@ class Settings:
             ),
             sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
         )
+
+    def _validate_distributed_task_storage(self) -> None:
+        required_values = {
+            "session_repository": (self.session_repository, "postgres"),
+            "agent_run_store": (self.agent_run_store, "postgres"),
+            "document_store": (self.document_store, "postgres"),
+            "repository_index_store": (
+                self.repository_index_store,
+                "postgres",
+            ),
+            "langgraph_checkpointer": (
+                self.langgraph_checkpointer,
+                "postgres",
+            ),
+            "rag_vector_store": (self.rag_vector_store, "qdrant"),
+        }
+        invalid = [
+            f"{name}={actual} (expected {expected})"
+            for name, (actual, expected) in required_values.items()
+            if actual != expected
+        ]
+        if invalid:
+            raise ValueError(
+                "celery task queue requires shared storage: " + ", ".join(invalid)
+            )
+
+
+def _require_choice(name: str, value: str, allowed: set[str]) -> None:
+    if value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ValueError(f"{name} must be one of: {choices}")
+
+
+def _require_positive(name: str, value: float | int) -> None:
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than 0")
 
 
 def _env(name: str, default: str | None, dotenv: dict[str, str]) -> str | None:

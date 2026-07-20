@@ -8,6 +8,7 @@ from ai_agent_platform.repositories.postgres import (
     PostgresRepositoryIndexRepository,
     PostgresSessionRepository,
 )
+from ai_agent_platform.repositories import RepositoryIndexStoreConflictError
 
 
 class PostgresRepositoryTests(unittest.TestCase):
@@ -148,6 +149,29 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(record.document_id, "doc_123")
         self.assertEqual(record.indexed_at, now)
 
+    def test_maps_active_index_unique_violation_to_conflict(self) -> None:
+        connection = ConflictConnection()
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.postgres._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresRepositoryIndexRepository(
+                database_url="postgresql://tester:secret@localhost:5432/test"
+            )
+            repository._connect = lambda: connection
+
+            with self.assertRaises(RepositoryIndexStoreConflictError):
+                repository.create_index_job(
+                    repository_id="repo_main",
+                    root_path="/workspace/repo",
+                    include_patterns=[],
+                    exclude_patterns=[],
+                    max_file_size=1024,
+                )
+
 
 class FakeCursor:
     def __init__(self, result):
@@ -175,6 +199,20 @@ class FakeConnection:
         self.calls.append((sql, params))
         result = self._results.pop(0) if self._results else None
         return FakeCursor(result)
+
+
+class UniqueViolation(Exception):
+    sqlstate = "23505"
+
+
+class ConflictConnection(FakeConnection):
+    def __init__(self):
+        super().__init__([None])
+
+    def execute(self, sql, params=None):
+        if self.calls:
+            raise UniqueViolation("active repository index job")
+        return super().execute(sql, params)
 
 
 if __name__ == "__main__":

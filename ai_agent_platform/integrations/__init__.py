@@ -18,7 +18,9 @@ from .rag import (
     RAGService,
     RAGValidationError,
     RetrievedDocument,
+    RetrievalMetrics,
     create_rag_service,
+    evaluate_retrieval,
 )
 from .tools import (
     ToolCall,
@@ -47,6 +49,7 @@ __all__ = [
     "RAGService",
     "RAGValidationError",
     "RetrievedDocument",
+    "RetrievalMetrics",
     "ToolCall",
     "ToolExecutionContext",
     "ToolRegistry",
@@ -55,6 +58,7 @@ __all__ = [
     "create_mcp_providers_from_config_file",
     "create_mcp_providers_from_configs",
     "create_rag_service",
+    "evaluate_retrieval",
     "load_mcp_server_configs",
     "register_mcp_tools",
     "summarize_tool_arguments",

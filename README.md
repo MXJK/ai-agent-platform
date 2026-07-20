@@ -10,17 +10,26 @@ Project structure:
 ```text
 ai_agent_platform/
   main.py                    # FastAPI application entrypoint
-  api/router.py              # HTTP routes
+  api/
+    router.py                # Versioned API composition root
+    routes/                  # Resource routers: sessions, chat, runs, repos, RAG
+  core/
+    config.py                # Validated environment configuration
+    observability.py         # JSON logging and request correlation middleware
+    metrics.py               # Thread-safe counters and duration summaries
+    task_queue.py            # Bounded background task execution boundary
   schemas/                   # Pydantic request and response models
   domain/models.py           # Core business entities
   repositories/memory.py     # In-memory storage boundary
   services/session_service.py # Session and message use cases
-  agents/coding_agent.py     # Repository QA and development assistant runtime
+  agents/
+    coding_agent.py          # LangGraph runtime and node orchestration
+    coding/                  # State, planners, change loop, tools, formatting
   agents/game_agent.py       # Legacy rule-based demo runtime
   integrations/
-    llm.py                   # Future LLM API client
-    rag.py                   # RAG parsing, chunking, embedding, vector search
-    tools.py                 # Future tool-calling registry
+    llm.py                   # LLM provider adapters and streaming client
+    rag/                     # RAG models, errors, factory, and service implementations
+    tools.py                 # Validated and auditable tool registry
 tests/
   test_agent.py
   test_session_service.py
@@ -44,9 +53,9 @@ Module roles:
   development assistant that classifies code questions, retrieves repository
   context, plans tool calls, and returns a trace. `game_agent.py` remains as a
   small legacy rule-based demo for the session-message exercise.
-- `integrations`: placeholders for LLM API calls, RAG retrieval, and tool
-  calling. These are separate because external systems fail, timeout, and need
-  retries/observability.
+- `integrations`: LLM APIs, RAG retrieval, MCP providers, sandbox execution, and
+  tool calling. These boundaries isolate external failures, timeouts, retries,
+  and observability from the application layer.
 
 Install dependencies:
 
@@ -89,6 +98,8 @@ MCP_REQUEST_TIMEOUT_SECONDS=10
 SANDBOX_MODE=local
 SANDBOX_DOCKER_IMAGE=python:3.11-slim
 SANDBOX_COMMAND_TIMEOUT_SECONDS=30
+LOG_LEVEL=INFO
+LOG_FORMAT=json
 ```
 
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
@@ -113,7 +124,7 @@ can be rebuilt without losing the source-of-truth records.
 Start the local databases:
 
 ```bash
-docker compose up -d postgres qdrant
+docker compose up -d postgres qdrant redis
 ```
 
 Check service health:
@@ -146,12 +157,14 @@ DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_pla
 ```
 
 If a local database was already initialized by the older repository auto-schema
-code and the tables match this initial migration, mark that existing schema as
-current once:
+code and the tables match the initial migration, mark only that baseline and
+then apply later migrations:
 
 ```bash
 DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
-  .venv/bin/python -m alembic stamp head
+  .venv/bin/python -m alembic stamp 20260715_0001
+DATABASE_URL=postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform \
+  .venv/bin/python -m alembic upgrade head
 ```
 
 Useful migration commands:
@@ -206,6 +219,7 @@ Endpoints:
 
 ```text
 GET  /api/v1/health
+GET  /api/v1/metrics
 POST /api/v1/sessions
 GET  /api/v1/sessions
 GET  /api/v1/sessions/{session_id}
@@ -227,6 +241,8 @@ Example requests:
 ```bash
 curl http://localhost:8000/api/v1/health
 
+curl http://localhost:8000/api/v1/metrics
+
 curl -X POST http://localhost:8000/api/v1/sessions \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"user_1"}'
@@ -236,6 +252,107 @@ curl http://localhost:8000/api/v1/sessions/sess_xxx/messages
 curl -N -X POST http://localhost:8000/api/v1/chat/stream \
   -H 'Content-Type: application/json' \
   -d '{"conversation_id":"sess_xxx","message":"你好，解释一下SSE"}'
+```
+
+## Observability and Configuration Safety
+
+Every HTTP response includes an `X-Request-ID`. A valid incoming
+`X-Request-ID` is propagated; otherwise the server generates one. Project logs
+can use JSON or text output through `LOG_FORMAT`, and background Agent workers
+bind `run_id`, `conversation_id`, and `repository_id` to their log context.
+Request bodies and tool secrets are not written to access logs.
+
+`GET /api/v1/metrics` exposes dependency-free process-local counters and timing
+summaries for HTTP requests and Agent executions. Agent run responses also
+contain a `metrics` object with elapsed time, node/tool counts, retries, and
+recovered errors. This local registry is intentionally small; a production
+deployment can replace the registry boundary with Prometheus or OpenTelemetry.
+
+`Settings` validates storage backends, sandbox mode, logging options, positive
+timeouts/limits, and RAG chunk overlap during startup. Invalid configuration
+fails before repositories, model clients, or background workers are created.
+
+## Asynchronous Tasks
+
+Agent runs and repository indexing share a bounded `TaskQueue` protocol. The
+default `InProcessTaskQueue` uses worker threads for local development, rejects
+submissions with `503` when capacity is exhausted, records per-task counters and
+durations, and drains accepted work during application shutdown.
+
+Set `TASK_QUEUE_BACKEND=celery` to publish JSON tasks through the Redis container
+to an independent Celery worker. Redis is the broker; PostgreSQL remains the
+source of truth for Agent runs and repository index jobs, and Qdrant remains the
+shared vector store. Distributed mode fails configuration validation unless all
+of those shared stores are selected, preventing the API and worker from silently
+using different in-memory state.
+
+Distributed tasks use an at-least-once delivery model with application-level
+idempotency. Each canonical JSON payload receives a deterministic Celery task ID,
+while Agent run and repository job status guards prevent completed work from
+being applied twice. Publish failures and transient worker infrastructure errors
+use bounded retries with exponential backoff and jitter. Business execution
+failures are persisted and are not blindly replayed, because Agent tools may
+have external side effects.
+
+Workers enforce soft and hard task time limits, recycle child processes after a
+bounded number of tasks, and store ignored-task failure diagnostics temporarily
+in Redis database 1. PostgreSQL remains the product-visible task status store.
+The Redis visibility timeout must be greater than the hard task time limit; this
+is validated at startup to prevent a long-running task from being delivered to
+two workers. A redelivered repository job may recover from `running` because
+file hashes make repository indexing resumable.
+
+Repository indexing is asynchronous: `POST /repositories/{id}/index` returns
+`202 Accepted` and a pending `job_id`; poll
+`GET /repositories/{id}/index-jobs/{job_id}` for running counters and the final
+status. A PostgreSQL partial unique index prevents multiple pending/running jobs
+for the same repository across API and worker processes.
+
+Tune the local executor with `BACKGROUND_TASK_WORKERS` and
+`BACKGROUND_TASK_QUEUE_CAPACITY`. The defaults are `4` workers and `100`
+accepted waiting tasks beyond the active workers.
+
+Run the distributed stack locally:
+
+```bash
+docker compose up -d postgres qdrant redis
+
+export TASK_QUEUE_BACKEND=celery
+export REDIS_URL=redis://localhost:6379/0
+export CELERY_RESULT_BACKEND_URL=redis://localhost:6379/1
+export SESSION_REPOSITORY=postgres
+export AGENT_RUN_STORE=postgres
+export DOCUMENT_STORE=postgres
+export REPOSITORY_INDEX_STORE=postgres
+export LANGGRAPH_CHECKPOINTER=postgres
+export RAG_VECTOR_STORE=qdrant
+
+.venv/bin/python -m alembic upgrade head
+.venv/bin/celery \
+  -A ai_agent_platform.workers.celery_app:celery_app \
+  worker --loglevel=INFO
+```
+
+Start Uvicorn in a second terminal with the same environment. The API and worker
+must also share the same LLM, embedding, Qdrant collection, and storage settings.
+If they later run inside Compose, use `redis://redis:6379/0` for `REDIS_URL` and
+`redis://redis:6379/1` for `CELERY_RESULT_BACKEND_URL`; `localhost` is for host
+processes. The development Compose file exposes port 6379 without authentication,
+so it should not be copied unchanged to a public host.
+The Redis development container enables AOF persistence and `noeviction` so
+broker keys are not discarded under memory pressure.
+
+Reliability settings and their local defaults:
+
+```text
+CELERY_TASK_MAX_RETRIES=3
+CELERY_TASK_RETRY_BACKOFF_SECONDS=2
+CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS=60
+CELERY_TASK_SOFT_TIME_LIMIT_SECONDS=900
+CELERY_TASK_TIME_LIMIT_SECONDS=960
+CELERY_VISIBILITY_TIMEOUT_SECONDS=3600
+CELERY_RESULT_EXPIRES_SECONDS=86400
+CELERY_WORKER_MAX_TASKS_PER_CHILD=100
 ```
 
 ## Repository QA Agent
@@ -258,12 +375,19 @@ itself is designed as a small OpenHands/Codex-style backend loop:
    the model output cannot be validated. Planned calls can include local
    repository search/read tools, file/symbol location, code explanation, change
    planning, bug investigation, and test design.
-4. pause for human approval when `change_planning` would execute a planned tool
-   sequence.
-5. retry recoverable RAG/answer-generation failures, collect structured
+4. pause for human approval before writable Sandbox or external-side-effect
+   tools execute.
+5. when Sandbox lifecycle tools are present, separate repository inspection,
+   code mutation, validation, and artifact collection into graph nodes. Failed
+   validation can produce one bounded repair plan, which requires a second
+   human approval before another write.
+6. collect test reports and the final unified Diff in `artifacts`, with a
+   `change_summary` that reports validation status, iterations, and changed
+   files.
+7. retry recoverable RAG/answer-generation failures, collect structured
    `errors`, and route unrecoverable failures through `handle_error` and
    `compose_error_answer`.
-6. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
+8. compose an answer with `rag_context`, `tool_calls`, `tool_results`, and a
    step-by-step `trace`.
 
 The first LangGraph persistence layer is now wired in with an in-memory
@@ -336,6 +460,19 @@ to execute commands through Docker with no network access, CPU and memory
 limits, and the sandbox workspace mounted at `/workspace`. The default
 `SANDBOX_MODE=local` is intended for unit tests and lightweight development.
 
+When a structured planner selects Sandbox lifecycle tools, the graph follows:
+
+```text
+inspect_repository -> execute_changes -> validate_changes
+  -> collect_artifacts -> compose_answer
+```
+
+If validation fails and the planner can propose a minimal repair, the graph
+pauses at `review_repair_plan`. Approval resumes another Sandbox mutation and
+validation cycle. The loop is capped at two mutation iterations, and the real
+repository is never modified; callers receive `test_report` and `code_diff`
+artifacts for review.
+
 The MCP provider boundary is available under `ai_agent_platform.integrations.mcp`.
 Any client that implements:
 
@@ -404,11 +541,13 @@ curl -X POST http://localhost:8000/api/v1/repositories/repo_main/index \
     "max_file_size": 200000
   }'
 
+curl http://localhost:8000/api/v1/repositories/repo_main/index-jobs/idxjob_xxx
+
 curl -X POST http://localhost:8000/api/v1/knowledge-bases/repo_main/documents \
   -H 'Content-Type: application/json' \
   -d '{
-    "filename": "ai_agent_platform/api/router.py",
-    "content": "def chat_stream(...): ...\ndef run_agent(...): ..."
+    "filename": "ai_agent_platform/api/routes/chat.py",
+    "content": "def chat_stream(...): ..."
   }'
 
 curl -X POST http://localhost:8000/api/v1/agent/runs \
@@ -416,7 +555,7 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   -d '{
     "conversation_id": "sess_xxx",
     "repository_id": "repo_main",
-    "focus_files": ["ai_agent_platform/api/router.py"],
+    "focus_files": ["ai_agent_platform/api/routes/chat.py"],
     "message": "解释 chat stream 接口在哪里实现"
   }'
 
@@ -474,6 +613,7 @@ reranker:
 
 ```bash
 export RAG_RECALL_LIMIT=20
+export RAG_LEXICAL_WEIGHT=0.35
 export RAG_RERANKER_PROVIDER=sentence_transformer
 export SENTENCE_TRANSFORMER_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
@@ -511,17 +651,18 @@ RAG implementation steps:
    `.md`, `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.json`, `.toml`,
    `.yaml`, `.html`, and `.css`. Real systems need extra parsers for PDF, Word,
    OCR, tables, and images.
-2. Chunking uses code-aware boundaries for source files where possible, splitting
-   around functions, classes, methods, and similar symbols while preserving code
-   indentation. Non-code documents still use character windows with natural
-   breakpoints and overlap. Chunks that are too large waste prompt space; chunks
-   that are too small lose context.
+2. Chunking uses code-aware boundaries for source files where possible. Python
+   uses the standard-library AST so a class stays with its methods and exposes
+   qualified symbols such as `ToolRegistry.execute`; incomplete source falls
+   back to regex boundaries. Non-code documents still use character windows
+   with natural breakpoints and overlap.
 3. Embedding converts each chunk and query into vectors. The same embedding
    model must be used for ingestion and search.
 4. Vector storage can use the local in-memory store for tests or Chroma for
    persisted local retrieval.
-5. Search filters by `knowledge_base_id`, recalls a larger candidate set, and
-   optionally reranks candidates before selecting the final chunks.
+5. Search filters by `knowledge_base_id`, recalls a larger candidate set, blends
+   vector similarity with exact content/symbol/path matches, and optionally runs
+   a cross-encoder reranker. `RAG_LEXICAL_WEIGHT` controls the lexical share.
 6. The top reranked chunks are formatted into the LLM prompt as numbered
    references.
 7. `/search` and `/ask` return both snippets and precise citation metadata such
@@ -542,7 +683,8 @@ Run the offline Agent eval suite:
 
 The eval suite ingests deterministic fixture files and checks intent
 classification, tool planning, RAG retrieval, code citation symbols, and
-approval pause behavior.
+approval pause behavior. Its report also includes retrieval Recall@5 and MRR so
+ranking changes can be compared instead of relying only on pass/fail examples.
 
 ## Small Exercise
 

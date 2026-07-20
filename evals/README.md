@@ -17,6 +17,7 @@ and agent cases, and reports checks for:
 - tool planning
 - RAG retrieval hit rate
 - code citation symbols
+- retrieval Recall@5 and mean reciprocal rank (MRR)
 - approval pause behavior
 
 The evals are intentionally small and deterministic. They are a regression
