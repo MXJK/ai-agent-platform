@@ -47,6 +47,8 @@ class RAGChunkResponse(BaseModel):
     end_line: Optional[int] = None
     symbols: list[str] = Field(default_factory=list)
     recall_score: Optional[float] = None
+    lexical_score: Optional[float] = None
+    hybrid_score: Optional[float] = None
     rerank_score: Optional[float] = None
 
     @classmethod
@@ -63,6 +65,8 @@ class RAGChunkResponse(BaseModel):
             end_line=chunk.end_line,
             symbols=chunk.symbols,
             recall_score=chunk.recall_score,
+            lexical_score=chunk.lexical_score,
+            hybrid_score=chunk.hybrid_score,
             rerank_score=chunk.rerank_score,
         )
 

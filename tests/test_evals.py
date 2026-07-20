@@ -40,6 +40,8 @@ class EvalRunnerTests(unittest.TestCase):
 
         self.assertTrue(report.passed)
         self.assertEqual(report.passed_count, report.total_count)
+        self.assertIsNotNone(report.retrieval_metrics)
+        self.assertGreater(report.retrieval_metrics.recall_at_k, 0.0)
 
 
 if __name__ == "__main__":

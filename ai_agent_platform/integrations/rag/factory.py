@@ -83,5 +83,6 @@ def create_rag_service(
         reranker=reranker,
         default_recall_limit=settings.rag_recall_limit,
         max_prompt_chars=settings.rag_max_prompt_chars,
+        lexical_weight=settings.rag_lexical_weight,
         document_store=document_store,
     )

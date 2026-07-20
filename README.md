@@ -525,6 +525,7 @@ reranker:
 
 ```bash
 export RAG_RECALL_LIMIT=20
+export RAG_LEXICAL_WEIGHT=0.35
 export RAG_RERANKER_PROVIDER=sentence_transformer
 export SENTENCE_TRANSFORMER_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
@@ -562,17 +563,18 @@ RAG implementation steps:
    `.md`, `.py`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.json`, `.toml`,
    `.yaml`, `.html`, and `.css`. Real systems need extra parsers for PDF, Word,
    OCR, tables, and images.
-2. Chunking uses code-aware boundaries for source files where possible, splitting
-   around functions, classes, methods, and similar symbols while preserving code
-   indentation. Non-code documents still use character windows with natural
-   breakpoints and overlap. Chunks that are too large waste prompt space; chunks
-   that are too small lose context.
+2. Chunking uses code-aware boundaries for source files where possible. Python
+   uses the standard-library AST so a class stays with its methods and exposes
+   qualified symbols such as `ToolRegistry.execute`; incomplete source falls
+   back to regex boundaries. Non-code documents still use character windows
+   with natural breakpoints and overlap.
 3. Embedding converts each chunk and query into vectors. The same embedding
    model must be used for ingestion and search.
 4. Vector storage can use the local in-memory store for tests or Chroma for
    persisted local retrieval.
-5. Search filters by `knowledge_base_id`, recalls a larger candidate set, and
-   optionally reranks candidates before selecting the final chunks.
+5. Search filters by `knowledge_base_id`, recalls a larger candidate set, blends
+   vector similarity with exact content/symbol/path matches, and optionally runs
+   a cross-encoder reranker. `RAG_LEXICAL_WEIGHT` controls the lexical share.
 6. The top reranked chunks are formatted into the LLM prompt as numbered
    references.
 7. `/search` and `/ask` return both snippets and precise citation metadata such
@@ -593,7 +595,8 @@ Run the offline Agent eval suite:
 
 The eval suite ingests deterministic fixture files and checks intent
 classification, tool planning, RAG retrieval, code citation symbols, and
-approval pause behavior.
+approval pause behavior. Its report also includes retrieval Recall@5 and MRR so
+ranking changes can be compared instead of relying only on pass/fail examples.
 
 ## Small Exercise
 

@@ -41,6 +41,7 @@ class Settings:
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
     rag_recall_limit: int = 20
+    rag_lexical_weight: float = 0.35
     rag_reranker_provider: str = "none"
     sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_max_prompt_chars: int = 6000
@@ -101,6 +102,8 @@ class Settings:
             raise ValueError("rag_chunk_overlap must be greater than or equal to 0")
         if self.rag_chunk_overlap >= self.rag_chunk_size:
             raise ValueError("rag_chunk_overlap must be smaller than rag_chunk_size")
+        if not 0.0 <= self.rag_lexical_weight <= 1.0:
+            raise ValueError("rag_lexical_weight must be between 0 and 1")
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
@@ -170,6 +173,9 @@ class Settings:
                 "RAG_CHUNK_OVERLAP", cls.rag_chunk_overlap, dotenv
             ),
             rag_recall_limit=_int_env("RAG_RECALL_LIMIT", cls.rag_recall_limit, dotenv),
+            rag_lexical_weight=_float_env(
+                "RAG_LEXICAL_WEIGHT", cls.rag_lexical_weight, dotenv
+            ),
             rag_reranker_provider=_env(
                 "RAG_RERANKER_PROVIDER", cls.rag_reranker_provider, dotenv
             ),

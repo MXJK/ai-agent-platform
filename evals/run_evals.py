@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.core import Settings
+from ai_agent_platform.integrations.rag import RetrievalMetrics, evaluate_retrieval
 from ai_agent_platform.main import create_app
 
 
@@ -33,6 +34,8 @@ class CaseResult:
     case_id: str
     case_type: str
     checks: list[CheckResult]
+    retrieved_files: list[str] | None = None
+    expected_files: list[str] | None = None
 
     @property
     def passed(self) -> bool:
@@ -42,6 +45,7 @@ class CaseResult:
 @dataclass(frozen=True)
 class EvalReport:
     results: list[CaseResult]
+    retrieval_metrics: RetrievalMetrics | None = None
 
     @property
     def passed(self) -> bool:
@@ -84,7 +88,15 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
             _run_case(client=client, repository_id=repository_id, case=case)
             for case in suite.get("cases", [])
         ]
-    return EvalReport(results=results)
+    retrieval_results = [result for result in results if result.expected_files]
+    retrieval_metrics = evaluate_retrieval(
+        rankings=[result.retrieved_files or [] for result in retrieval_results],
+        relevant_documents=[
+            set(result.expected_files or []) for result in retrieval_results
+        ],
+        k=5,
+    )
+    return EvalReport(results=results, retrieval_metrics=retrieval_metrics)
 
 
 def format_report(report: EvalReport) -> str:
@@ -92,6 +104,13 @@ def format_report(report: EvalReport) -> str:
         "Agent Eval Report",
         f"Passed: {report.passed_count}/{report.total_count} ({report.pass_rate:.0%})",
     ]
+    if report.retrieval_metrics is not None:
+        metrics = report.retrieval_metrics
+        lines.append(
+            f"Retrieval: Recall@{metrics.k}={metrics.recall_at_k:.3f}; "
+            f"MRR={metrics.mean_reciprocal_rank:.3f}; "
+            f"cases={metrics.evaluated_cases}"
+        )
     for result in report.results:
         status = "PASS" if result.passed else "FAIL"
         lines.append(f"- {status} {result.case_id} [{result.case_type}]")
@@ -141,10 +160,19 @@ def _run_case(
 ) -> CaseResult:
     case_type = str(case.get("type"))
     if case_type == "agent":
-        checks = _run_agent_case(client=client, repository_id=repository_id, case=case)
+        checks, retrieved_files = _run_agent_case(
+            client=client,
+            repository_id=repository_id,
+            case=case,
+        )
     elif case_type == "search":
-        checks = _run_search_case(client=client, repository_id=repository_id, case=case)
+        checks, retrieved_files = _run_search_case(
+            client=client,
+            repository_id=repository_id,
+            case=case,
+        )
     else:
+        retrieved_files = []
         checks = [
             CheckResult(
                 name="case_type",
@@ -156,6 +184,8 @@ def _run_case(
         case_id=str(case.get("id") or "<missing-id>"),
         case_type=case_type,
         checks=checks,
+        retrieved_files=retrieved_files,
+        expected_files=[str(item) for item in case.get("expected_files", [])],
     )
 
 
@@ -164,7 +194,7 @@ def _run_agent_case(
     client: TestClient,
     repository_id: str,
     case: dict[str, Any],
-) -> list[CheckResult]:
+) -> tuple[list[CheckResult], list[str]]:
     session_response = client.post("/api/v1/sessions", json={"user_id": "eval_runner"})
     session_response.raise_for_status()
     run_response = client.post(
@@ -204,7 +234,15 @@ def _run_agent_case(
                 bool(case.get("expected_pending_approval")),
             )
         )
-    return [check for check in checks if check.detail != "skipped"]
+    retrieved_files = [
+        str(item["filename"])
+        for item in result.get("rag_context", [])
+        if item.get("filename")
+    ]
+    return (
+        [check for check in checks if check.detail != "skipped"],
+        retrieved_files,
+    )
 
 
 def _run_search_case(
@@ -212,7 +250,7 @@ def _run_search_case(
     client: TestClient,
     repository_id: str,
     case: dict[str, Any],
-) -> list[CheckResult]:
+) -> tuple[list[CheckResult], list[str]]:
     response = client.post(
         f"/api/v1/knowledge-bases/{repository_id}/search",
         json={"query": case["query"], "limit": 5, "recall_limit": 12},
@@ -225,10 +263,15 @@ def _run_search_case(
         for item in results
         for symbol in item.get("symbols", [])
     ]
-    return [
-        _contains_any_file_check("retrieval", filenames, case.get("expected_files", [])),
-        _contains_all_check("symbols", symbols, case.get("expected_symbols", [])),
-    ]
+    return (
+        [
+            _contains_any_file_check(
+                "retrieval", filenames, case.get("expected_files", [])
+            ),
+            _contains_all_check("symbols", symbols, case.get("expected_symbols", [])),
+        ],
+        [str(item) for item in filenames if item],
+    )
 
 
 def _wait_for_run(client: TestClient, run_id: str) -> dict[str, Any]:

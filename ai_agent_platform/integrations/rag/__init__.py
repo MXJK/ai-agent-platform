@@ -10,6 +10,10 @@ from ai_agent_platform.integrations.rag.errors import (
     RAGProviderError,
     RAGValidationError,
 )
+from ai_agent_platform.integrations.rag.evaluation import (
+    RetrievalMetrics,
+    evaluate_retrieval,
+)
 from ai_agent_platform.integrations.rag.models import (
     DocumentChunk,
     DocumentStore,
@@ -59,9 +63,11 @@ __all__ = [
     "RecursiveCharacterChunker",
     "Reranker",
     "RetrievedDocument",
+    "RetrievalMetrics",
     "SentenceTransformerCrossEncoderReranker",
     "SUPPORTED_TEXT_EXTENSIONS",
     "TextDocumentParser",
     "VectorStore",
     "create_rag_service",
+    "evaluate_retrieval",
 ]

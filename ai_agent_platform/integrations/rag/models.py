@@ -41,6 +41,8 @@ class RetrievedDocument:
     end_line: int | None = None
     symbols: list[str] = field(default_factory=list)
     recall_score: float | None = None
+    lexical_score: float | None = None
+    hybrid_score: float | None = None
     rerank_score: float | None = None
 
 

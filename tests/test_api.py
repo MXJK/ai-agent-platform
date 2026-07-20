@@ -281,6 +281,8 @@ class APITests(unittest.TestCase):
         self.assertEqual(results[0]["filename"], "refund.md")
         self.assertIn("退款", results[0]["text"])
         self.assertIsNotNone(results[0]["recall_score"])
+        self.assertIsNotNone(results[0]["lexical_score"])
+        self.assertIsNotNone(results[0]["hybrid_score"])
 
         ask_response = self.client.post(
             "/api/v1/knowledge-bases/customer_faq/ask",
