@@ -1,4 +1,20 @@
 services:
+  gateway:
+    profiles: ["gateway"]
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    environment:
+      GATEWAY_LISTEN_ADDRESS: ":8080"
+      GATEWAY_UPSTREAM_URL: "http://host.docker.internal:8000"
+      GATEWAY_MAX_CONCURRENT_REQUESTS: "256"
+      GATEWAY_REQUESTS_PER_SECOND: "0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
   postgres:
     image: postgres:16
     container_name: ai-agent-platform-postgres

@@ -8,6 +8,9 @@ RAG, and a repository QA / development assistant Agent.
 Project structure:
 
 ```text
+gateway/                     # Go traffic gateway: proxy, SSE, admission control
+  cmd/gateway/               # Process entrypoint and graceful shutdown
+  internal/gateway/          # Configuration, proxy, limits, probes, tests
 ai_agent_platform/
   main.py                    # FastAPI application entrypoint
   api/
@@ -104,6 +107,58 @@ LOG_FORMAT=json
 
 The app reads `.env` automatically through `Settings.from_env()`, and `.env` is
 ignored by git so local secrets do not get committed.
+
+## Go Traffic Gateway
+
+The optional Go gateway owns the public traffic boundary while FastAPI remains
+the application and AI orchestration service. The gateway provides:
+
+- transparent HTTP and SSE reverse proxying to one configured FastAPI upstream
+- validated/generated `X-Request-ID` propagation and JSON access logs
+- request-body limits, bounded concurrent admission, and optional token-bucket
+  rate limiting
+- bounded upstream dial/header timeouts without a total timeout that would cut
+  off valid long-running SSE streams
+- `/healthz` process liveness, `/readyz` upstream readiness, connection pooling,
+  and graceful shutdown
+
+It intentionally does not own Agent, LangGraph, RAG, MCP, LLM-provider, or
+database logic. The rate limiter is instance-local overload protection, not a
+distributed tenant quota. Run multiple stateless gateway replicas behind the
+deployment platform's load balancer; add Redis or a dedicated limiter only if
+global cross-replica quotas become a measured requirement.
+
+Start FastAPI on port 8000, then run the gateway from another terminal:
+
+```bash
+go run ./gateway/cmd/gateway
+```
+
+The frontend and API are then available through `http://127.0.0.1:8080`. Check
+both probes with:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
+```
+
+To build and run the gateway in Docker while FastAPI runs on the host:
+
+```bash
+docker compose --profile gateway up --build gateway
+```
+
+The Compose configuration uses `host.docker.internal:8000` for the upstream.
+In a full container deployment, set `GATEWAY_UPSTREAM_URL` to the FastAPI
+service name instead. All gateway settings and local defaults are documented in
+`.env.example`; setting `GATEWAY_REQUESTS_PER_SECOND=0` disables rate limiting.
+
+Run the Go checks with:
+
+```bash
+go test ./gateway/...
+go vet ./gateway/...
+```
 
 ## Local Data Stores
 
