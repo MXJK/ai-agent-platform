@@ -16,6 +16,7 @@ from ai_agent_platform.integrations.llm import LLMResponse, _google_usage
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
+from ai_agent_platform.schemas.chat import ChatStreamRequest
 
 
 class FlakySearchRAGService:
@@ -194,7 +195,30 @@ class APITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn("AI Agent Platform", response.text)
+        self.assertIn('data-view-panel="chat"', response.text)
+        self.assertIn('id="approval-card"', response.text)
+        self.assertIn('id="settings-dialog"', response.text)
+        self.assertIn('aria-live="polite"', response.text)
         self.assertIn("/static/app.js", response.text)
+
+        script_response = self.client.get("/static/app.js")
+        stylesheet_response = self.client.get("/static/styles.css")
+        self.assertEqual(script_response.status_code, 200)
+        self.assertEqual(stylesheet_response.status_code, 200)
+        self.assertIn("text/javascript", script_response.headers["content-type"])
+        self.assertIn("text/css", stylesheet_response.headers["content-type"])
+        self.assertIn("AbortController", script_response.text)
+        self.assertIn("prefers-reduced-motion", stylesheet_response.text)
+
+    def test_chat_request_accepts_google_provider(self) -> None:
+        request = ChatStreamRequest(
+            conversation_id="sess_google",
+            message="你好",
+            provider="google",
+            model="gemini-test-model",
+        )
+
+        self.assertEqual(request.provider, "google")
 
     def test_streams_chat_response_and_records_messages(self) -> None:
         create_response = self.client.post(

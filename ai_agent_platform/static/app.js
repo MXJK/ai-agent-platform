@@ -1,4 +1,7 @@
 const API_BASE = "/api/v1";
+const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "waiting_approval"]);
+const TERMINAL_INDEX_STATUSES = new Set(["completed", "completed_with_errors", "failed"]);
 
 const state = {
   conversationId: "",
@@ -8,17 +11,15 @@ const state = {
   sessions: [],
   requestLog: [],
   latestRepositoryIndex: null,
+  currentView: "chat",
+  chatController: null,
+  agentPollGeneration: 0,
 };
 
 const $ = (id) => document.getElementById(id);
 
 function jsonPretty(value) {
   return JSON.stringify(value, null, 2);
-}
-
-function setRaw(value) {
-  $("raw-output").textContent =
-    typeof value === "string" ? value : jsonPretty(value);
 }
 
 function escapeHtml(value) {
@@ -28,6 +29,73 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function inlineMarkdown(value) {
+  return value
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function renderMarkdown(value) {
+  const escaped = escapeHtml(value).replace(/\r\n/g, "\n");
+  const codeBlocks = [];
+  const withTokens = escaped.replace(/```([\w.+-]*)\n?([\s\S]*?)```/g, (_, language, code) => {
+    const token = `@@CODE_BLOCK_${codeBlocks.length}@@`;
+    codeBlocks.push(
+      `<pre><code${language ? ` data-language="${escapeHtml(language)}"` : ""}>${code.trim()}</code></pre>`,
+    );
+    return `\n${token}\n`;
+  });
+
+  const lines = withTokens.split("\n");
+  const output = [];
+  let listType = "";
+
+  const closeList = () => {
+    if (listType) {
+      output.push(`</${listType}>`);
+      listType = "";
+    }
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const codeMatch = line.trim().match(/^@@CODE_BLOCK_(\d+)@@$/);
+    if (codeMatch) {
+      closeList();
+      output.push(codeBlocks[Number(codeMatch[1])] || "");
+      continue;
+    }
+    if (!line.trim()) {
+      closeList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      output.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const nextType = unordered ? "ul" : "ol";
+      if (listType !== nextType) {
+        closeList();
+        listType = nextType;
+        output.push(`<${listType}>`);
+      }
+      output.push(`<li>${inlineMarkdown((unordered || ordered)[1])}</li>`);
+      continue;
+    }
+    closeList();
+    output.push(`<p>${inlineMarkdown(line)}</p>`);
+  }
+  closeList();
+  return output.join("");
 }
 
 function csvValues(value) {
@@ -53,80 +121,259 @@ function optionalModelFields() {
 
 function formatDate(value) {
   if (!value) {
-    return "unknown";
+    return "未知时间";
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return String(value);
   }
-  return date.toLocaleString();
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDuration(value) {
+  const milliseconds = Number(value || 0);
+  if (milliseconds < 1000) {
+    return `${milliseconds} ms`;
+  }
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
+}
+
+function humanizeStatus(value) {
+  const labels = {
+    ok: "服务正常",
+    offline: "连接失败",
+    queued: "排队中",
+    running: "运行中",
+    waiting_approval: "等待审批",
+    completed: "已完成",
+    completed_with_errors: "完成，有警告",
+    failed: "失败",
+    pending: "等待中",
+  };
+  return labels[value] || value || "未知";
+}
+
+function truncate(value, maxLength = 120) {
+  const text = String(value ?? "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function humanizeError(error) {
+  if (!error) {
+    return "发生未知错误";
+  }
+  if (error.name === "AbortError") {
+    return "操作已停止";
+  }
+  return error.message || String(error);
+}
+
+function showToast(message, type = "success", timeout = 4200) {
+  const region = $("toast-region");
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span>${escapeHtml(message)}</span><button type="button" aria-label="关闭通知">×</button>`;
+  const close = () => toast.remove();
+  toast.querySelector("button").addEventListener("click", close);
+  region.appendChild(toast);
+  window.setTimeout(close, timeout);
+}
+
+function setRaw(value) {
+  $("raw-output").textContent = typeof value === "string" ? value : jsonPretty(value);
+}
+
+function setTrace(items) {
+  const list = $("trace-list");
+  list.innerHTML = "";
+  if (!items || items.length === 0) {
+    list.innerHTML = '<div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div>';
+    return;
+  }
+  for (const [index, item] of items.entries()) {
+    const node = document.createElement("div");
+    node.className = "trace-item";
+    node.innerHTML = `
+      <strong>${escapeHtml(item.step ?? index + 1)} · ${escapeHtml(item.node ?? "step")}</strong>
+      <p>${escapeHtml(item.summary ?? "")}</p>
+    `;
+    list.appendChild(node);
+  }
+}
+
+function setLastRequestId(value) {
+  $("last-request-id").textContent = `Request ID：${value || "—"}`;
+}
+
+function loadUiPreferences() {
+  try {
+    return JSON.parse(localStorage.getItem(UI_STORAGE_KEY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveUiPreferences() {
+  try {
+    localStorage.setItem(
+      UI_STORAGE_KEY,
+      JSON.stringify({
+        view: state.currentView,
+        inspectorHidden: document.body.classList.contains("inspector-hidden"),
+      }),
+    );
+  } catch {
+    // Device-local preferences are optional; the product remains usable without them.
+  }
+}
+
+function switchView(viewName, updateHash = true) {
+  const panel = document.querySelector(`[data-view-panel="${viewName}"]`);
+  if (!panel) {
+    return;
+  }
+  state.currentView = viewName;
+  document.querySelectorAll("[data-view-panel]").forEach((item) => {
+    const active = item.dataset.viewPanel === viewName;
+    item.classList.toggle("active", active);
+    item.hidden = !active;
+  });
+  document.querySelectorAll("[data-view]").forEach((item) => {
+    const active = item.dataset.view === viewName;
+    item.classList.toggle("active", active);
+    if (active) {
+      item.setAttribute("aria-current", "page");
+    } else {
+      item.removeAttribute("aria-current");
+    }
+  });
+  if (updateHash) {
+    history.replaceState(null, "", `#${viewName}`);
+  }
+  saveUiPreferences();
+  $("main-workspace").focus({ preventScroll: true });
+}
+
+function setInspectorVisible(visible) {
+  document.body.classList.toggle("inspector-hidden", !visible);
+  $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
+  saveUiPreferences();
+}
+
+function selectInspectorTab(name) {
+  const isTrace = name === "trace";
+  $("trace-panel").hidden = !isTrace;
+  $("raw-panel").hidden = isTrace;
+  $("trace-tab").classList.toggle("active", isTrace);
+  $("raw-tab").classList.toggle("active", !isTrace);
+  $("trace-tab").setAttribute("aria-selected", String(isTrace));
+  $("raw-tab").setAttribute("aria-selected", String(!isTrace));
+}
+
+function openSettings() {
+  const dialog = $("settings-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+}
+
+function closeSettings() {
+  const dialog = $("settings-dialog");
+  if (dialog.open) {
+    dialog.close();
+  }
+}
+
+function updateContextSummary() {
+  const userId = $("user-id-input").value.trim() || "demo_user";
+  const provider = $("provider-input").value.trim();
+  const model = $("model-input").value.trim();
+  const repositoryId = $("repository-id-input").value.trim() || "repo_main";
+  const repositoryRoot = $("repository-root-input").value.trim();
+  const modelLabel = model || provider || "默认配置";
+
+  $("context-user").textContent = userId;
+  $("context-model").textContent = modelLabel;
+  $("context-repository").textContent = repositoryId;
+  $("composer-context").textContent = modelLabel;
+  $("agent-repository-badge").textContent = repositoryId;
+  $("repository-name").textContent = repositoryId;
+  $("repository-path-display").textContent = repositoryRoot || "尚未配置根路径";
+  $("header-session-id").textContent = state.conversationId || "尚未创建";
+}
+
+function saveSettings() {
+  state.conversationId = $("conversation-id-input").value.trim();
+  updateContextSummary();
+  closeSettings();
+  showToast("工作区设置已更新");
 }
 
 function pushRequestLog(entry) {
-  state.requestLog.unshift({
-    at: new Date().toISOString(),
-    ...entry,
-  });
-  state.requestLog = state.requestLog.slice(0, 40);
+  state.requestLog.unshift({ at: new Date().toISOString(), ...entry });
+  state.requestLog = state.requestLog.slice(0, 50);
   renderRequestLog();
   renderOverview();
 }
 
-function renderOverview() {
-  $("metric-api").textContent = state.healthStatus;
-  $("metric-sessions").textContent = String(state.sessions.length);
-  $("metric-run").textContent = state.latestRunId
-    ? `${state.latestRunStatus || "unknown"}`
-    : "none";
-  const latest = state.requestLog[0];
-  $("metric-request").textContent = latest
-    ? `${latest.status} ${latest.ms}ms`
-    : "none";
-}
-
 function renderRequestLog() {
-  const node = $("request-log");
-  node.innerHTML = "";
+  const list = $("request-log");
+  list.innerHTML = "";
   if (state.requestLog.length === 0) {
-    node.innerHTML = '<div class="empty-state">No requests yet</div>';
+    list.innerHTML = '<div class="empty-state">暂无请求</div>';
     return;
   }
   for (const item of state.requestLog) {
     const row = document.createElement("div");
-    row.className = `data-item ${item.ok ? "ok" : "error"}`;
+    row.className = `request-item ${item.ok ? "ok" : "error"}`;
     row.innerHTML = `
-      <div>
-        <strong>${escapeHtml(item.method)} ${escapeHtml(item.path)}</strong>
-        <span>${escapeHtml(formatDate(item.at))}</span>
-      </div>
-      <code>${escapeHtml(item.status)} ${escapeHtml(item.ms)}ms</code>
+      <span class="request-method">${escapeHtml(item.method)}</span>
+      <span class="request-path">${escapeHtml(item.path)}</span>
+      <span class="request-time">${escapeHtml(formatDate(item.at))} · ${escapeHtml(item.ms)}ms</span>
+      <span class="request-status">${escapeHtml(item.status)}</span>
     `;
-    node.appendChild(row);
+    list.appendChild(row);
   }
 }
 
-function setTrace(items) {
-  const traceList = $("trace-list");
-  traceList.innerHTML = "";
-  if (!items || items.length === 0) {
-    traceList.innerHTML = '<div class="empty-state">No trace yet</div>';
-    return;
+function renderOverview() {
+  $("metric-api").textContent = humanizeStatus(state.healthStatus);
+  $("metric-sessions").textContent = String(state.sessions.length);
+  $("metric-run").textContent = state.latestRunId
+    ? humanizeStatus(state.latestRunStatus)
+    : "暂无";
+  const latest = state.requestLog[0];
+  $("metric-request").textContent = latest ? `${latest.status} · ${latest.ms}ms` : "暂无";
+}
+
+function parseErrorDetail(body, fallback) {
+  if (!body) {
+    return fallback;
   }
-  for (const item of items) {
-    const node = document.createElement("div");
-    node.className = "trace-item";
-    node.innerHTML = `
-      <strong>${escapeHtml(item.step ?? "")}. ${escapeHtml(item.node ?? "step")}</strong>
-      <span>${escapeHtml(item.summary ?? "")}</span>
-    `;
-    traceList.appendChild(node);
+  if (typeof body === "string") {
+    return body;
   }
+  if (typeof body.detail === "string") {
+    return body.detail;
+  }
+  if (Array.isArray(body.detail)) {
+    return body.detail
+      .map((item) => `${(item.loc || []).slice(1).join(".") || "request"}: ${item.msg || "invalid"}`)
+      .join("；");
+  }
+  return fallback;
 }
 
 async function fetchJson(path, options = {}) {
   const method = options.method || "GET";
   const startedAt = performance.now();
   let status = "ERR";
+  let requestId = "";
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       headers: {
@@ -136,6 +383,8 @@ async function fetchJson(path, options = {}) {
       ...options,
     });
     status = response.status;
+    requestId = response.headers.get("X-Request-ID") || "";
+    setLastRequestId(requestId);
     const text = await response.text();
     let body = null;
     if (text) {
@@ -146,13 +395,13 @@ async function fetchJson(path, options = {}) {
       }
     }
     if (!response.ok) {
-      const detail = body && body.detail ? body.detail : response.statusText;
-      throw new Error(`${response.status} ${detail}`);
+      throw new Error(`${response.status} ${parseErrorDetail(body, response.statusText)}`);
     }
     pushRequestLog({
       method,
       path,
       status,
+      requestId,
       ok: true,
       ms: Math.round(performance.now() - startedAt),
     });
@@ -162,6 +411,7 @@ async function fetchJson(path, options = {}) {
       method,
       path,
       status,
+      requestId,
       ok: false,
       ms: Math.round(performance.now() - startedAt),
     });
@@ -174,13 +424,13 @@ async function checkHealth() {
   try {
     const body = await fetchJson("/health");
     state.healthStatus = body.status;
-    pill.textContent = body.status;
-    pill.className = "pill ok";
+    pill.className = "status-pill ok";
+    pill.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>服务正常</span>';
     setRaw(body);
   } catch (error) {
     state.healthStatus = "offline";
-    pill.textContent = "offline";
-    pill.className = "pill error";
+    pill.className = "status-pill error";
+    pill.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>连接失败</span>';
   } finally {
     renderOverview();
   }
@@ -190,26 +440,48 @@ async function ensureSession() {
   const existing = $("conversation-id-input").value.trim();
   if (existing) {
     state.conversationId = existing;
+    updateContextSummary();
     return existing;
   }
   return createSession();
 }
 
+function resetChatView() {
+  $("chat-output").innerHTML = `
+    <div class="welcome-state">
+      <div class="welcome-orbit" aria-hidden="true"><span>✦</span></div>
+      <h2>从一个具体问题开始</h2>
+      <p>我可以解释代码、分析架构，也可以结合已索引的知识帮助你推进工作。</p>
+      <div class="prompt-grid" aria-label="推荐问题">
+        <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
+        <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
+        <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略"><span>规划质量</span><strong>设计可靠的测试策略</strong></button>
+      </div>
+    </div>
+  `;
+}
+
 async function createSession() {
-  $("session-status").textContent = "Creating session...";
-  const body = await fetchJson("/sessions", {
-    method: "POST",
-    body: JSON.stringify({
-      user_id: $("user-id-input").value.trim() || "demo_user",
-    }),
-  });
-  state.conversationId = body.id;
-  $("conversation-id-input").value = body.id;
-  $("session-status").textContent = `Active: ${body.id}`;
-  setRaw(body);
-  await listSessions(false);
-  await loadSession(false);
-  return body.id;
+  $("session-status").textContent = "正在创建会话…";
+  try {
+    const body = await fetchJson("/sessions", {
+      method: "POST",
+      body: JSON.stringify({ user_id: $("user-id-input").value.trim() || "demo_user" }),
+    });
+    state.conversationId = body.id;
+    $("conversation-id-input").value = body.id;
+    $("session-status").textContent = "会话已就绪";
+    resetChatView();
+    updateContextSummary();
+    setRaw(body);
+    await listSessions(false);
+    showToast("新会话已创建");
+    return body.id;
+  } catch (error) {
+    $("session-status").textContent = "创建会话失败";
+    showToast(humanizeError(error), "error");
+    throw error;
+  }
 }
 
 async function listSessions(showRaw = true) {
@@ -225,20 +497,20 @@ async function listSessions(showRaw = true) {
 
 function renderSessions() {
   const list = $("sessions-list");
+  $("sessions-count").textContent = String(state.sessions.length);
   list.innerHTML = "";
   if (state.sessions.length === 0) {
-    list.innerHTML = '<div class="empty-state">No sessions</div>';
+    list.innerHTML = '<div class="empty-state">暂无会话，创建一个会话开始工作。</div>';
     return;
   }
   for (const session of state.sessions) {
     const item = document.createElement("button");
-    item.className = "data-item selectable";
+    item.type = "button";
+    item.className = `session-item ${session.id === state.conversationId ? "active" : ""}`;
     item.dataset.sessionId = session.id;
     item.innerHTML = `
-      <div>
-        <strong>${escapeHtml(session.id)}</strong>
-        <span>${escapeHtml(session.user_id)} · ${escapeHtml(formatDate(session.created_at))}</span>
-      </div>
+      <strong>${escapeHtml(session.id)}</strong>
+      <span>${escapeHtml(session.user_id)} · ${escapeHtml(formatDate(session.created_at))}</span>
     `;
     list.appendChild(item);
   }
@@ -251,33 +523,46 @@ async function loadSession(showRaw = true) {
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
   ]);
-  $("session-status").textContent = `Loaded: ${session.id}`;
+  $("session-status").textContent = "会话已加载";
   renderSessionSummary(summary);
   renderMessages(messages.messages || []);
+  renderChatHistory(messages.messages || []);
+  renderSessions();
+  updateContextSummary();
   if (showRaw) {
     setRaw({ session, summary, messages });
   }
+  return session;
 }
 
 async function loadSessionSummary() {
-  const conversationId = await ensureSession();
-  const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`);
-  renderSessionSummary(body);
-  setRaw(body);
+  try {
+    const conversationId = await ensureSession();
+    const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`);
+    renderSessionSummary(body);
+    setRaw(body);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
 }
 
-async function refreshMessages() {
+async function refreshMessages(showRaw = true) {
   const conversationId = await ensureSession();
   const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`);
   renderMessages(body.messages || []);
-  setRaw(body);
+  if (showRaw) {
+    setRaw(body);
+  }
+  return body;
 }
 
 function renderSessionSummary(summary) {
   $("session-summary").innerHTML = `
-    <div class="summary-row"><span>Session</span><strong>${escapeHtml(summary.session_id)}</strong></div>
-    <div class="summary-row"><span>Messages</span><strong>${escapeHtml(summary.message_count)}</strong></div>
-    <div class="summary-row"><span>Last</span><strong>${escapeHtml(summary.last_message || "none")}</strong></div>
+    <div class="summary-strip">
+      <strong>${escapeHtml(summary.session_id)}</strong>
+      <span>${escapeHtml(summary.message_count)} 条消息</span>
+    </div>
+    ${summary.last_message ? `<p class="context-note">最近：${escapeHtml(truncate(summary.last_message, 180))}</p>` : ""}
   `;
 }
 
@@ -285,100 +570,183 @@ function renderMessages(messages) {
   const list = $("messages-list");
   list.innerHTML = "";
   if (messages.length === 0) {
-    list.innerHTML = '<div class="empty-state">No messages</div>';
+    list.innerHTML = '<div class="empty-state">这个会话还没有消息。</div>';
     return;
   }
   for (const message of messages) {
-    const item = document.createElement("div");
+    const item = document.createElement("article");
     item.className = `message-item role-${message.role}`;
     item.innerHTML = `
-      <div class="message-meta">
-        <strong>${escapeHtml(message.role)}</strong>
-        <span>${escapeHtml(formatDate(message.created_at))}</span>
-      </div>
+      <div class="message-meta"><strong>${escapeHtml(message.role)}</strong><span>${escapeHtml(formatDate(message.created_at))}</span></div>
       <p>${escapeHtml(message.content)}</p>
     `;
     list.appendChild(item);
   }
 }
 
+function renderChatHistory(messages) {
+  const chatMessages = messages.filter((message) => ["user", "assistant"].includes(message.role));
+  if (chatMessages.length === 0) {
+    resetChatView();
+    return;
+  }
+  const output = $("chat-output");
+  output.innerHTML = "";
+  for (const message of chatMessages) {
+    appendChatMessage(message.role, message.content, message.created_at);
+  }
+}
+
 async function addMessage() {
-  const conversationId = await ensureSession();
-  $("session-status").textContent = "Adding message...";
+  const content = $("message-content-input").value.trim();
+  if (!content) {
+    showToast("请输入消息内容", "warning");
+    return;
+  }
   try {
+    const conversationId = await ensureSession();
     const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`, {
       method: "POST",
       body: JSON.stringify({
         role: $("message-role-input").value,
-        content: $("message-content-input").value.trim(),
+        content,
         run_agent: $("message-run-agent-input").checked,
       }),
     });
-    $("session-status").textContent = `messages ${body.messages.length}`;
     renderMessages(body.messages || []);
     setRaw(body);
     await loadSessionSummary();
+    showToast("测试消息已添加");
   } catch (error) {
-    $("session-status").textContent = "Add message failed";
-    setRaw({ error: error.message });
+    showToast(humanizeError(error), "error");
+  }
+}
+
+function appendChatMessage(role, content = "", createdAt = null) {
+  const output = $("chat-output");
+  const welcome = output.querySelector(".welcome-state");
+  if (welcome) {
+    output.innerHTML = "";
+  }
+  const item = document.createElement("article");
+  item.className = `chat-message ${role}`;
+  const roleLabel = role === "user" ? "你" : "AI 助手";
+  const avatar = role === "user" ? "你" : "A";
+  item.innerHTML = `
+    <div class="chat-avatar" aria-hidden="true">${avatar}</div>
+    <div class="chat-bubble">
+      <div class="message-label"><strong>${roleLabel}</strong><span>${escapeHtml(createdAt ? formatDate(createdAt) : "刚刚")}</span></div>
+      <div class="message-content rich-output">${content ? renderMarkdown(content) : '<span class="typing-indicator" aria-label="正在生成"><span></span><span></span><span></span></span>'}</div>
+    </div>
+  `;
+  output.appendChild(item);
+  item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  return item.querySelector(".message-content");
+}
+
+function stopChat() {
+  if (state.chatController) {
+    state.chatController.abort();
   }
 }
 
 async function streamChat() {
-  const button = $("send-chat-btn");
-  const output = $("chat-output");
-  const meta = $("chat-meta");
-  button.disabled = true;
-  output.textContent = "";
-  meta.textContent = "Streaming...";
+  const input = $("chat-message-input");
+  const message = input.value.trim();
+  if (!message) {
+    showToast("请输入一条消息", "warning");
+    input.focus();
+    return;
+  }
+
+  const sendButton = $("send-chat-btn");
+  const stopButton = $("stop-chat-btn");
+  sendButton.disabled = true;
+  stopButton.classList.remove("hidden");
+  $("chat-meta").textContent = "正在准备…";
   setTrace([]);
+  state.chatController = new AbortController();
+  let assistantContent = null;
+
   try {
     const conversationId = await ensureSession();
-    const payload = {
-      conversation_id: conversationId,
-      message: $("chat-message-input").value.trim(),
-      ...optionalModelFields(),
-    };
+    appendChatMessage("user", message);
+    assistantContent = appendChatMessage("assistant");
+    input.value = "";
+    const payload = { conversation_id: conversationId, message, ...optionalModelFields() };
     const events = [];
-    await postSse("/chat/stream", payload, (eventName, data) => {
-      events.push({ event: eventName, data });
-      setRaw(events);
-      if (eventName === "meta") {
-        meta.textContent = `${data.provider} / ${data.model}`;
-      } else if (eventName === "delta") {
-        output.textContent += data.text || "";
-      } else if (eventName === "usage") {
-        meta.textContent = `tokens ${data.total_tokens}`;
-      } else if (eventName === "done") {
-        meta.textContent = `done in ${data.elapsed_ms} ms`;
-      } else if (eventName === "error") {
-        meta.textContent = data.code || "error";
-        output.textContent += `\n[error] ${data.message}`;
-      }
-    });
-    await refreshMessages();
+    let answer = "";
+    await postSse(
+      "/chat/stream",
+      payload,
+      (eventName, data) => {
+        events.push({ event: eventName, data });
+        if (events.length <= 200) {
+          setRaw(events);
+        }
+        if (eventName === "meta") {
+          $("chat-meta").textContent = `${data.provider} · ${data.model}`;
+        } else if (eventName === "delta") {
+          answer += data.text || "";
+          assistantContent.innerHTML = renderMarkdown(answer);
+        } else if (eventName === "usage") {
+          $("chat-meta").textContent = `${data.total_tokens || 0} tokens`;
+        } else if (eventName === "done") {
+          $("chat-meta").textContent = `已完成 · ${formatDuration(data.elapsed_ms)}`;
+        } else if (eventName === "error") {
+          throw new Error(data.message || data.code || "模型响应失败");
+        }
+      },
+      state.chatController.signal,
+    );
+    if (!answer) {
+      assistantContent.innerHTML = "<p>模型没有返回文本内容。</p>";
+    }
+    await refreshMessages(false);
   } catch (error) {
-    meta.textContent = "Error";
-    output.textContent = error.message;
-    setRaw({ error: error.message });
+    if (error.name === "AbortError") {
+      if (assistantContent) {
+        assistantContent.innerHTML = `${assistantContent.innerHTML}<p><em>生成已由你停止。</em></p>`;
+      }
+      $("chat-meta").textContent = "已停止";
+    } else {
+      if (assistantContent) {
+        assistantContent.innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
+      }
+      $("chat-meta").textContent = "生成失败";
+      showToast(humanizeError(error), "error");
+    }
   } finally {
-    button.disabled = false;
+    state.chatController = null;
+    sendButton.disabled = false;
+    stopButton.classList.add("hidden");
+    input.focus();
   }
 }
 
-async function postSse(path, payload, onEvent) {
+async function postSse(path, payload, onEvent, signal) {
   const startedAt = performance.now();
   let status = "ERR";
+  let requestId = "";
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
     });
     status = response.status;
+    requestId = response.headers.get("X-Request-ID") || "";
+    setLastRequestId(requestId);
     if (!response.ok || !response.body) {
       const text = await response.text();
-      throw new Error(`${response.status} ${text || response.statusText}`);
+      let detail = text;
+      try {
+        detail = parseErrorDetail(JSON.parse(text), response.statusText);
+      } catch {
+        // Keep the response body as the most useful diagnostic.
+      }
+      throw new Error(`${response.status} ${detail || response.statusText}`);
     }
 
     const reader = response.body.getReader();
@@ -409,6 +777,7 @@ async function postSse(path, payload, onEvent) {
       method: "POST",
       path,
       status,
+      requestId,
       ok: true,
       ms: Math.round(performance.now() - startedAt),
     });
@@ -417,6 +786,7 @@ async function postSse(path, payload, onEvent) {
       method: "POST",
       path,
       status,
+      requestId,
       ok: false,
       ms: Math.round(performance.now() - startedAt),
     });
@@ -439,28 +809,37 @@ function parseSseBlock(block) {
     return null;
   }
   const rawData = dataLines.join("\n");
-  let data = rawData;
   try {
-    data = JSON.parse(rawData);
+    return { event, data: JSON.parse(rawData) };
   } catch {
-    data = { text: rawData };
+    return { event, data: { text: rawData } };
   }
-  return { event, data };
+}
+
+function setAgentStatus(status, runId = "") {
+  const node = $("agent-status");
+  node.className = `status-pill ${status || "neutral"}`;
+  node.textContent = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
 }
 
 async function runAgent() {
+  const message = $("agent-message-input").value.trim();
+  if (!message) {
+    showToast("请先描述 Agent 任务", "warning");
+    return;
+  }
   const button = $("run-agent-btn");
-  const status = $("agent-status");
-  const answer = $("agent-answer");
   button.disabled = true;
-  status.textContent = "Running...";
-  answer.textContent = "";
-  $("agent-events").innerHTML = "";
+  setAgentStatus("running");
+  $("agent-answer").className = "rich-output empty-output";
+  $("agent-answer").textContent = "Agent 正在理解任务并规划下一步…";
+  $("agent-events").innerHTML = '<div class="empty-state">正在等待第一个运行事件…</div>';
+  $("approval-card").classList.add("hidden");
   try {
     const conversationId = await ensureSession();
     const payload = {
       conversation_id: conversationId,
-      message: $("agent-message-input").value.trim(),
+      message,
       repository_id: $("repository-id-input").value.trim() || "repo_main",
       focus_files: csvValues($("focus-files-input").value),
     };
@@ -471,9 +850,10 @@ async function runAgent() {
     renderAgentRun(body);
     await pollRunUntilTerminal();
   } catch (error) {
-    status.textContent = "Error";
-    answer.textContent = error.message;
-    setRaw({ error: error.message });
+    setAgentStatus("failed");
+    $("agent-answer").className = "rich-output";
+    $("agent-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
+    showToast(humanizeError(error), "error");
   } finally {
     button.disabled = false;
   }
@@ -481,59 +861,122 @@ async function runAgent() {
 
 function renderAgentRun(body) {
   const result = body.result || {};
-  state.latestRunId = body.run_id || "";
-  state.latestRunStatus = body.status || "";
-  $("agent-status").textContent = `${body.status || "unknown"} ${body.run_id || ""}`;
-  $("agent-answer").textContent =
-    result.answer ||
-    body.error ||
-    (body.pending_approval
-      ? `Waiting approval for: ${(body.pending_approval.planned_tools || []).join(", ")}`
-      : "No answer yet");
-  $("approve-run-btn").disabled = body.status !== "waiting_approval";
-  $("reject-run-btn").disabled = body.status !== "waiting_approval";
+  state.latestRunId = body.run_id || result.run_id || "";
+  state.latestRunStatus = body.status || result.status || "";
+  setAgentStatus(state.latestRunStatus, state.latestRunId);
+
+  const answer = result.answer || body.error || "";
+  const answerNode = $("agent-answer");
+  if (answer) {
+    answerNode.className = "rich-output";
+    answerNode.innerHTML = renderMarkdown(answer);
+  } else if (body.pending_approval) {
+    answerNode.className = "rich-output empty-output";
+    answerNode.textContent = "执行计划已生成，请完成下方审批。";
+  } else {
+    answerNode.className = "rich-output empty-output";
+    answerNode.textContent = "Agent 正在运行，结果会在完成后显示。";
+  }
+
+  renderApproval(body.pending_approval);
+  renderAgentMetrics(result.metrics);
+  renderArtifacts(result.artifacts || []);
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
 }
 
+function renderApproval(approval) {
+  const card = $("approval-card");
+  if (!approval) {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+  $("approval-reason").textContent = approval.reason || "一个或多个工具需要在执行前确认。";
+  const tools = $("approval-tools");
+  tools.innerHTML = "";
+  const requiredByName = new Map(
+    (approval.approval_required_tools || []).map((item) => [item.name, item]),
+  );
+  const calls = approval.tool_calls || (approval.planned_tools || []).map((name) => ({ name, arguments: {} }));
+  for (const call of calls) {
+    const risk = requiredByName.get(call.name) || {};
+    const item = document.createElement("article");
+    item.className = "approval-tool";
+    item.innerHTML = `
+      <header><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></header>
+      <p>${escapeHtml(risk.risk_summary || "只读或低风险工具；请确认参数符合预期。")}</p>
+      <pre>${escapeHtml(jsonPretty(risk.arguments_summary || call.arguments || {}))}</pre>
+    `;
+    tools.appendChild(item);
+  }
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderAgentMetrics(metrics) {
+  const values = metrics
+    ? [
+        ["耗时", formatDuration(metrics.elapsed_ms)],
+        ["节点", metrics.node_count],
+        ["工具调用", `${metrics.successful_tool_call_count}/${metrics.tool_call_count}`],
+        ["变更文件", metrics.changed_file_count],
+      ]
+    : [["耗时", "—"], ["节点", "—"], ["工具调用", "—"], ["变更文件", "—"]];
+  $("agent-metrics").innerHTML = values
+    .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+    .join("");
+}
+
+function renderArtifacts(artifacts) {
+  const list = $("agent-artifacts");
+  list.innerHTML = "";
+  for (const [index, artifact] of artifacts.entries()) {
+    const item = document.createElement("article");
+    item.className = "artifact-card";
+    const title = artifact.type || artifact.name || `Artifact ${index + 1}`;
+    const content = artifact.content || artifact.diff || artifact.output || artifact;
+    item.innerHTML = `<strong>${escapeHtml(title)}</strong><pre>${escapeHtml(typeof content === "string" ? content : jsonPretty(content))}</pre>`;
+    list.appendChild(item);
+  }
+}
+
 async function refreshRun() {
   if (!state.latestRunId) {
-    $("agent-status").textContent = "No run";
-    return;
+    showToast("还没有可刷新的 Agent 运行", "warning");
+    return null;
   }
   const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}`);
   renderAgentRun(body);
+  return body;
 }
 
-async function refreshEvents() {
+async function refreshEvents(showRaw = true) {
   if (!state.latestRunId) {
-    $("agent-events").innerHTML = '<div class="empty-state">No run selected</div>';
-    return;
+    $("agent-events").innerHTML = '<div class="empty-state">暂无运行事件</div>';
+    return null;
   }
-  const body = await fetchJson(
-    `/agent/runs/${encodeURIComponent(state.latestRunId)}/events`
-  );
+  const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/events`);
   renderAgentEvents(body.events || []);
-  setRaw(body);
+  if (showRaw) {
+    setRaw(body);
+  }
+  return body;
 }
 
 function renderAgentEvents(events) {
   const list = $("agent-events");
   list.innerHTML = "";
   if (events.length === 0) {
-    list.innerHTML = '<div class="empty-state">No events</div>';
+    list.innerHTML = '<div class="empty-state">暂无运行事件</div>';
     return;
   }
   for (const event of events) {
     const item = document.createElement("div");
-    item.className = "data-item";
+    item.className = "timeline-item";
     item.innerHTML = `
-      <div>
-        <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.type)}</strong>
-        <span>${escapeHtml(event.status)} · ${escapeHtml(event.node || "run")}</span>
-        <p>${escapeHtml(event.summary)}</p>
-      </div>
+      <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
+      <p>${escapeHtml(event.summary || humanizeStatus(event.status))}</p>
     `;
     list.appendChild(item);
   }
@@ -543,200 +986,244 @@ async function resumeRun(approved) {
   if (!state.latestRunId) {
     return;
   }
-  $("agent-status").textContent = approved ? "Approving..." : "Rejecting...";
-  const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/resume`, {
-    method: "POST",
-    body: JSON.stringify({
-      approved,
-      feedback: approved ? "前端调试台批准执行" : "前端调试台拒绝执行",
-    }),
-  });
-  renderAgentRun(body);
-  await pollRunUntilTerminal();
+  const approveButton = $("approve-run-btn");
+  const rejectButton = $("reject-run-btn");
+  approveButton.disabled = true;
+  rejectButton.disabled = true;
+  setAgentStatus("running", state.latestRunId);
+  try {
+    const feedback = $("approval-feedback-input").value.trim();
+    const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/resume`, {
+      method: "POST",
+      body: JSON.stringify({
+        approved,
+        feedback: feedback || (approved ? "用户已在产品界面确认执行计划" : "用户拒绝执行计划"),
+      }),
+    });
+    renderAgentRun(body);
+    showToast(approved ? "执行计划已批准" : "执行计划已拒绝", approved ? "success" : "warning");
+    await pollRunUntilTerminal();
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    approveButton.disabled = false;
+    rejectButton.disabled = false;
+  }
 }
 
 async function pollRunUntilTerminal() {
-  const terminalStatuses = new Set(["completed", "failed", "waiting_approval"]);
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (!state.latestRunId || terminalStatuses.has(state.latestRunStatus)) {
+  const generation = ++state.agentPollGeneration;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (
+      generation !== state.agentPollGeneration ||
+      !state.latestRunId ||
+      TERMINAL_RUN_STATUSES.has(state.latestRunStatus)
+    ) {
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
     await refreshRun();
+    if (attempt % 2 === 0) {
+      await refreshEvents(false);
+    }
   }
-  await refreshEvents();
+  await refreshEvents(false);
+  if (!TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
+    showToast("Agent 仍在后台运行，可稍后刷新状态", "warning");
+  }
 }
 
 async function ingestDocument() {
-  const status = $("rag-status");
-  status.textContent = "Ingesting...";
+  const content = $("document-content-input").value;
+  if (!content.trim()) {
+    showToast("请粘贴需要录入的文档内容", "warning");
+    return;
+  }
+  $("rag-status").textContent = "正在录入…";
   try {
     const kbId = $("kb-id-input").value.trim() || "demo_kb";
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/documents`, {
       method: "POST",
       body: JSON.stringify({
         filename: $("document-filename-input").value.trim() || "notes.md",
-        content: $("document-content-input").value,
+        content,
       }),
     });
-    status.textContent = `ingested ${body.chunk_count} chunks`;
+    $("rag-status").textContent = `已录入 ${body.chunk_count} 个片段`;
     setRaw(body);
+    showToast(`文档已录入，共 ${body.chunk_count} 个片段`);
   } catch (error) {
-    status.textContent = "Error";
-    $("rag-answer").textContent = error.message;
-    setRaw({ error: error.message });
+    $("rag-status").textContent = "录入失败";
+    showToast(humanizeError(error), "error");
   }
 }
 
 async function searchRag() {
-  const status = $("rag-status");
-  const answer = $("rag-answer");
-  status.textContent = "Searching...";
-  answer.textContent = "";
+  const question = $("rag-question-input").value.trim();
+  if (!question) {
+    showToast("请输入搜索词", "warning");
+    return;
+  }
+  $("rag-status").textContent = "正在检索…";
   try {
     const kbId = $("kb-id-input").value.trim() || "demo_kb";
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/search`, {
       method: "POST",
       body: JSON.stringify({
-        query: $("rag-question-input").value.trim(),
+        query: question,
         limit: numberValue("rag-limit-input", 5),
         recall_limit: numberValue("rag-recall-limit-input", 10),
       }),
     });
-    status.textContent = `results ${body.results.length}`;
-    answer.textContent = renderRagResults(body.results || []);
+    const results = body.results || [];
+    $("rag-status").textContent = `找到 ${results.length} 条结果`;
+    $("rag-answer").className = "rich-output";
+    $("rag-answer").innerHTML = results.length
+      ? `<h3>检索完成</h3><p>在知识库 <code>${escapeHtml(kbId)}</code> 中找到 ${results.length} 条相关内容。</p>`
+      : "<p>没有找到相关内容。可以调整问题或增加召回数量后重试。</p>";
+    renderCitations(results);
     setRaw(body);
   } catch (error) {
-    status.textContent = "Error";
-    answer.textContent = error.message;
-    setRaw({ error: error.message });
+    $("rag-status").textContent = "检索失败";
+    showToast(humanizeError(error), "error");
   }
 }
 
 async function askRag() {
-  const status = $("rag-status");
-  const answer = $("rag-answer");
-  status.textContent = "Asking...";
-  answer.textContent = "";
+  const question = $("rag-question-input").value.trim();
+  if (!question) {
+    showToast("请输入问题", "warning");
+    return;
+  }
+  $("rag-status").textContent = "正在生成…";
+  $("rag-answer").className = "rich-output empty-output";
+  $("rag-answer").textContent = "正在检索相关内容并组织回答…";
   try {
     const kbId = $("kb-id-input").value.trim() || "demo_kb";
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/ask`, {
       method: "POST",
       body: JSON.stringify({
-        question: $("rag-question-input").value.trim(),
+        question,
         limit: numberValue("rag-limit-input", 5),
         recall_limit: numberValue("rag-recall-limit-input", 10),
         ...optionalModelFields(),
       }),
     });
-    status.textContent = `citations ${body.citations.length}`;
-    answer.textContent = renderRagAnswer(body);
+    $("rag-status").textContent = `${body.citations.length} 条引用`;
+    $("rag-answer").className = "rich-output";
+    $("rag-answer").innerHTML = renderMarkdown(body.answer || "模型没有返回回答。");
+    renderCitations(body.citations || []);
     setRaw(body);
   } catch (error) {
-    status.textContent = "Error";
-    answer.textContent = error.message;
-    setRaw({ error: error.message });
+    $("rag-status").textContent = "生成失败";
+    $("rag-answer").className = "rich-output";
+    $("rag-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
+    showToast(humanizeError(error), "error");
   }
 }
 
-function renderRagResults(results) {
-  if (results.length === 0) {
-    return "No results";
+function renderCitations(citations) {
+  const list = $("rag-citations");
+  list.innerHTML = "";
+  for (const [index, citation] of citations.entries()) {
+    const score = Number(citation.score || 0).toFixed(3);
+    const lines = citation.start_line || citation.end_line
+      ? ` · 行 ${citation.start_line || "?"}–${citation.end_line || "?"}`
+      : "";
+    const item = document.createElement("article");
+    item.className = "citation-card";
+    item.innerHTML = `
+      <header><strong>[${index + 1}] ${escapeHtml(citation.filename)} · #${escapeHtml(citation.chunk_index)}${escapeHtml(lines)}</strong><span class="score-pill">${escapeHtml(score)}</span></header>
+      <p>${escapeHtml(citation.text)}</p>
+    `;
+    list.appendChild(item);
   }
-  return results
-    .map((item, index) => {
-      const score = Number(item.score || 0).toFixed(3);
-      const lines =
-        item.start_line || item.end_line
-          ? ` lines ${item.start_line || "?"}-${item.end_line || "?"}`
-          : "";
-      return `[${index + 1}] ${item.filename} #${item.chunk_index} score=${score}${lines}\n${item.text}`;
-    })
-    .join("\n\n");
-}
-
-function renderRagAnswer(body) {
-  return `${body.answer}\n\nCitations\n${renderRagResults(body.citations || [])}`;
 }
 
 async function indexRepository() {
-  const status = $("session-status");
   const repositoryId = $("repository-id-input").value.trim() || "repo_main";
   const rootPath = $("repository-root-input").value.trim();
   if (!rootPath) {
-    status.textContent = "Fill repository root path first";
-    switchTab("repository");
+    showToast("请先在工作区设置中填写仓库根路径", "warning");
+    openSettings();
+    $("repository-root-input").focus();
     return;
   }
-  status.textContent = "Indexing repository...";
+
+  $("index-repo-btn").disabled = true;
+  setRepositoryProgress({ status: "pending", scanned_files: 0, indexed_files: 0 });
   try {
-    const submitted = await fetchJson(
-      `/repositories/${encodeURIComponent(repositoryId)}/index`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          root_path: rootPath,
-          include_patterns: csvValues($("include-patterns-input").value),
-          exclude_patterns: csvValues($("exclude-patterns-input").value),
-          max_file_size: numberValue("max-file-size-input", 200000),
-        }),
-      }
-    );
+    const submitted = await fetchJson(`/repositories/${encodeURIComponent(repositoryId)}/index`, {
+      method: "POST",
+      body: JSON.stringify({
+        root_path: rootPath,
+        include_patterns: csvValues($("include-patterns-input").value),
+        exclude_patterns: csvValues($("exclude-patterns-input").value),
+        max_file_size: numberValue("max-file-size-input", 200000),
+      }),
+    });
     renderRepositoryResult(submitted);
-    status.textContent = `Index job ${submitted.job_id} queued`;
     const body = await waitForRepositoryIndex(repositoryId, submitted.job_id);
     state.latestRepositoryIndex = body;
-    status.textContent = `indexed ${body.indexed_files}, skipped ${body.skipped_files}`;
     renderRepositoryResult(body);
     setRaw(body);
-    switchTab("repository");
+    showToast(
+      `索引完成：${body.indexed_files} 个文件，跳过 ${body.skipped_files} 个`,
+      body.failed_files ? "warning" : "success",
+    );
   } catch (error) {
-    status.textContent = "Index failed";
-    $("repository-result").innerHTML = `<div class="empty-state error-text">${escapeHtml(error.message)}</div>`;
-    setRaw({ error: error.message });
-    switchTab("repository");
+    $("repository-progress-label").textContent = "索引失败";
+    showToast(humanizeError(error), "error");
+  } finally {
+    $("index-repo-btn").disabled = false;
   }
 }
 
 async function waitForRepositoryIndex(repositoryId, jobId) {
-  const terminalStatuses = new Set([
-    "completed",
-    "completed_with_errors",
-    "failed",
-  ]);
   for (let attempt = 0; attempt < 240; attempt += 1) {
     const body = await fetchJson(
-      `/repositories/${encodeURIComponent(repositoryId)}/index-jobs/${encodeURIComponent(jobId)}`
+      `/repositories/${encodeURIComponent(repositoryId)}/index-jobs/${encodeURIComponent(jobId)}`,
     );
+    setRepositoryProgress(body);
     renderRepositoryResult(body);
-    $("session-status").textContent =
-      `Index ${body.status}: scanned ${body.scanned_files}, indexed ${body.indexed_files}`;
-    if (terminalStatuses.has(body.status)) {
+    if (TERMINAL_INDEX_STATUSES.has(body.status)) {
       return body;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
   }
-  throw new Error(`index job ${jobId} did not finish before the polling timeout`);
+  throw new Error(`索引任务 ${jobId} 在等待时间内没有完成`);
+}
+
+function setRepositoryProgress(body) {
+  const card = $("repository-progress");
+  card.classList.remove("hidden");
+  const scanned = Number(body.scanned_files || 0);
+  const indexed = Number(body.indexed_files || 0);
+  const skipped = Number(body.skipped_files || 0);
+  const failed = Number(body.failed_files || 0);
+  const handled = indexed + skipped + failed;
+  const percent = TERMINAL_INDEX_STATUSES.has(body.status)
+    ? 100
+    : scanned > 0
+      ? Math.min(94, Math.round((handled / scanned) * 100))
+      : 8;
+  $("repository-progress-label").textContent = humanizeStatus(body.status || "pending");
+  $("repository-progress-count").textContent = `${scanned} 个文件`;
+  $("repository-progress-bar").style.width = `${percent}%`;
 }
 
 function renderRepositoryResult(body) {
   $("repository-result").innerHTML = `
-    <div class="summary-row"><span>Job</span><strong>${escapeHtml(body.job_id)}</strong></div>
-    <div class="summary-row"><span>Status</span><strong>${escapeHtml(body.status)}</strong></div>
-    <div class="summary-row"><span>Scanned</span><strong>${escapeHtml(body.scanned_files)}</strong></div>
-    <div class="summary-row"><span>Indexed</span><strong>${escapeHtml(body.indexed_files)}</strong></div>
-    <div class="summary-row"><span>Skipped</span><strong>${escapeHtml(body.skipped_files)}</strong></div>
-    <div class="summary-row"><span>Failed</span><strong>${escapeHtml(body.failed_files)}</strong></div>
+    <div><dt>状态</dt><dd>${escapeHtml(humanizeStatus(body.status))}</dd></div>
+    <div><dt>扫描</dt><dd>${escapeHtml(body.scanned_files ?? 0)}</dd></div>
+    <div><dt>已索引</dt><dd>${escapeHtml(body.indexed_files ?? 0)}</dd></div>
+    <div><dt>跳过 / 失败</dt><dd>${escapeHtml((body.skipped_files ?? 0) + (body.failed_files ?? 0))}</dd></div>
   `;
-  renderPathList(
-    "indexed-paths",
-    body.indexed_paths || [],
-    "Path details are not persisted"
-  );
+  renderPathList("indexed-paths", body.indexed_paths || [], "暂无已索引文件明细");
   renderPathList(
     "skipped-paths",
     [...(body.skipped_paths || []), ...(body.failed_paths || [])],
-    "No skipped or failed paths"
+    "没有跳过或失败的文件",
   );
 }
 
@@ -747,51 +1234,121 @@ function renderPathList(id, paths, emptyText) {
     list.innerHTML = `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
     return;
   }
-  for (const path of paths.slice(0, 120)) {
+  for (const path of paths.slice(0, 160)) {
     const item = document.createElement("div");
-    item.className = "data-item";
-    item.innerHTML = `<code>${escapeHtml(path)}</code>`;
+    item.className = "path-item";
+    item.textContent = path;
     list.appendChild(item);
   }
 }
 
-function switchTab(tabName) {
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.tab === tabName);
-  });
-  document.querySelectorAll(".tab-panel").forEach((panel) => {
-    panel.classList.toggle("active", panel.id === `${tabName}-tab`);
-  });
-}
-
 function bindEvents() {
-  $("refresh-health-btn").addEventListener("click", checkHealth);
-  $("refresh-overview-btn").addEventListener("click", async () => {
-    await checkHealth();
-    await listSessions(false);
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.addEventListener("click", () => switchView(button.dataset.view));
   });
+
+  document.addEventListener("click", (event) => {
+    const prompt = event.target.closest("[data-prompt]");
+    if (!prompt) {
+      return;
+    }
+    $("chat-message-input").value = prompt.dataset.prompt;
+    $("chat-message-input").focus();
+  });
+
+  $("open-settings-btn").addEventListener("click", openSettings);
+  $("sidebar-settings-btn").addEventListener("click", openSettings);
+  $("open-repository-settings-btn").addEventListener("click", openSettings);
+  $("save-settings-btn").addEventListener("click", saveSettings);
+  $("close-settings-btn").addEventListener("click", closeSettings);
+  $("settings-dialog").addEventListener("click", (event) => {
+    if (event.target === $("settings-dialog")) {
+      closeSettings();
+    }
+  });
+
+  $("toggle-inspector-btn").addEventListener("click", () => {
+    setInspectorVisible(document.body.classList.contains("inspector-hidden"));
+  });
+  $("close-inspector-btn").addEventListener("click", () => setInspectorVisible(false));
+  $("trace-tab").addEventListener("click", () => selectInspectorTab("trace"));
+  $("raw-tab").addEventListener("click", () => selectInspectorTab("raw"));
+
   $("create-session-btn").addEventListener("click", createSession);
-  $("load-session-btn").addEventListener("click", loadSession);
+  $("sessions-create-btn").addEventListener("click", createSession);
+  $("load-session-btn").addEventListener("click", async () => {
+    try {
+      await loadSession();
+      closeSettings();
+      showToast("会话已加载");
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
   $("list-sessions-btn").addEventListener("click", async () => {
-    await listSessions();
-    switchTab("sessions");
+    try {
+      await listSessions();
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
   });
   $("summary-session-btn").addEventListener("click", loadSessionSummary);
-  $("refresh-messages-btn").addEventListener("click", refreshMessages);
+  $("refresh-messages-btn").addEventListener("click", async () => {
+    try {
+      await refreshMessages();
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
   $("add-message-btn").addEventListener("click", addMessage);
+  $("sessions-list").addEventListener("click", async (event) => {
+    const row = event.target.closest("[data-session-id]");
+    if (!row) {
+      return;
+    }
+    state.conversationId = row.dataset.sessionId;
+    $("conversation-id-input").value = state.conversationId;
+    try {
+      await loadSession();
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
+
   $("send-chat-btn").addEventListener("click", streamChat);
+  $("stop-chat-btn").addEventListener("click", stopChat);
+  $("chat-message-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      streamChat();
+    }
+  });
+
   $("run-agent-btn").addEventListener("click", runAgent);
-  $("refresh-run-btn").addEventListener("click", refreshRun);
-  $("refresh-events-btn").addEventListener("click", refreshEvents);
+  $("refresh-run-btn").addEventListener("click", async () => {
+    try {
+      await refreshRun();
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
+  $("refresh-events-btn").addEventListener("click", async () => {
+    try {
+      await refreshEvents();
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
   $("approve-run-btn").addEventListener("click", () => resumeRun(true));
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
+
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("index-repo-btn").addEventListener("click", indexRepository);
-  $("clear-chat-btn").addEventListener("click", () => {
-    $("chat-output").textContent = "";
-    $("chat-meta").textContent = "Idle";
+
+  $("refresh-overview-btn").addEventListener("click", async () => {
+    await Promise.allSettled([checkHealth(), listSessions(false)]);
   });
   $("clear-log-btn").addEventListener("click", () => {
     state.requestLog = [];
@@ -800,35 +1357,46 @@ function bindEvents() {
   });
   $("clear-detail-btn").addEventListener("click", () => {
     setTrace([]);
-    setRaw("");
+    setRaw("等待响应…");
+    setLastRequestId("");
   });
+
   $("conversation-id-input").addEventListener("input", (event) => {
     state.conversationId = event.target.value.trim();
+    updateContextSummary();
   });
-  $("sessions-list").addEventListener("click", async (event) => {
-    const row = event.target.closest("[data-session-id]");
-    if (!row) {
-      return;
+  ["user-id-input", "provider-input", "model-input", "repository-id-input", "repository-root-input"].forEach((id) => {
+    $(id).addEventListener("input", updateContextSummary);
+    $(id).addEventListener("change", updateContextSummary);
+  });
+
+  window.addEventListener("hashchange", () => {
+    const view = location.hash.replace("#", "");
+    if (document.querySelector(`[data-view-panel="${view}"]`)) {
+      switchView(view, false);
     }
-    state.conversationId = row.dataset.sessionId;
-    $("conversation-id-input").value = state.conversationId;
-    await loadSession();
-  });
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
 }
 
-function init() {
+async function init() {
   bindEvents();
+  const preferences = loadUiPreferences();
+  const requestedView = location.hash.replace("#", "");
+  const preferredView = document.querySelector(`[data-view-panel="${preferences.view}"]`)
+    ? preferences.view
+    : "chat";
+  const initialView = document.querySelector(`[data-view-panel="${requestedView}"]`)
+    ? requestedView
+    : preferredView;
+  switchView(initialView, !location.hash);
+  setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);
+  selectInspectorTab("trace");
   setTrace([]);
   renderRequestLog();
   renderSessions();
   renderOverview();
-  checkHealth();
-  listSessions(false).catch(() => {
-    renderOverview();
-  });
+  updateContextSummary();
+  await Promise.allSettled([checkHealth(), listSessions(false)]);
 }
 
 init();
