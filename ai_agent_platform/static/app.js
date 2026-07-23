@@ -12,6 +12,7 @@ const state = {
   requestLog: [],
   latestRepositoryIndex: null,
   currentView: "chat",
+  composerMode: "chat",
   chatController: null,
   agentPollGeneration: 0,
 };
@@ -113,9 +114,11 @@ function numberValue(id, fallback) {
 function optionalModelFields() {
   const provider = $("provider-input").value.trim();
   const model = $("model-input").value.trim();
+  const thinkingLevel = $("thinking-level-input").value.trim();
   return {
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
+    ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
   };
 }
 
@@ -224,6 +227,7 @@ function saveUiPreferences() {
       UI_STORAGE_KEY,
       JSON.stringify({
         view: state.currentView,
+        composerMode: state.composerMode,
         inspectorHidden: document.body.classList.contains("inspector-hidden"),
       }),
     );
@@ -293,9 +297,10 @@ function updateContextSummary() {
   const userId = $("user-id-input").value.trim() || "demo_user";
   const provider = $("provider-input").value.trim();
   const model = $("model-input").value.trim();
+  const thinkingLevel = $("thinking-level-input").value.trim();
   const repositoryId = $("repository-id-input").value.trim() || "repo_main";
   const repositoryRoot = $("repository-root-input").value.trim();
-  const modelLabel = model || provider || "默认配置";
+  const modelLabel = `${model || provider || "默认配置"}${thinkingLevel ? ` · ${thinkingLevel}` : ""}`;
 
   $("context-user").textContent = userId;
   $("context-model").textContent = modelLabel;
@@ -312,6 +317,22 @@ function saveSettings() {
   updateContextSummary();
   closeSettings();
   showToast("工作区设置已更新");
+}
+
+function updateComposerMode(mode = $("composer-mode-input").value) {
+  state.composerMode = mode === "agent" ? "agent" : "chat";
+  $("composer-mode-input").value = state.composerMode;
+  const isAgent = state.composerMode === "agent";
+  $("composer-mode-description").textContent = isAgent
+    ? "读取仓库上下文并运行工具；需要权限的操作会等待审批。"
+    : "直接调用模型并流式回答，不执行仓库工具。";
+  $("chat-message-input").placeholder = isAgent
+    ? "描述仓库任务，Enter 交给代码 Agent，Shift + Enter 换行…"
+    : "输入消息，Enter 发送，Shift + Enter 换行…";
+  $("send-chat-btn").innerHTML = isAgent
+    ? '交给 Agent <span aria-hidden="true">→</span>'
+    : '发送 <span aria-hidden="true">↑</span>';
+  saveUiPreferences();
 }
 
 function pushRequestLog(entry) {
@@ -550,6 +571,7 @@ async function refreshMessages(showRaw = true) {
   const conversationId = await ensureSession();
   const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`);
   renderMessages(body.messages || []);
+  renderChatHistory(body.messages || []);
   if (showRaw) {
     setRaw(body);
   }
@@ -650,6 +672,40 @@ function stopChat() {
   }
 }
 
+async function submitComposerMessage() {
+  if (state.composerMode === "agent") {
+    await runAgentFromComposer();
+    return;
+  }
+  await streamChat();
+}
+
+async function runAgentFromComposer() {
+  const input = $("chat-message-input");
+  const message = input.value.trim();
+  if (!message) {
+    showToast("请输入一条消息", "warning");
+    input.focus();
+    return;
+  }
+
+  const sendButton = $("send-chat-btn");
+  const modeInput = $("composer-mode-input");
+  sendButton.disabled = true;
+  modeInput.disabled = true;
+  $("agent-message-input").value = message;
+  $("focus-files-input").value = "";
+  input.value = "";
+  switchView("agent");
+  showToast("任务已交给代码 Agent，可在这里查看进度和审批");
+  try {
+    await runAgent();
+  } finally {
+    sendButton.disabled = false;
+    modeInput.disabled = false;
+  }
+}
+
 async function streamChat() {
   const input = $("chat-message-input");
   const message = input.value.trim();
@@ -661,12 +717,15 @@ async function streamChat() {
 
   const sendButton = $("send-chat-btn");
   const stopButton = $("stop-chat-btn");
+  const modeInput = $("composer-mode-input");
   sendButton.disabled = true;
+  modeInput.disabled = true;
   stopButton.classList.remove("hidden");
   $("chat-meta").textContent = "正在准备…";
   setTrace([]);
   state.chatController = new AbortController();
   let assistantContent = null;
+  let answer = "";
 
   try {
     const conversationId = await ensureSession();
@@ -675,7 +734,6 @@ async function streamChat() {
     input.value = "";
     const payload = { conversation_id: conversationId, message, ...optionalModelFields() };
     const events = [];
-    let answer = "";
     await postSse(
       "/chat/stream",
       payload,
@@ -685,16 +743,24 @@ async function streamChat() {
           setRaw(events);
         }
         if (eventName === "meta") {
-          $("chat-meta").textContent = `${data.provider} · ${data.model}`;
+          const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
+          $("chat-meta").textContent = `${data.provider} · ${data.model}${thinking}`;
         } else if (eventName === "delta") {
           answer += data.text || "";
           assistantContent.innerHTML = renderMarkdown(answer);
         } else if (eventName === "usage") {
-          $("chat-meta").textContent = `${data.total_tokens || 0} tokens`;
+          const thoughts = data.thoughts_tokens
+            ? ` · ${data.thoughts_tokens} thinking`
+            : "";
+          $("chat-meta").textContent = `${data.total_tokens || 0} tokens${thoughts}`;
         } else if (eventName === "done") {
           $("chat-meta").textContent = `已完成 · ${formatDuration(data.elapsed_ms)}`;
         } else if (eventName === "error") {
-          throw new Error(data.message || data.code || "模型响应失败");
+          const streamError = new Error(data.message || data.code || "模型响应失败");
+          streamError.code = data.code || "llm_provider_error";
+          streamError.finishReason = data.finish_reason || "";
+          streamError.preservePartial = Boolean(data.partial_response && answer);
+          throw streamError;
         }
       },
       state.chatController.signal,
@@ -711,14 +777,23 @@ async function streamChat() {
       $("chat-meta").textContent = "已停止";
     } else {
       if (assistantContent) {
-        assistantContent.innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
+        const detail = error.code === "max_output_tokens"
+          ? "回答达到输出额度上限，已保留生成的部分内容。可提高额度或降低 Gemini 思考等级后重试。"
+          : humanizeError(error);
+        assistantContent.innerHTML = error.preservePartial
+          ? `${renderMarkdown(answer)}<p><em>${escapeHtml(detail)}</em></p>`
+          : `<p>${escapeHtml(detail)}</p>`;
       }
-      $("chat-meta").textContent = "生成失败";
-      showToast(humanizeError(error), "error");
+      $("chat-meta").textContent = error.code === "max_output_tokens" ? "输出已截断" : "生成失败";
+      showToast(
+        error.code === "max_output_tokens" ? "回答达到输出额度上限" : humanizeError(error),
+        error.code === "max_output_tokens" ? "warning" : "error",
+      );
     }
   } finally {
     state.chatController = null;
     sendButton.disabled = false;
+    modeInput.disabled = false;
     stopButton.classList.add("hidden");
     input.focus();
   }
@@ -1028,6 +1103,11 @@ async function pollRunUntilTerminal() {
     }
   }
   await refreshEvents(false);
+  try {
+    await refreshMessages(false);
+  } catch (error) {
+    showToast(`Agent 已结束，但共享会话刷新失败：${humanizeError(error)}`, "warning");
+  }
   if (!TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
     showToast("Agent 仍在后台运行，可稍后刷新状态", "warning");
   }
@@ -1315,12 +1395,15 @@ function bindEvents() {
     }
   });
 
-  $("send-chat-btn").addEventListener("click", streamChat);
+  $("send-chat-btn").addEventListener("click", submitComposerMessage);
   $("stop-chat-btn").addEventListener("click", stopChat);
+  $("composer-mode-input").addEventListener("change", (event) => {
+    updateComposerMode(event.target.value);
+  });
   $("chat-message-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      streamChat();
+      submitComposerMessage();
     }
   });
 
@@ -1365,7 +1448,7 @@ function bindEvents() {
     state.conversationId = event.target.value.trim();
     updateContextSummary();
   });
-  ["user-id-input", "provider-input", "model-input", "repository-id-input", "repository-root-input"].forEach((id) => {
+  ["user-id-input", "provider-input", "model-input", "thinking-level-input", "repository-id-input", "repository-root-input"].forEach((id) => {
     $(id).addEventListener("input", updateContextSummary);
     $(id).addEventListener("change", updateContextSummary);
   });
@@ -1388,6 +1471,8 @@ async function init() {
   const initialView = document.querySelector(`[data-view-panel="${requestedView}"]`)
     ? requestedView
     : preferredView;
+  state.composerMode = preferences.composerMode === "agent" ? "agent" : "chat";
+  updateComposerMode(state.composerMode);
   switchView(initialView, !location.hash);
   setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);
   selectInspectorTab("trace");

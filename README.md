@@ -63,9 +63,11 @@ Module roles:
 Install dependencies:
 
 ```bash
-python3 -m venv .venv
+python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
+
+Python 3.10 or newer is required by the Google Gen AI SDK used for Gemini 3.5.
 
 Run the API:
 
@@ -89,6 +91,8 @@ when trace and raw API details are not needed.
 
 Useful frontend interactions:
 
+- choose `快速对话` or `代码 Agent` from the shared composer; Agent tasks
+  reuse the existing run, approval, event, metric, and artifact workspace
 - press `Enter` to send a chat message and `Shift+Enter` for a new line
 - stop an in-progress SSE response from the chat composer
 - review tool permission, risk, and sanitized arguments before approving an
@@ -110,6 +114,10 @@ creating a local `.env` file:
 ```bash
 LLM_PROVIDER=google
 LLM_MODEL=gemini-3.5-flash
+LLM_MAX_OUTPUT_TOKENS=4096
+LLM_THINKING_LEVEL=low
+LLM_TIMEOUT_SECONDS=30
+SSE_HEARTBEAT_SECONDS=10
 GOOGLE_API_KEY=your_google_ai_studio_key
 EMBEDDING_PROVIDER=local
 MCP_ENABLED=false
@@ -323,8 +331,15 @@ curl http://localhost:8000/api/v1/sessions/sess_xxx/messages
 
 curl -N -X POST http://localhost:8000/api/v1/chat/stream \
   -H 'Content-Type: application/json' \
-  -d '{"conversation_id":"sess_xxx","message":"你好，解释一下SSE"}'
+  -d '{"conversation_id":"sess_xxx","message":"你好，解释一下SSE","thinking_level":"low"}'
 ```
+
+Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
+`thinking_level`. The server defaults to `low`; the product settings dialog can
+override it per Chat or RAG request. SSE responses include comment heartbeats
+while the model is idle, report thinking tokens separately, and return an
+explicit `max_output_tokens` error instead of a normal `done` event when Gemini
+finishes with `MAX_TOKENS`.
 
 ## Observability and Configuration Safety
 

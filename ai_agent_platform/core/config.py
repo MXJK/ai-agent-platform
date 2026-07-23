@@ -28,7 +28,9 @@ class Settings:
     llm_max_retries: int = 2
     llm_max_input_chars: int = 8000
     llm_max_context_messages: int = 12
-    llm_max_output_tokens: int = 1024
+    llm_max_output_tokens: int = 4096
+    llm_thinking_level: str = "low"
+    sse_heartbeat_seconds: float = 10.0
     rag_vector_store: str = "memory"
     chroma_persist_directory: str = ".chroma"
     chroma_collection_name: str = "rag_chunks"
@@ -75,6 +77,11 @@ class Settings:
             {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
         )
         _require_choice("log_format", self.log_format, {"json", "text"})
+        _require_choice(
+            "llm_thinking_level",
+            self.llm_thinking_level,
+            {"minimal", "low", "medium", "high"},
+        )
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
@@ -100,6 +107,7 @@ class Settings:
         )
         for name, value in (
             ("llm_timeout_seconds", self.llm_timeout_seconds),
+            ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
             ("llm_max_output_tokens", self.llm_max_output_tokens),
@@ -236,6 +244,12 @@ class Settings:
             ),
             llm_max_output_tokens=_int_env(
                 "LLM_MAX_OUTPUT_TOKENS", cls.llm_max_output_tokens, dotenv
+            ),
+            llm_thinking_level=_env(
+                "LLM_THINKING_LEVEL", cls.llm_thinking_level, dotenv
+            ),
+            sse_heartbeat_seconds=_float_env(
+                "SSE_HEARTBEAT_SECONDS", cls.sse_heartbeat_seconds, dotenv
             ),
             rag_vector_store=_env("RAG_VECTOR_STORE", cls.rag_vector_store, dotenv),
             chroma_persist_directory=_env(

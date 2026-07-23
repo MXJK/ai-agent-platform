@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from ai_agent_platform.integrations.rag import IngestedDocument, RetrievedDocument
+from ai_agent_platform.schemas.chat import LLMThinkingLevel
 
 
 class DocumentIngestRequest(BaseModel):
@@ -82,6 +83,7 @@ class RAGAskRequest(BaseModel):
     recall_limit: Optional[int] = Field(default=None, ge=1, le=100)
     provider: Optional[str] = Field(default=None, max_length=50)
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    thinking_level: Optional[LLMThinkingLevel] = None
 
 
 class RAGAskResponse(BaseModel):
