@@ -10,4 +10,5 @@ __pycache__/
 !.env.example
 .chroma/
 INTERVIEW_NOTES.md
+INTERVIEW_NOTES/
 gateway/gateway
