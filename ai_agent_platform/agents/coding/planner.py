@@ -13,6 +13,9 @@ from ai_agent_platform.agents.coding.models import (
     LLMCompletionClient,
 )
 from ai_agent_platform.agents.coding.change_loop import SANDBOX_MUTATION_TOOLS
+from ai_agent_platform.agents.coding.runtime_support import (
+    recent_conversation_context,
+)
 from ai_agent_platform.agents.coding.text import (
     extract_paths,
     extract_symbols,
@@ -189,6 +192,7 @@ def tool_planning_prompt(
     ]
     payload = {
         "user_input": state["user_input"],
+        "conversation_context": recent_conversation_context(state),
         "intent": state.get("intent", "repository_question"),
         "repository_id": state["repository_id"],
         "focus_files": state.get("focus_files", []),

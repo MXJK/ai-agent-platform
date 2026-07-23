@@ -12,7 +12,13 @@ from ai_agent_platform.agents.coding_agent import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.integrations import RAGConfigurationError, RAGProviderError
-from ai_agent_platform.integrations.llm import LLMResponse, _google_usage
+from ai_agent_platform.integrations.llm import (
+    LLMProviderError,
+    LLMResponse,
+    LLMStreamEvent,
+    LLMUsage,
+    _google_usage,
+)
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
@@ -208,6 +214,11 @@ class APITests(unittest.TestCase):
         self.assertIn("text/javascript", script_response.headers["content-type"])
         self.assertIn("text/css", stylesheet_response.headers["content-type"])
         self.assertIn("AbortController", script_response.text)
+        self.assertIn('id="thinking-level-input"', response.text)
+        self.assertIn('id="composer-mode-input"', response.text)
+        self.assertIn("thinking_level", script_response.text)
+        self.assertIn("submitComposerMessage", script_response.text)
+        self.assertIn("runAgentFromComposer", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
 
     def test_chat_request_accepts_google_provider(self) -> None:
@@ -216,9 +227,11 @@ class APITests(unittest.TestCase):
             message="你好",
             provider="google",
             model="gemini-test-model",
+            thinking_level="medium",
         )
 
         self.assertEqual(request.provider, "google")
+        self.assertEqual(request.thinking_level, "medium")
 
     def test_streams_chat_response_and_records_messages(self) -> None:
         create_response = self.client.post(
@@ -253,6 +266,63 @@ class APITests(unittest.TestCase):
         self.assertEqual(metrics["chat_streams_completed_total"], 1)
         self.assertGreater(metrics["llm_input_tokens_total"], 0)
         self.assertGreater(metrics["llm_output_tokens_total"], 0)
+
+    def test_chat_stream_reports_google_max_tokens_as_error(self) -> None:
+        class TruncatedLLMClient:
+            def stream_chat(self, messages, **kwargs):
+                self.thinking_level = kwargs.get("thinking_level")
+                yield LLMStreamEvent(type="delta", text="partial answer")
+                yield LLMStreamEvent(
+                    type="usage",
+                    usage=LLMUsage(
+                        input_tokens=12,
+                        output_tokens=900,
+                        thoughts_tokens=1100,
+                    ),
+                )
+                raise LLMProviderError(
+                    "Gemini reached the configured output token limit",
+                    code="max_output_tokens",
+                    finish_reason="MAX_TOKENS",
+                )
+
+        truncated_llm = TruncatedLLMClient()
+        client = TestClient(
+            create_app(
+                settings=Settings(
+                    llm_provider="google",
+                    llm_model="gemini-3.5-flash",
+                    google_api_key="test-key",
+                ),
+                llm_client=truncated_llm,
+            )
+        )
+        session_id = client.post(
+            "/api/v1/sessions",
+            json={"user_id": "user_1"},
+        ).json()["id"]
+
+        response = client.post(
+            "/api/v1/chat/stream",
+            json={
+                "conversation_id": session_id,
+                "message": "long answer",
+                "thinking_level": "high",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: delta", response.text)
+        self.assertIn('"thoughts_tokens": 1100', response.text)
+        self.assertIn("event: error", response.text)
+        self.assertIn('"code": "max_output_tokens"', response.text)
+        self.assertIn('"finish_reason": "MAX_TOKENS"', response.text)
+        self.assertIn('"partial_response": true', response.text)
+        self.assertNotIn("event: done", response.text)
+        self.assertEqual(truncated_llm.thinking_level, "high")
+        counters = client.get("/api/v1/metrics").json()["counters"]
+        self.assertEqual(counters["chat_streams_failed_total"], 1)
+        self.assertEqual(counters["llm_thoughts_tokens_total"], 1100)
 
     def test_chat_stream_returns_404_for_missing_conversation(self) -> None:
         response = self.client.post(
@@ -1054,6 +1124,7 @@ class APITests(unittest.TestCase):
         class UsageMetadata:
             prompt_token_count = 12
             candidates_token_count = 7
+            thoughts_token_count = 5
 
         usage = _google_usage(UsageMetadata())
 
@@ -1061,7 +1132,8 @@ class APITests(unittest.TestCase):
         assert usage is not None
         self.assertEqual(usage.input_tokens, 12)
         self.assertEqual(usage.output_tokens, 7)
-        self.assertEqual(usage.total_tokens, 19)
+        self.assertEqual(usage.thoughts_tokens, 5)
+        self.assertEqual(usage.total_tokens, 24)
 
 
 if __name__ == "__main__":

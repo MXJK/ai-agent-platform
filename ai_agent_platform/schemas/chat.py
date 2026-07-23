@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 LLMProviderName = Literal["fake", "openai", "anthropic", "google"]
+LLMThinkingLevel = Literal["minimal", "low", "medium", "high"]
 
 
 class ChatStreamRequest(BaseModel):
@@ -13,3 +14,4 @@ class ChatStreamRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     provider: Optional[LLMProviderName] = None
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    thinking_level: Optional[LLMThinkingLevel] = None

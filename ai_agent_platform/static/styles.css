@@ -687,6 +687,34 @@ body.inspector-hidden .app-shell {
   backdrop-filter: blur(16px);
 }
 
+.composer-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 9px 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-mode-control {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin: 0;
+  font-size: 10px;
+}
+
+.composer-mode-control select {
+  width: auto;
+  min-height: 30px;
+  padding: 0 28px 0 9px;
+  border-radius: 999px;
+  background-color: var(--surface-soft);
+  font-size: 11px;
+  font-weight: 750;
+}
+
 .composer textarea {
   min-height: 72px;
   padding: 9px 10px 5px;
@@ -2038,6 +2066,12 @@ body.inspector-hidden .inspector {
 
   .composer-hints span:not(:first-child) {
     display: none;
+  }
+
+  .composer-mode-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .surface {

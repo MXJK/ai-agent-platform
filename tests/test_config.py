@@ -43,6 +43,9 @@ class SettingsTests(unittest.TestCase):
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
                 "LOG_LEVEL": "INFO",
                 "LOG_FORMAT": "text",
+                "LLM_MAX_OUTPUT_TOKENS": "8192",
+                "LLM_THINKING_LEVEL": "medium",
+                "SSE_HEARTBEAT_SECONDS": "4.5",
                 "MCP_ENABLED": "true",
                 "MCP_CONFIG_PATH": "mcp.json",
                 "MCP_REQUEST_TIMEOUT_SECONDS": "3.5",
@@ -86,6 +89,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.log_format, "text")
+        self.assertEqual(settings.llm_max_output_tokens, 8192)
+        self.assertEqual(settings.llm_thinking_level, "medium")
+        self.assertEqual(settings.sse_heartbeat_seconds, 4.5)
         self.assertTrue(settings.mcp_enabled)
         self.assertEqual(settings.mcp_config_path, "mcp.json")
         self.assertEqual(settings.mcp_request_timeout_seconds, 3.5)
@@ -145,6 +151,10 @@ class SettingsTests(unittest.TestCase):
     def test_requires_mcp_config_when_mcp_is_enabled(self) -> None:
         with self.assertRaisesRegex(ValueError, "mcp_config_path"):
             Settings(mcp_enabled=True, mcp_config_path=None)
+
+    def test_rejects_invalid_llm_thinking_level(self) -> None:
+        with self.assertRaisesRegex(ValueError, "llm_thinking_level"):
+            Settings(llm_thinking_level="extreme")
 
 
 if __name__ == "__main__":

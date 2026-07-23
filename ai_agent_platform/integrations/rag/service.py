@@ -885,6 +885,7 @@ class RAGService:
         llm_client: LLMClient,
         provider: str | None = None,
         model: str | None = None,
+        thinking_level: str | None = None,
         limit: int = 5,
         recall_limit: int | None = None,
     ) -> RAGAnswer:
@@ -897,7 +898,12 @@ class RAGService:
         messages = self.build_prompt_messages(question=question, citations=citations)
 
         answer_parts: list[str] = []
-        for event in llm_client.stream_chat(messages, provider=provider, model=model):
+        for event in llm_client.stream_chat(
+            messages,
+            provider=provider,
+            model=model,
+            thinking_level=thinking_level,
+        ):
             if event.type == "delta":
                 answer_parts.append(event.text)
             elif event.type == "done":
