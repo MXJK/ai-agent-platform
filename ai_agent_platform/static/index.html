@@ -132,12 +132,21 @@
             id="chat-message-input"
             rows="5"
             placeholder="输入一条消息，测试 /api/v1/chat/stream"
+            aria-keyshortcuts="Control+Enter Meta+Enter"
           >解释一下这个项目里的 SSE 流式输出是怎么工作的</textarea>
           <div class="toolbar">
-            <button id="send-chat-btn" class="primary-button">Send stream</button>
+            <button id="send-chat-btn" class="primary-button" aria-controls="chat-output">Send stream</button>
+            <button id="stop-chat-btn" class="danger-button" aria-controls="chat-output" hidden disabled>Stop</button>
             <span id="chat-meta" class="muted" role="status" aria-live="polite">Idle</span>
+            <span class="shortcut-hint">⌘/Ctrl + Enter 发送 · Esc 停止</span>
           </div>
-          <div id="chat-output" class="answer-box"></div>
+          <div
+            id="chat-output"
+            class="answer-box markdown-output"
+            role="log"
+            aria-live="polite"
+            aria-busy="false"
+          ></div>
         </section>
 
         <section id="agent-tab" class="panel tab-panel">
@@ -382,6 +391,8 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
         </footer>
       </div>
     </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-label="Notifications"></div>
 
     <script src="/static/app.js" defer></script>
   </body>

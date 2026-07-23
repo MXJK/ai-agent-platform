@@ -11,6 +11,8 @@ const state = {
   latestRepositoryIndex: null,
   approvalResolutionInFlight: false,
   inspectorOpen: true,
+  chatAbortController: null,
+  chatText: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +60,175 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function renderInlineMarkdown(value) {
+  return String(value ?? "")
+    .split(/(`[^`\n]+`)/g)
+    .map((segment) => {
+      if (segment.startsWith("`") && segment.endsWith("`")) {
+        return `<code>${escapeHtml(segment.slice(1, -1))}</code>`;
+      }
+      return escapeHtml(segment).replace(
+        /\*\*([^*\n]+)\*\*/g,
+        "<strong>$1</strong>"
+      );
+    })
+    .join("");
+}
+
+function renderSafeMarkdown(value) {
+  const lines = String(value ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let listType = "";
+  let listItems = [];
+  let codeLanguage = "";
+  let codeLines = [];
+  let inCodeFence = false;
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) {
+      return;
+    }
+    blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (listItems.length === 0) {
+      return;
+    }
+    blocks.push(
+      `<${listType}>${listItems
+        .map((item) => `<li>${renderInlineMarkdown(item)}</li>`)
+        .join("")}</${listType}>`
+    );
+    listType = "";
+    listItems = [];
+  };
+  const flushCode = () => {
+    const language = codeLanguage
+      ? ` class="language-${escapeHtml(codeLanguage)}"`
+      : "";
+    blocks.push(
+      `<pre class="markdown-code"><code${language}>${escapeHtml(
+        codeLines.join("\n")
+      )}</code></pre>`
+    );
+    codeLanguage = "";
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    if (inCodeFence) {
+      if (/^```/.test(line)) {
+        flushCode();
+        inCodeFence = false;
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
+    const fence = line.match(/^```([A-Za-z0-9_-]*)\s*$/);
+    if (fence) {
+      flushParagraph();
+      flushList();
+      codeLanguage = fence[1] || "";
+      inCodeFence = true;
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length + 2;
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+
+    const unordered = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+\.\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const nextType = unordered ? "ul" : "ol";
+      if (listType && listType !== nextType) {
+        flushList();
+      }
+      listType = nextType;
+      listItems.push((unordered || ordered)[1]);
+      continue;
+    }
+
+    const quote = line.match(/^>\s?(.+)$/);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      blocks.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+      continue;
+    }
+    flushList();
+    paragraph.push(line);
+  }
+
+  if (inCodeFence) {
+    flushCode();
+  }
+  flushParagraph();
+  flushList();
+  return blocks.join("");
+}
+
+function renderChatOutput(value) {
+  state.chatText = String(value ?? "");
+  const output = $("chat-output");
+  output.innerHTML = renderSafeMarkdown(state.chatText);
+  output.scrollTop = output.scrollHeight;
+}
+
+function showToast(message, tone = "info") {
+  const region = $("toast-region");
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${tone}`;
+  toast.setAttribute("role", tone === "error" ? "alert" : "status");
+
+  const text = document.createElement("span");
+  text.textContent = message;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss notification");
+  close.textContent = "×";
+  close.addEventListener("click", () => toast.remove());
+
+  toast.append(text, close);
+  region.appendChild(toast);
+  window.setTimeout(() => toast.remove(), tone === "error" ? 7000 : 4200);
+}
+
+function reportError(context, error) {
+  const detail = error?.message || String(error || "Unknown error");
+  showToast(`${context}: ${detail}`, "error");
+  setRaw({ error: detail, context });
+}
+
+async function runUiAction(action, errorContext, successMessage = "") {
+  try {
+    const result = await action();
+    if (successMessage) {
+      showToast(successMessage, "success");
+    }
+    return result;
+  } catch (error) {
+    reportError(errorContext, error);
+    return null;
+  }
 }
 
 function csvValues(value) {
@@ -113,6 +284,23 @@ function setInspectorOpen(open) {
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(open));
 }
 
+function setChatStreaming(streaming) {
+  $("send-chat-btn").disabled = streaming;
+  $("stop-chat-btn").hidden = !streaming;
+  $("stop-chat-btn").disabled = !streaming;
+  $("clear-chat-btn").disabled = streaming;
+  $("chat-output").setAttribute("aria-busy", String(streaming));
+}
+
+function stopChat() {
+  if (!state.chatAbortController) {
+    return;
+  }
+  $("chat-meta").textContent = "Stopping...";
+  $("stop-chat-btn").disabled = true;
+  state.chatAbortController.abort();
+}
+
 function formatDate(value) {
   if (!value) {
     return "unknown";
@@ -155,7 +343,9 @@ function renderRequestLog() {
   }
   for (const item of state.requestLog) {
     const row = document.createElement("div");
-    row.className = `data-item ${item.ok ? "ok" : "error"}`;
+    row.className = `data-item ${
+      item.cancelled ? "cancelled" : item.ok ? "ok" : "error"
+    }`;
     row.innerHTML = `
       <div>
         <strong>${escapeHtml(item.method)} ${escapeHtml(item.path)}</strong>
@@ -331,6 +521,7 @@ async function loadSession(showRaw = true) {
     renderMessages([]);
     if (showRaw) {
       setRaw({ error: error.message, conversation_id: conversationId });
+      showToast(notFound ? "Session not found" : "Could not load session", "error");
     }
   }
 }
@@ -396,22 +587,25 @@ async function addMessage() {
     await loadSessionSummary();
   } catch (error) {
     $("session-status").textContent = "Add message failed";
-    setRaw({ error: error.message });
+    reportError("Could not add message", error);
   }
 }
 
 async function streamChat() {
-  const button = $("send-chat-btn");
-  const output = $("chat-output");
   const meta = $("chat-meta");
   const message = $("chat-message-input").value.trim();
   if (!message) {
     meta.textContent = "Enter a message";
-    output.textContent = "Message cannot be empty.";
+    renderChatOutput("Message cannot be empty.");
+    showToast("Enter a message before sending.", "error");
     return;
   }
-  button.disabled = true;
-  output.textContent = "";
+  const controller = new AbortController();
+  const events = [];
+  let streamError = null;
+  state.chatAbortController = controller;
+  renderChatOutput("");
+  setChatStreaming(true);
   meta.textContent = "Streaming...";
   setTrace([]);
   try {
@@ -421,34 +615,53 @@ async function streamChat() {
       message,
       ...optionalModelFields(),
     };
-    const events = [];
-    await postSse("/chat/stream", payload, (eventName, data) => {
-      events.push({ event: eventName, data });
-      setRaw(events);
-      if (eventName === "meta") {
-        meta.textContent = `${data.provider} / ${data.model}`;
-      } else if (eventName === "delta") {
-        output.textContent += data.text || "";
-      } else if (eventName === "usage") {
-        meta.textContent = `tokens ${data.total_tokens}`;
-      } else if (eventName === "done") {
-        meta.textContent = `done in ${data.elapsed_ms} ms`;
-      } else if (eventName === "error") {
-        meta.textContent = data.code || "error";
-        output.textContent += `\n[error] ${data.message}`;
-      }
-    });
+    await postSse(
+      "/chat/stream",
+      payload,
+      (eventName, data) => {
+        events.push({ event: eventName, data });
+        setRaw(events);
+        if (eventName === "meta") {
+          meta.textContent = `${data.provider} / ${data.model}`;
+        } else if (eventName === "delta") {
+          renderChatOutput(`${state.chatText}${data.text || ""}`);
+        } else if (eventName === "usage") {
+          meta.textContent = `tokens ${data.total_tokens}`;
+        } else if (eventName === "done") {
+          meta.textContent = `done in ${data.elapsed_ms} ms`;
+        } else if (eventName === "error") {
+          streamError = data;
+          meta.textContent = data.code || "error";
+          renderChatOutput(`${state.chatText}\n\n> Error: ${data.message}`);
+        }
+      },
+      { signal: controller.signal }
+    );
     await refreshMessages();
+    if (streamError) {
+      showToast(streamError.message || "Chat stream failed.", "error");
+    } else {
+      showToast("Response completed.", "success");
+    }
   } catch (error) {
-    meta.textContent = "Error";
-    output.textContent = error.message;
-    setRaw({ error: error.message });
+    if (controller.signal.aborted || error.name === "AbortError") {
+      meta.textContent = "Stopped";
+      setRaw({ status: "stopped", events });
+      showToast("Response stopped.", "info");
+    } else {
+      meta.textContent = "Error";
+      renderChatOutput(error.message);
+      reportError("Chat failed", error);
+    }
   } finally {
-    button.disabled = false;
+    if (state.chatAbortController === controller) {
+      state.chatAbortController = null;
+    }
+    setChatStreaming(false);
   }
 }
 
-async function postSse(path, payload, onEvent) {
+async function postSse(path, payload, onEvent, { signal } = {}) {
   const startedAt = performance.now();
   let status = "ERR";
   try {
@@ -456,6 +669,7 @@ async function postSse(path, payload, onEvent) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal,
     });
     status = response.status;
     if (!response.ok || !response.body) {
@@ -495,11 +709,13 @@ async function postSse(path, payload, onEvent) {
       ms: Math.round(performance.now() - startedAt),
     });
   } catch (error) {
+    const cancelled = Boolean(signal?.aborted || error.name === "AbortError");
     pushRequestLog({
       method: "POST",
       path,
-      status,
+      status: cancelled ? "ABORTED" : status,
       ok: false,
+      cancelled,
       ms: Math.round(performance.now() - startedAt),
     });
     throw error;
@@ -555,7 +771,7 @@ async function runAgent() {
   } catch (error) {
     status.textContent = "Error";
     answer.textContent = error.message;
-    setRaw({ error: error.message });
+    reportError("Agent run failed", error);
   } finally {
     button.disabled = false;
   }
@@ -667,7 +883,7 @@ async function resumeRun(approved) {
     await pollRunUntilTerminal({ ignoredWaitingApprovalId: approvalInterruptId });
   } catch (error) {
     $("agent-status").textContent = "Approval update failed";
-    setRaw({ error: error.message });
+    reportError("Approval update failed", error);
   } finally {
     state.approvalResolutionInFlight = false;
     if (state.latestRunId) {
@@ -713,7 +929,7 @@ async function ingestDocument() {
   } catch (error) {
     status.textContent = "Error";
     $("rag-answer").textContent = error.message;
-    setRaw({ error: error.message });
+    reportError("Document import failed", error);
   }
 }
 
@@ -738,7 +954,7 @@ async function searchRag() {
   } catch (error) {
     status.textContent = "Error";
     answer.textContent = error.message;
-    setRaw({ error: error.message });
+    reportError("Knowledge search failed", error);
   }
 }
 
@@ -764,7 +980,7 @@ async function askRag() {
   } catch (error) {
     status.textContent = "Error";
     answer.textContent = error.message;
-    setRaw({ error: error.message });
+    reportError("Knowledge answer failed", error);
   }
 }
 
@@ -824,7 +1040,7 @@ async function indexRepository() {
   } catch (error) {
     status.textContent = "Index failed";
     $("repository-result").innerHTML = `<div class="empty-state error-text">${escapeHtml(error.message)}</div>`;
-    setRaw({ error: error.message });
+    reportError("Repository indexing failed", error);
     switchTab("repository");
   }
 }
@@ -910,20 +1126,34 @@ function bindEvents() {
     await checkHealth();
     await listSessions(false);
   });
-  $("create-session-btn").addEventListener("click", createSession);
+  $("create-session-btn").addEventListener("click", () => {
+    runUiAction(createSession, "Could not create session", "Session created.");
+  });
   $("load-session-btn").addEventListener("click", loadSession);
   $("list-sessions-btn").addEventListener("click", async () => {
-    await listSessions();
+    const result = await runUiAction(listSessions, "Could not list sessions");
+    if (!result) {
+      return;
+    }
     closeSettings();
     switchTab("sessions");
   });
-  $("summary-session-btn").addEventListener("click", loadSessionSummary);
-  $("refresh-messages-btn").addEventListener("click", refreshMessages);
+  $("summary-session-btn").addEventListener("click", () => {
+    runUiAction(loadSessionSummary, "Could not load session summary");
+  });
+  $("refresh-messages-btn").addEventListener("click", () => {
+    runUiAction(refreshMessages, "Could not refresh messages");
+  });
   $("add-message-btn").addEventListener("click", addMessage);
   $("send-chat-btn").addEventListener("click", streamChat);
+  $("stop-chat-btn").addEventListener("click", stopChat);
   $("run-agent-btn").addEventListener("click", runAgent);
-  $("refresh-run-btn").addEventListener("click", refreshRun);
-  $("refresh-events-btn").addEventListener("click", refreshEvents);
+  $("refresh-run-btn").addEventListener("click", () => {
+    runUiAction(refreshRun, "Could not refresh agent run");
+  });
+  $("refresh-events-btn").addEventListener("click", () => {
+    runUiAction(refreshEvents, "Could not refresh agent events");
+  });
   $("approve-run-btn").addEventListener("click", () => resumeRun(true));
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
@@ -931,7 +1161,7 @@ function bindEvents() {
   $("ask-rag-btn").addEventListener("click", askRag);
   $("index-repo-btn").addEventListener("click", indexRepository);
   $("clear-chat-btn").addEventListener("click", () => {
-    $("chat-output").textContent = "";
+    renderChatOutput("");
     $("chat-meta").textContent = "Idle";
   });
   $("clear-log-btn").addEventListener("click", () => {
@@ -964,6 +1194,20 @@ function bindEvents() {
   $("provider-input").addEventListener("change", renderContextSummary);
   $("model-input").addEventListener("input", renderContextSummary);
   $("repository-id-input").addEventListener("input", renderContextSummary);
+  $("chat-message-input").addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      if (!state.chatAbortController) {
+        streamChat();
+      }
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.chatAbortController) {
+      event.preventDefault();
+      stopChat();
+    }
+  });
   $("sessions-list").addEventListener("click", async (event) => {
     const row = event.target.closest("[data-session-id]");
     if (!row) {

@@ -203,6 +203,10 @@ class APITests(unittest.TestCase):
         self.assertIn('id="detail-panel"', response.text)
         self.assertIn('class="tab active" data-tab="chat"', response.text)
         self.assertIn('id="chat-tab" class="panel tab-panel active"', response.text)
+        self.assertIn('id="stop-chat-btn"', response.text)
+        self.assertIn('id="toast-region"', response.text)
+        self.assertIn('aria-keyshortcuts="Control+Enter Meta+Enter"', response.text)
+        self.assertIn('class="answer-box markdown-output"', response.text)
 
         script_response = self.client.get("/static/app.js")
         self.assertEqual(script_response.status_code, 200)
@@ -214,12 +218,20 @@ class APITests(unittest.TestCase):
         self.assertIn("showModal", script_response.text)
         self.assertIn("setInspectorOpen", script_response.text)
         self.assertIn("renderContextSummary", script_response.text)
+        self.assertIn("new AbortController()", script_response.text)
+        self.assertIn("renderSafeMarkdown", script_response.text)
+        self.assertIn("showToast", script_response.text)
+        self.assertIn("state.chatAbortController.abort()", script_response.text)
+        self.assertIn('status: cancelled ? "ABORTED" : status', script_response.text)
 
         styles_response = self.client.get("/static/styles.css")
         self.assertEqual(styles_response.status_code, 200)
         self.assertIn(".settings-dialog", styles_response.text)
         self.assertIn(".shell.inspector-collapsed", styles_response.text)
         self.assertIn("@media (max-width: 1280px)", styles_response.text)
+        self.assertIn(".markdown-output .markdown-code", styles_response.text)
+        self.assertIn(".toast-region", styles_response.text)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", styles_response.text)
 
     def test_chat_request_accepts_google_provider(self) -> None:
         request = ChatStreamRequest(

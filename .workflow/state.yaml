@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "active"
 active_task: "PRODUCTIZE-FRONTEND"
-next_action: "实现 SSE 取消与安全 Markdown/代码呈现，并补充统一错误反馈和键盘交互"
+next_action: "增强 Agent 运行指标与审批态展示，并将 RAG 搜索和问答改为结构化引用卡片"
 blockers: []
 last_verified_commit: null
-updated_at: "2026-07-23T10:19:48+08:00"
+updated_at: "2026-07-23T11:10:44+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

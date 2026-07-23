@@ -26,11 +26,11 @@
 
 - [x] 首页默认呈现可直接使用的 Chat 工作区，主要产品能力可在一级导航中到达。
 - [x] 用户、模型、会话和仓库配置集中管理，并显示当前上下文摘要。
-- [ ] SSE Chat 支持流式状态、取消、错误反馈和安全的 Markdown/代码呈现。
+- [x] SSE Chat 支持流式状态、取消、错误反馈和安全的 Markdown/代码呈现。
 - [ ] Agent 页面展示运行状态、事件、指标及详细的审批风险/参数信息。
 - [ ] RAG 搜索/问答以结构化引用卡片呈现，仓库索引显示清晰的进度与结果。
 - [x] 页面在 1024px 及以上桌面宽度下布局稳定，导航、设置和 Inspector 可正常使用。
-- [ ] 基础键盘操作、焦点样式、ARIA 状态和 reduced-motion 偏好得到支持。
+- [x] 基础键盘操作、焦点样式、ARIA 状态和 reduced-motion 偏好得到支持。
 - [x] Google provider 可通过 Chat 请求模型校验。
 - [x] Python 测试、compileall、JavaScript 语法检查和 git diff 检查通过。
 
@@ -47,6 +47,9 @@
 - 2026-07-22 浏览器验收确认当前 `HEAD` 仍提供旧版 Debug Console，上述产品化实现与契约测试不在当前工作树中；任务保持 active，不能依据先前文字记录标记完成。
 - 阶段一只修复正确性，不改信息架构：对齐 Google provider 契约；审批界面只消费 `approval_required_tools`；批准/拒绝后的异步状态继续轮询；会话 404 和空 Chat 提供明确反馈。
 - 阶段二完成桌面端信息架构重构：Chat 作为默认入口，六项核心能力进入左侧一级导航；Session、Model 和 Repository 低频配置集中到原生模态设置；Trace 与 Raw response 收纳到可折叠 Inspector；1024–1280px 使用右侧浮层 Inspector，1281px 及以上使用三栏布局。
+- 阶段三采用浏览器原生 `AbortController` 中止 SSE 请求；停止后保留已接收的部分内容，并将取消记录为中性 `ABORTED` 请求而非失败。
+- 安全富文本只支持受控的标题、段落、列表、引用、加粗、行内代码和围栏代码块；所有模型文本先经过 HTML 转义，渲染器不接受原始 HTML、脚本或事件属性。
+- 统一反馈使用页面级 Toast 区域；Chat 支持 `Ctrl/Cmd + Enter` 发送和 `Esc` 停止，并补充 `aria-busy`、焦点轮廓及 `prefers-reduced-motion`。
 
 ## Verification
 
@@ -63,8 +66,13 @@
 - 阶段二 1440×900 浏览器验收：默认进入 Chat；六个一级导航均能切换唯一工作面板并同步标题；Inspector 可折叠/恢复；设置弹窗完整显示；Session、provider/model、repository 输入会即时同步到顶部上下文；页面横向溢出为 0。
 - 阶段二 1024×800 浏览器验收：默认折叠 Inspector，展开后以 360px 右侧浮层显示；设置弹窗尺寸为 976×744 且完整落在视口内；创建 Session 后返回 Chat，通过 fake provider 完成 SSE 请求并得到响应；页面横向溢出为 0。
 - 阶段二静态契约测试覆盖默认 Chat、设置、上下文摘要、Inspector 和 1280px 桌面断点；完整测试仍为 83 passed、1 个第三方 LangGraph pending deprecation warning。
+- 阶段三真实浏览器安全渲染验收：fake provider 返回标题、加粗、行内代码、代码块和 `<img onerror>` 混合内容；允许的 Markdown 正常渲染，输出中 `img=0`、`script=0`、事件标记未执行。
+- 阶段三真实浏览器取消验收：使用仅存在于测试进程中的延迟 fake provider，Stop 按钮和 `Esc` 均在部分 delta 到达后将状态置为 `Stopped`、`aria-busy=false`、隐藏 Stop 并恢复 Send；Toast 显示 `Response stopped.`。
+- 阶段三键盘与反馈验收：`Ctrl+Enter` 完成 Session 自动创建和 Chat 发送；空消息显示行内错误与 `role=alert` Toast；完成响应显示成功 Toast。
+- 阶段三 1024×800 浏览器验收：Chat 工具栏宽度与滚动宽度均为 750px，快捷键提示、Send 和状态无溢出；页面横向溢出为 0。
+- 延迟取消测试第一次启动包装进程时未显式覆盖本地默认 provider，页面在收到 Google `meta` 后立即通过 Stop 中止，未收到模型 delta、usage 或 done；随后关闭该进程并以 `LLM_PROVIDER=fake` 重新完成全部取消验收。
 - Go gateway 校验未运行：当前主机没有 `go` 命令；Docker 中 PostgreSQL、Qdrant、Redis 均在运行且 PostgreSQL/Redis 健康。
 
 ## Result
 
-阶段一正确性修复已提交为 `39324a3`。阶段二桌面信息架构已实现并通过自动化与 1024/1440 真实浏览器验收：默认 Chat、一级导航、集中设置、顶部上下文和可折叠 Inspector 均可使用。整体任务保持 active；下一阶段实现 SSE 取消、安全 Markdown/代码呈现和统一反馈，再继续增强 Agent 指标与 RAG 引用卡。未执行部署、发布或外部环境修改。
+阶段一正确性修复已提交为 `39324a3`，阶段二桌面信息架构已提交为 `c4f1de8`。阶段三 SSE 取消、安全 Markdown/代码呈现、Toast、键盘操作、ARIA 状态、焦点样式与 reduced-motion 已实现并通过自动化及真实浏览器验收。整体任务保持 active；下一阶段增强 Agent 运行指标与 RAG 结构化引用卡，并继续改善仓库索引进度。未执行部署、发布或外部环境修改。
