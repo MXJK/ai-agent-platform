@@ -163,7 +163,6 @@ class CeleryTaskQueue:
     TASK_NAMES = {
         "agent_run": "ai_agent_platform.agent_run",
         "agent_resume": "ai_agent_platform.agent_resume",
-        "repository_index": "ai_agent_platform.repository_index",
     }
 
     def __init__(

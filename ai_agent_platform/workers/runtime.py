@@ -13,19 +13,18 @@ from ai_agent_platform.agents import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueueError
-from ai_agent_platform.integrations import LLMClient, create_rag_service
+from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.main import (
     _create_agent_run_store,
-    _create_document_store,
     _create_langgraph_checkpointer,
     _create_mcp_providers,
-    _create_repository_index_store,
     _create_session_repository,
+    _create_workspace_store,
 )
 from ai_agent_platform.services import (
     AgentRunService,
-    RepositoryIndexingService,
     SessionService,
+    WorkspaceService,
 )
 
 
@@ -48,7 +47,6 @@ class WorkerOnlyTaskQueue:
 @dataclass
 class WorkerServices:
     agent_run_service: AgentRunService
-    repository_indexing_service: RepositoryIndexingService
     close_callbacks: list[Callable[[], None]]
 
     def close(self) -> None:
@@ -86,10 +84,6 @@ def _create_worker_services() -> WorkerServices:
     metrics = MetricsRegistry()
     session_repository = _create_session_repository(settings)
     llm_client = LLMClient(settings)
-    rag_service = create_rag_service(
-        settings,
-        document_store=_create_document_store(settings),
-    )
     mcp_providers = _create_mcp_providers(settings)
     tool_registry = create_coding_tool_registry(
         mcp_providers=mcp_providers,
@@ -100,26 +94,31 @@ def _create_worker_services() -> WorkerServices:
     )
     checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
     coding_runtime = CodingAgentRuntime(
-        rag_service=rag_service,
         tool_registry=tool_registry,
         run_store=_create_agent_run_store(settings),
         checkpointer=checkpointer,
         planner=LLMStructuredAgentPlanner(llm_client),
+        max_exploration_rounds=settings.agent_max_exploration_rounds,
+        max_read_tools_per_round=settings.agent_max_read_tools_per_round,
+        max_context_files=settings.agent_max_context_files,
+        max_context_chars=settings.agent_max_context_chars,
+        max_instruction_chars=settings.agent_max_instruction_chars,
+        max_history_messages=settings.llm_max_context_messages,
     )
     session_service = SessionService(
         repository=session_repository,
         agent_runtime=GameAgentRuntime(),
     )
     worker_queue = WorkerOnlyTaskQueue()
+    workspace_service = WorkspaceService(
+        store=_create_workspace_store(settings),
+        allowed_roots=settings.workspace_allowed_roots,
+    )
     agent_run_service = AgentRunService(
         runtime=coding_runtime,
         session_service=session_service,
+        workspace_service=workspace_service,
         metrics=metrics,
-        task_queue=worker_queue,
-    )
-    repository_indexing_service = RepositoryIndexingService(
-        rag_service=rag_service,
-        index_store=_create_repository_index_store(settings),
         task_queue=worker_queue,
     )
     close_callbacks = [provider.close for provider in mcp_providers]
@@ -127,6 +126,5 @@ def _create_worker_services() -> WorkerServices:
         close_callbacks.append(close_checkpointer)
     return WorkerServices(
         agent_run_service=agent_run_service,
-        repository_indexing_service=repository_indexing_service,
         close_callbacks=close_callbacks,
     )

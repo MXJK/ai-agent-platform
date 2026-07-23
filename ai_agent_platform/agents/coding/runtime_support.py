@@ -8,7 +8,6 @@ from typing import Any, Callable, Optional
 from ai_agent_platform.agents.coding.models import (
     MAX_NODE_RETRIES,
     AgentChangeSummary,
-    AgentRoute,
     AgentRunMetrics,
     AnswerRoute,
     CodingAgentState,
@@ -16,17 +15,11 @@ from ai_agent_platform.agents.coding.models import (
     InspectionRoute,
     PlanRoute,
     RepairReviewRoute,
-    RetrievalRoute,
     ReviewRoute,
     ValidationRoute,
 )
 from ai_agent_platform.agents.coding.change_loop import SANDBOX_LIFECYCLE_TOOLS
 from ai_agent_platform.agents.coding.text import snippet
-from ai_agent_platform.integrations import (
-    RAGConfigurationError,
-    RAGProviderError,
-    RAGValidationError,
-)
 
 MAX_AGENT_HISTORY_MESSAGES = 6
 MAX_AGENT_HISTORY_CHARS = 1800
@@ -134,16 +127,6 @@ def run_with_retries(
     return None, errors, max_attempts
 
 
-def classify_rag_error(exc: Exception) -> tuple[str, bool]:
-    if isinstance(exc, RAGValidationError):
-        return "rag_validation_error", False
-    if isinstance(exc, RAGConfigurationError):
-        return "rag_configuration_error", False
-    if isinstance(exc, RAGProviderError):
-        return "rag_provider_error", True
-    return "rag_unhandled_error", False
-
-
 def classify_answer_error(exc: Exception) -> tuple[str, bool]:
     return "answer_generation_error", True
 
@@ -178,7 +161,11 @@ def error_from_exception(
 ) -> dict[str, Any]:
     return structured_error(
         node=node,
-        code="runtime_error",
+        code=(
+            "workspace_unavailable"
+            if "workspace_unavailable" in str(exc)
+            else "runtime_error"
+        ),
         message=str(exc),
         retryable=False,
         attempt=attempt,
@@ -202,18 +189,6 @@ def unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
         for error in state.get("errors", [])
         if not error.get("recovered", False)
     ]
-
-
-def route_after_classification(state: CodingAgentState) -> AgentRoute:
-    return next_node_for_intent(state.get("intent", "repository_question"))
-
-
-def next_node_for_intent(intent: str) -> AgentRoute:
-    return "compose_answer" if intent == "small_talk" else "retrieve_repository_context"
-
-
-def route_after_retrieval(state: CodingAgentState) -> RetrievalRoute:
-    return "handle_error" if unresolved_errors(state) else "plan_tools"
 
 
 def route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
@@ -259,7 +234,7 @@ def route_after_answer_composition(state: CodingAgentState) -> AnswerRoute:
     return "handle_error" if unresolved_errors(state) else "end"
 
 
-def build_repository_query(state: CodingAgentState) -> str:
+def build_workspace_query(state: CodingAgentState) -> str:
     parts = [state["user_input"]]
     focus_files = state.get("focus_files", [])
     if focus_files:
@@ -296,15 +271,13 @@ def recent_conversation_context(
         if remaining_chars <= 0:
             break
     return "\n".join(reversed(selected))
-
-
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
     return {
         "type": "tool_plan_review",
         "approval_required": True,
         "reason": "one or more planned tools require human approval before execution",
         "intent": state.get("intent", "change_planning"),
-        "repository_id": state["repository_id"],
+        "workspace_id": state["workspace_id"],
         "message": state["user_input"],
         "planned_tools": [call.name for call in state.get("tool_calls", [])],
         "approval_required_tools": state.get("approval_required_tools", []),

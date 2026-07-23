@@ -1265,44 +1265,6 @@ textarea:focus {
   -webkit-line-clamp: 4;
 }
 
-.repository-hero {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 16px;
-  padding: 25px;
-  background: linear-gradient(135deg, #f6fbf9, #fff);
-}
-
-.repository-icon {
-  float: left;
-  display: grid;
-  width: 48px;
-  height: 48px;
-  margin-right: 14px;
-  place-items: center;
-  border-radius: 14px;
-  background: var(--brand-soft);
-  color: var(--brand);
-  font-size: 22px;
-}
-
-.repository-hero h2 {
-  margin: 0 0 2px;
-  font-size: 18px;
-}
-
-.repository-hero code {
-  display: block;
-  max-width: min(62vw, 620px);
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .progress-card {
   margin-bottom: 16px;
   padding: 15px 18px;
@@ -1335,10 +1297,6 @@ textarea:focus {
   border-radius: inherit;
   background: linear-gradient(90deg, var(--brand), #42a28e);
   transition: width 240ms ease;
-}
-
-.repository-metrics {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .path-columns {
@@ -2080,7 +2038,6 @@ body.inspector-hidden .inspector {
 
   .surface-heading,
   .surface-actions,
-  .repository-hero,
   .dialog-footer {
     align-items: stretch;
     flex-direction: column;
@@ -2090,8 +2047,7 @@ body.inspector-hidden .inspector {
     max-width: 100%;
   }
 
-  .surface-actions .button,
-  .repository-hero .button {
+  .surface-actions .button {
     width: 100%;
   }
 

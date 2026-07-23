@@ -1,25 +1,23 @@
-from .errors import RepositoryIndexStoreConflictError
 from .memory import (
-    InMemoryRepositoryIndexRepository,
     InMemorySessionRepository,
+    InMemoryWorkspaceRepository,
     SessionNotFoundError,
 )
 from .postgres import (
     PostgresAgentRunRepository,
     PostgresDependencyError,
     PostgresDocumentRepository,
-    PostgresRepositoryIndexRepository,
     PostgresSessionRepository,
+    PostgresWorkspaceRepository,
 )
 
 __all__ = [
     "InMemorySessionRepository",
-    "InMemoryRepositoryIndexRepository",
+    "InMemoryWorkspaceRepository",
     "PostgresAgentRunRepository",
     "PostgresDependencyError",
     "PostgresDocumentRepository",
-    "PostgresRepositoryIndexRepository",
     "PostgresSessionRepository",
-    "RepositoryIndexStoreConflictError",
+    "PostgresWorkspaceRepository",
     "SessionNotFoundError",
 ]

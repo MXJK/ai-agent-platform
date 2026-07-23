@@ -2,77 +2,67 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from ai_agent_platform.agents.coding.models import AgentRunRecord
 from ai_agent_platform.repositories.postgres import (
     PostgresAgentRunRepository,
     PostgresDocumentRepository,
-    PostgresRepositoryIndexRepository,
     PostgresSessionRepository,
+    PostgresWorkspaceRepository,
+    _agent_result_from_json,
 )
-from ai_agent_platform.repositories import RepositoryIndexStoreConflictError
 
 
 class PostgresRepositoryTests(unittest.TestCase):
     def test_constructors_do_not_initialize_schema(self) -> None:
-        class PsycopgSentinel:
-            def connect(self, database_url):
-                raise AssertionError("constructors should not connect to PostgreSQL")
-
-        database_url = "postgresql://tester:secret@localhost:5432/test_agent_platform"
+        database_url = "postgresql://tester:secret@localhost/test"
         with patch(
             "ai_agent_platform.repositories.postgres._require_psycopg",
-            return_value=PsycopgSentinel(),
+            return_value=object(),
         ) as require_psycopg:
-            session_repository = PostgresSessionRepository(database_url=database_url)
-            run_repository = PostgresAgentRunRepository(database_url=database_url)
-            document_repository = PostgresDocumentRepository(database_url=database_url)
-            index_repository = PostgresRepositoryIndexRepository(
-                database_url=database_url
-            )
-
-        self.assertEqual(session_repository._database_url, database_url)
-        self.assertEqual(run_repository._database_url, database_url)
-        self.assertEqual(document_repository._database_url, database_url)
-        self.assertEqual(index_repository._database_url, database_url)
+            repositories = [
+                PostgresSessionRepository(database_url=database_url),
+                PostgresAgentRunRepository(database_url=database_url),
+                PostgresDocumentRepository(database_url=database_url),
+                PostgresWorkspaceRepository(database_url=database_url),
+            ]
+        self.assertTrue(all(item._database_url == database_url for item in repositories))
         self.assertEqual(require_psycopg.call_count, 4)
 
-    def test_repository_index_job_lifecycle_maps_rows(self) -> None:
-        now = datetime(2026, 7, 15, tzinfo=timezone.utc)
-        job_row = (
-            "idxjob_123",
-            "repo_main",
-            "/workspace/repo",
-            ["**/*.py"],
-            [".git/**"],
-            1024,
-            "pending",
-            0,
-            0,
-            0,
-            0,
-            None,
-            now,
-            now,
-            None,
-        )
-        completed_row = (
-            "idxjob_123",
-            "repo_main",
-            "/workspace/repo",
-            ["**/*.py"],
-            [".git/**"],
-            1024,
-            "completed",
-            3,
-            2,
-            1,
-            0,
-            None,
-            now,
-            now,
-            now,
-        )
-        connection = FakeConnection([None, job_row, completed_row, None])
+    def test_workspace_upsert_get_and_list_map_rows(self) -> None:
+        now = datetime(2026, 7, 23, tzinfo=timezone.utc)
+        row = ("workspace_main", "/workspace/code", now, now)
+        connection = FakeConnection([row, row, [row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresWorkspaceRepository(database_url="postgresql://test")
+            repository._connect = lambda: connection
+            created = repository.upsert(
+                workspace_id="workspace_main",
+                root_path="/workspace/code",
+            )
+            loaded = repository.get("workspace_main")
+            listed = repository.list()
+        self.assertEqual(created.root_path, "/workspace/code")
+        self.assertEqual(loaded.id, "workspace_main")
+        self.assertEqual([item.id for item in listed], ["workspace_main"])
+        self.assertIn("workspaces", connection.calls[0][0])
 
+    def test_agent_run_persists_workspace_root_snapshot(self) -> None:
+        connection = FakeConnection([None])
+        record = AgentRunRecord(
+            run_id="run_1",
+            thread_id="run_1",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/workspace/code",
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup_workspace"],
+            trace=[],
+        )
         with patch(
             "ai_agent_platform.repositories.postgres._require_psycopg",
             return_value=object(),
@@ -80,97 +70,43 @@ class PostgresRepositoryTests(unittest.TestCase):
             "ai_agent_platform.repositories.postgres._require_jsonb",
             return_value=lambda value: value,
         ):
-            repository = PostgresRepositoryIndexRepository(
-                database_url="postgresql://tester:secret@localhost:5432/test"
-            )
+            repository = PostgresAgentRunRepository(database_url="postgresql://test")
             repository._connect = lambda: connection
-            job = repository.create_index_job(
-                repository_id="repo_main",
-                root_path="/workspace/repo",
-                include_patterns=["**/*.py"],
-                exclude_patterns=[".git/**"],
-                max_file_size=1024,
-            )
-            completed_job = repository.update_index_job(
-                job_id="idxjob_123",
-                status="completed",
-                scanned_files=3,
-                indexed_files=2,
-                skipped_files=1,
-                failed_files=0,
-            )
+            repository.save(record)
+        sql, params = connection.calls[0]
+        self.assertIn("workspace_root", sql)
+        self.assertIn("/workspace/code", params)
 
-        self.assertEqual(job.id, "idxjob_123")
-        self.assertEqual(job.repository_id, "repo_main")
-        self.assertEqual(job.include_patterns, ["**/*.py"])
-        self.assertEqual(job.status, "pending")
-        self.assertEqual(completed_job.status, "completed")
-        self.assertEqual(completed_job.scanned_files, 3)
-        self.assertEqual(completed_job.completed_at, now)
-        self.assertEqual(len(connection.calls), 4)
-        self.assertEqual(connection.calls[-1][1], (now, "repo_main"))
-
-    def test_repository_file_upsert_maps_metadata(self) -> None:
-        now = datetime(2026, 7, 15, tzinfo=timezone.utc)
-        file_row = (
-            "repofile_abc",
-            "repo_main",
-            "ai_agent_platform/main.py",
-            "sha256",
-            2048,
-            "doc_123",
-            now,
-            None,
-            now,
-            now,
+    def test_legacy_result_json_is_adapted_only_at_storage_boundary(self) -> None:
+        result = _agent_result_from_json(
+            {
+                "run_id": "run_legacy",
+                "thread_id": "run_legacy",
+                "conversation_id": "session_1",
+                "repository_id": "legacy_repo",
+                "status": "completed",
+                "checkpoint_id": None,
+                "role": "code agent",
+                "objective": "answer",
+                "intent": "repository_question",
+                "answer": "legacy",
+                "graph_engine": "langgraph",
+                "rag_context": [
+                    {
+                        "filename": "app.py",
+                        "text": "value = 1",
+                        "start_line": 1,
+                        "end_line": 1,
+                    }
+                ],
+                "tool_calls": [],
+                "tool_results": [],
+                "trace": [],
+            }
         )
-        connection = FakeConnection([file_row])
-
-        with patch(
-            "ai_agent_platform.repositories.postgres._require_psycopg",
-            return_value=object(),
-        ):
-            repository = PostgresRepositoryIndexRepository(
-                database_url="postgresql://tester:secret@localhost:5432/test"
-            )
-            repository._connect = lambda: connection
-            record = repository.upsert_file(
-                repository_id="repo_main",
-                path="ai_agent_platform/main.py",
-                content_hash="sha256",
-                size_bytes=2048,
-                document_id="doc_123",
-                indexed_at=now,
-            )
-
-        self.assertEqual(record.repository_id, "repo_main")
-        self.assertEqual(record.path, "ai_agent_platform/main.py")
-        self.assertEqual(record.content_hash, "sha256")
-        self.assertEqual(record.document_id, "doc_123")
-        self.assertEqual(record.indexed_at, now)
-
-    def test_maps_active_index_unique_violation_to_conflict(self) -> None:
-        connection = ConflictConnection()
-        with patch(
-            "ai_agent_platform.repositories.postgres._require_psycopg",
-            return_value=object(),
-        ), patch(
-            "ai_agent_platform.repositories.postgres._require_jsonb",
-            return_value=lambda value: value,
-        ):
-            repository = PostgresRepositoryIndexRepository(
-                database_url="postgresql://tester:secret@localhost:5432/test"
-            )
-            repository._connect = lambda: connection
-
-            with self.assertRaises(RepositoryIndexStoreConflictError):
-                repository.create_index_job(
-                    repository_id="repo_main",
-                    root_path="/workspace/repo",
-                    include_patterns=[],
-                    exclude_patterns=[],
-                    max_file_size=1024,
-                )
+        self.assertEqual(result.workspace_id, "legacy_repo")
+        self.assertEqual(result.context_sources[0].kind, "legacy_index")
+        self.assertEqual(result.context_sources[0].path, "app.py")
 
 
 class FakeCursor:
@@ -199,20 +135,6 @@ class FakeConnection:
         self.calls.append((sql, params))
         result = self._results.pop(0) if self._results else None
         return FakeCursor(result)
-
-
-class UniqueViolation(Exception):
-    sqlstate = "23505"
-
-
-class ConflictConnection(FakeConnection):
-    def __init__(self):
-        super().__init__([None])
-
-    def execute(self, sql, params=None):
-        if self.calls:
-            raise UniqueViolation("active repository index job")
-        return super().execute(sql, params)
 
 
 if __name__ == "__main__":

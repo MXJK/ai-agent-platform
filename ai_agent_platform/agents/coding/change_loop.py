@@ -202,7 +202,8 @@ class ChangeLoopExecutor:
     ) -> list[dict[str, Any]]:
         context = ToolExecutionContext(
             conversation_id=state["conversation_id"],
-            repository_id=state["repository_id"],
+            workspace_id=state["workspace_id"],
+            workspace_root=state["workspace_root"],
             run_id=state.get("run_id"),
         )
         return [
@@ -330,7 +331,7 @@ def _build_repair_approval_request(state: CodingAgentState) -> dict[str, Any]:
         "approval_required": True,
         "reason": "validation failed and the agent proposed another sandbox mutation",
         "intent": state.get("intent", "bug_investigation"),
-        "repository_id": state["repository_id"],
+        "workspace_id": state["workspace_id"],
         "message": state["user_input"],
         "iteration": state.get("change_iteration", 0) + 1,
         "planned_tools": [call.name for call in repair_calls],

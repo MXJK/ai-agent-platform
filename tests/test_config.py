@@ -10,6 +10,12 @@ class SettingsTests(unittest.TestCase):
         settings = Settings()
 
         self.assertEqual(settings.embedding_provider, "local")
+        self.assertTrue(settings.workspace_allowed_roots)
+
+    def test_blank_allowed_roots_falls_back_to_startup_directory(self) -> None:
+        with patch.dict(os.environ, {"WORKSPACE_ALLOWED_ROOTS": ""}):
+            settings = Settings.from_env()
+        self.assertEqual(len(settings.workspace_allowed_roots), 1)
 
     def test_reads_database_and_qdrant_settings_from_environment(self) -> None:
         with patch.dict(
@@ -21,7 +27,8 @@ class SettingsTests(unittest.TestCase):
                 "SESSION_REPOSITORY": "postgres",
                 "AGENT_RUN_STORE": "postgres",
                 "DOCUMENT_STORE": "postgres",
-                "REPOSITORY_INDEX_STORE": "postgres",
+                "WORKSPACE_STORE": "postgres",
+                "WORKSPACE_ALLOWED_ROOTS": "/srv/code:/opt/workspaces",
                 "LANGGRAPH_CHECKPOINTER": "postgres",
                 "RAG_VECTOR_STORE": "qdrant",
                 "RAG_LEXICAL_WEIGHT": "0.45",
@@ -64,7 +71,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.session_repository, "postgres")
         self.assertEqual(settings.agent_run_store, "postgres")
         self.assertEqual(settings.document_store, "postgres")
-        self.assertEqual(settings.repository_index_store, "postgres")
+        self.assertEqual(settings.workspace_store, "postgres")
+        self.assertEqual(
+            settings.workspace_allowed_roots,
+            ("/srv/code", "/opt/workspaces"),
+        )
         self.assertEqual(settings.langgraph_checkpointer, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.rag_lexical_weight, 0.45)
@@ -126,7 +137,7 @@ class SettingsTests(unittest.TestCase):
             session_repository="postgres",
             agent_run_store="postgres",
             document_store="postgres",
-            repository_index_store="postgres",
+            workspace_store="postgres",
             langgraph_checkpointer="postgres",
             rag_vector_store="qdrant",
         )

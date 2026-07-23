@@ -11,19 +11,16 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunMetrics,
     AgentRunRecord,
     AgentRunResult,
+    ContextSource,
 )
 from ai_agent_platform.domain import (
     Message,
-    RepositoryFileRecord,
-    RepositoryIndexJobRecord,
-    RepositoryIndexJobStatus,
-    RepositoryRecord,
     Session,
     TokenUsageRecord,
+    WorkspaceRecord,
 )
-from ai_agent_platform.integrations.rag import DocumentChunk, ParsedDocument, RetrievedDocument
+from ai_agent_platform.integrations.rag import DocumentChunk, ParsedDocument
 from ai_agent_platform.integrations.tools import ToolCall
-from ai_agent_platform.repositories.errors import RepositoryIndexStoreConflictError
 from ai_agent_platform.repositories.memory import SessionNotFoundError
 
 
@@ -208,7 +205,8 @@ class PostgresAgentRunRepository:
                     id,
                     thread_id,
                     conversation_id,
-                    repository_id,
+                    workspace_id,
+                    workspace_root,
                     status,
                     checkpoint_id,
                     latest_node,
@@ -235,13 +233,15 @@ class PostgresAgentRunRepository:
                     %s,
                     %s,
                     %s,
+                    %s,
                     NOW(),
                     NOW()
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     thread_id = EXCLUDED.thread_id,
                     conversation_id = EXCLUDED.conversation_id,
-                    repository_id = EXCLUDED.repository_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    workspace_root = EXCLUDED.workspace_root,
                     status = EXCLUDED.status,
                     checkpoint_id = EXCLUDED.checkpoint_id,
                     latest_node = EXCLUDED.latest_node,
@@ -257,7 +257,8 @@ class PostgresAgentRunRepository:
                     record.run_id,
                     record.thread_id,
                     record.conversation_id,
-                    record.repository_id,
+                    record.workspace_id,
+                    record.workspace_root,
                     record.status,
                     record.checkpoint_id,
                     record.latest_node,
@@ -278,7 +279,8 @@ class PostgresAgentRunRepository:
                     id,
                     thread_id,
                     conversation_id,
-                    repository_id,
+                    workspace_id,
+                    workspace_root,
                     status,
                     checkpoint_id,
                     latest_node,
@@ -378,325 +380,50 @@ class PostgresDocumentRepository:
         return psycopg.connect(self._database_url)
 
 
-class PostgresRepositoryIndexRepository:
-    """PostgreSQL source of truth for repository indexing metadata."""
+class PostgresWorkspaceRepository:
+    """PostgreSQL source of truth for registered workspaces."""
 
     def __init__(self, *, database_url: str) -> None:
         self._database_url = database_url
         _require_psycopg()
 
-    def upsert_repository(self, *, repository_id: str, root_path: str) -> RepositoryRecord:
+    def upsert(self, *, workspace_id: str, root_path: str) -> WorkspaceRecord:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                INSERT INTO repositories (id, root_path, created_at, updated_at)
+                INSERT INTO workspaces (id, root_path, created_at, updated_at)
                 VALUES (%s, %s, NOW(), NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     root_path = EXCLUDED.root_path,
                     updated_at = NOW()
-                RETURNING id, root_path, created_at, updated_at, last_indexed_at
+                RETURNING id, root_path, created_at, updated_at
                 """,
-                (repository_id, root_path),
+                (workspace_id, root_path),
             ).fetchone()
-        return _repository_from_row(row)
+        return _workspace_from_row(row)
 
-    def get_repository(self, repository_id: str) -> RepositoryRecord | None:
+    def get(self, workspace_id: str) -> WorkspaceRecord | None:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, root_path, created_at, updated_at, last_indexed_at
-                FROM repositories
+                SELECT id, root_path, created_at, updated_at
+                FROM workspaces
                 WHERE id = %s
                 """,
-                (repository_id,),
+                (workspace_id,),
             ).fetchone()
-        return _repository_from_row(row) if row is not None else None
+        return _workspace_from_row(row) if row is not None else None
 
-    def create_index_job(
-        self,
-        *,
-        repository_id: str,
-        root_path: str,
-        include_patterns: list[str],
-        exclude_patterns: list[str],
-        max_file_size: int,
-    ) -> RepositoryIndexJobRecord:
-        Jsonb = _require_jsonb()
-        job_id = f"idxjob_{uuid4().hex[:12]}"
-        try:
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO repositories (id, root_path, created_at, updated_at)
-                    VALUES (%s, %s, NOW(), NOW())
-                    ON CONFLICT (id) DO UPDATE SET
-                        root_path = EXCLUDED.root_path,
-                        updated_at = NOW()
-                    """,
-                    (repository_id, root_path),
-                )
-                row = conn.execute(
-                    """
-                    INSERT INTO repository_index_jobs (
-                        id,
-                        repository_id,
-                        root_path,
-                        include_patterns,
-                        exclude_patterns,
-                        max_file_size,
-                        status,
-                        scanned_files,
-                        indexed_files,
-                        skipped_files,
-                        failed_files,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s,
-                        'pending', 0, 0, 0, 0, NOW(), NOW()
-                    )
-                    RETURNING
-                        id,
-                        repository_id,
-                        root_path,
-                        include_patterns,
-                        exclude_patterns,
-                        max_file_size,
-                        status,
-                        scanned_files,
-                        indexed_files,
-                        skipped_files,
-                        failed_files,
-                        error,
-                        created_at,
-                        updated_at,
-                        completed_at
-                    """,
-                    (
-                        job_id,
-                        repository_id,
-                        root_path,
-                        Jsonb(include_patterns),
-                        Jsonb(exclude_patterns),
-                        max_file_size,
-                    ),
-                ).fetchone()
-        except Exception as exc:
-            if getattr(exc, "sqlstate", None) == "23505":
-                raise RepositoryIndexStoreConflictError(repository_id) from exc
-            raise
-        return _repository_index_job_from_row(row)
-
-    def update_index_job(
-        self,
-        *,
-        job_id: str,
-        status: RepositoryIndexJobStatus,
-        scanned_files: int,
-        indexed_files: int,
-        skipped_files: int,
-        failed_files: int,
-        error: str | None = None,
-    ) -> RepositoryIndexJobRecord:
-        completed_statuses = {"completed", "completed_with_errors", "failed"}
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                UPDATE repository_index_jobs
-                SET
-                    status = %s,
-                    scanned_files = %s,
-                    indexed_files = %s,
-                    skipped_files = %s,
-                    failed_files = %s,
-                    error = %s,
-                    updated_at = NOW(),
-                    completed_at = CASE
-                        WHEN %s THEN COALESCE(completed_at, NOW())
-                        ELSE completed_at
-                    END
-                WHERE id = %s
-                RETURNING
-                    id,
-                    repository_id,
-                    root_path,
-                    include_patterns,
-                    exclude_patterns,
-                    max_file_size,
-                    status,
-                    scanned_files,
-                    indexed_files,
-                    skipped_files,
-                    failed_files,
-                    error,
-                    created_at,
-                    updated_at,
-                    completed_at
-                """,
-                (
-                    status,
-                    scanned_files,
-                    indexed_files,
-                    skipped_files,
-                    failed_files,
-                    error,
-                    status in completed_statuses,
-                    job_id,
-                ),
-            ).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            record = _repository_index_job_from_row(row)
-            if status == "completed":
-                conn.execute(
-                    """
-                    UPDATE repositories
-                    SET last_indexed_at = %s, updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (record.completed_at or _now(), record.repository_id),
-                )
-        return record
-
-    def get_index_job(self, job_id: str) -> RepositoryIndexJobRecord:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT
-                    id,
-                    repository_id,
-                    root_path,
-                    include_patterns,
-                    exclude_patterns,
-                    max_file_size,
-                    status,
-                    scanned_files,
-                    indexed_files,
-                    skipped_files,
-                    failed_files,
-                    error,
-                    created_at,
-                    updated_at,
-                    completed_at
-                FROM repository_index_jobs
-                WHERE id = %s
-                """,
-                (job_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        return _repository_index_job_from_row(row)
-
-    def get_file(
-        self,
-        *,
-        repository_id: str,
-        path: str,
-    ) -> RepositoryFileRecord | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT
-                    id,
-                    repository_id,
-                    path,
-                    content_hash,
-                    size_bytes,
-                    document_id,
-                    indexed_at,
-                    skipped_reason,
-                    created_at,
-                    updated_at
-                FROM repository_files
-                WHERE repository_id = %s AND path = %s
-                """,
-                (repository_id, path),
-            ).fetchone()
-        return _repository_file_from_row(row) if row is not None else None
-
-    def upsert_file(
-        self,
-        *,
-        repository_id: str,
-        path: str,
-        content_hash: str,
-        size_bytes: int,
-        document_id: str | None,
-        indexed_at: datetime | None = None,
-        skipped_reason: str | None = None,
-    ) -> RepositoryFileRecord:
-        file_id = _repository_file_id(repository_id=repository_id, path=path)
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                INSERT INTO repository_files (
-                    id,
-                    repository_id,
-                    path,
-                    content_hash,
-                    size_bytes,
-                    document_id,
-                    indexed_at,
-                    skipped_reason,
-                    created_at,
-                    updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                ON CONFLICT (repository_id, path) DO UPDATE SET
-                    content_hash = EXCLUDED.content_hash,
-                    size_bytes = EXCLUDED.size_bytes,
-                    document_id = EXCLUDED.document_id,
-                    indexed_at = EXCLUDED.indexed_at,
-                    skipped_reason = EXCLUDED.skipped_reason,
-                    updated_at = NOW()
-                RETURNING
-                    id,
-                    repository_id,
-                    path,
-                    content_hash,
-                    size_bytes,
-                    document_id,
-                    indexed_at,
-                    skipped_reason,
-                    created_at,
-                    updated_at
-                """,
-                (
-                    file_id,
-                    repository_id,
-                    path,
-                    content_hash,
-                    size_bytes,
-                    document_id,
-                    indexed_at,
-                    skipped_reason,
-                ),
-            ).fetchone()
-        return _repository_file_from_row(row)
-
-    def list_files(self, repository_id: str) -> list[RepositoryFileRecord]:
+    def list(self) -> list[WorkspaceRecord]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT
-                    id,
-                    repository_id,
-                    path,
-                    content_hash,
-                    size_bytes,
-                    document_id,
-                    indexed_at,
-                    skipped_reason,
-                    created_at,
-                    updated_at
-                FROM repository_files
-                WHERE repository_id = %s
-                ORDER BY path ASC
-                """,
-                (repository_id,),
+                SELECT id, root_path, created_at, updated_at
+                FROM workspaces
+                ORDER BY id ASC
+                """
             ).fetchall()
-        return [_repository_file_from_row(row) for row in rows]
+        return [_workspace_from_row(row) for row in rows]
 
     def _connect(self):
         psycopg = _require_psycopg()
@@ -736,10 +463,6 @@ def _qdrant_point_id(chunk_id: str) -> str:
     return str(uuid5(NAMESPACE_URL, chunk_id))
 
 
-def _repository_file_id(*, repository_id: str, path: str) -> str:
-    return f"repofile_{uuid5(NAMESPACE_URL, f'{repository_id}:{path}').hex[:16]}"
-
-
 def _session_from_row(row: tuple[Any, ...]) -> Session:
     return Session(id=str(row[0]), user_id=str(row[1]), created_at=row[2])
 
@@ -775,8 +498,30 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     if data is None:
         return None
     payload = dict(data)
-    payload["rag_context"] = [
-        RetrievedDocument(**item) for item in payload.get("rag_context", [])
+    payload["workspace_id"] = payload.pop(
+        "workspace_id",
+        payload.pop("repository_id", "legacy_workspace"),
+    )
+    context_sources = payload.get("context_sources")
+    if context_sources is None:
+        context_sources = [
+            {
+                "kind": "legacy_index",
+                "path": str(item.get("filename") or ""),
+                "start_line": item.get("start_line"),
+                "end_line": item.get("end_line"),
+                "text": str(item.get("text") or ""),
+                "reason": "loaded from a historical indexed result",
+                "content_hash": hashlib.sha256(
+                    str(item.get("text") or "").encode("utf-8")
+                ).hexdigest(),
+                "truncated": False,
+            }
+            for item in payload.pop("rag_context", [])
+        ]
+    payload["context_sources"] = [
+        item if isinstance(item, ContextSource) else ContextSource(**item)
+        for item in context_sources
     ]
     payload["tool_calls"] = [
         ToolCall(**item) for item in payload.get("tool_calls", [])
@@ -797,59 +542,24 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
         run_id=str(row[0]),
         thread_id=str(row[1]),
         conversation_id=str(row[2]),
-        repository_id=str(row[3]),
-        status=row[4],
-        checkpoint_id=row[5],
-        latest_node=row[6],
-        next_nodes=list(row[7] or []),
-        trace=list(row[8] or []),
-        result=_agent_result_from_json(row[9]),
-        error=row[10],
-        pending_approval=row[11],
-        errors=list(row[12] or []),
+        workspace_id=str(row[3]),
+        workspace_root=str(row[4]),
+        status=row[5],
+        checkpoint_id=row[6],
+        latest_node=row[7],
+        next_nodes=list(row[8] or []),
+        trace=list(row[9] or []),
+        result=_agent_result_from_json(row[10]),
+        error=row[11],
+        pending_approval=row[12],
+        errors=list(row[13] or []),
     )
 
 
-def _repository_from_row(row: tuple[Any, ...]) -> RepositoryRecord:
-    return RepositoryRecord(
+def _workspace_from_row(row: tuple[Any, ...]) -> WorkspaceRecord:
+    return WorkspaceRecord(
         id=str(row[0]),
         root_path=str(row[1]),
         created_at=row[2],
         updated_at=row[3],
-        last_indexed_at=row[4],
-    )
-
-
-def _repository_index_job_from_row(row: tuple[Any, ...]) -> RepositoryIndexJobRecord:
-    return RepositoryIndexJobRecord(
-        id=str(row[0]),
-        repository_id=str(row[1]),
-        root_path=str(row[2]),
-        include_patterns=list(row[3] or []),
-        exclude_patterns=list(row[4] or []),
-        max_file_size=int(row[5]),
-        status=row[6],
-        scanned_files=int(row[7]),
-        indexed_files=int(row[8]),
-        skipped_files=int(row[9]),
-        failed_files=int(row[10]),
-        error=row[11],
-        created_at=row[12],
-        updated_at=row[13],
-        completed_at=row[14],
-    )
-
-
-def _repository_file_from_row(row: tuple[Any, ...]) -> RepositoryFileRecord:
-    return RepositoryFileRecord(
-        id=str(row[0]),
-        repository_id=str(row[1]),
-        path=str(row[2]),
-        content_hash=str(row[3]),
-        size_bytes=int(row[4]),
-        document_id=row[5],
-        indexed_at=row[6],
-        skipped_reason=row[7],
-        created_at=row[8],
-        updated_at=row[9],
     )

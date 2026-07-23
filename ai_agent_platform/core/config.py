@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
@@ -22,7 +22,10 @@ class Settings:
     session_repository: str = "memory"
     agent_run_store: str = "memory"
     document_store: str = "memory"
-    repository_index_store: str = "memory"
+    workspace_store: str = "memory"
+    workspace_allowed_roots: tuple[str, ...] = field(
+        default_factory=lambda: (str(Path.cwd().resolve()),)
+    )
     langgraph_checkpointer: str = "memory"
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 2
@@ -36,7 +39,7 @@ class Settings:
     chroma_collection_name: str = "rag_chunks"
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
-    qdrant_collection_name: str = "repo_chunks"
+    qdrant_collection_name: str = "knowledge_chunks"
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
@@ -67,6 +70,11 @@ class Settings:
     sandbox_docker_image: str = "python:3.11-slim"
     sandbox_command_timeout_seconds: float = 30.0
     sandbox_workspace_parent: str | None = None
+    agent_max_exploration_rounds: int = 4
+    agent_max_read_tools_per_round: int = 6
+    agent_max_context_files: int = 12
+    agent_max_context_chars: int = 32000
+    agent_max_instruction_chars: int = 16000
 
     def __post_init__(self) -> None:
         if not self.api_prefix.startswith("/"):
@@ -86,7 +94,7 @@ class Settings:
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
             ("document_store", self.document_store),
-            ("repository_index_store", self.repository_index_store),
+            ("workspace_store", self.workspace_store),
         ):
             _require_choice(name, value, {"memory", "postgres"})
         _require_choice(
@@ -146,6 +154,14 @@ class Settings:
                 "sandbox_command_timeout_seconds",
                 self.sandbox_command_timeout_seconds,
             ),
+            ("agent_max_exploration_rounds", self.agent_max_exploration_rounds),
+            (
+                "agent_max_read_tools_per_round",
+                self.agent_max_read_tools_per_round,
+            ),
+            ("agent_max_context_files", self.agent_max_context_files),
+            ("agent_max_context_chars", self.agent_max_context_chars),
+            ("agent_max_instruction_chars", self.agent_max_instruction_chars),
         ):
             _require_positive(name, value)
         if self.llm_max_retries < 0:
@@ -226,8 +242,13 @@ class Settings:
             ),
             agent_run_store=_env("AGENT_RUN_STORE", cls.agent_run_store, dotenv),
             document_store=_env("DOCUMENT_STORE", cls.document_store, dotenv),
-            repository_index_store=_env(
-                "REPOSITORY_INDEX_STORE", cls.repository_index_store, dotenv
+            workspace_store=_env(
+                "WORKSPACE_STORE", cls.workspace_store, dotenv
+            ),
+            workspace_allowed_roots=_paths_env(
+                "WORKSPACE_ALLOWED_ROOTS",
+                (str(Path.cwd().resolve()),),
+                dotenv,
             ),
             langgraph_checkpointer=_env(
                 "LANGGRAPH_CHECKPOINTER", cls.langgraph_checkpointer, dotenv
@@ -365,6 +386,31 @@ class Settings:
                 dotenv,
             ),
             sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
+            agent_max_exploration_rounds=_int_env(
+                "AGENT_MAX_EXPLORATION_ROUNDS",
+                cls.agent_max_exploration_rounds,
+                dotenv,
+            ),
+            agent_max_read_tools_per_round=_int_env(
+                "AGENT_MAX_READ_TOOLS_PER_ROUND",
+                cls.agent_max_read_tools_per_round,
+                dotenv,
+            ),
+            agent_max_context_files=_int_env(
+                "AGENT_MAX_CONTEXT_FILES",
+                cls.agent_max_context_files,
+                dotenv,
+            ),
+            agent_max_context_chars=_int_env(
+                "AGENT_MAX_CONTEXT_CHARS",
+                cls.agent_max_context_chars,
+                dotenv,
+            ),
+            agent_max_instruction_chars=_int_env(
+                "AGENT_MAX_INSTRUCTION_CHARS",
+                cls.agent_max_instruction_chars,
+                dotenv,
+            ),
         )
 
     def _validate_distributed_task_storage(self) -> None:
@@ -372,8 +418,8 @@ class Settings:
             "session_repository": (self.session_repository, "postgres"),
             "agent_run_store": (self.agent_run_store, "postgres"),
             "document_store": (self.document_store, "postgres"),
-            "repository_index_store": (
-                self.repository_index_store,
+            "workspace_store": (
+                self.workspace_store,
                 "postgres",
             ),
             "langgraph_checkpointer": (
@@ -428,6 +474,18 @@ def _bool_env(name: str, default: bool, dotenv: dict[str, str]) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value")
+
+
+def _paths_env(
+    name: str,
+    default: tuple[str, ...],
+    dotenv: dict[str, str],
+) -> tuple[str, ...]:
+    value = _env(name, None, dotenv)
+    if value is None:
+        return default
+    parsed = tuple(item.strip() for item in value.split(os.pathsep) if item.strip())
+    return parsed or default
 
 
 def _load_dotenv(path: str = ".env") -> dict[str, str]:

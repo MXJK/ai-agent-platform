@@ -1,23 +1,17 @@
 from .models import (
     AgentDecision,
     Message,
-    RepositoryFileRecord,
-    RepositoryIndexJobRecord,
-    RepositoryIndexJobStatus,
-    RepositoryRecord,
     Session,
     SessionSummary,
     TokenUsageRecord,
+    WorkspaceRecord,
 )
 
 __all__ = [
     "AgentDecision",
     "Message",
-    "RepositoryFileRecord",
-    "RepositoryIndexJobRecord",
-    "RepositoryIndexJobStatus",
-    "RepositoryRecord",
     "Session",
     "SessionSummary",
     "TokenUsageRecord",
+    "WorkspaceRecord",
 ]

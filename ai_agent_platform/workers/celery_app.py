@@ -15,7 +15,6 @@ from ai_agent_platform.workers.runtime import (
 from ai_agent_platform.workers.reliability import (
     execute_reliable_task,
     is_broker_redelivery,
-    is_retry_or_redelivery,
 )
 
 
@@ -95,30 +94,6 @@ def execute_agent_resume(task, **payload: Any) -> None:
             )
         ),
     )
-
-
-@celery_app.task(bind=True, name="ai_agent_platform.repository_index")
-def execute_repository_index(task, **payload: Any) -> None:
-    job_id = str(payload["job_id"])
-    execute_reliable_task(
-        task=task,
-        task_name="repository_index",
-        task_reference=job_id,
-        settings=settings,
-        handler=lambda: (
-            get_worker_services().repository_indexing_service.execute_index_job(
-                **payload,
-                recover_running=is_retry_or_redelivery(task),
-            )
-        ),
-        failure_handler=lambda error, _attempt, _max_attempts: (
-            get_worker_services().repository_indexing_service.fail_index_task(
-                job_id=job_id,
-                error=error,
-            )
-        ),
-    )
-
 
 @worker_process_shutdown.connect
 def close_worker_runtime(**_: Any) -> None:

@@ -1,5 +1,6 @@
 {
-  "repository_id": "repo_main",
+  "workspace_id": "workspace_main",
+  "knowledge_base_id": "eval_docs",
   "fixtures": [
     {
       "filename": "ai_agent_platform/api/routes/agent_runs.py",
@@ -28,7 +29,7 @@
     {
       "id": "agent_waits_for_change_approval",
       "type": "agent",
-      "message": "帮我实现 agent 支持 repository_id 参数并补测试",
+      "message": "帮我实现 agent 支持 workspace_id 参数并补测试",
       "expected_status": "waiting_approval",
       "expected_intent": "change_planning",
       "expected_tools": ["change_planner", "test_designer"],

@@ -4,7 +4,7 @@ import unittest
 from ai_agent_platform.agents.coding.planner import tool_planning_prompt
 from ai_agent_platform.agents.coding.runtime_support import (
     MAX_AGENT_HISTORY_CHARS,
-    build_repository_query,
+    build_workspace_query,
     recent_conversation_context,
 )
 
@@ -13,7 +13,7 @@ class AgentConversationContextTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = {
             "user_input": "继续检查刚才提到的调用链",
-            "repository_id": "repo_main",
+            "workspace_id": "workspace_main",
             "focus_files": [],
             "history": [
                 {"role": "user", "content": f"历史消息 {index}"}
@@ -30,8 +30,8 @@ class AgentConversationContextTests(unittest.TestCase):
         self.assertIn("历史消息 7", context)
         self.assertLessEqual(len(context), MAX_AGENT_HISTORY_CHARS)
 
-    def test_repository_query_uses_recent_conversation_context(self) -> None:
-        query = build_repository_query(self.state)
+    def test_workspace_query_uses_recent_conversation_context(self) -> None:
+        query = build_workspace_query(self.state)
 
         self.assertIn("继续检查刚才提到的调用链", query)
         self.assertIn("最近会话上下文", query)

@@ -1,4 +1,4 @@
-"""Learning project for backend and repository-aware AI agent engineering."""
+"""Backend platform for task-driven code agents and independent document RAG."""
 
 from .agent import AgentAction, AgentCommand, RuleBasedAgent
 

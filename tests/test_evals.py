@@ -14,7 +14,7 @@ class EvalRunnerTests(unittest.TestCase):
     def test_loads_default_eval_suite(self) -> None:
         suite = load_eval_suite()
 
-        self.assertEqual(suite["repository_id"], "repo_main")
+        self.assertEqual(suite["workspace_id"], "workspace_main")
         self.assertGreaterEqual(len(suite["fixtures"]), 1)
         self.assertGreaterEqual(len(suite["cases"]), 1)
         self.assertTrue(all("id" in item for item in suite["cases"]))

@@ -103,7 +103,8 @@ class MCPProviderTests(unittest.TestCase):
             ),
             context=ToolExecutionContext(
                 conversation_id="sess_1",
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=".",
             ),
         )
 
@@ -182,7 +183,8 @@ class MCPProviderTests(unittest.TestCase):
                     ),
                     context=ToolExecutionContext(
                         conversation_id="sess_1",
-                        repository_id="repo_main",
+                        workspace_id="workspace_main",
+                        workspace_root=".",
                     ),
                 )
 
@@ -255,12 +257,16 @@ class MCPProviderTests(unittest.TestCase):
                     json={"user_id": "user_1"},
                 )
                 session_id = create_response.json()["id"]
+                client.put(
+                    "/api/v1/workspaces/workspace_main",
+                    json={"root_path": "."},
+                )
                 run_response = client.post(
                     "/api/v1/agent/runs",
                     json={
                         "conversation_id": session_id,
                         "message": "please echo hello MCP using the echo tool",
-                        "repository_id": "repo_main",
+                        "workspace_id": "workspace_main",
                     },
                 )
                 run_status_body = wait_for_agent_run(
@@ -295,12 +301,16 @@ class MCPProviderTests(unittest.TestCase):
                     json={"user_id": "user_1"},
                 )
                 session_id = create_response.json()["id"]
+                client.put(
+                    "/api/v1/workspaces/workspace_main",
+                    json={"root_path": "."},
+                )
                 run_response = client.post(
                     "/api/v1/agent/runs",
                     json={
                         "conversation_id": session_id,
                         "message": "please create issue for production outage",
-                        "repository_id": "repo_main",
+                        "workspace_id": "workspace_main",
                     },
                 )
                 run_status_body = wait_for_agent_run(

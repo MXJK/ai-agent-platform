@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from tempfile import TemporaryDirectory
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,25 +70,42 @@ def load_eval_suite(path: Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
 
 
 def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
-    repository_id = str(suite.get("repository_id") or "repo_main")
-    app = create_app(
-        settings=Settings(
-            llm_provider="fake",
-            embedding_provider="local",
-            rag_vector_store="memory",
+    workspace_id = str(suite.get("workspace_id") or "workspace_main")
+    knowledge_base_id = str(suite.get("knowledge_base_id") or "eval_docs")
+    fixtures = list(suite.get("fixtures", []))
+    with TemporaryDirectory() as temp_dir:
+        workspace_root = Path(temp_dir)
+        for fixture in fixtures:
+            target = workspace_root / fixture["filename"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(fixture["content"], encoding="utf-8")
+        app = create_app(
+            settings=Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                rag_vector_store="memory",
+                workspace_allowed_roots=(str(workspace_root),),
+            )
         )
-    )
-
-    with TestClient(app) as client:
-        _ingest_fixtures(
-            client=client,
-            repository_id=repository_id,
-            fixtures=list(suite.get("fixtures", [])),
-        )
-        results = [
-            _run_case(client=client, repository_id=repository_id, case=case)
-            for case in suite.get("cases", [])
-        ]
+        with TestClient(app) as client:
+            client.put(
+                f"/api/v1/workspaces/{workspace_id}",
+                json={"root_path": str(workspace_root)},
+            ).raise_for_status()
+            _ingest_fixtures(
+                client=client,
+                knowledge_base_id=knowledge_base_id,
+                fixtures=fixtures,
+            )
+            results = [
+                _run_case(
+                    client=client,
+                    workspace_id=workspace_id,
+                    knowledge_base_id=knowledge_base_id,
+                    case=case,
+                )
+                for case in suite.get("cases", [])
+            ]
     retrieval_results = [result for result in results if result.expected_files]
     retrieval_metrics = evaluate_retrieval(
         rankings=[result.retrieved_files or [] for result in retrieval_results],
@@ -137,12 +155,12 @@ def main(argv: list[str] | None = None) -> int:
 def _ingest_fixtures(
     *,
     client: TestClient,
-    repository_id: str,
+    knowledge_base_id: str,
     fixtures: list[dict[str, Any]],
 ) -> None:
     for fixture in fixtures:
         response = client.post(
-            f"/api/v1/knowledge-bases/{repository_id}/documents",
+            f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
             json={
                 "filename": fixture["filename"],
                 "content": fixture["content"],
@@ -155,20 +173,21 @@ def _ingest_fixtures(
 def _run_case(
     *,
     client: TestClient,
-    repository_id: str,
+    workspace_id: str,
+    knowledge_base_id: str,
     case: dict[str, Any],
 ) -> CaseResult:
     case_type = str(case.get("type"))
     if case_type == "agent":
         checks, retrieved_files = _run_agent_case(
             client=client,
-            repository_id=repository_id,
+            workspace_id=workspace_id,
             case=case,
         )
     elif case_type == "search":
         checks, retrieved_files = _run_search_case(
             client=client,
-            repository_id=repository_id,
+            knowledge_base_id=knowledge_base_id,
             case=case,
         )
     else:
@@ -192,7 +211,7 @@ def _run_case(
 def _run_agent_case(
     *,
     client: TestClient,
-    repository_id: str,
+    workspace_id: str,
     case: dict[str, Any],
 ) -> tuple[list[CheckResult], list[str]]:
     session_response = client.post("/api/v1/sessions", json={"user_id": "eval_runner"})
@@ -201,7 +220,7 @@ def _run_agent_case(
         "/api/v1/agent/runs",
         json={
             "conversation_id": session_response.json()["id"],
-            "repository_id": repository_id,
+            "workspace_id": workspace_id,
             "message": case["message"],
         },
     )
@@ -218,7 +237,7 @@ def _run_agent_case(
         ),
         _contains_any_file_check(
             "retrieval",
-            [item.get("filename") for item in result.get("rag_context", [])],
+            [item.get("path") for item in result.get("context_sources", [])],
             case.get("expected_files", []),
         ),
         _answer_keywords_check(
@@ -235,9 +254,9 @@ def _run_agent_case(
             )
         )
     retrieved_files = [
-        str(item["filename"])
-        for item in result.get("rag_context", [])
-        if item.get("filename")
+        str(item["path"])
+        for item in result.get("context_sources", [])
+        if item.get("path")
     ]
     return (
         [check for check in checks if check.detail != "skipped"],
@@ -248,11 +267,11 @@ def _run_agent_case(
 def _run_search_case(
     *,
     client: TestClient,
-    repository_id: str,
+    knowledge_base_id: str,
     case: dict[str, Any],
 ) -> tuple[list[CheckResult], list[str]]:
     response = client.post(
-        f"/api/v1/knowledge-bases/{repository_id}/search",
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/search",
         json={"query": case["query"], "limit": 5, "recall_limit": 12},
     )
     response.raise_for_status()

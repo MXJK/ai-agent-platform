@@ -78,7 +78,8 @@ class ToolResult:
 @dataclass(frozen=True)
 class ToolExecutionContext:
     conversation_id: str
-    repository_id: str
+    workspace_id: str
+    workspace_root: str
     run_id: str | None = None
 
 
