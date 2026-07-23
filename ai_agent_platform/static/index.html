@@ -39,7 +39,7 @@
             <button id="list-sessions-btn" class="secondary-button">List</button>
             <button id="summary-session-btn" class="secondary-button">Summary</button>
           </div>
-          <div id="session-status" class="muted">No session yet</div>
+          <div id="session-status" class="muted" role="status" aria-live="polite">No session yet</div>
         </section>
 
         <section class="section">
@@ -193,7 +193,7 @@
           >解释一下这个项目里的 SSE 流式输出是怎么工作的</textarea>
           <div class="toolbar">
             <button id="send-chat-btn" class="primary-button">Send stream</button>
-            <span id="chat-meta" class="muted">Idle</span>
+            <span id="chat-meta" class="muted" role="status" aria-live="polite">Idle</span>
           </div>
           <div id="chat-output" class="answer-box"></div>
         </section>
@@ -219,8 +219,14 @@
             <button id="run-agent-btn" class="primary-button">Run agent</button>
             <button id="approve-run-btn" class="secondary-button" disabled>Approve</button>
             <button id="reject-run-btn" class="secondary-button" disabled>Reject</button>
-            <span id="agent-status" class="muted">Idle</span>
+            <span id="agent-status" class="muted" role="status" aria-live="polite">Idle</span>
           </div>
+          <section id="agent-approval-panel" class="approval-panel" aria-labelledby="agent-approval-title" hidden>
+            <div class="section-title compact-title">
+              <h3 id="agent-approval-title">Approval required</h3>
+            </div>
+            <div id="agent-approval-tools" class="approval-tool-list"></div>
+          </section>
           <div class="split-grid">
             <div>
               <div class="mini-title">Answer</div>
@@ -255,7 +261,7 @@
 AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Agent trace 和仓库索引能力。</textarea>
           <div class="toolbar">
             <button id="ingest-doc-btn" class="secondary-button">Ingest document</button>
-            <span id="rag-status" class="muted">Idle</span>
+            <span id="rag-status" class="muted" role="status" aria-live="polite">Idle</span>
           </div>
           <div class="two-column">
             <label>

@@ -158,6 +158,64 @@ pre {
   margin-top: 16px;
 }
 
+.approval-panel {
+  margin: 14px 0;
+  padding: 13px;
+  border: 1px solid #efc56f;
+  border-radius: 7px;
+  background: var(--warn-soft);
+}
+
+.approval-panel[hidden] {
+  display: none;
+}
+
+.approval-panel .compact-title {
+  margin-top: 0;
+}
+
+.approval-panel h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.approval-tool-list {
+  display: grid;
+  gap: 10px;
+}
+
+.approval-tool-card {
+  padding: 11px;
+  border: 1px solid rgba(165, 98, 5, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.approval-tool-card strong,
+.approval-tool-card span {
+  display: block;
+}
+
+.approval-tool-card span,
+.approval-tool-card p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.approval-arguments {
+  max-height: 180px;
+  margin: 9px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 label {
   display: grid;
   gap: 6px;

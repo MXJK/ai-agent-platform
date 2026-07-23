@@ -5,7 +5,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-LLMProviderName = Literal["fake", "openai", "anthropic"]
+LLMProviderName = Literal["fake", "openai", "anthropic", "google"]
 
 
 class ChatStreamRequest(BaseModel):

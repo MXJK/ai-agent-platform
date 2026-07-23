@@ -4,10 +4,12 @@ const state = {
   conversationId: "",
   latestRunId: "",
   latestRunStatus: "",
+  latestApprovalInterruptId: "",
   healthStatus: "checking",
   sessions: [],
   requestLog: [],
   latestRepositoryIndex: null,
+  approvalResolutionInFlight: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -246,16 +248,28 @@ function renderSessions() {
 
 async function loadSession(showRaw = true) {
   const conversationId = await ensureSession();
-  const [session, summary, messages] = await Promise.all([
-    fetchJson(`/sessions/${encodeURIComponent(conversationId)}`),
-    fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
-    fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
-  ]);
-  $("session-status").textContent = `Loaded: ${session.id}`;
-  renderSessionSummary(summary);
-  renderMessages(messages.messages || []);
-  if (showRaw) {
-    setRaw({ session, summary, messages });
+  $("session-status").textContent = "Loading session...";
+  try {
+    const session = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}`);
+    const [summary, messages] = await Promise.all([
+      fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
+      fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
+    ]);
+    state.conversationId = session.id;
+    $("session-status").textContent = `Loaded: ${session.id}`;
+    renderSessionSummary(summary);
+    renderMessages(messages.messages || []);
+    if (showRaw) {
+      setRaw({ session, summary, messages });
+    }
+  } catch (error) {
+    const notFound = String(error.message || "").startsWith("404 ");
+    $("session-status").textContent = notFound ? "Session not found" : "Load session failed";
+    $("session-summary").innerHTML = '<div class="empty-state">No active session data</div>';
+    renderMessages([]);
+    if (showRaw) {
+      setRaw({ error: error.message, conversation_id: conversationId });
+    }
   }
 }
 
@@ -328,6 +342,12 @@ async function streamChat() {
   const button = $("send-chat-btn");
   const output = $("chat-output");
   const meta = $("chat-meta");
+  const message = $("chat-message-input").value.trim();
+  if (!message) {
+    meta.textContent = "Enter a message";
+    output.textContent = "Message cannot be empty.";
+    return;
+  }
   button.disabled = true;
   output.textContent = "";
   meta.textContent = "Streaming...";
@@ -336,7 +356,7 @@ async function streamChat() {
     const conversationId = await ensureSession();
     const payload = {
       conversation_id: conversationId,
-      message: $("chat-message-input").value.trim(),
+      message,
       ...optionalModelFields(),
     };
     const events = [];
@@ -481,20 +501,45 @@ async function runAgent() {
 
 function renderAgentRun(body) {
   const result = body.result || {};
+  const pendingApproval = body.pending_approval || null;
+  const approvalTools = pendingApproval?.approval_required_tools || [];
   state.latestRunId = body.run_id || "";
   state.latestRunStatus = body.status || "";
+  state.latestApprovalInterruptId = pendingApproval?.interrupt_id || "";
   $("agent-status").textContent = `${body.status || "unknown"} ${body.run_id || ""}`;
   $("agent-answer").textContent =
     result.answer ||
     body.error ||
-    (body.pending_approval
-      ? `Waiting approval for: ${(body.pending_approval.planned_tools || []).join(", ")}`
+    (pendingApproval
+      ? `Waiting approval for: ${approvalTools.map((item) => item.name).join(", ") || "review"}`
       : "No answer yet");
-  $("approve-run-btn").disabled = body.status !== "waiting_approval";
-  $("reject-run-btn").disabled = body.status !== "waiting_approval";
+  const approvalActionsDisabled =
+    body.status !== "waiting_approval" || state.approvalResolutionInFlight;
+  $("approve-run-btn").disabled = approvalActionsDisabled;
+  $("reject-run-btn").disabled = approvalActionsDisabled;
+  renderAgentApproval(pendingApproval);
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
+}
+
+function renderAgentApproval(pendingApproval) {
+  const panel = $("agent-approval-panel");
+  const list = $("agent-approval-tools");
+  const tools = pendingApproval?.approval_required_tools || [];
+  panel.hidden = tools.length === 0;
+  list.innerHTML = "";
+  for (const tool of tools) {
+    const item = document.createElement("article");
+    item.className = "approval-tool-card";
+    item.innerHTML = `
+      <strong>${escapeHtml(tool.name || "tool")}</strong>
+      <span>${escapeHtml(tool.permission_level || "unknown")} · ${escapeHtml(tool.provider || "unknown")}</span>
+      <p>${escapeHtml(tool.risk_summary || "Review the requested tool before continuing.")}</p>
+      <pre class="approval-arguments">${escapeHtml(jsonPretty(tool.arguments_summary || {}))}</pre>
+    `;
+    list.appendChild(item);
+  }
 }
 
 async function refreshRun() {
@@ -543,22 +588,44 @@ async function resumeRun(approved) {
   if (!state.latestRunId) {
     return;
   }
-  $("agent-status").textContent = approved ? "Approving..." : "Rejecting...";
-  const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/resume`, {
-    method: "POST",
-    body: JSON.stringify({
-      approved,
-      feedback: approved ? "前端调试台批准执行" : "前端调试台拒绝执行",
-    }),
-  });
-  renderAgentRun(body);
-  await pollRunUntilTerminal();
+  const approvalInterruptId = state.latestApprovalInterruptId;
+  state.approvalResolutionInFlight = true;
+  $("approve-run-btn").disabled = true;
+  $("reject-run-btn").disabled = true;
+  $("agent-status").textContent = approved ? "Applying approval..." : "Applying rejection...";
+  try {
+    const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/resume`, {
+      method: "POST",
+      body: JSON.stringify({
+        approved,
+        feedback: approved ? "前端调试台批准执行" : "前端调试台拒绝执行",
+      }),
+    });
+    renderAgentRun(body);
+    await pollRunUntilTerminal({ ignoredWaitingApprovalId: approvalInterruptId });
+  } catch (error) {
+    $("agent-status").textContent = "Approval update failed";
+    setRaw({ error: error.message });
+  } finally {
+    state.approvalResolutionInFlight = false;
+    if (state.latestRunId) {
+      await refreshRun();
+    }
+  }
 }
 
-async function pollRunUntilTerminal() {
-  const terminalStatuses = new Set(["completed", "failed", "waiting_approval"]);
+async function pollRunUntilTerminal({ ignoredWaitingApprovalId = "" } = {}) {
+  const terminalStatuses = new Set(["completed", "failed"]);
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (!state.latestRunId || terminalStatuses.has(state.latestRunStatus)) {
+    const waitingForNewApproval =
+      state.latestRunStatus === "waiting_approval" &&
+      (!ignoredWaitingApprovalId ||
+        state.latestApprovalInterruptId !== ignoredWaitingApprovalId);
+    if (
+      !state.latestRunId ||
+      terminalStatuses.has(state.latestRunStatus) ||
+      waitingForNewApproval
+    ) {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));

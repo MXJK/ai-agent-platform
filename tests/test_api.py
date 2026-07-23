@@ -16,6 +16,7 @@ from ai_agent_platform.integrations.llm import LLMResponse, _google_usage
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
+from ai_agent_platform.schemas import ChatStreamRequest
 
 
 class FlakySearchRAGService:
@@ -195,6 +196,24 @@ class APITests(unittest.TestCase):
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn("AI Agent Platform", response.text)
         self.assertIn("/static/app.js", response.text)
+        self.assertIn('id="agent-approval-panel"', response.text)
+        self.assertIn('aria-live="polite"', response.text)
+
+        script_response = self.client.get("/static/app.js")
+        self.assertEqual(script_response.status_code, 200)
+        self.assertIn("approval_required_tools", script_response.text)
+        self.assertIn("ignoredWaitingApprovalId: approvalInterruptId", script_response.text)
+        self.assertIn("Session not found", script_response.text)
+        self.assertIn("Enter a message", script_response.text)
+
+    def test_chat_request_accepts_google_provider(self) -> None:
+        request = ChatStreamRequest(
+            conversation_id="sess_google",
+            message="测试 Google provider 契约",
+            provider="google",
+        )
+
+        self.assertEqual(request.provider, "google")
 
     def test_streams_chat_response_and_records_messages(self) -> None:
         create_response = self.client.post(
