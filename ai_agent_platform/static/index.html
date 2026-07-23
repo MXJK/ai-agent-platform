@@ -63,15 +63,11 @@
           </button>
           <button class="nav-item" type="button" data-view="agent">
             <span class="nav-icon" aria-hidden="true">⌘</span>
-            <span><strong>代码 Agent</strong><small>仓库理解与执行</small></span>
+            <span><strong>代码 Agent</strong><small>按需读取与执行</small></span>
           </button>
           <button class="nav-item" type="button" data-view="rag">
             <span class="nav-icon" aria-hidden="true">◫</span>
             <span><strong>知识库</strong><small>检索与问答</small></span>
-          </button>
-          <button class="nav-item" type="button" data-view="repository">
-            <span class="nav-icon" aria-hidden="true">⌗</span>
-            <span><strong>仓库索引</strong><small>同步代码上下文</small></span>
           </button>
           <button class="nav-item" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true">☷</span>
@@ -91,7 +87,7 @@
           <dl class="context-list">
             <div><dt>用户</dt><dd id="context-user">demo_user</dd></div>
             <div><dt>模型</dt><dd id="context-model">默认配置</dd></div>
-            <div><dt>仓库</dt><dd id="context-repository">repo_main</dd></div>
+            <div><dt>工作区</dt><dd id="context-workspace">workspace_main</dd></div>
           </dl>
           <p id="session-status" class="context-note">创建会话后即可开始工作</p>
         </div>
@@ -155,9 +151,9 @@
         <section id="agent-view" class="view-panel" data-view-panel="agent" aria-labelledby="agent-title" hidden>
           <header class="view-header compact">
             <div>
-              <p class="eyebrow">Repository Agent</p>
+              <p class="eyebrow">Workspace Agent</p>
               <h1 id="agent-title">代码 Agent</h1>
-              <p>理解仓库、规划改动，并在执行前把风险交给你审阅。</p>
+              <p>按任务读取实时文件、规划改动，并在执行前把风险交给你审阅。</p>
             </div>
             <span id="agent-status" class="status-pill neutral">尚未运行</span>
           </header>
@@ -167,7 +163,7 @@
               <article class="surface task-card">
                 <div class="surface-heading">
                   <div><span class="step-kicker">01 · 任务</span><h2>描述你希望 Agent 完成的工作</h2></div>
-                  <span id="agent-repository-badge" class="meta-badge">repo_main</span>
+                  <span id="agent-workspace-badge" class="meta-badge">workspace_main</span>
                 </div>
                 <label for="agent-message-input">任务目标</label>
                 <textarea
@@ -251,7 +247,7 @@
                 rows="13"
                 placeholder="粘贴 Markdown、文本、代码或配置内容"
               ># 项目说明
-AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Agent trace 和仓库索引能力。</textarea>
+AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、独立知识库与按需上下文代码 Agent。</textarea>
               <div class="surface-actions">
                 <p>内容会按照当前 Embedding 配置进行向量化。</p>
                 <button id="ingest-doc-btn" class="button secondary" type="button">录入文档</button>
@@ -275,51 +271,6 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
               </div>
               <div id="rag-answer" class="rich-output empty-output">检索结果和回答会显示在这里。</div>
               <div id="rag-citations" class="citation-list"></div>
-            </article>
-          </div>
-        </section>
-
-        <section id="repository-view" class="view-panel" data-view-panel="repository" aria-labelledby="repository-title" hidden>
-          <header class="view-header compact">
-            <div>
-              <p class="eyebrow">Repository Context</p>
-              <h1 id="repository-title">仓库索引</h1>
-              <p>把本地代码转换为可检索上下文，供 Agent 和知识问答使用。</p>
-            </div>
-            <button id="open-repository-settings-btn" class="button secondary" type="button">配置仓库</button>
-          </header>
-
-          <article class="surface repository-hero">
-            <div>
-              <span class="repository-icon" aria-hidden="true">⌗</span>
-              <p class="eyebrow">当前仓库</p>
-              <h2 id="repository-name">repo_main</h2>
-              <code id="repository-path-display">尚未配置根路径</code>
-            </div>
-            <button id="index-repo-btn" class="button primary" type="button">开始索引</button>
-          </article>
-
-          <div id="repository-progress" class="progress-card hidden" role="status" aria-live="polite">
-            <div class="progress-heading"><strong id="repository-progress-label">准备索引…</strong><span id="repository-progress-count">0 文件</span></div>
-            <div class="progress-track"><span id="repository-progress-bar"></span></div>
-          </div>
-
-          <div class="content-grid equal-grid">
-            <article class="surface">
-              <div class="surface-heading"><h2>索引摘要</h2></div>
-              <dl id="repository-result" class="metric-list repository-metrics">
-                <div><dt>状态</dt><dd>尚未运行</dd></div>
-                <div><dt>扫描</dt><dd>—</dd></div>
-                <div><dt>已索引</dt><dd>—</dd></div>
-                <div><dt>跳过 / 失败</dt><dd>—</dd></div>
-              </dl>
-            </article>
-            <article class="surface">
-              <div class="surface-heading"><h2>文件明细</h2></div>
-              <div class="path-columns">
-                <div><h3>已索引</h3><div id="indexed-paths" class="path-list"><div class="empty-state">暂无文件</div></div></div>
-                <div><h3>跳过或失败</h3><div id="skipped-paths" class="path-list"><div class="empty-state">暂无文件</div></div></div>
-              </div>
             </article>
           </div>
         </section>
@@ -427,7 +378,7 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
       <form method="dialog" class="settings-shell">
         <header class="dialog-header">
-          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>配置会话、模型和仓库上下文。密钥始终只从服务端环境读取。</p></div>
+          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>注册代码工作区，Agent 会针对任务实时搜索和读取文件。密钥始终只从服务端环境读取。</p></div>
           <button id="close-settings-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭设置">×</button>
         </header>
 
@@ -459,21 +410,23 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
           </section>
 
           <section class="settings-section">
-            <div class="settings-section-heading"><span>03</span><div><h3>仓库</h3><p>路径相对于运行 FastAPI 的机器。</p></div></div>
+            <div class="settings-section-heading"><span>03</span><div><h3>代码工作区</h3><p>根路径必须位于服务端允许的目录中。</p></div></div>
+            <label for="workspace-select">已注册工作区
+              <select id="workspace-select"><option value="">尚未加载</option></select>
+            </label>
             <div class="field-grid">
-              <label for="repository-id-input">仓库 ID<input id="repository-id-input" value="repo_main" /></label>
-              <label for="repository-root-input">根路径<input id="repository-root-input" placeholder="/path/to/local/repository" autocomplete="off" /></label>
+              <label for="workspace-id-input">工作区 ID<input id="workspace-id-input" value="workspace_main" /></label>
+              <label for="workspace-root-input">根路径<input id="workspace-root-input" placeholder="/path/to/local/workspace" autocomplete="off" /></label>
             </div>
-            <div class="field-grid">
-              <label for="include-patterns-input">包含规则<input id="include-patterns-input" value="**/*.py, **/*.md" /></label>
-              <label for="exclude-patterns-input">排除规则<input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" /></label>
+            <div class="button-row">
+              <button id="refresh-workspaces-btn" class="button ghost" type="button">刷新列表</button>
+              <button id="register-workspace-btn" class="button secondary" type="button">注册或更新</button>
             </div>
-            <label for="max-file-size-input">最大文件大小（字节）<input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" /></label>
           </section>
         </div>
 
         <footer class="dialog-footer">
-          <p>界面偏好会保存在当前设备；仓库路径和内容不会保存。</p>
+          <p>界面偏好会保存在当前设备；工作区内容不会上传为向量索引。</p>
           <div class="button-row">
             <button class="button ghost" type="submit" value="cancel">取消</button>
             <button id="save-settings-btn" class="button primary" type="button">保存设置</button>

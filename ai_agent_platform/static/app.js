@@ -1,7 +1,6 @@
 const API_BASE = "/api/v1";
 const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "waiting_approval"]);
-const TERMINAL_INDEX_STATUSES = new Set(["completed", "completed_with_errors", "failed"]);
 
 const state = {
   conversationId: "",
@@ -10,7 +9,7 @@ const state = {
   healthStatus: "checking",
   sessions: [],
   requestLog: [],
-  latestRepositoryIndex: null,
+  workspaces: [],
   currentView: "chat",
   chatController: null,
   agentPollGeneration: 0,
@@ -293,17 +292,14 @@ function updateContextSummary() {
   const userId = $("user-id-input").value.trim() || "demo_user";
   const provider = $("provider-input").value.trim();
   const model = $("model-input").value.trim();
-  const repositoryId = $("repository-id-input").value.trim() || "repo_main";
-  const repositoryRoot = $("repository-root-input").value.trim();
+  const workspaceId = $("workspace-id-input").value.trim() || "workspace_main";
   const modelLabel = model || provider || "默认配置";
 
   $("context-user").textContent = userId;
   $("context-model").textContent = modelLabel;
-  $("context-repository").textContent = repositoryId;
+  $("context-workspace").textContent = workspaceId;
   $("composer-context").textContent = modelLabel;
-  $("agent-repository-badge").textContent = repositoryId;
-  $("repository-name").textContent = repositoryId;
-  $("repository-path-display").textContent = repositoryRoot || "尚未配置根路径";
+  $("agent-workspace-badge").textContent = workspaceId;
   $("header-session-id").textContent = state.conversationId || "尚未创建";
 }
 
@@ -840,7 +836,7 @@ async function runAgent() {
     const payload = {
       conversation_id: conversationId,
       message,
-      repository_id: $("repository-id-input").value.trim() || "repo_main",
+      workspace_id: $("workspace-id-input").value.trim() || "workspace_main",
       focus_files: csvValues($("focus-files-input").value),
     };
     const body = await fetchJson("/agent/runs", {
@@ -1140,106 +1136,51 @@ function renderCitations(citations) {
   }
 }
 
-async function indexRepository() {
-  const repositoryId = $("repository-id-input").value.trim() || "repo_main";
-  const rootPath = $("repository-root-input").value.trim();
-  if (!rootPath) {
-    showToast("请先在工作区设置中填写仓库根路径", "warning");
-    openSettings();
-    $("repository-root-input").focus();
+async function registerWorkspace() {
+  const workspaceId = $("workspace-id-input").value.trim();
+  const rootPath = $("workspace-root-input").value.trim();
+  if (!workspaceId) {
+    showToast("请填写工作区 ID", "warning");
     return;
   }
-
-  $("index-repo-btn").disabled = true;
-  setRepositoryProgress({ status: "pending", scanned_files: 0, indexed_files: 0 });
+  if (!rootPath) {
+    showToast("请填写工作区根路径", "warning");
+    $("workspace-root-input").focus();
+    return;
+  }
+  $("register-workspace-btn").disabled = true;
   try {
-    const submitted = await fetchJson(`/repositories/${encodeURIComponent(repositoryId)}/index`, {
-      method: "POST",
-      body: JSON.stringify({
-        root_path: rootPath,
-        include_patterns: csvValues($("include-patterns-input").value),
-        exclude_patterns: csvValues($("exclude-patterns-input").value),
-        max_file_size: numberValue("max-file-size-input", 200000),
-      }),
+    const body = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ root_path: rootPath }),
     });
-    renderRepositoryResult(submitted);
-    const body = await waitForRepositoryIndex(repositoryId, submitted.job_id);
-    state.latestRepositoryIndex = body;
-    renderRepositoryResult(body);
     setRaw(body);
-    showToast(
-      `索引完成：${body.indexed_files} 个文件，跳过 ${body.skipped_files} 个`,
-      body.failed_files ? "warning" : "success",
-    );
+    await listWorkspaces();
+    $("workspace-select").value = workspaceId;
+    showToast(`工作区 ${workspaceId} 已注册`, "success");
   } catch (error) {
-    $("repository-progress-label").textContent = "索引失败";
     showToast(humanizeError(error), "error");
   } finally {
-    $("index-repo-btn").disabled = false;
+    $("register-workspace-btn").disabled = false;
   }
 }
 
-async function waitForRepositoryIndex(repositoryId, jobId) {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    const body = await fetchJson(
-      `/repositories/${encodeURIComponent(repositoryId)}/index-jobs/${encodeURIComponent(jobId)}`,
-    );
-    setRepositoryProgress(body);
-    renderRepositoryResult(body);
-    if (TERMINAL_INDEX_STATUSES.has(body.status)) {
-      return body;
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
+async function listWorkspaces() {
+  const body = await fetchJson("/workspaces");
+  state.workspaces = body.workspaces || [];
+  const select = $("workspace-select");
+  const selectedId = $("workspace-id-input").value.trim();
+  select.innerHTML = '<option value="">选择工作区</option>';
+  for (const workspace of state.workspaces) {
+    const option = document.createElement("option");
+    option.value = workspace.id;
+    option.textContent = `${workspace.id} · ${workspace.root_path}`;
+    option.dataset.rootPath = workspace.root_path;
+    select.appendChild(option);
   }
-  throw new Error(`索引任务 ${jobId} 在等待时间内没有完成`);
-}
-
-function setRepositoryProgress(body) {
-  const card = $("repository-progress");
-  card.classList.remove("hidden");
-  const scanned = Number(body.scanned_files || 0);
-  const indexed = Number(body.indexed_files || 0);
-  const skipped = Number(body.skipped_files || 0);
-  const failed = Number(body.failed_files || 0);
-  const handled = indexed + skipped + failed;
-  const percent = TERMINAL_INDEX_STATUSES.has(body.status)
-    ? 100
-    : scanned > 0
-      ? Math.min(94, Math.round((handled / scanned) * 100))
-      : 8;
-  $("repository-progress-label").textContent = humanizeStatus(body.status || "pending");
-  $("repository-progress-count").textContent = `${scanned} 个文件`;
-  $("repository-progress-bar").style.width = `${percent}%`;
-}
-
-function renderRepositoryResult(body) {
-  $("repository-result").innerHTML = `
-    <div><dt>状态</dt><dd>${escapeHtml(humanizeStatus(body.status))}</dd></div>
-    <div><dt>扫描</dt><dd>${escapeHtml(body.scanned_files ?? 0)}</dd></div>
-    <div><dt>已索引</dt><dd>${escapeHtml(body.indexed_files ?? 0)}</dd></div>
-    <div><dt>跳过 / 失败</dt><dd>${escapeHtml((body.skipped_files ?? 0) + (body.failed_files ?? 0))}</dd></div>
-  `;
-  renderPathList("indexed-paths", body.indexed_paths || [], "暂无已索引文件明细");
-  renderPathList(
-    "skipped-paths",
-    [...(body.skipped_paths || []), ...(body.failed_paths || [])],
-    "没有跳过或失败的文件",
-  );
-}
-
-function renderPathList(id, paths, emptyText) {
-  const list = $(id);
-  list.innerHTML = "";
-  if (paths.length === 0) {
-    list.innerHTML = `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
-    return;
-  }
-  for (const path of paths.slice(0, 160)) {
-    const item = document.createElement("div");
-    item.className = "path-item";
-    item.textContent = path;
-    list.appendChild(item);
-  }
+  select.value = state.workspaces.some((item) => item.id === selectedId)
+    ? selectedId
+    : "";
 }
 
 function bindEvents() {
@@ -1258,7 +1199,6 @@ function bindEvents() {
 
   $("open-settings-btn").addEventListener("click", openSettings);
   $("sidebar-settings-btn").addEventListener("click", openSettings);
-  $("open-repository-settings-btn").addEventListener("click", openSettings);
   $("save-settings-btn").addEventListener("click", saveSettings);
   $("close-settings-btn").addEventListener("click", closeSettings);
   $("settings-dialog").addEventListener("click", (event) => {
@@ -1345,7 +1285,19 @@ function bindEvents() {
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
-  $("index-repo-btn").addEventListener("click", indexRepository);
+  $("register-workspace-btn").addEventListener("click", registerWorkspace);
+  $("refresh-workspaces-btn").addEventListener("click", () => {
+    listWorkspaces().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("workspace-select").addEventListener("change", (event) => {
+    const workspace = state.workspaces.find((item) => item.id === event.target.value);
+    if (!workspace) {
+      return;
+    }
+    $("workspace-id-input").value = workspace.id;
+    $("workspace-root-input").value = workspace.root_path;
+    updateContextSummary();
+  });
 
   $("refresh-overview-btn").addEventListener("click", async () => {
     await Promise.allSettled([checkHealth(), listSessions(false)]);
@@ -1365,7 +1317,7 @@ function bindEvents() {
     state.conversationId = event.target.value.trim();
     updateContextSummary();
   });
-  ["user-id-input", "provider-input", "model-input", "repository-id-input", "repository-root-input"].forEach((id) => {
+  ["user-id-input", "provider-input", "model-input", "workspace-id-input", "workspace-root-input"].forEach((id) => {
     $(id).addEventListener("input", updateContextSummary);
     $(id).addEventListener("change", updateContextSummary);
   });
@@ -1396,7 +1348,7 @@ async function init() {
   renderSessions();
   renderOverview();
   updateContextSummary();
-  await Promise.allSettled([checkHealth(), listSessions(false)]);
+  await Promise.allSettled([checkHealth(), listSessions(false), listWorkspaces()]);
 }
 
 init();

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, TypedDict
 
-from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
 
@@ -29,20 +28,29 @@ class CodingAgentState(TypedDict, total=False):
     run_id: str
     conversation_id: str
     user_input: str
-    repository_id: str
+    workspace_id: str
+    workspace_root: str
     history: list[dict[str, str]]
     focus_files: list[str]
     intent: str
     intent_reason: str
     intent_confidence: float
     planner_source: str
-    rag_context: list[RetrievedDocument]
+    project_instructions: list["ContextSource"]
+    context_sources: list["ContextSource"]
+    exploration_round: int
+    context_sufficient: bool
+    context_budget_exhausted: bool
+    context_chars: int
+    context_files: list[str]
+    seen_context_keys: list[str]
     tool_calls: list[ToolCall]
     analysis_tool_calls: list[ToolCall]
     change_tool_calls: list[ToolCall]
     validation_tool_calls: list[ToolCall]
     repair_tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
+    exploration_results: list[dict[str, Any]]
     validation_results: list[dict[str, Any]]
     validation_history: list[dict[str, Any]]
     artifacts: list[dict[str, Any]]
@@ -58,10 +66,10 @@ class CodingAgentState(TypedDict, total=False):
     errors: list[dict[str, Any]]
 
 
-AgentRoute = Literal["retrieve_repository_context", "compose_answer"]
+AgentRoute = Literal["plan_exploration", "compose_answer"]
 PlanRoute = Literal["review_tool_plan", "inspect_repository"]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
-RetrievalRoute = Literal["plan_tools", "handle_error"]
+ContextRoute = Literal["plan_exploration", "plan_tools", "compose_answer"]
 AnswerRoute = Literal["handle_error", "end"]
 InspectionRoute = Literal[
     "execute_changes", "validate_changes", "collect_artifacts", "compose_answer"
@@ -71,6 +79,18 @@ RepairReviewRoute = Literal["execute_changes", "collect_artifacts"]
 ChangeExecutionRoute = Literal["validate_changes", "collect_artifacts"]
 AgentRunStatus = Literal["queued", "running", "waiting_approval", "completed", "failed"]
 MAX_NODE_RETRIES = 2
+
+
+@dataclass(frozen=True)
+class ContextSource:
+    kind: str
+    path: str
+    start_line: int | None
+    end_line: int | None
+    text: str
+    reason: str
+    content_hash: str
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,7 +120,7 @@ class AgentRunResult:
     run_id: str
     thread_id: str
     conversation_id: str
-    repository_id: str
+    workspace_id: str
     status: AgentRunStatus
     checkpoint_id: Optional[str]
     role: str
@@ -108,7 +128,7 @@ class AgentRunResult:
     intent: str
     answer: str
     graph_engine: str
-    rag_context: list[RetrievedDocument]
+    context_sources: list[ContextSource]
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
@@ -124,7 +144,8 @@ class AgentRunRecord:
     run_id: str
     thread_id: str
     conversation_id: str
-    repository_id: str
+    workspace_id: str
+    workspace_root: str
     status: AgentRunStatus
     checkpoint_id: Optional[str]
     latest_node: Optional[str]
@@ -176,4 +197,7 @@ class AgentPlanner(Protocol):
         state: CodingAgentState,
         tool_specs: list[ToolSpec],
     ) -> list[ToolCall]:
+        ...
+
+    def compose_answer(self, state: CodingAgentState) -> str:
         ...

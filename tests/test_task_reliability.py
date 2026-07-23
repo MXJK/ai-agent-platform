@@ -38,8 +38,8 @@ class TaskReliabilityTests(unittest.TestCase):
         ), self.assertRaises(RetryScheduled):
             execute_reliable_task(
                 task=task,
-                task_name="repository_index",
-                task_reference="idxjob_1",
+                task_name="agent_run",
+                task_reference="run_1",
                 settings=Settings(),
                 handler=lambda: (_ for _ in ()).throw(
                     ConnectionError("postgres unavailable")

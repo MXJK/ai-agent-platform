@@ -1,4 +1,4 @@
-"""Building blocks for the repository-aware coding agent."""
+"""Building blocks for the task-driven workspace coding agent."""
 
 from ai_agent_platform.agents.coding.change_loop import MAX_CHANGE_ITERATIONS
 from ai_agent_platform.agents.coding.models import (
@@ -16,6 +16,7 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunStatus,
     AgentRunStore,
     CodingAgentState,
+    ContextSource,
     LLMCompletionClient,
 )
 from ai_agent_platform.agents.coding.planner import (
@@ -40,6 +41,7 @@ __all__ = [
     "AgentRunStatus",
     "AgentRunStore",
     "CodingAgentState",
+    "ContextSource",
     "InMemoryAgentRunStore",
     "LLMCompletionClient",
     "LLMStructuredAgentPlanner",

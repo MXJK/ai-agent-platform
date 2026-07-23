@@ -2,22 +2,23 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
-from ai_agent_platform.schemas.rag import RAGChunkResponse
+from ai_agent_platform.agents.coding.models import ContextSource
 
 
 class AgentRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     conversation_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=8000)
-    repository_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
-    knowledge_base_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    workspace_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
     focus_files: list[str] = Field(default_factory=list, max_length=20)
-
-    @property
-    def resolved_repository_id(self) -> str:
-        return self.repository_id or self.knowledge_base_id or "repo_main"
 
 
 class AgentRunResumeRequest(BaseModel):
@@ -57,11 +58,26 @@ class AgentChangeSummaryResponse(BaseModel):
     validation_passed: bool
 
 
+class ContextSourceResponse(BaseModel):
+    kind: str
+    path: str
+    start_line: Optional[int]
+    end_line: Optional[int]
+    text: str
+    reason: str
+    content_hash: str
+    truncated: bool
+
+    @classmethod
+    def from_domain(cls, source: ContextSource) -> "ContextSourceResponse":
+        return cls(**source.__dict__)
+
+
 class AgentRunResponse(BaseModel):
     run_id: str
     thread_id: str
     conversation_id: str
-    repository_id: str
+    workspace_id: str
     status: str
     checkpoint_id: Optional[str]
     role: str
@@ -69,7 +85,7 @@ class AgentRunResponse(BaseModel):
     intent: str
     answer: str
     graph_engine: str
-    rag_context: list[RAGChunkResponse]
+    context_sources: list[ContextSourceResponse]
     tool_calls: list[AgentToolCallResponse]
     tool_results: list[dict[str, Any]]
     trace: list[AgentTraceStepResponse]
@@ -85,7 +101,7 @@ class AgentRunResponse(BaseModel):
             run_id=result.run_id,
             thread_id=result.thread_id,
             conversation_id=result.conversation_id,
-            repository_id=result.repository_id,
+            workspace_id=result.workspace_id,
             status=result.status,
             checkpoint_id=result.checkpoint_id,
             role=result.role,
@@ -93,9 +109,9 @@ class AgentRunResponse(BaseModel):
             intent=result.intent,
             answer=result.answer,
             graph_engine=result.graph_engine,
-            rag_context=[
-                RAGChunkResponse.from_domain(citation)
-                for citation in result.rag_context
+            context_sources=[
+                ContextSourceResponse.from_domain(source)
+                for source in result.context_sources
             ],
             tool_calls=[
                 AgentToolCallResponse(
@@ -146,7 +162,7 @@ class AgentRunStatusResponse(BaseModel):
     run_id: str
     thread_id: str
     conversation_id: str
-    repository_id: str
+    workspace_id: str
     status: str
     checkpoint_id: Optional[str]
     latest_node: Optional[str]
@@ -163,7 +179,7 @@ class AgentRunStatusResponse(BaseModel):
             run_id=record.run_id,
             thread_id=record.thread_id,
             conversation_id=record.conversation_id,
-            repository_id=record.repository_id,
+            workspace_id=record.workspace_id,
             status=record.status,
             checkpoint_id=record.checkpoint_id,
             latest_node=record.latest_node,
@@ -213,7 +229,7 @@ class AgentRunEventsResponse(BaseModel):
                 output={
                     "run_id": record.run_id,
                     "conversation_id": record.conversation_id,
-                    "repository_id": record.repository_id,
+                    "workspace_id": record.workspace_id,
                 },
             )
         ]
@@ -224,7 +240,7 @@ class AgentRunEventsResponse(BaseModel):
                     sequence=len(events) + 1,
                     type="run_started",
                     status="running",
-                    node="setup",
+                    node="setup_workspace",
                     summary="Background worker started executing the Agent graph.",
                     output={"thread_id": record.thread_id},
                 )

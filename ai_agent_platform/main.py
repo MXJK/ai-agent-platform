@@ -32,17 +32,17 @@ from ai_agent_platform.integrations import (
     create_rag_service,
 )
 from ai_agent_platform.repositories import (
-    InMemoryRepositoryIndexRepository,
     InMemorySessionRepository,
+    InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
     PostgresDocumentRepository,
-    PostgresRepositoryIndexRepository,
     PostgresSessionRepository,
+    PostgresWorkspaceRepository,
 )
 from ai_agent_platform.services import (
     AgentRunService,
-    RepositoryIndexingService,
     SessionService,
+    WorkspaceService,
 )
 
 
@@ -97,16 +97,23 @@ def create_app(
     if coding_agent_runtime is None:
         checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
         coding_agent_runtime = CodingAgentRuntime(
-            rag_service=rag_service,
             tool_registry=tool_registry,
             run_store=_create_agent_run_store(settings),
             checkpointer=checkpointer,
             planner=LLMStructuredAgentPlanner(llm_client),
+            max_exploration_rounds=settings.agent_max_exploration_rounds,
+            max_read_tools_per_round=settings.agent_max_read_tools_per_round,
+            max_context_files=settings.agent_max_context_files,
+            max_context_chars=settings.agent_max_context_chars,
+            max_instruction_chars=settings.agent_max_instruction_chars,
+            max_history_messages=settings.llm_max_context_messages,
         )
-    repository_indexing_service = RepositoryIndexingService(
-        rag_service=rag_service,
-        index_store=_create_repository_index_store(settings),
-        task_queue=task_queue,
+    workspace_service = WorkspaceService(
+        store=_create_workspace_store(settings),
+        allowed_roots=(
+            settings.workspace_allowed_roots
+            or (str(Path.cwd().resolve()),)
+        ),
     )
     session_service = SessionService(
         repository=repository,
@@ -115,6 +122,7 @@ def create_app(
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
         session_service=session_service,
+        workspace_service=workspace_service,
         metrics=metrics,
         task_queue=task_queue,
     )
@@ -125,7 +133,6 @@ def create_app(
             yield
         finally:
             app.state.agent_run_service.close()
-            app.state.repository_indexing_service.close()
             app.state.task_queue.close()
             if close_checkpointer is not None:
                 close_checkpointer()
@@ -138,7 +145,7 @@ def create_app(
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
-    app.state.repository_indexing_service = repository_indexing_service
+    app.state.workspace_service = workspace_service
     app.state.task_queue = task_queue
     static_dir = Path(__file__).parent / "static"
 
@@ -148,7 +155,7 @@ def create_app(
             llm_client=llm_client,
             rag_service=rag_service,
             agent_run_service=agent_run_service,
-            repository_indexing_service=repository_indexing_service,
+            workspace_service=workspace_service,
             settings=settings,
             metrics=metrics,
         ),
@@ -198,13 +205,13 @@ def _create_document_store(settings: Settings):
     raise ValueError(f"unsupported document store: {settings.document_store}")
 
 
-def _create_repository_index_store(settings: Settings):
-    if settings.repository_index_store == "memory":
-        return InMemoryRepositoryIndexRepository()
-    if settings.repository_index_store == "postgres":
-        return PostgresRepositoryIndexRepository(database_url=settings.database_url)
+def _create_workspace_store(settings: Settings):
+    if settings.workspace_store == "memory":
+        return InMemoryWorkspaceRepository()
+    if settings.workspace_store == "postgres":
+        return PostgresWorkspaceRepository(database_url=settings.database_url)
     raise ValueError(
-        f"unsupported repository index store: {settings.repository_index_store}"
+        f"unsupported workspace store: {settings.workspace_store}"
     )
 
 

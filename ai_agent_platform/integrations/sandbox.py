@@ -44,6 +44,7 @@ DEFAULT_DENIED_COMMANDS = {
 class SandboxWorkspace:
     key: str
     path: Path
+    source_root: Path
     baseline: dict[str, bytes]
 
 
@@ -53,7 +54,6 @@ class SandboxRuntime:
     def __init__(
         self,
         *,
-        root_path: Path | str,
         mode: str = "local",
         docker_image: str = "python:3.11-slim",
         command_timeout_seconds: float = 30.0,
@@ -62,7 +62,6 @@ class SandboxRuntime:
     ) -> None:
         if mode not in {"local", "docker"}:
             raise ValueError("sandbox mode must be local or docker")
-        self._root_path = Path(root_path).expanduser().resolve()
         self._mode = mode
         self._docker_image = docker_image
         self._command_timeout_seconds = command_timeout_seconds
@@ -88,7 +87,7 @@ class SandboxRuntime:
         return {
             "mode": self._mode,
             "workspace": str(workspace.path),
-            "root": str(self._root_path),
+            "root": str(workspace.source_root),
             "changed_files": self.changed_files(context=context),
         }
 
@@ -209,6 +208,7 @@ class SandboxRuntime:
 
     def _workspace_for(self, context: ToolExecutionContext | None) -> SandboxWorkspace:
         key = _workspace_key(context)
+        source_root = _source_root(context)
         with self._lock:
             existing = self._workspaces.get(key)
             if existing is not None:
@@ -219,10 +219,11 @@ class SandboxRuntime:
                     dir=str(self._workspace_parent) if self._workspace_parent else None,
                 )
             )
-            _copy_source_tree(self._root_path, workspace_path)
+            _copy_source_tree(source_root, workspace_path)
             workspace = SandboxWorkspace(
                 key=key,
                 path=workspace_path,
+                source_root=source_root,
                 baseline=_snapshot_files(workspace_path),
             )
             self._workspaces[key] = workspace
@@ -266,10 +267,20 @@ class SandboxRuntime:
 
 def _workspace_key(context: ToolExecutionContext | None) -> str:
     if context is None:
-        return "manual"
-    if context.run_id:
-        return context.run_id
-    return f"{context.conversation_id}:{context.repository_id}"
+        raise ValueError("workspace context is required")
+    return (
+        f"{context.conversation_id}:{context.workspace_id}:"
+        f"{context.run_id or 'run'}"
+    )
+
+
+def _source_root(context: ToolExecutionContext | None) -> Path:
+    if context is None or not context.workspace_root:
+        raise ValueError("workspace context is required")
+    root = Path(context.workspace_root).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError("workspace_unavailable: captured workspace root is inaccessible")
+    return root
 
 
 def _safe_key(value: str) -> str:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from ai_agent_platform.integrations.sandbox import SandboxRuntime
@@ -67,14 +66,12 @@ class SandboxToolKit:
 def register_sandbox_tools(
     registry: ToolRegistry,
     *,
-    root_path: Path | str | None = None,
     mode: str = "local",
     docker_image: str = "python:3.11-slim",
     command_timeout_seconds: float = 30.0,
-    workspace_parent: Path | str | None = None,
+    workspace_parent: str | None = None,
 ) -> SandboxRuntime:
     runtime = SandboxRuntime(
-        root_path=Path(root_path or "."),
         mode=mode,
         docker_image=docker_image,
         command_timeout_seconds=command_timeout_seconds,
@@ -107,7 +104,7 @@ def register_sandbox_tools(
         requires_approval=True,
         risk_summary=(
             "Writes only inside the per-run sandbox workspace; review the path "
-            "and final diff before applying changes to the real repository."
+            "and final diff before applying changes outside the sandbox."
         ),
         max_output_chars=12000,
     )

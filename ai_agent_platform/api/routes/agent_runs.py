@@ -12,7 +12,7 @@ from ai_agent_platform.schemas import (
     AgentRunResumeRequest,
     AgentRunStatusResponse,
 )
-from ai_agent_platform.services import AgentRunService
+from ai_agent_platform.services import AgentRunService, WorkspaceNotFoundError
 
 
 def create_agent_runs_router(
@@ -36,11 +36,13 @@ def create_agent_runs_router(
             record = agent_run_service.submit_run(
                 conversation_id=request.conversation_id,
                 message=request.message,
-                repository_id=request.resolved_repository_id,
+                workspace_id=request.workspace_id,
                 focus_files=request.focus_files,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="workspace not found") from exc
         except TaskQueueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

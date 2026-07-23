@@ -52,6 +52,9 @@ class RuleBasedAgentPlanner:
     ) -> list[ToolCall]:
         return []
 
+    def compose_answer(self, state: CodingAgentState) -> str:
+        return grounded_answer_fallback(state)
+
 
 class LLMStructuredAgentPlanner:
     """Uses structured LLM JSON for agent decisions with rule-based fallback."""
@@ -114,6 +117,16 @@ class LLMStructuredAgentPlanner:
         except Exception:
             fallback = getattr(self._fallback, "plan_repair_tool_calls", None)
             return fallback(state, tool_specs) if callable(fallback) else []
+
+    def compose_answer(self, state: CodingAgentState) -> str:
+        try:
+            response = self._llm_client.complete(answer_prompt(state))
+            text = str(response.text).strip()
+            if not text:
+                raise ValueError("LLM returned an empty answer")
+            return text
+        except Exception:
+            return self._fallback.compose_answer(state)
 
 
 def classify_intent(text: str) -> tuple[str, str]:
@@ -178,21 +191,22 @@ def tool_planning_prompt(
         }
         for spec in tool_specs
     ]
-    citations = [
+    sources = [
         {
-            "filename": citation.filename,
-            "chunk_index": citation.chunk_index,
-            "score": citation.score,
-            "snippet": snippet(citation.text, limit=180),
+            "kind": source.kind,
+            "path": source.path,
+            "start_line": source.start_line,
+            "end_line": source.end_line,
+            "snippet": snippet(source.text, limit=180),
         }
-        for citation in state.get("rag_context", [])
+        for source in state.get("context_sources", [])
     ]
     payload = {
         "user_input": state["user_input"],
         "intent": state.get("intent", "repository_question"),
-        "repository_id": state["repository_id"],
+        "workspace_id": state["workspace_id"],
         "focus_files": state.get("focus_files", []),
-        "retrieved_context": citations,
+        "context_sources": sources,
         "available_tools": tool_payload,
     }
     return (
@@ -299,14 +313,6 @@ def complete_tool_arguments(
     *,
     state: CodingAgentState,
 ) -> dict[str, Any]:
-    if spec.name == "repository_context_search":
-        arguments.setdefault("query", state["user_input"])
-        arguments.setdefault("repository_id", state["repository_id"])
-        citations = state.get("rag_context", [])
-        arguments.setdefault("citation_count", len(citations))
-        arguments.setdefault(
-            "candidate_files", unique([citation.filename for citation in citations])
-        )
     required = spec.input_schema.get("required", [])
     if not isinstance(required, list):
         return arguments
@@ -341,23 +347,12 @@ def plan_rule_based_tool_calls(
 ) -> list[ToolCall]:
     intent = state.get("intent", "repository_question")
     user_input = state["user_input"]
-    repository_id = state["repository_id"]
     focus_files = state.get("focus_files", [])
-    citations = state.get("rag_context", [])
-    cited_files = unique([citation.filename for citation in citations])
+    sources = state.get("context_sources", [])
+    cited_files = unique([source.path for source in sources])
     mentioned_paths = extract_paths(user_input)
     symbols = extract_symbols(user_input)
-    calls = [
-        ToolCall(
-            name="repository_context_search",
-            arguments={
-                "query": user_input,
-                "repository_id": repository_id,
-                "citation_count": len(citations),
-                "candidate_files": cited_files,
-            },
-        )
-    ]
+    calls: list[ToolCall] = []
     if intent in {
         "repository_question",
         "repo_navigation",
@@ -404,7 +399,7 @@ def plan_rule_based_tool_calls(
                 arguments={
                     "query": user_input,
                     "files": unique(focus_files + cited_files),
-                    "context_snippets": [snippet(item.text) for item in citations],
+                    "context_snippets": [snippet(item.text) for item in sources],
                 },
             )
         )
@@ -452,6 +447,95 @@ def plan_rule_based_tool_calls(
         )
     )
     return calls
+
+
+def answer_prompt(state: CodingAgentState) -> str:
+    sources = [
+        {
+            "kind": source.kind,
+            "path": source.path,
+            "lines": [source.start_line, source.end_line],
+            "text": source.text,
+            "reason": source.reason,
+            "truncated": source.truncated,
+        }
+        for source in (
+            list(state.get("project_instructions", []))
+            + list(state.get("context_sources", []))
+        )
+    ]
+    payload = {
+        "task": state["user_input"],
+        "intent": state.get("intent"),
+        "history": state.get("history", [])[-8:],
+        "sources": sources,
+        "tool_summaries": _tool_summaries(state.get("tool_results", [])),
+        "artifacts": state.get("artifacts", []),
+        "budget_exhausted": state.get("context_budget_exhausted", False),
+    }
+    return (
+        "Answer the coding task using only the supplied live-workspace evidence. "
+        "Cite code as path:start-end. Explain uncertainty when evidence is "
+        "insufficient. Include validation and diff outcomes when present. Do not "
+        "claim that a repository index or embedding exists.\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def _tool_summaries(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in results:
+        summary: dict[str, Any] = {
+            "name": item.get("name"),
+            "ok": item.get("ok"),
+            "error": item.get("error"),
+            "duration_ms": item.get("duration_ms"),
+        }
+        output = item.get("result")
+        if isinstance(output, dict):
+            summary["result"] = {
+                key: output[key]
+                for key in (
+                    "path",
+                    "start_line",
+                    "end_line",
+                    "count",
+                    "truncated",
+                    "engine",
+                    "changed_files",
+                    "exit_code",
+                    "command",
+                )
+                if key in output
+            }
+        summaries.append(summary)
+    return summaries
+
+
+def grounded_answer_fallback(state: CodingAgentState) -> str:
+    sources = state.get("context_sources", [])
+    lines = [f"工作区 `{state['workspace_id']}` 的按需读取结果："]
+    if not sources:
+        lines.append("当前没有收集到足够的可读源码证据，无法可靠回答具体实现细节。")
+    else:
+        for source in sources:
+            location = source.path
+            if source.start_line is not None:
+                location += f":{source.start_line}-{source.end_line or source.start_line}"
+            lines.append(f"- {location}：{snippet(source.text, limit=240)}")
+    if state.get("context_budget_exhausted"):
+        lines.append("探索预算已耗尽；未覆盖到的部分需要下一次任务继续定向读取。")
+    for decision_name in ("review_decision", "repair_review_decision"):
+        decision = state.get(decision_name, {})
+        if decision and not decision.get("approved"):
+            lines.append(
+                "审批未通过："
+                + str(decision.get("feedback") or "未提供补充说明")
+            )
+    artifacts = state.get("artifacts", [])
+    if artifacts:
+        lines.append(f"已生成 {len(artifacts)} 个验证/Diff 产物，可从 artifacts 审阅。")
+    return "\n".join(lines)
 
 
 def approval_required_tools(

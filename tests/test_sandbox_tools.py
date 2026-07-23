@@ -11,7 +11,7 @@ from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 class SandboxToolTests(unittest.TestCase):
     def test_sandbox_tool_specs_mark_writes_and_commands_for_approval(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            registry = create_coding_tool_registry(root_path=Path(temp_dir))
+            registry = create_coding_tool_registry()
             specs = {spec.name: spec for spec in registry.list_specs()}
 
         self.assertEqual(specs["sandbox.write_file"].permission_level, "write_safe")
@@ -28,10 +28,11 @@ class SandboxToolTests(unittest.TestCase):
             root = Path(temp_dir)
             source_file = root / "app.py"
             source_file.write_text("print('old')\n", encoding="utf-8")
-            registry = create_coding_tool_registry(root_path=root)
+            registry = create_coding_tool_registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
                 run_id="run_1",
             )
 
@@ -47,7 +48,10 @@ class SandboxToolTests(unittest.TestCase):
             )
             self.assertTrue(write_result.ok)
             self.assertEqual(source_file.read_text(encoding="utf-8"), "print('old')\n")
-            self.assertIn("agent-sandbox-run-1", write_result.result["workspace"])
+            self.assertIn(
+                "agent-sandbox-sess-1-workspace-main-run-1",
+                write_result.result["workspace"],
+            )
 
             command_result = registry.execute(
                 ToolCall(
@@ -76,10 +80,11 @@ class SandboxToolTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("print('safe')\n", encoding="utf-8")
-            registry = create_coding_tool_registry(root_path=root)
+            registry = create_coding_tool_registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
                 run_id="run_2",
             )
 
@@ -111,10 +116,11 @@ class SandboxToolTests(unittest.TestCase):
             root = Path(temp_dir)
             source_file = root / "app.py"
             source_file.write_text("value = 'old'\n", encoding="utf-8")
-            registry = create_coding_tool_registry(root_path=root)
+            registry = create_coding_tool_registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
                 run_id="run_3",
             )
             patch = (
@@ -145,10 +151,11 @@ class SandboxToolTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("value = 1\n", encoding="utf-8")
-            registry = create_coding_tool_registry(root_path=root)
+            registry = create_coding_tool_registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
                 run_id="run_large_output",
             )
             output_script = "print('x' * 25000)"

@@ -13,11 +13,6 @@ from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 from ai_agent_platform.schemas import AgentRunResponse
 
 
-class EmptyRAGService:
-    def search(self, **_: object) -> list[object]:
-        return []
-
-
 class SuccessfulChangePlanner:
     def __init__(self, command: str) -> None:
         self.command = command
@@ -100,7 +95,8 @@ class AgentChangeLoopTests(unittest.TestCase):
                 conversation_id="sess_1",
                 user_input="修改 app.py 并验证",
                 history=[],
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
             )
             result = runtime.resume(run_id=waiting.run_id, approved=True)
 
@@ -122,9 +118,12 @@ class AgentChangeLoopTests(unittest.TestCase):
             self.assertEqual(
                 [step["node"] for step in result.trace],
                 [
-                    "setup",
+                    "setup_workspace",
+                    "load_project_instructions",
                     "classify_request",
-                    "retrieve_repository_context",
+                    "plan_exploration",
+                    "execute_exploration",
+                    "assess_context",
                     "plan_tools",
                     "review_tool_plan",
                     "inspect_repository",
@@ -148,7 +147,8 @@ class AgentChangeLoopTests(unittest.TestCase):
                 conversation_id="sess_2",
                 user_input="先制造失败再修复 app.py",
                 history=[],
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
             )
             repair_wait = runtime.resume(
                 run_id=initial_wait.run_id,
@@ -194,7 +194,8 @@ class AgentChangeLoopTests(unittest.TestCase):
                 conversation_id="sess_3",
                 user_input="验证失败后拒绝修复",
                 history=[],
-                repository_id="repo_main",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
             )
             repair_wait = runtime.resume(run_id=initial_wait.run_id, approved=True)
             result = runtime.resume(
@@ -220,8 +221,7 @@ class AgentChangeLoopTests(unittest.TestCase):
     @staticmethod
     def _runtime(root: Path, planner: object) -> CodingAgentRuntime:
         return CodingAgentRuntime(
-            rag_service=EmptyRAGService(),
-            tool_registry=create_coding_tool_registry(root_path=root),
+            tool_registry=create_coding_tool_registry(),
             planner=planner,
         )
 

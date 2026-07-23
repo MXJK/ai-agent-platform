@@ -7,15 +7,15 @@ from ai_agent_platform.api.routes import (
     create_chat_router,
     create_health_router,
     create_knowledge_bases_router,
-    create_repositories_router,
     create_sessions_router,
+    create_workspaces_router,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings
 from ai_agent_platform.integrations import LLMClient, RAGService
 from ai_agent_platform.services import (
     AgentRunService,
-    RepositoryIndexingService,
     SessionService,
+    WorkspaceService,
 )
 
 
@@ -24,7 +24,7 @@ def create_api_router(
     llm_client: LLMClient,
     rag_service: RAGService,
     agent_run_service: AgentRunService,
-    repository_indexing_service: RepositoryIndexingService,
+    workspace_service: WorkspaceService,
     settings: Settings,
     metrics: MetricsRegistry,
 ) -> APIRouter:
@@ -37,6 +37,6 @@ def create_api_router(
         create_chat_router(session_service, llm_client, settings, metrics)
     )
     router.include_router(create_agent_runs_router(agent_run_service, settings))
-    router.include_router(create_repositories_router(repository_indexing_service))
+    router.include_router(create_workspaces_router(workspace_service))
     router.include_router(create_knowledge_bases_router(rag_service, llm_client))
     return router

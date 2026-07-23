@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Optional
 
 from ai_agent_platform.integrations.mcp import (
@@ -14,19 +13,16 @@ from ai_agent_platform.tools import register_repository_tools, register_sandbox_
 
 
 def create_coding_tool_registry(
-    root_path: Path | str | None = None,
     mcp_providers: Optional[list[MCPToolProvider]] = None,
     sandbox_mode: str = "local",
     sandbox_docker_image: str = "python:3.11-slim",
     sandbox_command_timeout_seconds: float = 30.0,
-    sandbox_workspace_parent: Path | str | None = None,
+    sandbox_workspace_parent: str | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
-    resolved_root_path = root_path or Path.cwd()
-    register_repository_tools(registry, resolved_root_path)
+    register_repository_tools(registry)
     register_sandbox_tools(
         registry,
-        root_path=resolved_root_path,
         mode=sandbox_mode,
         docker_image=sandbox_docker_image,
         command_timeout_seconds=sandbox_command_timeout_seconds,
@@ -34,11 +30,6 @@ def create_coding_tool_registry(
     )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
-    registry.register(
-        "repository_context_search",
-        repository_context_search_tool,
-        description="Summarize repository RAG retrieval state for answer grounding.",
-    )
     registry.register(
         "file_symbol_locator",
         file_symbol_locator_tool,
@@ -71,22 +62,6 @@ def create_coding_tool_registry(
         description="Suggest focused tests for a requested behavior or fix.",
     )
     return registry
-
-
-def repository_context_search_tool(
-    *,
-    query: str,
-    repository_id: str,
-    citation_count: int,
-    candidate_files: list[str],
-) -> dict[str, Any]:
-    return {
-        "query": query,
-        "repository_id": repository_id,
-        "citation_count": citation_count,
-        "candidate_files": candidate_files,
-        "next_step": "ground the answer in retrieved file chunks and ask for indexing if citations are empty",
-    }
 
 
 def file_symbol_locator_tool(
@@ -149,6 +124,6 @@ def test_designer_tool(*, goal: str, candidate_files: list[str]) -> dict[str, An
         "recommended_tests": [
             "API contract test for /api/v1/agent/runs",
             "runtime unit test for intent routing and planned tools",
-            "RAG-scoped test that proves repository_id isolates code indexes",
+            "workspace isolation test that proves tools cannot cross registered roots",
         ],
     }

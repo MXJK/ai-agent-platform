@@ -19,6 +19,7 @@ from ai_agent_platform.core import (
     log_context,
 )
 from ai_agent_platform.services.session_service import SessionService
+from ai_agent_platform.services.workspace_service import WorkspaceService
 
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,14 @@ class AgentRunService:
         *,
         runtime: CodingAgentRuntime,
         session_service: SessionService,
+        workspace_service: WorkspaceService,
         max_workers: int = 4,
         metrics: MetricsRegistry | None = None,
         task_queue: TaskQueue | None = None,
     ) -> None:
         self._runtime = runtime
         self._session_service = session_service
+        self._workspace_service = workspace_service
         self._metrics = metrics or MetricsRegistry()
         self._owns_task_queue = task_queue is None
         self._task_queue = task_queue or InProcessTaskQueue(
@@ -54,9 +57,10 @@ class AgentRunService:
         *,
         conversation_id: str,
         message: str,
-        repository_id: str,
+        workspace_id: str,
         focus_files: Optional[list[str]] = None,
     ) -> AgentRunRecord:
+        workspace_root = self._workspace_service.resolve_for_run(workspace_id)
         history = self._session_service.list_messages(session_id=conversation_id)
         self._session_service.add_message(
             session_id=conversation_id,
@@ -65,7 +69,8 @@ class AgentRunService:
         )
         record = self._runtime.create_queued_run(
             conversation_id=conversation_id,
-            repository_id=repository_id,
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
         )
         try:
             self._task_queue.submit(
@@ -78,7 +83,7 @@ class AgentRunService:
                     {"role": item.role, "content": item.content}
                     for item in history
                 ],
-                repository_id=repository_id,
+                workspace_id=workspace_id,
                 focus_files=focus_files or [],
             )
         except TaskQueueError as exc:
@@ -151,7 +156,7 @@ class AgentRunService:
         conversation_id: str,
         message: str,
         history: list[dict[str, str]],
-        repository_id: str,
+        workspace_id: str,
         focus_files: list[str],
         broker_redelivered: bool = False,
     ) -> None:
@@ -179,7 +184,7 @@ class AgentRunService:
         with log_context(
             run_id=run_id,
             conversation_id=conversation_id,
-            repository_id=repository_id,
+            workspace_id=record.workspace_id,
         ):
             logger.info("agent run started")
             try:
@@ -188,7 +193,8 @@ class AgentRunService:
                     conversation_id=conversation_id,
                     user_input=message,
                     history=history,
-                    repository_id=repository_id,
+                    workspace_id=record.workspace_id,
+                    workspace_root=record.workspace_root,
                     focus_files=focus_files,
                 )
             except Exception as exc:
@@ -237,7 +243,7 @@ class AgentRunService:
         with log_context(
             run_id=run_id,
             conversation_id=record.conversation_id,
-            repository_id=record.repository_id,
+            workspace_id=record.workspace_id,
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
