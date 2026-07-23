@@ -73,15 +73,32 @@ Run the API:
 .venv/bin/python -m uvicorn ai_agent_platform.main:app --reload
 ```
 
-Open the lightweight frontend console:
+Open the product workspace:
 
 ```text
 http://127.0.0.1:8000/
 ```
 
-The console is served by FastAPI from `ai_agent_platform/static/`. It provides a
-small debug UI for sessions, `POST /api/v1/chat/stream`, coding-agent runs, RAG
-document ingest/ask, and repository indexing.
+The workspace is served directly by FastAPI from `ai_agent_platform/static/`, so
+it does not require a separate Node build or development server. Its primary
+navigation covers streaming chat, coding-agent runs and approval review, RAG
+document ingest/search/ask, repository indexing, session history, and an
+operations view for request diagnostics. Low-frequency user, model, session,
+and repository fields live in the settings dialog; the Inspector can be hidden
+when trace and raw API details are not needed.
+
+Useful frontend interactions:
+
+- press `Enter` to send a chat message and `Shift+Enter` for a new line
+- stop an in-progress SSE response from the chat composer
+- review tool permission, risk, and sanitized arguments before approving an
+  Agent run
+- use the bottom navigation on narrow screens; settings and the Inspector open
+  as overlays so they do not push the primary workflow below the fold
+
+The browser only stores the selected product view and Inspector visibility as
+device-local preferences. API keys, document content, and repository paths are
+not stored by the frontend.
 
 By default, local runs use the fake LLM provider and local deterministic
 embeddings, so the basic API, RAG, and repository indexing flows work without

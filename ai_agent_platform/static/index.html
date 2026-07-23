@@ -3,396 +3,486 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AI Agent Platform — 面向代码、知识库与智能工作流的统一工作台"
+    />
+    <meta name="theme-color" content="#f4f7fb" />
     <title>AI Agent Platform</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <header class="app-header">
-      <div class="brand-block">
-        <h1>AI Agent Platform</h1>
-        <p>面向代码、知识与自动化任务的 AI 工作空间</p>
+    <a class="skip-link" href="#main-workspace">跳到主要内容</a>
+
+    <header class="topbar">
+      <a class="brand" href="#chat" aria-label="AI Agent Platform 首页">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span>
+          <strong>AI Agent Platform</strong>
+          <small>智能研发工作台</small>
+        </span>
+      </a>
+
+      <div class="topbar-context" aria-label="当前工作上下文">
+        <span class="context-label">当前会话</span>
+        <strong id="header-session-id">尚未创建</strong>
       </div>
-      <div class="context-bar" aria-label="Current workspace context">
-        <div class="context-chip">
-          <span>Session</span>
-          <strong id="context-session">Not selected</strong>
+
+      <div class="topbar-actions">
+        <div id="health-pill" class="status-pill neutral" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>连接中</span>
         </div>
-        <div class="context-chip">
-          <span>Model</span>
-          <strong id="context-provider">Default</strong>
-        </div>
-        <div class="context-chip">
-          <span>Repository</span>
-          <strong id="context-repository">repo_main</strong>
-        </div>
-      </div>
-      <div class="header-actions">
-        <span id="health-pill" class="pill">checking</span>
-        <button id="refresh-health-btn" class="ghost-button">刷新</button>
-        <button id="settings-btn" class="secondary-button" aria-haspopup="dialog">设置</button>
-        <button id="toggle-inspector-btn" class="secondary-button" aria-expanded="true">Inspector</button>
+        <button id="create-session-btn" class="button secondary desktop-action" type="button">
+          <span aria-hidden="true">＋</span> 新建会话
+        </button>
+        <button id="open-settings-btn" class="icon-button" type="button" aria-label="打开设置" title="设置">
+          <span aria-hidden="true">⚙</span>
+        </button>
+        <button
+          id="toggle-inspector-btn"
+          class="icon-button"
+          type="button"
+          aria-label="显示运行详情"
+          aria-controls="inspector-panel"
+          aria-expanded="true"
+          title="运行详情"
+        >
+          <span aria-hidden="true">⌁</span>
+        </button>
+        <a class="icon-button" href="/docs" aria-label="打开 API 文档" title="API 文档">↗</a>
       </div>
     </header>
 
-    <main id="app-shell" class="shell">
-      <aside class="panel side-panel navigation-panel">
-        <div class="navigation-heading">
-          <span>Workspace</span>
-          <strong>主要能力</strong>
-        </div>
-        <nav class="tabs" aria-label="Primary navigation">
-          <button class="tab active" data-tab="chat">Chat</button>
-          <button class="tab" data-tab="agent">Agent</button>
-          <button class="tab" data-tab="rag">Knowledge</button>
-          <button class="tab" data-tab="repository">Repository</button>
-          <button class="tab" data-tab="sessions">Sessions</button>
-          <button class="tab" data-tab="overview">Operations</button>
+    <div class="app-shell">
+      <aside class="sidebar" id="primary-sidebar">
+        <nav class="primary-nav" aria-label="主要功能">
+          <button class="nav-item active" type="button" data-view="chat" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">✦</span>
+            <span><strong>智能对话</strong><small>流式模型会话</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="agent">
+            <span class="nav-icon" aria-hidden="true">⌘</span>
+            <span><strong>代码 Agent</strong><small>仓库理解与执行</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="rag">
+            <span class="nav-icon" aria-hidden="true">◫</span>
+            <span><strong>知识库</strong><small>检索与问答</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="repository">
+            <span class="nav-icon" aria-hidden="true">⌗</span>
+            <span><strong>仓库索引</strong><small>同步代码上下文</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="sessions">
+            <span class="nav-icon" aria-hidden="true">☷</span>
+            <span><strong>会话记录</strong><small>历史消息与摘要</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="activity">
+            <span class="nav-icon" aria-hidden="true">◌</span>
+            <span><strong>运行中心</strong><small>指标、请求与诊断</small></span>
+          </button>
         </nav>
-        <div class="navigation-footer">
-          <span>开发与接口</span>
-          <a class="ghost-link" href="/docs">Open API Docs</a>
+
+        <div class="sidebar-context">
+          <div class="context-card-heading">
+            <span>工作上下文</span>
+            <button id="sidebar-settings-btn" class="text-button" type="button">编辑</button>
+          </div>
+          <dl class="context-list">
+            <div><dt>用户</dt><dd id="context-user">demo_user</dd></div>
+            <div><dt>模型</dt><dd id="context-model">默认配置</dd></div>
+            <div><dt>仓库</dt><dd id="context-repository">repo_main</dd></div>
+          </dl>
+          <p id="session-status" class="context-note">创建会话后即可开始工作</p>
         </div>
       </aside>
 
-      <section class="workspace">
-        <header class="workspace-header">
-          <div>
-            <span class="workspace-eyebrow">Current view</span>
-            <h2 id="workspace-title">Chat</h2>
-            <p id="workspace-description">与模型进行流式对话，并沿用当前 Session 上下文。</p>
-          </div>
-        </header>
-
-        <section id="overview-tab" class="panel tab-panel">
-          <div class="section-title">
-            <h2>Diagnostics</h2>
-            <button id="refresh-overview-btn" class="ghost-button">Refresh</button>
-          </div>
-          <div class="metrics-grid">
-            <div class="metric-card">
-              <span>API</span>
-              <strong id="metric-api">checking</strong>
-            </div>
-            <div class="metric-card">
-              <span>Sessions</span>
-              <strong id="metric-sessions">0</strong>
-            </div>
-            <div class="metric-card">
-              <span>Latest run</span>
-              <strong id="metric-run">none</strong>
-            </div>
-            <div class="metric-card">
-              <span>Last request</span>
-              <strong id="metric-request">none</strong>
-            </div>
-          </div>
-          <div class="coverage-grid">
-            <div class="coverage-item ok">Health</div>
-            <div class="coverage-item ok">Sessions</div>
-            <div class="coverage-item ok">Messages</div>
-            <div class="coverage-item ok">SSE Chat</div>
-            <div class="coverage-item ok">Agent Runs</div>
-            <div class="coverage-item ok">Agent Events</div>
-            <div class="coverage-item ok">RAG Ingest</div>
-            <div class="coverage-item ok">RAG Search</div>
-            <div class="coverage-item ok">RAG Ask</div>
-            <div class="coverage-item ok">Repo Index</div>
-          </div>
-          <div class="section-title compact-title">
-            <h2>Request Log</h2>
-            <button id="clear-log-btn" class="ghost-button">Clear log</button>
-          </div>
-          <div id="request-log" class="data-list"></div>
-        </section>
-
-        <section id="sessions-tab" class="panel tab-panel">
-          <div class="section-title">
-            <h2>Sessions & Messages</h2>
-            <button id="refresh-messages-btn" class="ghost-button">Refresh messages</button>
-          </div>
-          <div class="split-grid">
+      <main id="main-workspace" class="workspace" tabindex="-1">
+        <section id="chat-view" class="view-panel active" data-view-panel="chat" aria-labelledby="chat-title">
+          <header class="view-header">
             <div>
-              <div class="mini-title">Available sessions</div>
-              <div id="sessions-list" class="data-list"></div>
+              <p class="eyebrow">AI Workspace</p>
+              <h1 id="chat-title">今天想一起解决什么？</h1>
+              <p>在一个连续会话里讨论问题、梳理思路，并观察模型的实时响应。</p>
             </div>
-            <div>
-              <div class="mini-title">Active session</div>
-              <div id="session-summary" class="summary-box"></div>
-              <div id="messages-list" class="message-list"></div>
+            <span id="chat-meta" class="meta-badge">等待输入</span>
+          </header>
+
+          <div id="chat-output" class="conversation" aria-live="polite" aria-label="对话内容">
+            <div class="welcome-state">
+              <div class="welcome-orbit" aria-hidden="true"><span>✦</span></div>
+              <h2>从一个具体问题开始</h2>
+              <p>我可以解释代码、分析架构，也可以结合已索引的知识帮助你推进工作。</p>
+              <div class="prompt-grid" aria-label="推荐问题">
+                <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
+                  <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
+                </button>
+                <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理">
+                  <span>分析实现</span><strong>检查 SSE 流式输出</strong>
+                </button>
+                <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略">
+                  <span>规划质量</span><strong>设计可靠的测试策略</strong>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="composer-wrap">
+            <div class="composer">
+              <label class="sr-only" for="chat-message-input">输入消息</label>
+              <textarea
+                id="chat-message-input"
+                rows="3"
+                maxlength="8000"
+                placeholder="输入消息，Enter 发送，Shift + Enter 换行…"
+              ></textarea>
+              <div class="composer-footer">
+                <div class="composer-hints">
+                  <span id="composer-context">默认模型</span>
+                  <span>内容上限 8,000 字符</span>
+                </div>
+                <div class="button-row">
+                  <button id="stop-chat-btn" class="button ghost hidden" type="button">停止</button>
+                  <button id="send-chat-btn" class="button primary" type="button">
+                    发送 <span aria-hidden="true">↑</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section id="chat-tab" class="panel tab-panel active">
-          <div class="section-title">
-            <h2>SSE Chat</h2>
-            <button id="clear-chat-btn" class="ghost-button">Clear</button>
+        <section id="agent-view" class="view-panel" data-view-panel="agent" aria-labelledby="agent-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Repository Agent</p>
+              <h1 id="agent-title">代码 Agent</h1>
+              <p>理解仓库、规划改动，并在执行前把风险交给你审阅。</p>
+            </div>
+            <span id="agent-status" class="status-pill neutral">尚未运行</span>
+          </header>
+
+          <div class="content-grid agent-grid">
+            <div class="stack">
+              <article class="surface task-card">
+                <div class="surface-heading">
+                  <div><span class="step-kicker">01 · 任务</span><h2>描述你希望 Agent 完成的工作</h2></div>
+                  <span id="agent-repository-badge" class="meta-badge">repo_main</span>
+                </div>
+                <label for="agent-message-input">任务目标</label>
+                <textarea
+                  id="agent-message-input"
+                  rows="6"
+                  maxlength="8000"
+                  placeholder="例如：解释某个调用链、定位错误，或规划一次安全的代码改动"
+                >解释 ai_agent_platform/api/router.py 的职责和主要调用链</textarea>
+                <label for="focus-files-input">重点文件 <span>可选，逗号分隔</span></label>
+                <input id="focus-files-input" value="ai_agent_platform/api/router.py" />
+                <div class="surface-actions">
+                  <p>Agent 的可写操作会暂停并等待你的审批。</p>
+                  <button id="run-agent-btn" class="button primary" type="button">开始运行</button>
+                </div>
+              </article>
+
+              <article id="approval-card" class="surface approval-card hidden" aria-live="assertive">
+                <div class="approval-icon" aria-hidden="true">!</div>
+                <div class="approval-content">
+                  <p class="eyebrow">需要人工审批</p>
+                  <h2>Agent 已暂停，等待你检查执行计划</h2>
+                  <p id="approval-reason">一个或多个工具需要在执行前确认。</p>
+                  <div id="approval-tools" class="approval-tools"></div>
+                  <label for="approval-feedback-input">审批反馈 <span>可选</span></label>
+                  <textarea id="approval-feedback-input" rows="3" maxlength="4000" placeholder="补充限制、修正方向，或说明拒绝原因"></textarea>
+                  <div class="button-row approval-actions">
+                    <button id="reject-run-btn" class="button danger" type="button">拒绝执行</button>
+                    <button id="approve-run-btn" class="button primary" type="button">确认并继续</button>
+                  </div>
+                </div>
+              </article>
+
+              <article class="surface result-card">
+                <div class="surface-heading">
+                  <div><span class="step-kicker">02 · 结果</span><h2>Agent 回答</h2></div>
+                  <button id="refresh-run-btn" class="button ghost" type="button">刷新状态</button>
+                </div>
+                <div id="agent-answer" class="rich-output empty-output">运行 Agent 后，结果会显示在这里。</div>
+                <div id="agent-artifacts" class="artifact-list"></div>
+              </article>
+            </div>
+
+            <aside class="stack">
+              <article class="surface">
+                <div class="surface-heading"><h2>运行进度</h2><button id="refresh-events-btn" class="text-button" type="button">刷新</button></div>
+                <div id="agent-events" class="timeline"><div class="empty-state">暂无运行事件</div></div>
+              </article>
+              <article class="surface">
+                <div class="surface-heading"><h2>运行指标</h2></div>
+                <dl id="agent-metrics" class="metric-list">
+                  <div><dt>耗时</dt><dd>—</dd></div>
+                  <div><dt>节点</dt><dd>—</dd></div>
+                  <div><dt>工具调用</dt><dd>—</dd></div>
+                  <div><dt>变更文件</dt><dd>—</dd></div>
+                </dl>
+              </article>
+            </aside>
           </div>
-          <textarea
-            id="chat-message-input"
-            rows="5"
-            placeholder="输入一条消息，测试 /api/v1/chat/stream"
-            aria-keyshortcuts="Control+Enter Meta+Enter"
-          >解释一下这个项目里的 SSE 流式输出是怎么工作的</textarea>
-          <div class="toolbar">
-            <button id="send-chat-btn" class="primary-button" aria-controls="chat-output">Send stream</button>
-            <button id="stop-chat-btn" class="danger-button" aria-controls="chat-output" hidden disabled>Stop</button>
-            <span id="chat-meta" class="muted" role="status" aria-live="polite">Idle</span>
-            <span class="shortcut-hint">⌘/Ctrl + Enter 发送 · Esc 停止</span>
-          </div>
-          <div
-            id="chat-output"
-            class="answer-box markdown-output"
-            role="log"
-            aria-live="polite"
-            aria-busy="false"
-          ></div>
         </section>
 
-        <section id="agent-tab" class="panel tab-panel">
-          <div class="section-title">
-            <h2>Coding Agent</h2>
-            <div class="button-row">
-              <button id="refresh-run-btn" class="ghost-button">Refresh run</button>
-              <button id="refresh-events-btn" class="ghost-button">Events</button>
-            </div>
-          </div>
-          <textarea
-            id="agent-message-input"
-            rows="5"
-            placeholder="输入仓库问答或改动规划问题"
-          >解释 ai_agent_platform/api/router.py 里 chat_stream 的调用链</textarea>
-          <label>
-            Focus files
-            <input id="focus-files-input" value="ai_agent_platform/api/router.py" />
-          </label>
-          <div class="toolbar">
-            <button id="run-agent-btn" class="primary-button">Run agent</button>
-            <button id="approve-run-btn" class="secondary-button" disabled>Approve</button>
-            <button id="reject-run-btn" class="secondary-button" disabled>Reject</button>
-            <span id="agent-status" class="muted" role="status" aria-live="polite">Idle</span>
-          </div>
-          <section id="agent-approval-panel" class="approval-panel" aria-labelledby="agent-approval-title" hidden>
-            <div class="section-title compact-title">
-              <h3 id="agent-approval-title">Approval required</h3>
-            </div>
-            <div id="agent-approval-tools" class="approval-tool-list"></div>
-          </section>
-          <div class="split-grid">
+        <section id="rag-view" class="view-panel" data-view-panel="rag" aria-labelledby="rag-title" hidden>
+          <header class="view-header compact">
             <div>
-              <div class="mini-title">Answer</div>
-              <div id="agent-answer" class="answer-box"></div>
+              <p class="eyebrow">Grounded Knowledge</p>
+              <h1 id="rag-title">知识库</h1>
+              <p>录入可信资料，用检索结果支撑每一次回答。</p>
             </div>
-            <div>
-              <div class="mini-title">Events</div>
-              <div id="agent-events" class="data-list"></div>
-            </div>
-          </div>
-        </section>
+            <span id="rag-status" class="meta-badge">等待操作</span>
+          </header>
 
-        <section id="rag-tab" class="panel tab-panel">
-          <div class="section-title">
-            <h2>Knowledge Base</h2>
-          </div>
-          <div class="two-column">
-            <label>
-              Knowledge Base ID
-              <input id="kb-id-input" value="demo_kb" />
-            </label>
-            <label>
-              Filename
-              <input id="document-filename-input" value="notes.md" />
-            </label>
-          </div>
-          <textarea
-            id="document-content-input"
-            rows="6"
-            placeholder="Paste markdown, txt, py, json, yaml, or other supported text"
-          ># 项目说明
+          <div class="content-grid equal-grid">
+            <article class="surface">
+              <div class="surface-heading"><div><span class="step-kicker">01 · 录入</span><h2>添加知识</h2></div></div>
+              <div class="field-grid">
+                <label for="kb-id-input">知识库 ID<input id="kb-id-input" value="demo_kb" /></label>
+                <label for="document-filename-input">文件名<input id="document-filename-input" value="notes.md" /></label>
+              </div>
+              <label for="document-content-input">文档内容</label>
+              <textarea
+                id="document-content-input"
+                rows="13"
+                placeholder="粘贴 Markdown、文本、代码或配置内容"
+              ># 项目说明
 AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Agent trace 和仓库索引能力。</textarea>
-          <div class="toolbar">
-            <button id="ingest-doc-btn" class="secondary-button">Ingest document</button>
-            <span id="rag-status" class="muted" role="status" aria-live="polite">Idle</span>
+              <div class="surface-actions">
+                <p>内容会按照当前 Embedding 配置进行向量化。</p>
+                <button id="ingest-doc-btn" class="button secondary" type="button">录入文档</button>
+              </div>
+            </article>
+
+            <article class="surface">
+              <div class="surface-heading"><div><span class="step-kicker">02 · 提问</span><h2>检索并生成回答</h2></div></div>
+              <label for="rag-question-input">问题或搜索词</label>
+              <textarea id="rag-question-input" rows="6" maxlength="4000">这个项目主要包含哪些后端能力？</textarea>
+              <details class="advanced-options">
+                <summary>检索参数</summary>
+                <div class="field-grid">
+                  <label for="rag-limit-input">返回数量<input id="rag-limit-input" type="number" min="1" max="20" value="5" /></label>
+                  <label for="rag-recall-limit-input">召回数量<input id="rag-recall-limit-input" type="number" min="1" max="100" value="10" /></label>
+                </div>
+              </details>
+              <div class="button-row rag-actions">
+                <button id="search-rag-btn" class="button secondary" type="button">仅检索</button>
+                <button id="ask-rag-btn" class="button primary" type="button">生成回答</button>
+              </div>
+              <div id="rag-answer" class="rich-output empty-output">检索结果和回答会显示在这里。</div>
+              <div id="rag-citations" class="citation-list"></div>
+            </article>
           </div>
-          <div class="two-column">
-            <label>
-              Query / Question
-              <textarea id="rag-question-input" rows="4">这个项目主要包含哪些后端能力？</textarea>
-            </label>
-            <div class="two-column nested-inputs">
-              <label>
-                Limit
-                <input id="rag-limit-input" type="number" min="1" max="20" value="5" />
-              </label>
-              <label>
-                Recall limit
-                <input id="rag-recall-limit-input" type="number" min="1" max="100" value="10" />
-              </label>
-            </div>
-          </div>
-          <div class="toolbar">
-            <button id="search-rag-btn" class="secondary-button">Search RAG</button>
-            <button id="ask-rag-btn" class="primary-button">Ask RAG</button>
-          </div>
-          <div id="rag-answer" class="answer-box"></div>
         </section>
 
-        <section id="repository-tab" class="panel tab-panel">
-          <div class="section-title">
-            <h2>Repository Index Result</h2>
+        <section id="repository-view" class="view-panel" data-view-panel="repository" aria-labelledby="repository-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Repository Context</p>
+              <h1 id="repository-title">仓库索引</h1>
+              <p>把本地代码转换为可检索上下文，供 Agent 和知识问答使用。</p>
+            </div>
+            <button id="open-repository-settings-btn" class="button secondary" type="button">配置仓库</button>
+          </header>
+
+          <article class="surface repository-hero">
+            <div>
+              <span class="repository-icon" aria-hidden="true">⌗</span>
+              <p class="eyebrow">当前仓库</p>
+              <h2 id="repository-name">repo_main</h2>
+              <code id="repository-path-display">尚未配置根路径</code>
+            </div>
+            <button id="index-repo-btn" class="button primary" type="button">开始索引</button>
+          </article>
+
+          <div id="repository-progress" class="progress-card hidden" role="status" aria-live="polite">
+            <div class="progress-heading"><strong id="repository-progress-label">准备索引…</strong><span id="repository-progress-count">0 文件</span></div>
+            <div class="progress-track"><span id="repository-progress-bar"></span></div>
           </div>
-          <div id="repository-result" class="summary-box"></div>
-          <div class="split-grid">
-            <div>
-              <div class="mini-title">Indexed paths</div>
-              <div id="indexed-paths" class="data-list"></div>
-            </div>
-            <div>
-              <div class="mini-title">Skipped / failed paths</div>
-              <div id="skipped-paths" class="data-list"></div>
-            </div>
+
+          <div class="content-grid equal-grid">
+            <article class="surface">
+              <div class="surface-heading"><h2>索引摘要</h2></div>
+              <dl id="repository-result" class="metric-list repository-metrics">
+                <div><dt>状态</dt><dd>尚未运行</dd></div>
+                <div><dt>扫描</dt><dd>—</dd></div>
+                <div><dt>已索引</dt><dd>—</dd></div>
+                <div><dt>跳过 / 失败</dt><dd>—</dd></div>
+              </dl>
+            </article>
+            <article class="surface">
+              <div class="surface-heading"><h2>文件明细</h2></div>
+              <div class="path-columns">
+                <div><h3>已索引</h3><div id="indexed-paths" class="path-list"><div class="empty-state">暂无文件</div></div></div>
+                <div><h3>跳过或失败</h3><div id="skipped-paths" class="path-list"><div class="empty-state">暂无文件</div></div></div>
+              </div>
+            </article>
           </div>
         </section>
-      </section>
 
-      <aside id="detail-panel" class="panel detail-panel" aria-label="Inspector">
-        <div class="section-title">
-          <div>
-            <span class="workspace-eyebrow">Observability</span>
-            <h2>Inspector</h2>
+        <section id="sessions-view" class="view-panel" data-view-panel="sessions" aria-labelledby="sessions-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Conversation Memory</p>
+              <h1 id="sessions-title">会话记录</h1>
+              <p>浏览当前运行实例中的会话和消息。</p>
+            </div>
+            <div class="button-row">
+              <button id="list-sessions-btn" class="button ghost" type="button">刷新</button>
+              <button id="sessions-create-btn" class="button primary" type="button">新建会话</button>
+            </div>
+          </header>
+
+          <div class="content-grid session-grid">
+            <article class="surface">
+              <div class="surface-heading"><h2>会话</h2><span id="sessions-count" class="meta-badge">0</span></div>
+              <div id="sessions-list" class="session-list"><div class="empty-state">暂无会话</div></div>
+            </article>
+            <article class="surface session-detail">
+              <div class="surface-heading">
+                <h2>消息详情</h2>
+                <div class="button-row">
+                  <button id="summary-session-btn" class="text-button" type="button">摘要</button>
+                  <button id="refresh-messages-btn" class="text-button" type="button">刷新</button>
+                </div>
+              </div>
+              <div id="session-summary" class="session-summary"><div class="empty-state">选择一个会话查看详情</div></div>
+              <div id="messages-list" class="message-list"></div>
+              <details class="developer-message">
+                <summary>添加测试消息</summary>
+                <div class="field-grid">
+                  <label for="message-role-input">角色
+                    <select id="message-role-input">
+                      <option value="user">user</option>
+                      <option value="assistant">assistant</option>
+                      <option value="system">system</option>
+                      <option value="tool">tool</option>
+                    </select>
+                  </label>
+                  <label class="check-field" for="message-run-agent-input">
+                    <input id="message-run-agent-input" type="checkbox" /> 运行旧版 Agent
+                  </label>
+                </div>
+                <label for="message-content-input">消息内容</label>
+                <textarea id="message-content-input" rows="3">调试消息：请记录当前会话状态</textarea>
+                <button id="add-message-btn" class="button secondary" type="button">添加消息</button>
+              </details>
+            </article>
           </div>
-          <div class="button-row">
-            <button id="clear-detail-btn" class="ghost-button">Clear</button>
-            <button id="close-inspector-btn" class="icon-text-button" aria-label="Close Inspector">×</button>
+        </section>
+
+        <section id="activity-view" class="view-panel" data-view-panel="activity" aria-labelledby="activity-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h1 id="activity-title">运行中心</h1>
+              <p>观察本地服务状态、最近请求与任务运行情况。</p>
+            </div>
+            <button id="refresh-overview-btn" class="button secondary" type="button">刷新数据</button>
+          </header>
+
+          <div class="metrics-grid">
+            <article class="metric-card"><span>API 状态</span><strong id="metric-api">连接中</strong><small>应用服务健康度</small></article>
+            <article class="metric-card"><span>会话数量</span><strong id="metric-sessions">0</strong><small>当前实例内存记录</small></article>
+            <article class="metric-card"><span>最新 Agent</span><strong id="metric-run">暂无</strong><small>最近一次运行状态</small></article>
+            <article class="metric-card"><span>最近请求</span><strong id="metric-request">暂无</strong><small>状态码与耗时</small></article>
           </div>
+
+          <article class="surface request-surface">
+            <div class="surface-heading">
+              <div><h2>请求日志</h2><p>仅保留当前浏览器会话中的最近 50 条记录。</p></div>
+              <button id="clear-log-btn" class="text-button" type="button">清空</button>
+            </div>
+            <div id="request-log" class="request-list"><div class="empty-state">暂无请求</div></div>
+          </article>
+        </section>
+      </main>
+
+      <aside id="inspector-panel" class="inspector" aria-label="运行详情">
+        <header class="inspector-header">
+          <div><p class="eyebrow">Inspector</p><h2>运行详情</h2></div>
+          <button id="close-inspector-btn" class="icon-button small" type="button" aria-label="关闭运行详情">×</button>
+        </header>
+        <div class="inspector-tabs" role="tablist" aria-label="详情类型">
+          <button id="trace-tab" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="trace-panel">执行轨迹</button>
+          <button id="raw-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="raw-panel">原始数据</button>
         </div>
-        <div class="mini-title">Trace</div>
-        <div id="trace-list" class="trace-list"></div>
-        <div class="section-title compact-title">
-          <div class="mini-title">Raw response</div>
-        </div>
-        <pre id="raw-output" class="raw-output"></pre>
+        <section id="trace-panel" class="inspector-content" role="tabpanel" aria-labelledby="trace-tab">
+          <div id="trace-list" class="trace-list"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
+        </section>
+        <section id="raw-panel" class="inspector-content" role="tabpanel" aria-labelledby="raw-tab" hidden>
+          <pre id="raw-output" class="raw-output">等待响应…</pre>
+        </section>
+        <footer class="inspector-footer">
+          <span id="last-request-id">Request ID：—</span>
+          <button id="clear-detail-btn" class="text-button" type="button">清空详情</button>
+        </footer>
       </aside>
-    </main>
+    </div>
 
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
-      <div class="settings-shell">
-        <header class="settings-header">
-          <div>
-            <span class="workspace-eyebrow">Workspace configuration</span>
-            <h2 id="settings-title">设置</h2>
-            <p>集中管理当前会话、模型和仓库上下文。</p>
-          </div>
-          <button id="close-settings-btn" class="icon-text-button" aria-label="Close settings">×</button>
+      <form method="dialog" class="settings-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>配置会话、模型和仓库上下文。密钥始终只从服务端环境读取。</p></div>
+          <button id="close-settings-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭设置">×</button>
         </header>
 
-        <div class="settings-grid">
-          <section class="settings-card">
-            <div class="section-title">
-              <h3>Session</h3>
-              <button id="create-session-btn" class="secondary-button" type="button">New session</button>
+        <div class="settings-body">
+          <section class="settings-section">
+            <div class="settings-section-heading"><span>01</span><div><h3>会话</h3><p>标识当前用户和正在使用的会话。</p></div></div>
+            <div class="field-grid">
+              <label for="user-id-input">用户 ID<input id="user-id-input" value="demo_user" autocomplete="off" /></label>
+              <label for="conversation-id-input">会话 ID<input id="conversation-id-input" placeholder="留空时自动创建" autocomplete="off" /></label>
             </div>
-            <label>
-              User ID
-              <input id="user-id-input" value="demo_user" autocomplete="off" />
-            </label>
-            <label>
-              Conversation ID
-              <input id="conversation-id-input" placeholder="Create, paste, or select session id" />
-            </label>
-            <div class="button-row">
-              <button id="load-session-btn" class="secondary-button" type="button">Load</button>
-              <button id="list-sessions-btn" class="secondary-button" type="button">Show sessions</button>
-              <button id="summary-session-btn" class="ghost-button" type="button">Refresh summary</button>
-            </div>
-            <div id="session-status" class="muted" role="status" aria-live="polite">No session yet</div>
+            <button id="load-session-btn" class="button ghost" type="button">加载指定会话</button>
           </section>
 
-          <section class="settings-card">
-            <div class="section-title">
-              <h3>Model</h3>
-            </div>
-            <label>
-              Provider
-              <select id="provider-input">
-                <option value="">Default</option>
-                <option value="fake">fake</option>
-                <option value="openai">openai</option>
-                <option value="anthropic">anthropic</option>
-                <option value="google">google</option>
-              </select>
-            </label>
-            <label>
-              Model
-              <input id="model-input" placeholder="Default model" />
-            </label>
-            <p class="settings-note">敏感凭据仍由服务端环境变量管理，不会保存在浏览器中。</p>
-          </section>
-
-          <section class="settings-card settings-card-wide">
-            <div class="section-title">
-              <h3>Repository</h3>
-              <button id="index-repo-btn" class="primary-button" type="button">Index repository</button>
-            </div>
-            <div class="two-column">
-              <label>
-                Repository ID
-                <input id="repository-id-input" value="repo_main" />
-              </label>
-              <label>
-                Root path
-                <input id="repository-root-input" placeholder="/path/to/local/repo" />
-              </label>
-            </div>
-            <div class="settings-pattern-grid">
-              <label>
-                Include patterns
-                <input id="include-patterns-input" value="**/*.py, **/*.md" />
-              </label>
-              <label>
-                Exclude patterns
-                <input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" />
-              </label>
-              <label>
-                Max file size
-                <input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" />
-              </label>
-            </div>
-          </section>
-
-          <details class="settings-card settings-card-wide advanced-settings">
-            <summary>Advanced session message tool</summary>
-            <div class="advanced-settings-body">
-              <label>
-                Role
-                <select id="message-role-input">
-                  <option value="user">user</option>
-                  <option value="assistant">assistant</option>
-                  <option value="system">system</option>
-                  <option value="tool">tool</option>
+          <section class="settings-section">
+            <div class="settings-section-heading"><span>02</span><div><h3>模型</h3><p>留空时使用服务端默认配置。</p></div></div>
+            <div class="field-grid">
+              <label for="provider-input">Provider
+                <select id="provider-input">
+                  <option value="">服务端默认</option>
+                  <option value="fake">fake</option>
+                  <option value="openai">openai</option>
+                  <option value="anthropic">anthropic</option>
+                  <option value="google">google</option>
                 </select>
               </label>
-              <label class="check-label">
-                <input id="message-run-agent-input" type="checkbox" />
-                Run legacy agent
-              </label>
-              <label>
-                Message content
-                <textarea id="message-content-input" rows="4">调试消息：请记录当前会话状态</textarea>
-              </label>
-              <button id="add-message-btn" class="secondary-button" type="button">Add message</button>
+              <label for="model-input">模型名称<input id="model-input" placeholder="服务端默认模型" autocomplete="off" /></label>
             </div>
-          </details>
+            <p class="privacy-note"><span aria-hidden="true">i</span> 当前页面不会读取或保存任何模型 API Key。</p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-heading"><span>03</span><div><h3>仓库</h3><p>路径相对于运行 FastAPI 的机器。</p></div></div>
+            <div class="field-grid">
+              <label for="repository-id-input">仓库 ID<input id="repository-id-input" value="repo_main" /></label>
+              <label for="repository-root-input">根路径<input id="repository-root-input" placeholder="/path/to/local/repository" autocomplete="off" /></label>
+            </div>
+            <div class="field-grid">
+              <label for="include-patterns-input">包含规则<input id="include-patterns-input" value="**/*.py, **/*.md" /></label>
+              <label for="exclude-patterns-input">排除规则<input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" /></label>
+            </div>
+            <label for="max-file-size-input">最大文件大小（字节）<input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" /></label>
+          </section>
         </div>
 
-        <footer class="settings-footer">
-          <span>配置仅作用于当前浏览器中的工作上下文。</span>
-          <button id="done-settings-btn" class="primary-button" type="button">完成</button>
+        <footer class="dialog-footer">
+          <p>界面偏好会保存在当前设备；仓库路径和内容不会保存。</p>
+          <div class="button-row">
+            <button class="button ghost" type="submit" value="cancel">取消</button>
+            <button id="save-settings-btn" class="button primary" type="button">保存设置</button>
+          </div>
         </footer>
-      </div>
+      </form>
     </dialog>
 
-    <div id="toast-region" class="toast-region" aria-live="polite" aria-label="Notifications"></div>
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
     <script src="/static/app.js" defer></script>
   </body>

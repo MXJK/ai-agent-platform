@@ -27,8 +27,8 @@
 - [x] 首页默认呈现可直接使用的 Chat 工作区，主要产品能力可在一级导航中到达。
 - [x] 用户、模型、会话和仓库配置集中管理，并显示当前上下文摘要。
 - [x] SSE Chat 支持流式状态、取消、错误反馈和安全的 Markdown/代码呈现。
-- [ ] Agent 页面展示运行状态、事件、指标及详细的审批风险/参数信息。
-- [ ] RAG 搜索/问答以结构化引用卡片呈现，仓库索引显示清晰的进度与结果。
+- [x] Agent 页面展示运行状态、事件、指标及详细的审批风险/参数信息。
+- [x] RAG 搜索/问答以结构化引用卡片呈现，仓库索引显示清晰的进度与结果。
 - [x] 页面在 1024px 及以上桌面宽度下布局稳定，导航、设置和 Inspector 可正常使用。
 - [x] 基础键盘操作、焦点样式、ARIA 状态和 reduced-motion 偏好得到支持。
 - [x] Google provider 可通过 Chat 请求模型校验。
@@ -50,6 +50,7 @@
 - 阶段三采用浏览器原生 `AbortController` 中止 SSE 请求；停止后保留已接收的部分内容，并将取消记录为中性 `ABORTED` 请求而非失败。
 - 安全富文本只支持受控的标题、段落、列表、引用、加粗、行内代码和围栏代码块；所有模型文本先经过 HTML 转义，渲染器不接受原始 HTML、脚本或事件属性。
 - 统一反馈使用页面级 Toast 区域；Chat 支持 `Ctrl/Cmd + Enter` 发送和 `Esc` 停止，并补充 `aria-busy`、焦点轮廓及 `prefers-reduced-motion`。
+- PR #3 冲突解决以已合并到 `origin/main` 的完整产品化工作区为前端基线；该版本是本地三个阶段的功能超集，并额外包含 Agent 指标、Artifacts、RAG 引用卡、仓库索引进度和本地界面偏好。冲突解决未用本地旧版覆盖远端完整实现。
 
 ## Verification
 
@@ -58,7 +59,7 @@
 - `node --check ai_agent_platform/static/app.js`：通过。
 - `git diff --check`：通过。
 - 真实浏览器主流程：会话创建/加载、消息写入、SSE Chat、Agent 只读运行、RAG 导入/搜索/问答、仓库索引均可完成；测试 Agent 变更请求已通过拒绝审批收尾，未修改源码。
-- 产品契约验收：仍未完成。首页仍为 Overview Debug Console；尚无设置界面、停止生成、Toast、Markdown 渲染、结构化引用卡、Inspector 浮层或本地偏好。
+- 产品契约验收：完成。默认 Chat、集中设置、SSE Stop、Toast、安全 Markdown、结构化引用卡、Inspector、本地界面偏好、Agent 指标和仓库索引进度均已在最终合并树中实现。
 - 阶段一 Agent 审批验收：通过。变更请求只显示 `change_planner` 一张审批卡，包含 `write_safe`、provider、风险说明和参数摘要；点击拒绝后按钮立即禁用，并自动轮询至 `completed`，无需手动刷新。
 - 阶段一错误体验验收：通过。不存在的会话只请求一次主资源，页面显示 `Session not found` 并清空旧摘要；空 Chat 显示 `Enter a message` 和 `Message cannot be empty.`。
 - Google Chat 契约验收：通过。`ChatStreamRequest` 接受 `google`，新增模型契约测试；浏览器回归未调用真实 Google 服务。
@@ -71,8 +72,9 @@
 - 阶段三键盘与反馈验收：`Ctrl+Enter` 完成 Session 自动创建和 Chat 发送；空消息显示行内错误与 `role=alert` Toast；完成响应显示成功 Toast。
 - 阶段三 1024×800 浏览器验收：Chat 工具栏宽度与滚动宽度均为 750px，快捷键提示、Send 和状态无溢出；页面横向溢出为 0。
 - 延迟取消测试第一次启动包装进程时未显式覆盖本地默认 provider，页面在收到 Google `meta` 后立即通过 Stop 中止，未收到模型 delta、usage 或 done；随后关闭该进程并以 `LLM_PROVIDER=fake` 重新完成全部取消验收。
+- PR #3 冲突解决后完整验证：`.venv/bin/python -m pytest -q` 为 83 passed、1 warning；compileall、`node --check ai_agent_platform/static/app.js` 和 staged diff check 均通过。最终树相对 `origin/main` 只新增工作流说明、任务记录、`AGENTS.md` 与 `.gitignore`，没有回退远端前端文件。
 - Go gateway 校验未运行：当前主机没有 `go` 命令；Docker 中 PostgreSQL、Qdrant、Redis 均在运行且 PostgreSQL/Redis 健康。
 
 ## Result
 
-阶段一正确性修复已提交为 `39324a3`，阶段二桌面信息架构已提交为 `c4f1de8`。阶段三 SSE 取消、安全 Markdown/代码呈现、Toast、键盘操作、ARIA 状态、焦点样式与 reduced-motion 已实现并通过自动化及真实浏览器验收。整体任务保持 active；下一阶段增强 Agent 运行指标与 RAG 结构化引用卡，并继续改善仓库索引进度。未执行部署、发布或外部环境修改。
+阶段一正确性修复、阶段二桌面信息架构和阶段三流式交互增强均已完成。PR #3 冲突已采用远端完整产品化实现解决，所有验收条件满足，任务状态可关闭。最终功能包含默认 Chat、集中设置、可折叠 Inspector、SSE 取消、安全 Markdown、统一反馈、Agent 指标与审批风险、RAG 引用卡、仓库进度和桌面可访问性。未执行部署、发布或迁移。
