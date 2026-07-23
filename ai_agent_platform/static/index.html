@@ -3,125 +3,67 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Agent Platform Debug Console</title>
+    <title>AI Agent Platform</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <header class="app-header">
-      <div>
+      <div class="brand-block">
         <h1>AI Agent Platform</h1>
-        <p>Debug console for sessions, streaming, agent runs, RAG, and repository indexing</p>
+        <p>面向代码、知识与自动化任务的 AI 工作空间</p>
+      </div>
+      <div class="context-bar" aria-label="Current workspace context">
+        <div class="context-chip">
+          <span>Session</span>
+          <strong id="context-session">Not selected</strong>
+        </div>
+        <div class="context-chip">
+          <span>Model</span>
+          <strong id="context-provider">Default</strong>
+        </div>
+        <div class="context-chip">
+          <span>Repository</span>
+          <strong id="context-repository">repo_main</strong>
+        </div>
       </div>
       <div class="header-actions">
         <span id="health-pill" class="pill">checking</span>
-        <button id="refresh-health-btn" class="ghost-button">Refresh</button>
-        <a class="ghost-link" href="/docs">API Docs</a>
+        <button id="refresh-health-btn" class="ghost-button">刷新</button>
+        <button id="settings-btn" class="secondary-button" aria-haspopup="dialog">设置</button>
+        <button id="toggle-inspector-btn" class="secondary-button" aria-expanded="true">Inspector</button>
       </div>
     </header>
 
-    <main class="shell">
-      <aside class="panel side-panel">
-        <section class="section">
-          <div class="section-title">
-            <h2>Session</h2>
-            <button id="create-session-btn" class="icon-button" title="Create session">+</button>
-          </div>
-          <label>
-            User ID
-            <input id="user-id-input" value="demo_user" autocomplete="off" />
-          </label>
-          <label>
-            Conversation ID
-            <input id="conversation-id-input" placeholder="Create, paste, or select session id" />
-          </label>
-          <div class="button-row">
-            <button id="load-session-btn" class="secondary-button">Load</button>
-            <button id="list-sessions-btn" class="secondary-button">List</button>
-            <button id="summary-session-btn" class="secondary-button">Summary</button>
-          </div>
-          <div id="session-status" class="muted" role="status" aria-live="polite">No session yet</div>
-        </section>
-
-        <section class="section">
-          <div class="section-title">
-            <h2>Add Message</h2>
-          </div>
-          <label>
-            Role
-            <select id="message-role-input">
-              <option value="user">user</option>
-              <option value="assistant">assistant</option>
-              <option value="system">system</option>
-              <option value="tool">tool</option>
-            </select>
-          </label>
-          <label class="check-label">
-            <input id="message-run-agent-input" type="checkbox" />
-            Run legacy agent
-          </label>
-          <textarea id="message-content-input" rows="4">调试消息：请记录当前会话状态</textarea>
-          <button id="add-message-btn" class="secondary-button">Add message</button>
-        </section>
-
-        <section class="section">
-          <div class="section-title">
-            <h2>Model</h2>
-          </div>
-          <label>
-            Provider
-            <select id="provider-input">
-              <option value="">Default</option>
-              <option value="fake">fake</option>
-              <option value="openai">openai</option>
-              <option value="anthropic">anthropic</option>
-              <option value="google">google</option>
-            </select>
-          </label>
-          <label>
-            Model
-            <input id="model-input" placeholder="Default model" />
-          </label>
-        </section>
-
-        <section class="section">
-          <div class="section-title">
-            <h2>Repository</h2>
-          </div>
-          <label>
-            Repository ID
-            <input id="repository-id-input" value="repo_main" />
-          </label>
-          <label>
-            Root path
-            <input id="repository-root-input" placeholder="/path/to/local/repo" />
-          </label>
-          <label>
-            Include patterns
-            <input id="include-patterns-input" value="**/*.py, **/*.md" />
-          </label>
-          <label>
-            Exclude patterns
-            <input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" />
-          </label>
-          <label>
-            Max file size
-            <input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" />
-          </label>
-          <button id="index-repo-btn" class="secondary-button">Index repository</button>
-        </section>
+    <main id="app-shell" class="shell">
+      <aside class="panel side-panel navigation-panel">
+        <div class="navigation-heading">
+          <span>Workspace</span>
+          <strong>主要能力</strong>
+        </div>
+        <nav class="tabs" aria-label="Primary navigation">
+          <button class="tab active" data-tab="chat">Chat</button>
+          <button class="tab" data-tab="agent">Agent</button>
+          <button class="tab" data-tab="rag">Knowledge</button>
+          <button class="tab" data-tab="repository">Repository</button>
+          <button class="tab" data-tab="sessions">Sessions</button>
+          <button class="tab" data-tab="overview">Operations</button>
+        </nav>
+        <div class="navigation-footer">
+          <span>开发与接口</span>
+          <a class="ghost-link" href="/docs">Open API Docs</a>
+        </div>
       </aside>
 
       <section class="workspace">
-        <nav class="tabs" aria-label="Console modes">
-          <button class="tab active" data-tab="overview">Overview</button>
-          <button class="tab" data-tab="sessions">Sessions</button>
-          <button class="tab" data-tab="chat">Chat stream</button>
-          <button class="tab" data-tab="agent">Agent run</button>
-          <button class="tab" data-tab="rag">RAG</button>
-          <button class="tab" data-tab="repository">Repository</button>
-        </nav>
+        <header class="workspace-header">
+          <div>
+            <span class="workspace-eyebrow">Current view</span>
+            <h2 id="workspace-title">Chat</h2>
+            <p id="workspace-description">与模型进行流式对话，并沿用当前 Session 上下文。</p>
+          </div>
+        </header>
 
-        <section id="overview-tab" class="panel tab-panel active">
+        <section id="overview-tab" class="panel tab-panel">
           <div class="section-title">
             <h2>Diagnostics</h2>
             <button id="refresh-overview-btn" class="ghost-button">Refresh</button>
@@ -181,7 +123,7 @@
           </div>
         </section>
 
-        <section id="chat-tab" class="panel tab-panel">
+        <section id="chat-tab" class="panel tab-panel active">
           <div class="section-title">
             <h2>SSE Chat</h2>
             <button id="clear-chat-btn" class="ghost-button">Clear</button>
@@ -304,18 +246,142 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、RAG、Age
         </section>
       </section>
 
-      <aside class="panel detail-panel">
+      <aside id="detail-panel" class="panel detail-panel" aria-label="Inspector">
         <div class="section-title">
-          <h2>Trace</h2>
-          <button id="clear-detail-btn" class="ghost-button">Clear</button>
+          <div>
+            <span class="workspace-eyebrow">Observability</span>
+            <h2>Inspector</h2>
+          </div>
+          <div class="button-row">
+            <button id="clear-detail-btn" class="ghost-button">Clear</button>
+            <button id="close-inspector-btn" class="icon-text-button" aria-label="Close Inspector">×</button>
+          </div>
         </div>
+        <div class="mini-title">Trace</div>
         <div id="trace-list" class="trace-list"></div>
         <div class="section-title compact-title">
-          <h2>Raw</h2>
+          <div class="mini-title">Raw response</div>
         </div>
         <pre id="raw-output" class="raw-output"></pre>
       </aside>
     </main>
+
+    <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+      <div class="settings-shell">
+        <header class="settings-header">
+          <div>
+            <span class="workspace-eyebrow">Workspace configuration</span>
+            <h2 id="settings-title">设置</h2>
+            <p>集中管理当前会话、模型和仓库上下文。</p>
+          </div>
+          <button id="close-settings-btn" class="icon-text-button" aria-label="Close settings">×</button>
+        </header>
+
+        <div class="settings-grid">
+          <section class="settings-card">
+            <div class="section-title">
+              <h3>Session</h3>
+              <button id="create-session-btn" class="secondary-button" type="button">New session</button>
+            </div>
+            <label>
+              User ID
+              <input id="user-id-input" value="demo_user" autocomplete="off" />
+            </label>
+            <label>
+              Conversation ID
+              <input id="conversation-id-input" placeholder="Create, paste, or select session id" />
+            </label>
+            <div class="button-row">
+              <button id="load-session-btn" class="secondary-button" type="button">Load</button>
+              <button id="list-sessions-btn" class="secondary-button" type="button">Show sessions</button>
+              <button id="summary-session-btn" class="ghost-button" type="button">Refresh summary</button>
+            </div>
+            <div id="session-status" class="muted" role="status" aria-live="polite">No session yet</div>
+          </section>
+
+          <section class="settings-card">
+            <div class="section-title">
+              <h3>Model</h3>
+            </div>
+            <label>
+              Provider
+              <select id="provider-input">
+                <option value="">Default</option>
+                <option value="fake">fake</option>
+                <option value="openai">openai</option>
+                <option value="anthropic">anthropic</option>
+                <option value="google">google</option>
+              </select>
+            </label>
+            <label>
+              Model
+              <input id="model-input" placeholder="Default model" />
+            </label>
+            <p class="settings-note">敏感凭据仍由服务端环境变量管理，不会保存在浏览器中。</p>
+          </section>
+
+          <section class="settings-card settings-card-wide">
+            <div class="section-title">
+              <h3>Repository</h3>
+              <button id="index-repo-btn" class="primary-button" type="button">Index repository</button>
+            </div>
+            <div class="two-column">
+              <label>
+                Repository ID
+                <input id="repository-id-input" value="repo_main" />
+              </label>
+              <label>
+                Root path
+                <input id="repository-root-input" placeholder="/path/to/local/repo" />
+              </label>
+            </div>
+            <div class="settings-pattern-grid">
+              <label>
+                Include patterns
+                <input id="include-patterns-input" value="**/*.py, **/*.md" />
+              </label>
+              <label>
+                Exclude patterns
+                <input id="exclude-patterns-input" value=".venv/**, __pycache__/**, .git/**" />
+              </label>
+              <label>
+                Max file size
+                <input id="max-file-size-input" type="number" min="1" max="5000000" value="200000" />
+              </label>
+            </div>
+          </section>
+
+          <details class="settings-card settings-card-wide advanced-settings">
+            <summary>Advanced session message tool</summary>
+            <div class="advanced-settings-body">
+              <label>
+                Role
+                <select id="message-role-input">
+                  <option value="user">user</option>
+                  <option value="assistant">assistant</option>
+                  <option value="system">system</option>
+                  <option value="tool">tool</option>
+                </select>
+              </label>
+              <label class="check-label">
+                <input id="message-run-agent-input" type="checkbox" />
+                Run legacy agent
+              </label>
+              <label>
+                Message content
+                <textarea id="message-content-input" rows="4">调试消息：请记录当前会话状态</textarea>
+              </label>
+              <button id="add-message-btn" class="secondary-button" type="button">Add message</button>
+            </div>
+          </details>
+        </div>
+
+        <footer class="settings-footer">
+          <span>配置仅作用于当前浏览器中的工作上下文。</span>
+          <button id="done-settings-btn" class="primary-button" type="button">完成</button>
+        </footer>
+      </div>
+    </dialog>
 
     <script src="/static/app.js" defer></script>
   </body>

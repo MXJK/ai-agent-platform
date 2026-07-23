@@ -10,9 +10,37 @@ const state = {
   requestLog: [],
   latestRepositoryIndex: null,
   approvalResolutionInFlight: false,
+  inspectorOpen: true,
 };
 
 const $ = (id) => document.getElementById(id);
+
+const VIEW_METADATA = {
+  chat: {
+    title: "Chat",
+    description: "与模型进行流式对话，并沿用当前 Session 上下文。",
+  },
+  agent: {
+    title: "Agent",
+    description: "运行仓库感知的代码任务，查看审批、事件和执行结果。",
+  },
+  rag: {
+    title: "Knowledge",
+    description: "导入知识文档，并执行检索增强搜索与问答。",
+  },
+  repository: {
+    title: "Repository",
+    description: "查看当前仓库索引任务的进度、结果和失败信息。",
+  },
+  sessions: {
+    title: "Sessions",
+    description: "浏览会话历史、摘要和已保存的消息上下文。",
+  },
+  overview: {
+    title: "Operations",
+    description: "检查服务健康、请求日志和核心 API 运行情况。",
+  },
+};
 
 function jsonPretty(value) {
   return JSON.stringify(value, null, 2);
@@ -51,6 +79,38 @@ function optionalModelFields() {
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
   };
+}
+
+function renderContextSummary() {
+  const conversationId =
+    state.conversationId || $("conversation-id-input").value.trim();
+  const provider = $("provider-input").value.trim() || "Default";
+  const model = $("model-input").value.trim();
+  $("context-session").textContent = conversationId || "Not selected";
+  $("context-provider").textContent = model ? `${provider} / ${model}` : provider;
+  $("context-repository").textContent =
+    $("repository-id-input").value.trim() || "repo_main";
+}
+
+function openSettings() {
+  const dialog = $("settings-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+}
+
+function closeSettings() {
+  const dialog = $("settings-dialog");
+  if (dialog.open) {
+    dialog.close();
+  }
+}
+
+function setInspectorOpen(open) {
+  state.inspectorOpen = open;
+  $("detail-panel").classList.toggle("is-collapsed", !open);
+  $("app-shell").classList.toggle("inspector-collapsed", !open);
+  $("toggle-inspector-btn").setAttribute("aria-expanded", String(open));
 }
 
 function formatDate(value) {
@@ -208,6 +268,7 @@ async function createSession() {
   state.conversationId = body.id;
   $("conversation-id-input").value = body.id;
   $("session-status").textContent = `Active: ${body.id}`;
+  renderContextSummary();
   setRaw(body);
   await listSessions(false);
   await loadSession(false);
@@ -256,6 +317,7 @@ async function loadSession(showRaw = true) {
       fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
     ]);
     state.conversationId = session.id;
+    renderContextSummary();
     $("session-status").textContent = `Loaded: ${session.id}`;
     renderSessionSummary(summary);
     renderMessages(messages.messages || []);
@@ -735,6 +797,8 @@ async function indexRepository() {
     switchTab("repository");
     return;
   }
+  closeSettings();
+  switchTab("repository");
   status.textContent = "Indexing repository...";
   try {
     const submitted = await fetchJson(
@@ -823,12 +887,21 @@ function renderPathList(id, paths, emptyText) {
 }
 
 function switchTab(tabName) {
+  const metadata = VIEW_METADATA[tabName] || VIEW_METADATA.chat;
   document.querySelectorAll(".tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.tab === tabName);
+    const active = tab.dataset.tab === tabName;
+    tab.classList.toggle("active", active);
+    if (active) {
+      tab.setAttribute("aria-current", "page");
+    } else {
+      tab.removeAttribute("aria-current");
+    }
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === `${tabName}-tab`);
   });
+  $("workspace-title").textContent = metadata.title;
+  $("workspace-description").textContent = metadata.description;
 }
 
 function bindEvents() {
@@ -841,6 +914,7 @@ function bindEvents() {
   $("load-session-btn").addEventListener("click", loadSession);
   $("list-sessions-btn").addEventListener("click", async () => {
     await listSessions();
+    closeSettings();
     switchTab("sessions");
   });
   $("summary-session-btn").addEventListener("click", loadSessionSummary);
@@ -869,9 +943,27 @@ function bindEvents() {
     setTrace([]);
     setRaw("");
   });
+  $("settings-btn").addEventListener("click", openSettings);
+  $("close-settings-btn").addEventListener("click", closeSettings);
+  $("done-settings-btn").addEventListener("click", closeSettings);
+  $("settings-dialog").addEventListener("click", (event) => {
+    if (event.target === $("settings-dialog")) {
+      closeSettings();
+    }
+  });
+  $("toggle-inspector-btn").addEventListener("click", () => {
+    setInspectorOpen(!state.inspectorOpen);
+  });
+  $("close-inspector-btn").addEventListener("click", () => {
+    setInspectorOpen(false);
+  });
   $("conversation-id-input").addEventListener("input", (event) => {
     state.conversationId = event.target.value.trim();
+    renderContextSummary();
   });
+  $("provider-input").addEventListener("change", renderContextSummary);
+  $("model-input").addEventListener("input", renderContextSummary);
+  $("repository-id-input").addEventListener("input", renderContextSummary);
   $("sessions-list").addEventListener("click", async (event) => {
     const row = event.target.closest("[data-session-id]");
     if (!row) {
@@ -879,6 +971,7 @@ function bindEvents() {
     }
     state.conversationId = row.dataset.sessionId;
     $("conversation-id-input").value = state.conversationId;
+    renderContextSummary();
     await loadSession();
   });
   document.querySelectorAll(".tab").forEach((tab) => {
@@ -888,6 +981,9 @@ function bindEvents() {
 
 function init() {
   bindEvents();
+  switchTab("chat");
+  renderContextSummary();
+  setInspectorOpen(window.matchMedia("(min-width: 1281px)").matches);
   setTrace([]);
   renderRequestLog();
   renderSessions();

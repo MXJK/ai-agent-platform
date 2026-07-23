@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "active"
 active_task: "PRODUCTIZE-FRONTEND"
-next_action: "重构桌面端信息架构：默认进入 Chat，将低频配置移入设置，并把 Trace 与 Raw 收纳到 Inspector"
+next_action: "实现 SSE 取消与安全 Markdown/代码呈现，并补充统一错误反馈和键盘交互"
 blockers: []
 last_verified_commit: null
-updated_at: "2026-07-23T09:56:19+08:00"
+updated_at: "2026-07-23T10:19:48+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -24,12 +24,12 @@
 
 ## Acceptance criteria
 
-- [ ] 首页默认呈现可直接使用的 Chat 工作区，主要产品能力可在一级导航中到达。
-- [ ] 用户、模型、会话和仓库配置集中管理，并显示当前上下文摘要。
+- [x] 首页默认呈现可直接使用的 Chat 工作区，主要产品能力可在一级导航中到达。
+- [x] 用户、模型、会话和仓库配置集中管理，并显示当前上下文摘要。
 - [ ] SSE Chat 支持流式状态、取消、错误反馈和安全的 Markdown/代码呈现。
 - [ ] Agent 页面展示运行状态、事件、指标及详细的审批风险/参数信息。
 - [ ] RAG 搜索/问答以结构化引用卡片呈现，仓库索引显示清晰的进度与结果。
-- [ ] 页面在 1024px 及以上桌面宽度下布局稳定，导航、设置和 Inspector 可正常使用。
+- [x] 页面在 1024px 及以上桌面宽度下布局稳定，导航、设置和 Inspector 可正常使用。
 - [ ] 基础键盘操作、焦点样式、ARIA 状态和 reduced-motion 偏好得到支持。
 - [x] Google provider 可通过 Chat 请求模型校验。
 - [x] Python 测试、compileall、JavaScript 语法检查和 git diff 检查通过。
@@ -46,6 +46,7 @@
 - 修复前端已有 Google provider 选项与 `ChatStreamRequest` Literal 不一致的问题。
 - 2026-07-22 浏览器验收确认当前 `HEAD` 仍提供旧版 Debug Console，上述产品化实现与契约测试不在当前工作树中；任务保持 active，不能依据先前文字记录标记完成。
 - 阶段一只修复正确性，不改信息架构：对齐 Google provider 契约；审批界面只消费 `approval_required_tools`；批准/拒绝后的异步状态继续轮询；会话 404 和空 Chat 提供明确反馈。
+- 阶段二完成桌面端信息架构重构：Chat 作为默认入口，六项核心能力进入左侧一级导航；Session、Model 和 Repository 低频配置集中到原生模态设置；Trace 与 Raw response 收纳到可折叠 Inspector；1024–1280px 使用右侧浮层 Inspector，1281px 及以上使用三栏布局。
 
 ## Verification
 
@@ -59,8 +60,11 @@
 - 阶段一错误体验验收：通过。不存在的会话只请求一次主资源，页面显示 `Session not found` 并清空旧摘要；空 Chat 显示 `Enter a message` 和 `Message cannot be empty.`。
 - Google Chat 契约验收：通过。`ChatStreamRequest` 接受 `google`，新增模型契约测试；浏览器回归未调用真实 Google 服务。
 - 浏览器控制台回归：阶段一流程无 error/warn；测试 Agent 变更请求已拒绝，未修改 README 或其他源码。
+- 阶段二 1440×900 浏览器验收：默认进入 Chat；六个一级导航均能切换唯一工作面板并同步标题；Inspector 可折叠/恢复；设置弹窗完整显示；Session、provider/model、repository 输入会即时同步到顶部上下文；页面横向溢出为 0。
+- 阶段二 1024×800 浏览器验收：默认折叠 Inspector，展开后以 360px 右侧浮层显示；设置弹窗尺寸为 976×744 且完整落在视口内；创建 Session 后返回 Chat，通过 fake provider 完成 SSE 请求并得到响应；页面横向溢出为 0。
+- 阶段二静态契约测试覆盖默认 Chat、设置、上下文摘要、Inspector 和 1280px 桌面断点；完整测试仍为 83 passed、1 个第三方 LangGraph pending deprecation warning。
 - Go gateway 校验未运行：当前主机没有 `go` 命令；Docker 中 PostgreSQL、Qdrant、Redis 均在运行且 PostgreSQL/Redis 健康。
 
 ## Result
 
-阶段一正确性修复已完成：Google provider、会话加载错误、空 Chat、审批风险呈现和审批后轮询均通过自动化与真实浏览器回归。整体任务仍未完成，因为默认 Chat 工作区、桌面设置入口、Inspector、流式取消与安全 Markdown、RAG 引用卡和桌面产品布局尚未实现。下一阶段进入桌面端信息架构重构。未执行部署、发布、提交或外部环境修改。
+阶段一正确性修复已提交为 `39324a3`。阶段二桌面信息架构已实现并通过自动化与 1024/1440 真实浏览器验收：默认 Chat、一级导航、集中设置、顶部上下文和可折叠 Inspector 均可使用。整体任务保持 active；下一阶段实现 SSE 取消、安全 Markdown/代码呈现和统一反馈，再继续增强 Agent 指标与 RAG 引用卡。未执行部署、发布或外部环境修改。
