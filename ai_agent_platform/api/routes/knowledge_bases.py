@@ -89,6 +89,7 @@ def create_knowledge_bases_router(
                 llm_client=llm_client,
                 provider=request.provider,
                 model=request.model,
+                thinking_level=request.thinking_level,
                 limit=request.limit,
                 recall_limit=request.recall_limit,
             )

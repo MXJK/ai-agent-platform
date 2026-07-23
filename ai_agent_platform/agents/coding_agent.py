@@ -39,6 +39,7 @@ from ai_agent_platform.agents.coding.planner import (
 from ai_agent_platform.agents.coding.runtime_support import (
     append_errors as _append_errors,
     append_trace as _append_trace,
+    build_workspace_query,
     build_change_summary as _build_change_summary,
     build_run_metrics as _build_run_metrics,
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
@@ -664,7 +665,7 @@ class CodingAgentRuntime:
             ToolCall(
                 name="repo.search_code",
                 arguments={
-                    "query": state["user_input"],
+                    "query": build_workspace_query(state),
                     "max_results": 12,
                     "context_lines": 1,
                 },

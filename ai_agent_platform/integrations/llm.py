@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 import json
 import time
@@ -23,10 +24,11 @@ class LLMResponse:
 class LLMUsage:
     input_tokens: int
     output_tokens: int
+    thoughts_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+        return self.input_tokens + self.output_tokens + self.thoughts_tokens
 
 
 @dataclass(frozen=True)
@@ -37,9 +39,18 @@ class LLMStreamEvent:
 
 
 class LLMProviderError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        code: str = "llm_provider_error",
+        finish_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.code = code
+        self.finish_reason = finish_reason
 
 
 class LLMClient:
@@ -54,10 +65,15 @@ class LLMClient:
         *,
         provider: str | None = None,
         model: str | None = None,
+        thinking_level: str | None = None,
     ) -> Iterable[LLMStreamEvent]:
         selected_provider = provider or self._settings.llm_provider
         selected_model = model or self._settings.llm_model
-        stream_factory = self._stream_factory(selected_provider, selected_model)
+        stream_factory = self._stream_factory(
+            selected_provider,
+            selected_model,
+            thinking_level,
+        )
 
         last_error: LLMProviderError | None = None
         for attempt in range(self._settings.llm_max_retries + 1):
@@ -84,7 +100,12 @@ class LLMClient:
                 text_parts.append(event.text)
         return LLMResponse(text="".join(text_parts), model=self._settings.llm_model)
 
-    def _stream_factory(self, provider: str, model: str):
+    def _stream_factory(
+        self,
+        provider: str,
+        model: str,
+        thinking_level: str | None,
+    ):
         if provider == "fake":
             return lambda messages: self._stream_fake(messages, model)
         if provider == "openai":
@@ -92,7 +113,11 @@ class LLMClient:
         if provider == "anthropic":
             return lambda messages: self._stream_anthropic(messages, model)
         if provider == "google":
-            return lambda messages: self._stream_google(messages, model)
+            return lambda messages: self._stream_google(
+                messages,
+                model,
+                thinking_level=thinking_level,
+            )
         raise LLMProviderError(f"unsupported llm provider: {provider}")
 
     def _stream_fake(
@@ -169,7 +194,11 @@ class LLMClient:
         )
 
     def _stream_google(
-        self, messages: list[dict[str, str]], model: str
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        *,
+        thinking_level: str | None = None,
     ) -> Iterable[LLMStreamEvent]:
         if not self._settings.google_api_key:
             raise LLMProviderError("GOOGLE_API_KEY is not configured")
@@ -186,11 +215,39 @@ class LLMClient:
         config_kwargs: dict[str, object] = {
             "max_output_tokens": self._settings.llm_max_output_tokens
         }
+        selected_thinking_level = thinking_level
+        if selected_thinking_level is None and model.startswith("gemini-3"):
+            selected_thinking_level = self._settings.llm_thinking_level
+        if selected_thinking_level is not None:
+            if not model.startswith("gemini-3"):
+                raise LLMProviderError(
+                    "thinking_level is only supported for Gemini 3 models",
+                    code="unsupported_thinking_level",
+                )
+            try:
+                thinking_level_value = getattr(
+                    types.ThinkingLevel,
+                    selected_thinking_level.upper(),
+                )
+            except (AttributeError, TypeError) as exc:
+                raise LLMProviderError(
+                    "google-genai >=2.14.0 is required for Gemini thinking_level",
+                    code="google_sdk_upgrade_required",
+                ) from exc
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=thinking_level_value
+            )
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
 
-        client = genai.Client(api_key=self._settings.google_api_key)
+        client = genai.Client(
+            api_key=self._settings.google_api_key,
+            http_options=types.HttpOptions(
+                timeout=max(1, int(self._settings.llm_timeout_seconds * 1000))
+            ),
+        )
         usage: LLMUsage | None = None
+        finish_reason: str | None = None
         try:
             stream = client.models.generate_content_stream(
                 model=model,
@@ -204,8 +261,22 @@ class LLMClient:
                 chunk_usage = _google_usage(getattr(chunk, "usage_metadata", None))
                 if chunk_usage is not None:
                     usage = chunk_usage
+                chunk_finish_reason = _google_finish_reason(chunk)
+                if chunk_finish_reason is not None:
+                    finish_reason = chunk_finish_reason
         except Exception as exc:
+            if _is_timeout_exception(exc):
+                raise LLMProviderError(
+                    "llm provider request timed out",
+                    retryable=True,
+                    code="llm_timeout",
+                ) from exc
             raise LLMProviderError(str(exc), retryable=True) from exc
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                with suppress(Exception):
+                    close()
 
         if usage is not None:
             yield LLMStreamEvent(type="usage", usage=usage)
@@ -216,6 +287,18 @@ class LLMClient:
                     input_tokens=_estimate_tokens(_join_message_text(messages)),
                     output_tokens=0,
                 ),
+            )
+        if finish_reason not in {None, "STOP"}:
+            if finish_reason == "MAX_TOKENS":
+                raise LLMProviderError(
+                    "Gemini reached the configured output token limit",
+                    code="max_output_tokens",
+                    finish_reason=finish_reason,
+                )
+            raise LLMProviderError(
+                f"Gemini stopped with finish reason {finish_reason}",
+                code="llm_finish_reason",
+                finish_reason=finish_reason,
             )
         yield LLMStreamEvent(type="done")
 
@@ -366,7 +449,33 @@ def _google_usage(usage_metadata: object) -> LLMUsage | None:
     return LLMUsage(
         input_tokens=_int_attr(usage_metadata, "prompt_token_count"),
         output_tokens=_int_attr(usage_metadata, "candidates_token_count"),
+        thoughts_tokens=_int_attr(usage_metadata, "thoughts_token_count"),
     )
+
+
+def _google_finish_reason(chunk: object) -> str | None:
+    for candidate in getattr(chunk, "candidates", None) or []:
+        reason = getattr(candidate, "finish_reason", None)
+        if reason is None:
+            continue
+        value = getattr(reason, "value", reason)
+        normalized = str(value).strip().upper()
+        if normalized and normalized not in {"NONE", "FINISH_REASON_UNSPECIFIED"}:
+            return normalized.removeprefix("FINISHREASON.")
+    return None
+
+
+def _is_timeout_exception(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, httpx.TimeoutException)):
+            return True
+        if "timed out" in str(current).lower() or "timeout" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _usage_event(input_tokens: object, output_tokens: object) -> LLMStreamEvent:

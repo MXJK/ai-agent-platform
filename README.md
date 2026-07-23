@@ -2,7 +2,7 @@
 
 FastAPI backend with streaming chat, a task-driven code Agent, an independent
 document knowledge base, approval-aware sandbox execution, and optional
-PostgreSQL/Celery/Qdrant infrastructure.
+PostgreSQL, Celery, Redis, and Qdrant infrastructure.
 
 The code Agent does not index a repository and does not use embeddings. A run
 captures a registered workspace root, searches the live filesystem for the
@@ -11,14 +11,45 @@ snippets in the current model context.
 
 ## Local start
 
+Python 3.10 or newer is required by the Google Gen AI SDK:
+
 ```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn ai_agent_platform.main:app --reload
+python3.10 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn ai_agent_platform.main:app --reload
 ```
 
-The web UI is available at `http://127.0.0.1:8000`. The default fake LLM and
-local embedding provider require no API key.
+The web UI is available at `http://127.0.0.1:8000`. It is served directly by
+FastAPI and requires no separate frontend build. The default fake LLM and local
+embedding provider require no API key.
+
+The shared composer offers:
+
+- `快速对话` for direct SSE model responses;
+- `代码 Agent` for task-driven workspace exploration, approvals, progress, and
+  artifacts;
+- a common conversation history, so bounded recent messages can inform Agent
+  exploration and structured tool planning.
+
+## Gemini streaming
+
+Create a local `.env` file to use Gemini:
+
+```dotenv
+LLM_PROVIDER=google
+LLM_MODEL=gemini-3.5-flash
+LLM_MAX_OUTPUT_TOKENS=4096
+LLM_THINKING_LEVEL=low
+LLM_TIMEOUT_SECONDS=30
+SSE_HEARTBEAT_SECONDS=10
+GOOGLE_API_KEY=your_google_ai_studio_key
+```
+
+Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
+`thinking_level`. The UI can override the server default. SSE responses emit
+heartbeats while the provider is idle, report thinking tokens separately, and
+return an explicit `max_output_tokens` error instead of a normal completion
+when Gemini finishes with `MAX_TOKENS`.
 
 ## Code Agent flow
 
@@ -60,6 +91,9 @@ tasks retain each rule's applicable path.
 README files and directories are not injected automatically. They are read only
 when task-driven search selects them.
 
+Recent conversation context is bounded to six messages and 1,800 characters.
+It is included in deterministic workspace queries and structured tool planning.
+
 ## Workspace API
 
 `workspace_id` uses letters, digits, `_`, `-`, and `.`. Root paths are
@@ -99,12 +133,12 @@ are not accepted or returned.
 
 ### Live source tools
 
-- `repo.find_files`: locate by filename/path fragment.
+- `repo.find_files`: locate by filename or path fragment.
 - `repo.list_files`: list paths below a workspace-relative directory.
 - `repo.search_code`: use `rg` with `.gitignore`, falling back to Python.
 - `repo.read_file`: read a UTF-8 line range with real line numbers and hash.
 
-The tools reject absolute/traversal paths, escaping symlinks, binary or
+The tools reject absolute or traversal paths, escaping symlinks, binary or
 oversized files, dependency/build directories, real `.env` files, private keys,
 and common credential files.
 
@@ -140,8 +174,8 @@ Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
 
-For Celery, configure shared storage and identical mounts/allowed roots in API
-and workers:
+For Celery, configure shared storage and identical mounts and allowed roots in
+API and workers:
 
 ```dotenv
 TASK_QUEUE_BACKEND=celery
@@ -157,6 +191,20 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 Workers register only Agent run/resume tasks. An inaccessible captured root
 fails with the structured `workspace_unavailable` message.
 
+## Optional Go gateway
+
+The `gateway/` service provides request admission, request-ID propagation,
+health/readiness probes, SSE-safe proxying, and graceful shutdown:
+
+```bash
+go run ./gateway/cmd/gateway
+go test ./gateway/...
+go vet ./gateway/...
+```
+
+It remains a transport boundary and does not own Agent, RAG, LLM, or database
+logic.
+
 ## Verification
 
 ```bash
@@ -166,7 +214,7 @@ node --check ai_agent_platform/static/app.js
 git diff --check
 ```
 
-Run offline Agent/retrieval evals with:
+Run offline Agent evaluations with:
 
 ```bash
 .venv/bin/python evals/run_evals.py

@@ -19,6 +19,10 @@ from ai_agent_platform.agents.coding.models import (
     ValidationRoute,
 )
 from ai_agent_platform.agents.coding.change_loop import SANDBOX_LIFECYCLE_TOOLS
+from ai_agent_platform.agents.coding.text import snippet
+
+MAX_AGENT_HISTORY_MESSAGES = 6
+MAX_AGENT_HISTORY_CHARS = 1800
 
 
 def checkpoint_id(snapshot: Any) -> Optional[str]:
@@ -230,6 +234,43 @@ def route_after_answer_composition(state: CodingAgentState) -> AnswerRoute:
     return "handle_error" if unresolved_errors(state) else "end"
 
 
+def build_workspace_query(state: CodingAgentState) -> str:
+    parts = [state["user_input"]]
+    focus_files = state.get("focus_files", [])
+    if focus_files:
+        parts.append("重点文件: " + " ".join(focus_files))
+    conversation_context = recent_conversation_context(state)
+    if conversation_context:
+        parts.append("最近会话上下文:\n" + conversation_context)
+    return "\n".join(parts)
+
+
+def recent_conversation_context(
+    state: CodingAgentState,
+    *,
+    max_messages: int = MAX_AGENT_HISTORY_MESSAGES,
+    max_chars: int = MAX_AGENT_HISTORY_CHARS,
+) -> str:
+    """Return a bounded, newest-first-selected conversation excerpt."""
+
+    history = state.get("history", [])
+    selected: list[str] = []
+    remaining_chars = max_chars
+    for message in reversed(history[-max_messages:]):
+        role = str(message.get("role") or "").strip()
+        content = " ".join(str(message.get("content") or "").split())
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        line = f"{role}: {snippet(content, limit=280)}"
+        if len(line) > remaining_chars:
+            line = line[:remaining_chars].rstrip()
+        if not line:
+            break
+        selected.append(line)
+        remaining_chars -= len(line) + 1
+        if remaining_chars <= 0:
+            break
+    return "\n".join(reversed(selected))
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
     return {
         "type": "tool_plan_review",

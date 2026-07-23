@@ -46,6 +46,11 @@
   路径并从 run 记录读取快照。
 - PostgreSQL 仅在历史结果反序列化边界兼容旧
   `repository_id/rag_context`，公开 Schema 使用 `extra=forbid`。
+- 解决与 `main@7f13665` 的合并冲突时，保留 Gemini 思考等级、SSE
+  心跳/截断处理和统一 Chat/Agent composer；统一入口改为稳定的
+  `workspace_id/context_sources` 契约，不恢复 repository index 或代码 RAG。
+- 最近六条、最多 1,800 字符的会话历史同时进入结构化工具规划和规则兜底的
+  工作区搜索查询。
 
 ## Verification
 
@@ -61,10 +66,19 @@
   repository/run/index 数据并再次升级。确认 `workspaces` 根路径及
   `agent_runs.workspace_id/workspace_root` 回填保留，两个索引表被删除。
   临时数据库已删除。
+- 合并 `main@7f13665` 并解决六个冲突文件后：
+  - `.venv/bin/python -m pytest -q`：通过，89 passed（1 个第三方
+    LangGraph pending deprecation warning）。
+  - `.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
+  - Python 3.11 `compileall`：通过。
+  - `node --check ai_agent_platform/static/app.js`：通过。
+  - `git diff --check`：通过。
+  - `.venv/bin/python evals/run_evals.py`：通过，4/4；Recall@5=1.000，
+    MRR=1.000。
 
 ## Result
 
 完成。代码 Agent 现在只针对具体任务搜索并读取实时工作区文件，不创建代码
 Embedding 或向量索引；独立知识库 RAG、审批、Sandbox 验证和 Diff 闭环保持
-可用。等待人工审查本分支，然后由统一界面分支按 `workspace_id` 与
-`context_sources` 契约合并。
+可用。与 `main` 的 Gemini 流式和统一 Chat/Agent 界面改动已合并，统一入口
+直接使用 `workspace_id` 与 `context_sources`，PR #5 可重新检查并合并。

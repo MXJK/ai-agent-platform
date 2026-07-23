@@ -59,7 +59,7 @@
         <nav class="primary-nav" aria-label="主要功能">
           <button class="nav-item active" type="button" data-view="chat" aria-current="page">
             <span class="nav-icon" aria-hidden="true">✦</span>
-            <span><strong>智能对话</strong><small>流式模型会话</small></span>
+            <span><strong>对话工作台</strong><small>Chat 与 Agent 统一入口</small></span>
           </button>
           <button class="nav-item" type="button" data-view="agent">
             <span class="nav-icon" aria-hidden="true">⌘</span>
@@ -99,7 +99,7 @@
             <div>
               <p class="eyebrow">AI Workspace</p>
               <h1 id="chat-title">今天想一起解决什么？</h1>
-              <p>在一个连续会话里讨论问题、梳理思路，并观察模型的实时响应。</p>
+              <p>在同一个连续会话中快速问答，或把代码任务交给 Agent。</p>
             </div>
             <span id="chat-meta" class="meta-badge">等待输入</span>
           </header>
@@ -108,7 +108,7 @@
             <div class="welcome-state">
               <div class="welcome-orbit" aria-hidden="true"><span>✦</span></div>
               <h2>从一个具体问题开始</h2>
-              <p>我可以解释代码、分析架构，也可以结合已索引的知识帮助你推进工作。</p>
+              <p>我可以解释代码、分析架构，也可以按需读取工作区文件或检索独立知识库。</p>
               <div class="prompt-grid" aria-label="推荐问题">
                 <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
                   <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
@@ -125,6 +125,16 @@
 
           <div class="composer-wrap">
             <div class="composer">
+              <div class="composer-mode-bar">
+                <label class="composer-mode-control" for="composer-mode-input">
+                  <span>响应方式</span>
+                  <select id="composer-mode-input">
+                    <option value="chat">快速对话</option>
+                    <option value="agent">代码 Agent</option>
+                  </select>
+                </label>
+                <span id="composer-mode-description">直接调用模型并流式回答，不执行代码工具。</span>
+              </div>
               <label class="sr-only" for="chat-message-input">输入消息</label>
               <textarea
                 id="chat-message-input"
@@ -405,8 +415,17 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、独立知
                 </select>
               </label>
               <label for="model-input">模型名称<input id="model-input" placeholder="服务端默认模型" autocomplete="off" /></label>
+              <label for="thinking-level-input">Gemini 思考等级
+                <select id="thinking-level-input">
+                  <option value="">服务端默认</option>
+                  <option value="minimal">minimal</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
             </div>
-            <p class="privacy-note"><span aria-hidden="true">i</span> 当前页面不会读取或保存任何模型 API Key。</p>
+            <p class="privacy-note"><span aria-hidden="true">i</span> 思考等级仅用于 Gemini 3；当前页面不会读取或保存任何模型 API Key。</p>
           </section>
 
           <section class="settings-section">
