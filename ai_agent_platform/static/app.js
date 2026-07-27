@@ -736,10 +736,44 @@ async function runAgentFromComposer() {
   $("agent-message-input").value = message;
   $("focus-files-input").value = "";
   input.value = "";
-  switchView("agent");
-  showToast("任务已交给代码 Agent，可在这里查看进度和审批");
+  let submitted = false;
+  setChatStatus("正在提交给 Agent", "running");
   try {
-    await runAgent();
+    const run = await runAgent({
+      onSubmitted: () => {
+        submitted = true;
+        appendChatMessage("user", message);
+        appendChatMessage(
+          "assistant",
+          "代码 Agent 已接收任务。你可以继续留在对话工作台，运行详情和审批请前往代码 Agent 页面查看。",
+        );
+        setChatStatus("Agent 运行中", "running");
+        showToast("任务已交给代码 Agent；运行详情可前往代码 Agent 页面查看");
+      },
+    });
+    if (!run && !submitted) {
+      input.value = message;
+      setChatStatus("Agent 提交失败", "failed");
+      return;
+    }
+    if (state.latestRunStatus === "completed") {
+      setChatStatus("Agent 已完成", "completed");
+    } else if (state.latestRunStatus === "waiting_approval") {
+      appendChatMessage(
+        "assistant",
+        "代码 Agent 正在等待审批。请前往代码 Agent 页面查看计划并决定是否继续。",
+      );
+      setChatStatus("Agent 等待审批", "waiting_approval");
+      showToast("Agent 正在等待审批，请前往代码 Agent 页面处理", "warning");
+    } else if (state.latestRunStatus === "failed") {
+      appendChatMessage(
+        "assistant",
+        "代码 Agent 运行失败。请前往代码 Agent 页面查看错误详情。",
+      );
+      setChatStatus("Agent 运行失败", "failed");
+    } else {
+      setChatStatus("Agent 在后台运行", "running");
+    }
   } finally {
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
@@ -947,13 +981,14 @@ function setAgentStatus(status, runId = "") {
   node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
-async function runAgent() {
+async function runAgent({ onSubmitted = null } = {}) {
   const message = $("agent-message-input").value.trim();
   if (!message) {
     $("agent-message-input").setAttribute("aria-invalid", "true");
     showToast("请先描述 Agent 任务", "warning");
-    return;
+    return null;
   }
+  let submittedRun = null;
   const button = $("run-agent-btn");
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
@@ -975,13 +1010,19 @@ async function runAgent() {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    submittedRun = body;
     renderAgentRun(body);
+    if (onSubmitted) {
+      onSubmitted(body);
+    }
     await pollRunUntilTerminal();
+    return body;
   } catch (error) {
     setAgentStatus("failed");
     $("agent-answer").className = "rich-output";
     $("agent-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
     showToast(humanizeError(error), "error");
+    return submittedRun;
   } finally {
     button.disabled = false;
     button.removeAttribute("aria-busy");
