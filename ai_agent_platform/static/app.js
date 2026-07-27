@@ -19,6 +19,14 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+function iconMarkup(name) {
+  return `<svg class="app-icon" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
+}
+
+function preferredScrollBehavior() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
 function jsonPretty(value) {
   return JSON.stringify(value, null, 2);
 }
@@ -161,6 +169,16 @@ function humanizeStatus(value) {
   return labels[value] || value || "未知";
 }
 
+function statusClass(value) {
+  if (value === "completed_with_errors") {
+    return "warning";
+  }
+  if (["completed", "failed", "waiting_approval", "running", "queued"].includes(value)) {
+    return value;
+  }
+  return "neutral";
+}
+
 function truncate(value, maxLength = 120) {
   const text = String(value ?? "");
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
@@ -264,8 +282,13 @@ function switchView(viewName, updateHash = true) {
 }
 
 function setInspectorVisible(visible) {
+  const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
+  $("toggle-inspector-btn").setAttribute("aria-label", visible ? "隐藏运行详情" : "显示运行详情");
+  panel.setAttribute("aria-hidden", String(!visible));
+  panel.inert = !visible;
+  panel.hidden = !visible;
   saveUiPreferences();
 }
 
@@ -305,6 +328,7 @@ function updateContextSummary() {
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceId;
   $("composer-context").textContent = modelLabel;
+  $("composer-provider-input").value = provider;
   $("agent-workspace-badge").textContent = workspaceId;
   $("header-session-id").textContent = state.conversationId || "尚未创建";
 }
@@ -321,15 +345,21 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("composer-mode-input").value = state.composerMode;
   const isAgent = state.composerMode === "agent";
   $("composer-mode-description").textContent = isAgent
-    ? "按任务读取工作区文件并运行工具；需要权限的操作会等待审批。"
-    : "直接调用模型并流式回答，不执行代码工具。";
+    ? "读取工作区并运行工具；高风险操作等待审批。"
+    : "流式回答，不执行代码工具。";
   $("chat-message-input").placeholder = isAgent
     ? "描述代码任务，Enter 交给代码 Agent，Shift + Enter 换行…"
     : "输入消息，Enter 发送，Shift + Enter 换行…";
   $("send-chat-btn").innerHTML = isAgent
-    ? '交给 Agent <span aria-hidden="true">→</span>'
-    : '发送 <span aria-hidden="true">↑</span>';
+    ? `交给 Agent ${iconMarkup("arrow-right")}`
+    : `发送 ${iconMarkup("arrow-up")}`;
   saveUiPreferences();
+}
+
+function setChatStatus(label, status = "neutral") {
+  const node = $("chat-meta");
+  node.className = `status-pill ${status}`;
+  node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
 function pushRequestLog(entry) {
@@ -468,9 +498,9 @@ async function ensureSession() {
 function resetChatView() {
   $("chat-output").innerHTML = `
     <div class="welcome-state">
-      <div class="welcome-orbit" aria-hidden="true"><span>✦</span></div>
+      <div class="welcome-mark" aria-hidden="true"><strong>A</strong><span>READY</span></div>
       <h2>从一个具体问题开始</h2>
-      <p>我可以解释代码、分析架构，也可以按需读取工作区文件或检索独立知识库。</p>
+      <p>解释代码、分析架构，或把需要执行的任务交给 Agent。</p>
       <div class="prompt-grid" aria-label="推荐问题">
         <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
         <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
@@ -478,6 +508,7 @@ function resetChatView() {
       </div>
     </div>
   `;
+  setChatStatus("等待输入");
 }
 
 async function createSession() {
@@ -660,7 +691,7 @@ function appendChatMessage(role, content = "", createdAt = null) {
     </div>
   `;
   output.appendChild(item);
-  item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  item.scrollIntoView({ behavior: preferredScrollBehavior(), block: "nearest" });
   return item.querySelector(".message-content");
 }
 
@@ -682,6 +713,7 @@ async function runAgentFromComposer() {
   const input = $("chat-message-input");
   const message = input.value.trim();
   if (!message) {
+    input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
     input.focus();
     return;
@@ -690,6 +722,7 @@ async function runAgentFromComposer() {
   const sendButton = $("send-chat-btn");
   const modeInput = $("composer-mode-input");
   sendButton.disabled = true;
+  sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
   $("agent-message-input").value = message;
   $("focus-files-input").value = "";
@@ -700,6 +733,7 @@ async function runAgentFromComposer() {
     await runAgent();
   } finally {
     sendButton.disabled = false;
+    sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
   }
 }
@@ -708,6 +742,7 @@ async function streamChat() {
   const input = $("chat-message-input");
   const message = input.value.trim();
   if (!message) {
+    input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
     input.focus();
     return;
@@ -717,9 +752,11 @@ async function streamChat() {
   const stopButton = $("stop-chat-btn");
   const modeInput = $("composer-mode-input");
   sendButton.disabled = true;
+  sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
   stopButton.classList.remove("hidden");
-  $("chat-meta").textContent = "正在准备…";
+  $("chat-output").setAttribute("aria-busy", "true");
+  setChatStatus("正在准备", "running");
   setTrace([]);
   state.chatController = new AbortController();
   let assistantContent = null;
@@ -742,7 +779,7 @@ async function streamChat() {
         }
         if (eventName === "meta") {
           const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          $("chat-meta").textContent = `${data.provider} · ${data.model}${thinking}`;
+          setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
         } else if (eventName === "delta") {
           answer += data.text || "";
           assistantContent.innerHTML = renderMarkdown(answer);
@@ -750,9 +787,9 @@ async function streamChat() {
           const thoughts = data.thoughts_tokens
             ? ` · ${data.thoughts_tokens} thinking`
             : "";
-          $("chat-meta").textContent = `${data.total_tokens || 0} tokens${thoughts}`;
+          setChatStatus(`${data.total_tokens || 0} tokens${thoughts}`, "running");
         } else if (eventName === "done") {
-          $("chat-meta").textContent = `已完成 · ${formatDuration(data.elapsed_ms)}`;
+          setChatStatus(`已完成 · ${formatDuration(data.elapsed_ms)}`, "completed");
         } else if (eventName === "error") {
           const streamError = new Error(data.message || data.code || "模型响应失败");
           streamError.code = data.code || "llm_provider_error";
@@ -772,7 +809,7 @@ async function streamChat() {
       if (assistantContent) {
         assistantContent.innerHTML = `${assistantContent.innerHTML}<p><em>生成已由你停止。</em></p>`;
       }
-      $("chat-meta").textContent = "已停止";
+      setChatStatus("已停止", "neutral");
     } else {
       if (assistantContent) {
         const detail = error.code === "max_output_tokens"
@@ -782,7 +819,10 @@ async function streamChat() {
           ? `${renderMarkdown(answer)}<p><em>${escapeHtml(detail)}</em></p>`
           : `<p>${escapeHtml(detail)}</p>`;
       }
-      $("chat-meta").textContent = error.code === "max_output_tokens" ? "输出已截断" : "生成失败";
+      setChatStatus(
+        error.code === "max_output_tokens" ? "输出已截断" : "生成失败",
+        error.code === "max_output_tokens" ? "warning" : "failed",
+      );
       showToast(
         error.code === "max_output_tokens" ? "回答达到输出额度上限" : humanizeError(error),
         error.code === "max_output_tokens" ? "warning" : "error",
@@ -791,8 +831,10 @@ async function streamChat() {
   } finally {
     state.chatController = null;
     sendButton.disabled = false;
+    sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
     stopButton.classList.add("hidden");
+    $("chat-output").removeAttribute("aria-busy");
     input.focus();
   }
 }
@@ -891,18 +933,22 @@ function parseSseBlock(block) {
 
 function setAgentStatus(status, runId = "") {
   const node = $("agent-status");
-  node.className = `status-pill ${status || "neutral"}`;
-  node.textContent = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
+  node.className = `status-pill ${statusClass(status)}`;
+  const label = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
+  node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
 async function runAgent() {
   const message = $("agent-message-input").value.trim();
   if (!message) {
+    $("agent-message-input").setAttribute("aria-invalid", "true");
     showToast("请先描述 Agent 任务", "warning");
     return;
   }
   const button = $("run-agent-btn");
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  $("agent-answer").setAttribute("aria-busy", "true");
   setAgentStatus("running");
   $("agent-answer").className = "rich-output empty-output";
   $("agent-answer").textContent = "Agent 正在理解任务并规划下一步…";
@@ -929,6 +975,8 @@ async function runAgent() {
     showToast(humanizeError(error), "error");
   } finally {
     button.disabled = false;
+    button.removeAttribute("aria-busy");
+    $("agent-answer").removeAttribute("aria-busy");
   }
 }
 
@@ -975,16 +1023,16 @@ function renderApproval(approval) {
   const calls = approval.tool_calls || (approval.planned_tools || []).map((name) => ({ name, arguments: {} }));
   for (const call of calls) {
     const risk = requiredByName.get(call.name) || {};
-    const item = document.createElement("article");
+    const item = document.createElement("details");
     item.className = "approval-tool";
     item.innerHTML = `
-      <header><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></header>
+      <summary><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></summary>
       <p>${escapeHtml(risk.risk_summary || "只读或低风险工具；请确认参数符合预期。")}</p>
       <pre>${escapeHtml(jsonPretty(risk.arguments_summary || call.arguments || {}))}</pre>
     `;
     tools.appendChild(item);
   }
-  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
 }
 
 function renderAgentMetrics(metrics) {
@@ -1046,9 +1094,13 @@ function renderAgentEvents(events) {
   }
   for (const event of events) {
     const item = document.createElement("div");
-    item.className = "timeline-item";
+    const eventStatus = event.status || "pending";
+    item.className = `timeline-item ${statusClass(eventStatus)}`;
     item.innerHTML = `
-      <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
+      <div class="timeline-heading">
+        <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
+        <span>${escapeHtml(humanizeStatus(eventStatus))}</span>
+      </div>
       <p>${escapeHtml(event.summary || humanizeStatus(event.status))}</p>
     `;
     list.appendChild(item);
@@ -1063,6 +1115,7 @@ async function resumeRun(approved) {
   const rejectButton = $("reject-run-btn");
   approveButton.disabled = true;
   rejectButton.disabled = true;
+  approveButton.setAttribute("aria-busy", "true");
   setAgentStatus("running", state.latestRunId);
   try {
     const feedback = $("approval-feedback-input").value.trim();
@@ -1081,6 +1134,7 @@ async function resumeRun(approved) {
   } finally {
     approveButton.disabled = false;
     rejectButton.disabled = false;
+    approveButton.removeAttribute("aria-busy");
   }
 }
 
@@ -1509,11 +1563,22 @@ function bindEvents() {
   $("composer-mode-input").addEventListener("change", (event) => {
     updateComposerMode(event.target.value);
   });
+  $("composer-provider-input").addEventListener("change", (event) => {
+    $("provider-input").value = event.target.value;
+    updateContextSummary();
+  });
+  $("composer-attachment-btn").addEventListener("click", () => {
+    switchView("rag");
+    $("document-files-input").click();
+  });
   $("chat-message-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       submitComposerMessage();
     }
+  });
+  ["chat-message-input", "agent-message-input", "rag-question-input"].forEach((id) => {
+    $(id).addEventListener("input", () => $(id).removeAttribute("aria-invalid"));
   });
 
   $("run-agent-btn").addEventListener("click", runAgent);
