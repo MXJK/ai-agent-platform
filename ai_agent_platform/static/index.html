@@ -275,18 +275,19 @@
                 <label for="kb-id-input">知识库
                   <select id="kb-id-input"><option value="">请先创建知识库</option></select>
                 </label>
-                <label for="document-filename-input">文件名<input id="document-filename-input" value="notes.md" /></label>
+                <label for="document-files-input">选择文件
+                  <input
+                    id="document-files-input"
+                    type="file"
+                    multiple
+                    accept=".pdf,.docx,.md,.markdown,.txt,.html,.json,.yaml,.yml,.toml,.py,.js,.jsx,.ts,.tsx,.css,.go,.java,.rs"
+                  />
+                </label>
               </div>
-              <label for="document-content-input">文档内容</label>
-              <textarea
-                id="document-content-input"
-                rows="13"
-                placeholder="粘贴 Markdown、文本、代码或配置内容"
-              ># 项目说明
-AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、独立知识库与按需上下文代码 Agent。</textarea>
+              <div id="selected-document-files" class="selected-files">尚未选择文件</div>
               <div class="surface-actions">
-                <p>内容会按照当前 Embedding 配置进行向量化。</p>
-                <button id="ingest-doc-btn" class="button secondary" type="button">录入文档</button>
+                <p>支持 PDF、DOCX、Markdown 与 UTF-8 文本；单个文件最大 20 MiB。</p>
+                <button id="ingest-doc-btn" class="button secondary" type="button">录入所选文件</button>
               </div>
             </article>
 
@@ -297,7 +298,7 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、独立知
               <details class="advanced-options">
                 <summary>检索参数</summary>
                 <div class="field-grid">
-                  <label for="rag-limit-input">返回数量<input id="rag-limit-input" type="number" min="1" max="20" value="5" /></label>
+                  <label for="rag-limit-input">重排数量<input id="rag-limit-input" type="number" min="1" max="20" value="5" /></label>
                   <label for="rag-recall-limit-input">召回数量<input id="rag-recall-limit-input" type="number" min="1" max="100" value="10" /></label>
                 </div>
               </details>

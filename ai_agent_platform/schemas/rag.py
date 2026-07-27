@@ -51,12 +51,6 @@ class KnowledgeBasesResponse(BaseModel):
     knowledge_bases: list[KnowledgeBaseResponse]
 
 
-class DocumentIngestRequest(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
-    content: str = Field(min_length=1)
-    source_uri: Optional[str] = Field(default=None, max_length=1000)
-
-
 class DocumentIngestResponse(BaseModel):
     knowledge_base_id: str
     document_id: str

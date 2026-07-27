@@ -170,9 +170,11 @@ def _ingest_fixtures(
     for fixture in fixtures:
         response = client.post(
             f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
-            json={
-                "filename": fixture["filename"],
-                "content": fixture["content"],
+            files={
+                "file": (
+                    fixture["filename"],
+                    fixture["content"].encode("utf-8"),
+                )
             },
         )
         if response.status_code != 201:

@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,19 @@ def wait_for_run(client: TestClient, run_id: str) -> dict:
             return body
         time.sleep(0.01)
     raise AssertionError("agent run did not finish")
+
+
+def upload_document(
+    client: TestClient,
+    knowledge_base_id: str,
+    filename: str,
+    content: str | bytes,
+):
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    return client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
+        files={"file": (filename, payload)},
+    )
 
 
 class ApiTests(unittest.TestCase):
@@ -152,6 +166,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertIn('id="workspace-id-input"', response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
+        self.assertIn('id="document-files-input"', response.text)
+        self.assertIn("重排数量", response.text)
+        self.assertNotIn('id="document-content-input"', response.text)
+        self.assertNotIn('id="document-filename-input"', response.text)
         self.assertNotIn('id="repository-id-input"', response.text)
         self.assertEqual(script_response.status_code, 200)
         self.assertIn("thinking_level", script_response.text)
@@ -312,12 +330,11 @@ class ApiTests(unittest.TestCase):
                 },
             )
             self.assertEqual(created.status_code, 201)
-            ingested = client.post(
-                "/api/v1/knowledge-bases/docs/documents",
-                json={
-                    "filename": "guide.md",
-                    "content": "Falcon mode enables deterministic offline testing.",
-                },
+            ingested = upload_document(
+                client,
+                "docs",
+                "guide.md",
+                "Falcon mode enables deterministic offline testing.",
             )
             self.assertEqual(ingested.status_code, 201)
             search = client.post(
@@ -335,10 +352,7 @@ class ApiTests(unittest.TestCase):
 
     def test_knowledge_base_catalog_crud_and_cascade_delete(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
-            missing_ingest = client.post(
-                "/api/v1/knowledge-bases/missing/documents",
-                json={"filename": "missing.md", "content": "missing"},
-            )
+            missing_ingest = upload_document(client, "missing", "missing.md", "missing")
             self.assertEqual(missing_ingest.status_code, 404)
 
             created = client.post(
@@ -363,12 +377,11 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual(duplicate.status_code, 409)
 
-            ingested = client.post(
-                "/api/v1/knowledge-bases/product_docs/documents",
-                json={
-                    "filename": "manual.md",
-                    "content": "Falcon mode is enabled from the product settings.",
-                },
+            ingested = upload_document(
+                client,
+                "product_docs",
+                "manual.md",
+                "Falcon mode is enabled from the product settings.",
             )
             self.assertEqual(ingested.status_code, 201)
             loaded = client.get("/api/v1/knowledge-bases/product_docs")
@@ -400,6 +413,43 @@ class ApiTests(unittest.TestCase):
                 404,
             )
 
+    def test_document_upload_rejects_empty_invalid_and_oversized_files(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "uploads",
+                    "name": "Uploads",
+                    "description": "",
+                    "tags": [],
+                },
+            ).raise_for_status()
+
+            empty = upload_document(client, "uploads", "empty.md", b"")
+            invalid_utf8 = upload_document(
+                client,
+                "uploads",
+                "invalid.md",
+                b"\xff\xfe",
+            )
+            with patch(
+                "ai_agent_platform.api.routes.knowledge_bases.MAX_DOCUMENT_BYTES",
+                4,
+            ):
+                oversized = upload_document(
+                    client,
+                    "uploads",
+                    "large.md",
+                    b"12345",
+                )
+
+            self.assertEqual(empty.status_code, 400)
+            self.assertIn("document text is empty", empty.json()["detail"])
+            self.assertEqual(invalid_utf8.status_code, 400)
+            self.assertIn("UTF-8", invalid_utf8.json()["detail"])
+            self.assertEqual(oversized.status_code, 413)
+            self.assertIn("20 MiB", oversized.json()["detail"])
+
     def test_agent_automatically_routes_to_rag_and_hybrid_context(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -425,12 +475,11 @@ class ApiTests(unittest.TestCase):
                         "tags": ["Falcon", "manual", "policy"],
                     },
                 ).raise_for_status()
-                client.post(
-                    "/api/v1/knowledge-bases/falcon_docs/documents",
-                    json={
-                        "filename": "falcon.md",
-                        "content": "Falcon mode enables deterministic offline testing.",
-                    },
+                upload_document(
+                    client,
+                    "falcon_docs",
+                    "falcon.md",
+                    "Falcon mode enables deterministic offline testing.",
                 ).raise_for_status()
 
                 rag_run = client.post(
@@ -495,19 +544,17 @@ class ApiTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(response.status_code, 201)
-            client.post(
-                "/api/v1/knowledge-bases/customer_faq/documents",
-                json={
-                    "filename": "refund.md",
-                    "content": "退款申请需要在订单完成后 7 天内提交。",
-                },
+            upload_document(
+                client,
+                "customer_faq",
+                "refund.md",
+                "退款申请需要在订单完成后 7 天内提交。",
             )
-            client.post(
-                "/api/v1/knowledge-bases/hr_policy/documents",
-                json={
-                    "filename": "vacation.md",
-                    "content": "年假需要提前 3 个工作日提交审批。",
-                },
+            upload_document(
+                client,
+                "hr_policy",
+                "vacation.md",
+                "年假需要提前 3 个工作日提交审批。",
             )
             response = client.post(
                 "/api/v1/knowledge-bases/hr_policy/search",
@@ -519,12 +566,11 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(
                 all(result["knowledge_base_id"] == "hr_policy" for result in results)
             )
-            unsupported = client.post(
-                "/api/v1/knowledge-bases/hr_policy/documents",
-                json={
-                    "filename": "manual.pdf",
-                    "content": "PDF binary requires a parser.",
-                },
+            unsupported = upload_document(
+                client,
+                "hr_policy",
+                "legacy.doc",
+                b"legacy Word binary",
             )
             self.assertEqual(unsupported.status_code, 400)
             self.assertIn("unsupported document type", unsupported.json()["detail"])

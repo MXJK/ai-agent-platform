@@ -392,13 +392,14 @@ async function fetchJson(path, options = {}) {
   const startedAt = performance.now();
   let status = "ERR";
   let requestId = "";
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   try {
     const response = await fetch(`${API_BASE}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
       ...options,
+      headers,
     });
     status = response.status;
     requestId = response.headers.get("X-Request-ID") || "";
@@ -1111,34 +1112,64 @@ async function pollRunUntilTerminal() {
 }
 
 async function ingestDocument() {
-  const content = $("document-content-input").value;
-  if (!content.trim()) {
-    showToast("请粘贴需要录入的文档内容", "warning");
+  const input = $("document-files-input");
+  const files = Array.from(input.files || []);
+  if (!files.length) {
+    showToast("请先选择需要录入的文件", "warning");
     return;
   }
+
   const kbId = $("kb-id-input").value.trim();
   if (!kbId) {
     showToast("请先创建并选择知识库", "warning");
     return;
   }
-  $("rag-status").textContent = "正在录入…";
+
+  const ingested = [];
+  const failures = [];
+  $("ingest-doc-btn").disabled = true;
   try {
-    const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/documents`, {
-      method: "POST",
-      body: JSON.stringify({
-        filename: $("document-filename-input").value.trim() || "notes.md",
-        content,
-      }),
-    });
-    $("rag-status").textContent = `已录入 ${body.chunk_count} 个片段`;
-    setRaw(body);
+    for (const [index, file] of files.entries()) {
+      $("rag-status").textContent = `正在录入 ${index + 1}/${files.length}…`;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      try {
+        const body = await fetchJson(
+          `/knowledge-bases/${encodeURIComponent(kbId)}/documents`,
+          { method: "POST", body: form },
+        );
+        ingested.push(body);
+      } catch (error) {
+        failures.push({ filename: file.name, error: humanizeError(error) });
+      }
+    }
     await listKnowledgeBases();
     $("kb-id-input").value = kbId;
-    showToast(`文档已录入，共 ${body.chunk_count} 个片段`);
-  } catch (error) {
-    $("rag-status").textContent = "录入失败";
-    showToast(humanizeError(error), "error");
+    const chunkCount = ingested.reduce((total, item) => total + item.chunk_count, 0);
+    $("rag-status").textContent = failures.length
+      ? `已录入 ${ingested.length}，失败 ${failures.length}`
+      : `已录入 ${ingested.length} 个文件`;
+    setRaw({ documents: ingested, failures });
+    input.value = "";
+    renderSelectedDocumentFiles();
+    if (failures.length) {
+      showToast(
+        `${ingested.length} 个文件录入成功，${failures.length} 个失败；详情见原始数据`,
+        ingested.length ? "warning" : "error",
+      );
+    } else {
+      showToast(`已录入 ${ingested.length} 个文件，共 ${chunkCount} 个片段`);
+    }
+  } finally {
+    $("ingest-doc-btn").disabled = false;
   }
+}
+
+function renderSelectedDocumentFiles() {
+  const files = Array.from($("document-files-input").files || []);
+  $("selected-document-files").textContent = files.length
+    ? `已选择 ${files.length} 个文件：${files.map((file) => file.name).join("、")}`
+    : "尚未选择文件";
 }
 
 async function searchRag() {
@@ -1504,6 +1535,7 @@ function bindEvents() {
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
+  $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);
   $("refresh-knowledge-bases-btn").addEventListener("click", () => {
     listKnowledgeBases().catch((error) => showToast(humanizeError(error), "error"));
   });

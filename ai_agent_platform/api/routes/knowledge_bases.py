@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Path, Response, status
+from fastapi import APIRouter, File, HTTPException, Path, Response, UploadFile, status
 
 from ai_agent_platform.integrations import (
     LLMClient,
@@ -8,7 +8,6 @@ from ai_agent_platform.integrations import (
     RAGValidationError,
 )
 from ai_agent_platform.schemas import (
-    DocumentIngestRequest,
     DocumentIngestResponse,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseResponse,
@@ -32,6 +31,7 @@ KNOWLEDGE_BASE_ID = Path(
     max_length=128,
     pattern=r"^[a-zA-Z0-9_-]+$",
 )
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 
 def create_knowledge_bases_router(
@@ -132,16 +132,27 @@ def create_knowledge_bases_router(
         response_model=DocumentIngestResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def ingest_document(
-        request: DocumentIngestRequest,
+    async def ingest_document(
+        file: UploadFile = File(...),
         knowledge_base_id: str = KNOWLEDGE_BASE_ID,
     ) -> DocumentIngestResponse:
+        filename = _upload_filename(file.filename)
+        if not filename or len(filename) > 255:
+            raise HTTPException(status_code=400, detail="invalid upload filename")
         try:
-            ingested = knowledge_base_service.ingest_document(
+            content = await file.read(MAX_DOCUMENT_BYTES + 1)
+        finally:
+            await file.close()
+        if len(content) > MAX_DOCUMENT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="uploaded file exceeds the 20 MiB limit",
+            )
+        try:
+            ingested = knowledge_base_service.ingest_file(
                 knowledge_base_id=knowledge_base_id,
-                filename=request.filename,
-                content=request.content,
-                source_uri=request.source_uri,
+                filename=filename,
+                content=content,
             )
         except RAGValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -219,3 +230,13 @@ def create_knowledge_bases_router(
         )
 
     return router
+
+
+def _upload_filename(filename: str | None) -> str:
+    normalized = (filename or "").replace("\\", "/").strip()
+    if normalized.lower().startswith("c:/fakepath/"):
+        return normalized.rsplit("/", 1)[-1]
+    parts = normalized.split("/")
+    if normalized.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+        return parts[-1] if parts else ""
+    return normalized

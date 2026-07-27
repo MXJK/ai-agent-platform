@@ -137,6 +137,27 @@ class KnowledgeBaseService:
         )
         return ingested
 
+    def ingest_file(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+        content: bytes,
+        source_uri: str | None = None,
+    ) -> IngestedDocument:
+        self.get(knowledge_base_id)
+        ingested = self._rag_service.ingest_file(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            content=content,
+            source_uri=source_uri,
+        )
+        self._store.record_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=ingested.document_id,
+        )
+        return ingested
+
     def search(
         self,
         *,

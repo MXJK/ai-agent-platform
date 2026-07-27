@@ -1,4 +1,7 @@
+from io import BytesIO
 import unittest
+
+from docx import Document
 
 from ai_agent_platform.integrations.rag import (
     InMemoryVectorStore,
@@ -9,6 +12,43 @@ from ai_agent_platform.integrations.rag import (
     TextDocumentParser,
     evaluate_retrieval,
 )
+
+
+def _simple_pdf(text: str) -> bytes:
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+        ),
+        b"<< /Length "
+        + str(len(stream)).encode("ascii")
+        + b" >>\nstream\n"
+        + stream
+        + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    payload = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(payload))
+        payload.extend(f"{index} 0 obj\n".encode("ascii"))
+        payload.extend(body)
+        payload.extend(b"\nendobj\n")
+    xref_offset = len(payload)
+    payload.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    payload.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        payload.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    payload.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(payload)
 
 
 class ConstantEmbeddingProvider:
@@ -22,6 +62,34 @@ class ConstantEmbeddingProvider:
 
 
 class RAGRetrievalTests(unittest.TestCase):
+    def test_parser_extracts_pdf_docx_and_utf8_markdown(self) -> None:
+        parser = TextDocumentParser()
+        markdown = parser.parse_bytes(
+            knowledge_base_id="docs",
+            filename="guide.md",
+            content=b"\xef\xbb\xbf# Falcon\nOffline mode",
+        )
+
+        word_buffer = BytesIO()
+        word_document = Document()
+        word_document.add_heading("Falcon handbook", level=1)
+        word_document.add_paragraph("DOCX setup instructions")
+        word_document.save(word_buffer)
+        word = parser.parse_bytes(
+            knowledge_base_id="docs",
+            filename="handbook.docx",
+            content=word_buffer.getvalue(),
+        )
+        pdf = parser.parse_bytes(
+            knowledge_base_id="docs",
+            filename="manual.pdf",
+            content=_simple_pdf("Falcon PDF guide"),
+        )
+
+        self.assertIn("Offline mode", markdown.text)
+        self.assertIn("DOCX setup instructions", word.text)
+        self.assertIn("Falcon PDF guide", pdf.text)
+
     def test_python_ast_keeps_class_methods_in_a_qualified_symbol_block(self) -> None:
         document = ParsedDocument(
             id="doc_1",
@@ -102,6 +170,44 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertEqual(metrics.evaluated_cases, 2)
         self.assertEqual(metrics.recall_at_k, 0.5)
         self.assertEqual(metrics.mean_reciprocal_rank, 0.25)
+
+    def test_delete_knowledge_base_keeps_other_namespaces(self) -> None:
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=InMemoryVectorStore(),
+            reranker=NoopReranker(),
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+        )
+        for knowledge_base_id in ("delete_me", "keep_me"):
+            service.ingest_document(
+                knowledge_base_id=knowledge_base_id,
+                filename=f"{knowledge_base_id}.md",
+                content=f"{knowledge_base_id} reference content",
+            )
+
+        service.delete_knowledge_base(knowledge_base_id="delete_me")
+
+        self.assertEqual(
+            service.search(
+                knowledge_base_id="delete_me",
+                query="reference",
+                limit=5,
+            ),
+            [],
+        )
+        self.assertEqual(
+            len(
+                service.search(
+                    knowledge_base_id="keep_me",
+                    query="reference",
+                    limit=5,
+                )
+            ),
+            1,
+        )
 
     def test_delete_knowledge_base_keeps_other_namespaces(self) -> None:
         service = RAGService(

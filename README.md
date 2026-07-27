@@ -187,6 +187,17 @@ POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
 ```
 
+Document ingestion accepts a multipart `file` upload (20 MiB maximum):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge-bases/product_docs/documents \
+  -F 'file=@/absolute/path/to/manual.pdf'
+```
+
+Supported uploads include PDF, DOCX, Markdown, UTF-8 text/configuration files,
+and the existing UTF-8 source-code formats. Legacy `.doc` files and scanned
+documents requiring OCR are not supported.
+
 Only these document endpoints use chunking, embeddings, and the configured
 vector store. Agent RAG routing calls the same search implementation and
 degrades to an evidence warning when retrieval is unavailable.
