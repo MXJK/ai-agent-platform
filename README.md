@@ -16,12 +16,27 @@ Python 3.10 or newer is required by the Google Gen AI SDK:
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m uvicorn ai_agent_platform.main:app --reload
+cp -n .env.example .env
+./scripts/start.sh
+```
+
+After the initial environment setup, `./scripts/start.sh` is the only command
+needed for local startup. It validates the persistent configuration, starts
+PostgreSQL/Qdrant/Redis, waits for them to become reachable, applies pending
+Alembic migrations, and runs both Celery Worker and FastAPI. Press `Ctrl+C` to
+stop the API and Worker; persistent database containers remain running.
+
+Useful startup options:
+
+```bash
+./scripts/start.sh --check  # Validate dependencies/configuration without writes.
+APP_RELOAD=0 ./scripts/start.sh
+APP_HOST=0.0.0.0 APP_PORT=8000 ./scripts/start.sh
 ```
 
 The web UI is available at `http://127.0.0.1:8000`. It is served directly by
-FastAPI and requires no separate frontend build. The default fake LLM and local
-embedding provider require no API key.
+FastAPI and requires no separate frontend build. The example configuration uses
+the fake LLM and local embedding provider, which require no API key.
 
 The shared composer offers:
 
@@ -186,6 +201,29 @@ WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
+```
+
+The persistent runtime assigns one responsibility to each database:
+
+| Component | Responsibility |
+| --- | --- |
+| PostgreSQL | Sessions/messages, Agent runs, workspace and knowledge-base catalogs, document/chunk metadata, and LangGraph checkpoints |
+| Qdrant | RAG embeddings, vector similarity search, knowledge-base filtering, and retrieval payloads |
+| Redis | Celery broker and result backend; it is not the source of truth for business records |
+| Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
+
+`RAG_VECTOR_STORE` selects either Qdrant or Chroma. They implement the same
+vector-store boundary and are not written simultaneously. The checked-in
+example and current persistent runtime select Qdrant; in-memory repositories
+remain available only as explicit test doubles.
+
+Before starting the API and Celery worker, start the backing services and apply
+the schema migration:
+
+```bash
+docker compose up -d postgres qdrant redis
+.venv/bin/alembic upgrade head
+.venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
 
 Workers register only Agent run/resume tasks. An inaccessible captured root
