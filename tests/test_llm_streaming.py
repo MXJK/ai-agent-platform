@@ -14,6 +14,7 @@ from ai_agent_platform.integrations.llm import (
     LLMClient,
     LLMProviderError,
     LLMStreamEvent,
+    collect_llm_usage,
 )
 
 
@@ -190,6 +191,32 @@ class GoogleStreamingTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "llm_timeout")
         self.assertTrue(raised.exception.retryable)
         self.assertTrue(_FakeClient.instances[0].closed)
+
+    def test_complete_reports_and_collects_provider_usage(self) -> None:
+        client = LLMClient(
+            Settings(llm_provider="fake", llm_model="fake-agent-model")
+        )
+
+        with collect_llm_usage() as usage:
+            first = client.complete("first prompt")
+            second = client.complete("second prompt")
+
+        self.assertIsNotNone(first.usage)
+        self.assertIsNotNone(second.usage)
+        assert first.usage is not None
+        assert second.usage is not None
+        self.assertEqual(
+            usage.input_tokens,
+            first.usage.input_tokens + second.usage.input_tokens,
+        )
+        self.assertEqual(
+            usage.output_tokens,
+            first.usage.output_tokens + second.usage.output_tokens,
+        )
+        self.assertEqual(
+            usage.total_tokens,
+            usage.input_tokens + usage.output_tokens + usage.thoughts_tokens,
+        )
 
 
 class HeartbeatTests(unittest.TestCase):

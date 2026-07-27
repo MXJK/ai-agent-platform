@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from ai_agent_platform.agents.coding.models import AgentRunRecord
+from ai_agent_platform.integrations.rag import (
+    DocumentChunk,
+    IndexJob,
+    ParsedDocument,
+)
 from ai_agent_platform.repositories.postgres import (
     PostgresAgentRunRepository,
     PostgresDocumentRepository,
@@ -68,6 +73,76 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.id, "workspace_main")
         self.assertEqual([item.id for item in listed], ["workspace_main"])
         self.assertIn("workspaces", connection.calls[0][0])
+
+    def test_document_repository_persists_lexical_and_provenance_metadata(self) -> None:
+        connection = FakeConnection([None, None, None])
+        document = ParsedDocument(
+            id="doc_1",
+            knowledge_base_id="docs",
+            filename="guide.py",
+            text="def healthcheck(): return True",
+        )
+        chunk = DocumentChunk(
+            id="chk_1",
+            knowledge_base_id="docs",
+            document_id="doc_1",
+            filename="guide.py",
+            chunk_index=0,
+            text=document.text,
+            start_line=4,
+            end_line=4,
+            symbols=["healthcheck"],
+        )
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.postgres._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresDocumentRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            repository.save_document(document, [chunk])
+
+        sql, params = connection.calls[2]
+        self.assertIn("search_text", sql)
+        self.assertIn("start_line", sql)
+        self.assertIn("healthcheck", params[9])
+        self.assertEqual(params[6:9], (4, 4, ["healthcheck"]))
+
+    def test_document_repository_maps_index_job_state(self) -> None:
+        now = datetime(2026, 7, 27, tzinfo=timezone.utc)
+        row = (
+            "idx_1",
+            "docs",
+            "guide.md",
+            "active",
+            "doc_1",
+            2,
+            None,
+            now,
+            now,
+            now,
+        )
+        connection = FakeConnection([row, [row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresDocumentRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            loaded = repository.get_index_job("idx_1")
+            listed = repository.list_index_jobs(
+                knowledge_base_id="docs",
+                limit=20,
+            )
+
+        self.assertEqual(loaded, IndexJob(*row))
+        self.assertEqual([item.status for item in listed], ["active"])
 
     def test_agent_run_persists_workspace_root_snapshot(self) -> None:
         connection = FakeConnection([None])

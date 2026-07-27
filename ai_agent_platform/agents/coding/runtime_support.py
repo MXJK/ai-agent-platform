@@ -315,6 +315,12 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
         ),
         change_iteration_count=state.get("change_iteration", 0),
         changed_file_count=len(state.get("changed_files", [])),
+        input_tokens=max(0, int(state.get("llm_input_tokens", 0))),
+        output_tokens=max(0, int(state.get("llm_output_tokens", 0))),
+        thoughts_tokens=max(0, int(state.get("llm_thoughts_tokens", 0))),
+        total_tokens=max(0, int(state.get("llm_input_tokens", 0)))
+        + max(0, int(state.get("llm_output_tokens", 0)))
+        + max(0, int(state.get("llm_thoughts_tokens", 0))),
     )
 
 

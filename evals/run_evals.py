@@ -47,10 +47,14 @@ class CaseResult:
 class EvalReport:
     results: list[CaseResult]
     retrieval_metrics: RetrievalMetrics | None = None
+    quality_failures: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
-        return all(result.passed for result in self.results)
+        return (
+            all(result.passed for result in self.results)
+            and not self.quality_failures
+        )
 
     @property
     def passed_count(self) -> int:
@@ -101,6 +105,16 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
                     "tags": ["evaluation", "source"],
                 },
             ).raise_for_status()
+            for item in suite.get("additional_knowledge_bases", []):
+                client.post(
+                    "/api/v1/knowledge-bases",
+                    json={
+                        "id": item["id"],
+                        "name": item.get("name") or item["id"],
+                        "description": item.get("description") or "",
+                        "tags": item.get("tags") or [],
+                    },
+                ).raise_for_status()
             _ingest_fixtures(
                 client=client,
                 knowledge_base_id=knowledge_base_id,
@@ -115,7 +129,11 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
                 )
                 for case in suite.get("cases", [])
             ]
-    retrieval_results = [result for result in results if result.expected_files]
+    retrieval_results = [
+        result
+        for result in results
+        if result.case_type == "search" and result.expected_files
+    ]
     retrieval_metrics = evaluate_retrieval(
         rankings=[result.retrieved_files or [] for result in retrieval_results],
         relevant_documents=[
@@ -123,7 +141,15 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
         ],
         k=5,
     )
-    return EvalReport(results=results, retrieval_metrics=retrieval_metrics)
+    quality_failures = _retrieval_quality_failures(
+        retrieval_metrics,
+        suite.get("retrieval_thresholds", {}),
+    )
+    return EvalReport(
+        results=results,
+        retrieval_metrics=retrieval_metrics,
+        quality_failures=tuple(quality_failures),
+    )
 
 
 def format_report(report: EvalReport) -> str:
@@ -135,9 +161,14 @@ def format_report(report: EvalReport) -> str:
         metrics = report.retrieval_metrics
         lines.append(
             f"Retrieval: Recall@{metrics.k}={metrics.recall_at_k:.3f}; "
+            f"Precision@{metrics.k}={metrics.precision_at_k:.3f}; "
             f"MRR={metrics.mean_reciprocal_rank:.3f}; "
+            f"NDCG@{metrics.k}={metrics.ndcg_at_k:.3f}; "
+            f"HitRate@{metrics.k}={metrics.hit_rate_at_k:.3f}; "
             f"cases={metrics.evaluated_cases}"
         )
+    for failure in report.quality_failures:
+        lines.append(f"- FAIL quality_gate: {failure}")
     for result in report.results:
         status = "PASS" if result.passed else "FAIL"
         lines.append(f"- {status} {result.case_id} [{result.case_type}]")
@@ -198,7 +229,9 @@ def _run_case(
     elif case_type == "search":
         checks, retrieved_files = _run_search_case(
             client=client,
-            knowledge_base_id=knowledge_base_id,
+            knowledge_base_id=str(
+                case.get("knowledge_base_id") or knowledge_base_id
+            ),
             case=case,
         )
     else:
@@ -283,14 +316,20 @@ def _run_search_case(
 ) -> tuple[list[CheckResult], list[str]]:
     response = client.post(
         f"/api/v1/knowledge-bases/{knowledge_base_id}/search",
-        json={"query": case["query"], "limit": 5, "recall_limit": 12},
+        json={
+            "query": case["query"],
+            "limit": 5,
+            "recall_limit": int(case.get("recall_limit") or 12),
+        },
     )
     response.raise_for_status()
     results = response.json()["results"]
-    filenames = [item.get("filename") for item in results]
+    checked_results = results[: int(case.get("check_limit") or 5)]
+    filenames = [item.get("filename") for item in checked_results]
+    metric_filenames = [item.get("filename") for item in results]
     symbols = [
         symbol
-        for item in results
+        for item in checked_results
         for symbol in item.get("symbols", [])
     ]
     return (
@@ -299,8 +338,60 @@ def _run_search_case(
                 "retrieval", filenames, case.get("expected_files", [])
             ),
             _contains_all_check("symbols", symbols, case.get("expected_symbols", [])),
+            _contains_none_check(
+                "hard_negatives",
+                filenames,
+                case.get("expected_absent_files", []),
+            ),
+            _equals_check(
+                "empty_results",
+                len(results) == 0,
+                True if case.get("expect_empty_results") else None,
+            ),
         ],
-        [str(item) for item in filenames if item],
+        [str(item) for item in metric_filenames if item],
+    )
+
+
+def _retrieval_quality_failures(
+    metrics: RetrievalMetrics,
+    thresholds: object,
+) -> list[str]:
+    if not isinstance(thresholds, dict):
+        return ["retrieval_thresholds must be an object"]
+    checks = {
+        "min_recall_at_k": metrics.recall_at_k,
+        "min_precision_at_k": metrics.precision_at_k,
+        "min_mrr": metrics.mean_reciprocal_rank,
+        "min_ndcg_at_k": metrics.ndcg_at_k,
+        "min_hit_rate_at_k": metrics.hit_rate_at_k,
+    }
+    failures: list[str] = []
+    for name, actual in checks.items():
+        configured = thresholds.get(name)
+        if configured is None:
+            continue
+        expected = float(configured)
+        if actual < expected:
+            failures.append(
+                f"{name} expected>={expected:.3f} actual={actual:.3f}"
+            )
+    return failures
+
+
+def _contains_none_check(
+    name: str,
+    actual_values: list[Any],
+    forbidden_values: list[Any],
+) -> CheckResult:
+    if not forbidden_values:
+        return CheckResult(name=name, passed=True, detail="skipped")
+    actual = {str(value) for value in actual_values if value}
+    present = [value for value in forbidden_values if str(value) in actual]
+    return CheckResult(
+        name=name,
+        passed=not present,
+        detail=f"unexpected={present} actual={sorted(actual)}",
     )
 
 

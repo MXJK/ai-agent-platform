@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import time
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Iterator, Literal
 
 import httpx
 
@@ -12,12 +13,6 @@ from ai_agent_platform.core import Settings
 
 
 LLMEventType = Literal["delta", "usage", "done"]
-
-
-@dataclass(frozen=True)
-class LLMResponse:
-    text: str
-    model: str
 
 
 @dataclass(frozen=True)
@@ -29,6 +24,45 @@ class LLMUsage:
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens + self.thoughts_tokens
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    text: str
+    model: str
+    usage: LLMUsage | None = None
+
+
+@dataclass
+class LLMUsageAccumulator:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thoughts_tokens: int = 0
+
+    def add(self, usage: LLMUsage) -> None:
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.thoughts_tokens += usage.thoughts_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens + self.thoughts_tokens
+
+
+_LLM_USAGE_ACCUMULATOR: ContextVar[LLMUsageAccumulator | None] = ContextVar(
+    "llm_usage_accumulator",
+    default=None,
+)
+
+
+@contextmanager
+def collect_llm_usage() -> Iterator[LLMUsageAccumulator]:
+    accumulator = LLMUsageAccumulator()
+    token = _LLM_USAGE_ACCUMULATOR.set(accumulator)
+    try:
+        yield accumulator
+    finally:
+        _LLM_USAGE_ACCUMULATOR.reset(token)
 
 
 @dataclass(frozen=True)
@@ -94,11 +128,23 @@ class LLMClient:
 
     def complete(self, prompt: str) -> LLMResponse:
         text_parts: list[str] = []
+        latest_usage: LLMUsage | None = None
         messages = [{"role": "user", "content": prompt}]
-        for event in self.stream_chat(messages):
-            if event.type == "delta":
-                text_parts.append(event.text)
-        return LLMResponse(text="".join(text_parts), model=self._settings.llm_model)
+        try:
+            for event in self.stream_chat(messages):
+                if event.type == "delta":
+                    text_parts.append(event.text)
+                elif event.type == "usage" and event.usage is not None:
+                    latest_usage = event.usage
+        finally:
+            accumulator = _LLM_USAGE_ACCUMULATOR.get()
+            if accumulator is not None and latest_usage is not None:
+                accumulator.add(latest_usage)
+        return LLMResponse(
+            text="".join(text_parts),
+            model=self._settings.llm_model,
+            usage=latest_usage,
+        )
 
     def _stream_factory(
         self,

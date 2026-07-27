@@ -6,7 +6,11 @@ from typing import Annotated, Optional
 from pydantic import BaseModel, Field
 
 from ai_agent_platform.domain import KnowledgeBaseRecord
-from ai_agent_platform.integrations.rag import IngestedDocument, RetrievedDocument
+from ai_agent_platform.integrations.rag import (
+    IndexJob,
+    IngestedDocument,
+    RetrievedDocument,
+)
 from ai_agent_platform.schemas.chat import LLMThinkingLevel
 
 
@@ -56,6 +60,8 @@ class DocumentIngestResponse(BaseModel):
     document_id: str
     filename: str
     chunk_count: int
+    index_job_id: Optional[str] = None
+    index_status: str
 
     @classmethod
     def from_domain(cls, document: IngestedDocument) -> "DocumentIngestResponse":
@@ -64,7 +70,30 @@ class DocumentIngestResponse(BaseModel):
             document_id=document.document_id,
             filename=document.filename,
             chunk_count=document.chunk_count,
+            index_job_id=document.index_job_id,
+            index_status=document.index_status,
         )
+
+
+class IndexJobResponse(BaseModel):
+    id: str
+    knowledge_base_id: str
+    filename: str
+    status: str
+    document_id: Optional[str] = None
+    chunk_count: int
+    error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime] = None
+
+    @classmethod
+    def from_domain(cls, job: IndexJob) -> "IndexJobResponse":
+        return cls(**job.__dict__)
+
+
+class IndexJobsResponse(BaseModel):
+    index_jobs: list[IndexJobResponse]
 
 
 class RAGSearchRequest(BaseModel):
@@ -88,6 +117,9 @@ class RAGChunkResponse(BaseModel):
     lexical_score: Optional[float] = None
     hybrid_score: Optional[float] = None
     rerank_score: Optional[float] = None
+    dense_rank: Optional[int] = None
+    lexical_rank: Optional[int] = None
+    fusion_score: Optional[float] = None
 
     @classmethod
     def from_domain(cls, chunk: RetrievedDocument) -> "RAGChunkResponse":
@@ -106,6 +138,9 @@ class RAGChunkResponse(BaseModel):
             lexical_score=chunk.lexical_score,
             hybrid_score=chunk.hybrid_score,
             rerank_score=chunk.rerank_score,
+            dense_rank=chunk.dense_rank,
+            lexical_rank=chunk.lexical_rank,
+            fusion_score=chunk.fusion_score,
         )
 
 

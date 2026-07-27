@@ -1,4 +1,12 @@
-from .llm import LLMClient, LLMProviderError, LLMResponse, LLMStreamEvent, LLMUsage
+from .llm import (
+    LLMClient,
+    LLMProviderError,
+    LLMResponse,
+    LLMStreamEvent,
+    LLMUsage,
+    LLMUsageAccumulator,
+    collect_llm_usage,
+)
 from .mcp import (
     MCPClient,
     MCPServerConfig,
@@ -37,6 +45,7 @@ __all__ = [
     "LLMResponse",
     "LLMStreamEvent",
     "LLMUsage",
+    "LLMUsageAccumulator",
     "MCPClient",
     "MCPServerConfig",
     "MCPStdioClient",
@@ -58,6 +67,7 @@ __all__ = [
     "create_mcp_providers_from_config_file",
     "create_mcp_providers_from_configs",
     "create_rag_service",
+    "collect_llm_usage",
     "evaluate_retrieval",
     "load_mcp_server_configs",
     "register_mcp_tools",

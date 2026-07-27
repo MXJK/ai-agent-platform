@@ -1,5 +1,6 @@
 from .agent_run_service import AgentRunService
 from .knowledge_base_service import (
+    IndexJobNotFoundError,
     KnowledgeBaseAlreadyExistsError,
     KnowledgeBaseNotFoundError,
     KnowledgeBaseService,
@@ -14,6 +15,7 @@ from .workspace_service import (
 __all__ = [
     "AgentRunService",
     "KnowledgeBaseAlreadyExistsError",
+    "IndexJobNotFoundError",
     "KnowledgeBaseNotFoundError",
     "KnowledgeBaseService",
     "SessionService",

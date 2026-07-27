@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 
@@ -44,6 +45,9 @@ class RetrievedDocument:
     lexical_score: float | None = None
     hybrid_score: float | None = None
     rerank_score: float | None = None
+    dense_rank: int | None = None
+    lexical_rank: int | None = None
+    fusion_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,22 @@ class IngestedDocument:
     document_id: str
     filename: str
     chunk_count: int
+    index_job_id: str | None = None
+    index_status: str = "active"
+
+
+@dataclass(frozen=True)
+class IndexJob:
+    id: str
+    knowledge_base_id: str
+    filename: str
+    status: str
+    document_id: str | None
+    chunk_count: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +104,15 @@ class VectorStore(Protocol):
     ) -> None:
         ...
 
+    def replace_document(
+        self,
+        *,
+        document_id: str,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+    ) -> None:
+        ...
+
     def search(
         self,
         *,
@@ -100,6 +129,43 @@ class DocumentStore(Protocol):
         document: ParsedDocument,
         chunks: list[DocumentChunk],
     ) -> None:
+        ...
+
+    def search_lexical(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        limit: int,
+    ) -> list[RetrievedDocument]:
+        ...
+
+
+class IndexJobStore(Protocol):
+    def create_index_job(self, job: IndexJob) -> None:
+        ...
+
+    def transition_index_job(
+        self,
+        *,
+        job_id: str,
+        expected_status: str,
+        status: str,
+        document_id: str | None = None,
+        chunk_count: int | None = None,
+        error: str | None = None,
+    ) -> IndexJob:
+        ...
+
+    def get_index_job(self, job_id: str) -> IndexJob | None:
+        ...
+
+    def list_index_jobs(
+        self,
+        *,
+        knowledge_base_id: str,
+        limit: int,
+    ) -> list[IndexJob]:
         ...
 
 

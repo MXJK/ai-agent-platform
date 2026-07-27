@@ -1,8 +1,9 @@
 # AI Agent Platform
 
-FastAPI backend with streaming chat, a task-driven code Agent, an independent
-document knowledge base, approval-aware sandbox execution, and optional
-PostgreSQL, Celery, Redis, and Qdrant infrastructure.
+FastAPI backend with streaming chat, a task-driven code Agent, managed document
+knowledge bases, approval-aware sandbox execution, and optional PostgreSQL,
+Celery, Redis, and Qdrant infrastructure. A native browser workspace and an
+optional Go gateway provide the product and traffic boundaries.
 
 The code Agent does not index a repository and does not use embeddings. A run
 captures a registered workspace root, searches the live filesystem for the
@@ -45,6 +46,22 @@ The shared composer offers:
   artifacts;
 - a common conversation history, so bounded recent messages can inform Agent
   exploration and structured tool planning.
+
+Both response modes render an in-message execution process and response
+metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
+usage across structured planning and answer generation. The UI shows input,
+output, thinking, and total tokens per response. Agent polling also merges live
+LangGraph checkpoint trace so fast runs still play completed stages in order
+before the final answer appears.
+
+The browser workspace also includes:
+
+- managed knowledge-base catalog, multi-file upload, hybrid search, answers,
+  citations, and index-job status;
+- local workspace folder selection constrained by `WORKSPACE_ALLOWED_ROOTS`;
+- Agent run details, approval risk, validation artifacts, errors, and metrics;
+- safe Markdown rendering, response cancellation, responsive navigation, and
+  accessible textual status indicators.
 
 ## Gemini streaming
 
@@ -90,6 +107,12 @@ live files; document evidence reuses the independent RAG search stack.
 answer generation. Change runs retain human approval, per-run sandbox copying,
 validation, one bounded repair attempt, and Diff/test artifacts. The registered
 source workspace is never modified directly.
+
+Running Agent status is read from both the product run store and the latest
+LangGraph checkpoint. The API therefore exposes already-completed trace nodes
+while a run is still executing. Final metrics include elapsed time, node/tool
+counts, changed files, recovered errors, and provider-reported input, output,
+thinking, and total tokens.
 
 Default exploration budgets:
 
@@ -185,6 +208,8 @@ chunks. Document RAG endpoints remain available independently:
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
+GET  /api/v1/knowledge-bases/{knowledge_base_id}/index-jobs
+GET  /api/v1/knowledge-bases/{knowledge_base_id}/index-jobs/{job_id}
 ```
 
 Document ingestion accepts a multipart `file` upload (20 MiB maximum):
@@ -201,6 +226,24 @@ documents requiring OCR are not supported.
 Only these document endpoints use chunking, embeddings, and the configured
 vector store. Agent RAG routing calls the same search implementation and
 degrades to an evidence warning when retrieval is unavailable.
+
+Each upload records a queryable index job with the state sequence
+`pending → parsing → embedding → vector_written → active`; a failure from any
+non-terminal state is recorded as `failed` with a bounded error message.
+Vector replacement writes the new points before removing stale points, so an
+embedding failure does not delete the previous searchable version first.
+
+Search performs two independent candidate recalls:
+
+1. dense similarity recall from the configured vector store;
+2. lexical recall using in-memory BM25 locally or PostgreSQL full-text search
+   in the persistent runtime.
+
+The rankings are combined with weighted reciprocal-rank fusion (RRF), then the
+optional CrossEncoder reranker selects the final results. Responses expose the
+raw dense/lexical scores, `dense_rank`, `lexical_rank`, `fusion_score`, and the
+optional reranker score. `RAG_LEXICAL_WEIGHT` controls the RRF channel weights
+and `RAG_RRF_K` controls rank smoothing.
 
 ## Storage and migration
 
@@ -220,6 +263,9 @@ Revision `20260723_0006`:
 Revision `20260724_0007` creates the managed `knowledge_bases` catalog,
 backfills IDs already present in `documents`, and adds the cascading document
 foreign key.
+
+Revision `20260727_0008` adds PostgreSQL lexical search metadata, preserves
+chunk line/symbol provenance, and creates the `rag_index_jobs` state journal.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
@@ -243,7 +289,7 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, Agent runs, workspace and knowledge-base catalogs, document/chunk metadata, and LangGraph checkpoints |
+| PostgreSQL | Sessions/messages, Agent runs, workspace and knowledge-base catalogs, document/chunk metadata, lexical RAG search, index jobs, and LangGraph checkpoints |
 | Qdrant | RAG embeddings, vector similarity search, knowledge-base filtering, and retrieval payloads |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
@@ -303,7 +349,9 @@ logic.
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
+.venv/bin/python INTERVIEW_NOTES/validate.py
 node --check ai_agent_platform/static/app.js
+go test ./gateway/...
 git diff --check
 ```
 

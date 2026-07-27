@@ -64,6 +64,7 @@ from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.text import extract_paths, unique
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.domain import Message
+from ai_agent_platform.integrations.llm import LLMUsageAccumulator, collect_llm_usage
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext, ToolRegistry
 
 
@@ -79,6 +80,26 @@ MAX_ROUTING_CATALOG_ENTRIES = 50
 MAX_ROUTING_CATALOG_CHARS = 12000
 MAX_SELECTED_KNOWLEDGE_BASES = 3
 RAG_RESULTS_PER_KNOWLEDGE_BASE = 5
+
+
+def _merge_llm_usage(
+    state: CodingAgentState,
+    usage: LLMUsageAccumulator,
+    *,
+    previous_metrics: Any = None,
+) -> CodingAgentState:
+    merged = dict(state)
+    merged["llm_input_tokens"] = (
+        int(getattr(previous_metrics, "input_tokens", 0)) + usage.input_tokens
+    )
+    merged["llm_output_tokens"] = (
+        int(getattr(previous_metrics, "output_tokens", 0)) + usage.output_tokens
+    )
+    merged["llm_thoughts_tokens"] = (
+        int(getattr(previous_metrics, "thoughts_tokens", 0))
+        + usage.thoughts_tokens
+    )
+    return merged  # type: ignore[return-value]
 
 
 class CodingAgentRuntime:
@@ -180,7 +201,9 @@ class CodingAgentRuntime:
             "started_at": perf_counter(),
         }
         try:
-            state = self._graph.invoke(initial_state, config)
+            with collect_llm_usage() as llm_usage:
+                state = self._graph.invoke(initial_state, config)
+            state = _merge_llm_usage(state, llm_usage)
         except Exception as exc:
             snapshot = self._snapshot_for(config)
             self._run_store.save(
@@ -286,9 +309,17 @@ class CodingAgentRuntime:
             raise AgentRunInvalidStateError(run_id, record.status)
         config = {"configurable": {"thread_id": record.thread_id}}
         try:
-            state = self._graph.invoke(
-                Command(resume={"approved": approved, "feedback": feedback or ""}),
-                config,
+            with collect_llm_usage() as llm_usage:
+                state = self._graph.invoke(
+                    Command(resume={"approved": approved, "feedback": feedback or ""}),
+                    config,
+                )
+            state = _merge_llm_usage(
+                state,
+                llm_usage,
+                previous_metrics=(
+                    record.result.metrics if record.result is not None else None
+                ),
             )
         except Exception as exc:
             snapshot = self._snapshot_for(config)
@@ -322,9 +353,33 @@ class CodingAgentRuntime:
 
     def get_run(self, run_id: str) -> AgentRunRecord:
         try:
-            return self._run_store.get(run_id)
+            record = self._run_store.get(run_id)
         except KeyError as exc:
             raise AgentRunNotFoundError(run_id) from exc
+        if record.status != "running":
+            return record
+        snapshot = self._snapshot_for(
+            {"configurable": {"thread_id": record.thread_id}}
+        )
+        trace = _snapshot_trace(snapshot)
+        if not trace:
+            return record
+        return AgentRunRecord(
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            workspace_root=record.workspace_root,
+            status=record.status,
+            checkpoint_id=_checkpoint_id(snapshot),
+            latest_node=_latest_trace_node(snapshot),
+            next_nodes=_next_nodes(snapshot),
+            trace=trace,
+            result=record.result,
+            error=record.error,
+            pending_approval=record.pending_approval,
+            errors=_snapshot_errors(snapshot) or record.errors,
+        )
 
     def _finish_invocation(
         self,

@@ -19,8 +19,26 @@ Run all relevant commands before marking a task done:
 1. Read `.workflow/state.yaml` and the active task file before editing.
 2. Confirm the goal, acceptance criteria, and permitted scope.
 3. Keep complex task specifications in `.workflow/tasks/<task-id>.md`.
-4. After implementation, run verification and update the task result.
-5. Update `.workflow/state.yaml`; only record a commit actually covered by verification.
+4. Before closing any task, assess documentation impact.
+5. After implementation, run verification and update the task result.
+6. Update `.workflow/state.yaml`; only record a commit actually covered by verification.
+
+### Documentation synchronization
+
+- Treat `README.md` and the modular interview handbook rooted at
+  `INTERVIEW_NOTES.md` as part of the feature definition, not optional follow-up
+  work.
+- When a task changes user-visible behavior, API contracts, configuration,
+  architecture, data flow, operations, verification commands, or capability
+  boundaries, update `README.md`, `INTERVIEW_NOTES.md`, the affected
+  `INTERVIEW_NOTES/*.md` Parts, and `INTERVIEW_NOTES/facts.json` in the same
+  task.
+- Remove or correct stale claims when a capability is replaced or deleted; do
+  not leave legacy architecture described as current behavior.
+- If a task has no documentation impact, record that conclusion and the reason
+  in the task Result instead of making cosmetic documentation edits.
+- Run `.venv/bin/python INTERVIEW_NOTES/validate.py` whenever the interview
+  handbook or any evidence path mapped by `INTERVIEW_NOTES/facts.json` changes.
 
 ### Safety
 

@@ -5,6 +5,7 @@ from typing import Protocol
 from ai_agent_platform.domain import KnowledgeBaseRecord
 from ai_agent_platform.integrations import LLMClient, RAGService
 from ai_agent_platform.integrations.rag import (
+    IndexJob,
     IngestedDocument,
     RAGAnswer,
     RetrievedDocument,
@@ -55,6 +56,10 @@ class KnowledgeBaseNotFoundError(KeyError):
 
 
 class KnowledgeBaseAlreadyExistsError(ValueError):
+    pass
+
+
+class IndexJobNotFoundError(KeyError):
     pass
 
 
@@ -172,6 +177,30 @@ class KnowledgeBaseService:
             query=query,
             limit=limit,
             recall_limit=recall_limit,
+        )
+
+    def get_index_job(
+        self,
+        *,
+        knowledge_base_id: str,
+        job_id: str,
+    ) -> IndexJob:
+        self.get(knowledge_base_id)
+        job = self._rag_service.get_index_job(job_id=job_id)
+        if job is None or job.knowledge_base_id != knowledge_base_id:
+            raise IndexJobNotFoundError(job_id)
+        return job
+
+    def list_index_jobs(
+        self,
+        *,
+        knowledge_base_id: str,
+        limit: int,
+    ) -> list[IndexJob]:
+        self.get(knowledge_base_id)
+        return self._rag_service.list_index_jobs(
+            knowledge_base_id=knowledge_base_id,
+            limit=limit,
         )
 
     def answer_question(

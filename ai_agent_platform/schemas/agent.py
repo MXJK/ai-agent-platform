@@ -48,6 +48,10 @@ class AgentRunMetricsResponse(BaseModel):
     recovered_error_count: int
     change_iteration_count: int
     changed_file_count: int
+    input_tokens: int
+    output_tokens: int
+    thoughts_tokens: int
+    total_tokens: int
 
 
 class AgentChangeSummaryResponse(BaseModel):
@@ -150,6 +154,10 @@ class AgentRunResponse(BaseModel):
                 recovered_error_count=result.metrics.recovered_error_count,
                 change_iteration_count=result.metrics.change_iteration_count,
                 changed_file_count=result.metrics.changed_file_count,
+                input_tokens=result.metrics.input_tokens,
+                output_tokens=result.metrics.output_tokens,
+                thoughts_tokens=result.metrics.thoughts_tokens,
+                total_tokens=result.metrics.total_tokens,
             ),
             change_summary=AgentChangeSummaryResponse(
                 status=result.change_summary.status,

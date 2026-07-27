@@ -62,6 +62,9 @@ class CodingAgentState(TypedDict, total=False):
     exploration_results: list[dict[str, Any]]
     validation_results: list[dict[str, Any]]
     validation_history: list[dict[str, Any]]
+    llm_input_tokens: int
+    llm_output_tokens: int
+    llm_thoughts_tokens: int
     artifacts: list[dict[str, Any]]
     changed_files: list[str]
     change_status: str
@@ -116,6 +119,10 @@ class AgentRunMetrics:
     recovered_error_count: int = 0
     change_iteration_count: int = 0
     changed_file_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thoughts_tokens: int = 0
+    total_tokens: int = 0
 
 
 @dataclass(frozen=True)

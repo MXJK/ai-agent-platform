@@ -9,6 +9,8 @@ from ai_agent_platform.schemas import (
     SessionResponse,
     SessionsResponse,
     SessionSummaryResponse,
+    TokenUsageResponse,
+    TokenUsagesResponse,
 )
 from ai_agent_platform.services import SessionService
 
@@ -78,6 +80,26 @@ def create_sessions_router(session_service: SessionService) -> APIRouter:
             raise HTTPException(status_code=404, detail="session not found") from exc
         return MessagesResponse(
             messages=[MessageResponse.from_domain(message) for message in messages]
+        )
+
+    @router.get(
+        "/sessions/{session_id}/token-usage",
+        response_model=TokenUsagesResponse,
+    )
+    def list_token_usage(session_id: str) -> TokenUsagesResponse:
+        try:
+            records = session_service.list_token_usage(session_id=session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return TokenUsagesResponse(
+            session_id=session_id,
+            input_tokens=sum(record.input_tokens for record in records),
+            output_tokens=sum(record.output_tokens for record in records),
+            total_tokens=sum(record.total_tokens for record in records),
+            records=[
+                TokenUsageResponse.from_domain(record)
+                for record in records
+            ],
         )
 
     return router

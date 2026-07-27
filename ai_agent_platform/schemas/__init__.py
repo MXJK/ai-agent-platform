@@ -15,6 +15,8 @@ from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
 from .rag import (
     DocumentIngestResponse,
+    IndexJobResponse,
+    IndexJobsResponse,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseResponse,
     KnowledgeBasesResponse,
@@ -25,7 +27,13 @@ from .rag import (
     RAGSearchRequest,
     RAGSearchResponse,
 )
-from .session import CreateSessionRequest, SessionResponse, SessionsResponse
+from .session import (
+    CreateSessionRequest,
+    SessionResponse,
+    SessionsResponse,
+    TokenUsageResponse,
+    TokenUsagesResponse,
+)
 from .summary import SessionSummaryResponse
 from .workspace import (
     WorkspaceDirectoryBrowseResponse,
@@ -50,6 +58,8 @@ __all__ = [
     "ChatStreamRequest",
     "CreateSessionRequest",
     "DocumentIngestResponse",
+    "IndexJobResponse",
+    "IndexJobsResponse",
     "KnowledgeBaseCreateRequest",
     "KnowledgeBaseResponse",
     "KnowledgeBasesResponse",
@@ -67,6 +77,8 @@ __all__ = [
     "SessionsResponse",
     "SessionSummaryResponse",
     "TimingMetricResponse",
+    "TokenUsageResponse",
+    "TokenUsagesResponse",
     "WorkspaceDirectoryBrowseResponse",
     "WorkspaceDirectoryResponse",
     "WorkspaceResponse",

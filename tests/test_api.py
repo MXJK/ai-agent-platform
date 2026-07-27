@@ -176,6 +176,15 @@ class ApiTests(unittest.TestCase):
                 result = wait_for_run(client, first.json()["run_id"])
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(result["workspace_id"], "project")
+                usage = result["result"]["metrics"]
+                self.assertGreater(usage["input_tokens"], 0)
+                self.assertGreater(usage["output_tokens"], 0)
+                self.assertEqual(
+                    usage["total_tokens"],
+                    usage["input_tokens"]
+                    + usage["output_tokens"]
+                    + usage["thoughts_tokens"],
+                )
                 sources = result["result"]["context_sources"]
                 self.assertTrue(
                     any(
@@ -220,6 +229,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn('id="composer-mode-input"', response.text)
+        self.assertNotIn('id="session-token-usage"', response.text)
+        self.assertNotIn('id="composer-attachment-btn"', response.text)
+        self.assertNotIn('id="composer-provider-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertIn('id="workspace-id-input"', response.text)
         self.assertIn('id="open-workspace-picker-btn"', response.text)
@@ -236,13 +248,20 @@ class ApiTests(unittest.TestCase):
         self.assertIn("runAgentFromComposer", script_response.text)
         self.assertNotIn('switchView("agent");', script_response.text)
         self.assertIn("onSubmitted", script_response.text)
-        self.assertIn("继续留在对话工作台", script_response.text)
+        self.assertIn("renderExecutionProcess", script_response.text)
+        self.assertIn("traceToolNames", script_response.text)
+        self.assertIn("renderResponseMetrics", script_response.text)
+        self.assertIn("createAgentProgressPresenter", script_response.text)
+        self.assertIn("await onProgress", script_response.text)
         self.assertIn("workspace_id", script_response.text)
         self.assertIn("browseWorkspaceDirectories", script_response.text)
         self.assertIn("/workspace-directories", script_response.text)
         self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
+        self.assertIn(".execution-process", stylesheet_response.text)
+        self.assertIn(".response-metrics", stylesheet_response.text)
+        self.assertIn("width: fit-content", stylesheet_response.text)
 
     def test_chat_request_accepts_google_provider(self) -> None:
         request = ChatStreamRequest(
@@ -292,6 +311,17 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(metrics["chat_streams_completed_total"], 1)
             self.assertGreater(metrics["llm_input_tokens_total"], 0)
             self.assertGreater(metrics["llm_output_tokens_total"], 0)
+            usage = client.get(
+                f"/api/v1/sessions/{session_id}/token-usage"
+            ).json()
+            self.assertEqual(usage["session_id"], session_id)
+            self.assertGreater(usage["input_tokens"], 0)
+            self.assertGreater(usage["output_tokens"], 0)
+            self.assertEqual(
+                usage["total_tokens"],
+                usage["input_tokens"] + usage["output_tokens"],
+            )
+            self.assertEqual(len(usage["records"]), 1)
 
     def test_chat_stream_reports_google_max_tokens_as_error(self) -> None:
         class TruncatedLLMClient:
@@ -401,12 +431,25 @@ class ApiTests(unittest.TestCase):
                 "Falcon mode enables deterministic offline testing.",
             )
             self.assertEqual(ingested.status_code, 201)
+            self.assertEqual(ingested.json()["index_status"], "active")
+            index_job_id = ingested.json()["index_job_id"]
+            self.assertTrue(index_job_id.startswith("idx_"))
+            jobs = client.get(
+                "/api/v1/knowledge-bases/docs/index-jobs"
+            ).json()["index_jobs"]
+            self.assertEqual([job["status"] for job in jobs], ["active"])
+            loaded_job = client.get(
+                f"/api/v1/knowledge-bases/docs/index-jobs/{index_job_id}"
+            )
+            self.assertEqual(loaded_job.status_code, 200)
+            self.assertEqual(loaded_job.json()["chunk_count"], 1)
             search = client.post(
                 "/api/v1/knowledge-bases/docs/search",
                 json={"query": "Falcon deterministic", "limit": 3},
             )
             self.assertEqual(search.status_code, 200)
             self.assertGreaterEqual(len(search.json()["results"]), 1)
+            self.assertIsNotNone(search.json()["results"][0]["fusion_score"])
             answer = client.post(
                 "/api/v1/knowledge-bases/docs/ask",
                 json={"question": "What enables offline testing?", "limit": 3},

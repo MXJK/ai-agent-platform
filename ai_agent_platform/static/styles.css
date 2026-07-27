@@ -870,7 +870,10 @@ body.inspector-hidden .app-shell {
 }
 
 .chat-bubble {
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
+  justify-self: start;
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 4px 10px 10px;
@@ -879,7 +882,20 @@ body.inspector-hidden .app-shell {
 }
 
 .chat-message.user .chat-bubble {
+  justify-self: end;
   border-radius: 10px 4px 10px 10px;
+}
+
+.chat-bubble .rich-output {
+  min-height: 0;
+}
+
+.chat-bubble .rich-output > :first-child {
+  margin-top: 0;
+}
+
+.chat-bubble .rich-output > :last-child {
+  margin-bottom: 0;
 }
 
 .message-label {
@@ -894,6 +910,211 @@ body.inspector-hidden .app-shell {
 
 .message-label strong {
   color: var(--ink-soft);
+}
+
+.execution-process {
+  width: auto;
+  min-width: min(260px, 100%);
+  max-width: 620px;
+  margin: 0 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.execution-process summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.execution-process summary::-webkit-details-marker {
+  display: none;
+}
+
+.execution-summary-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.execution-summary-main strong {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.execution-summary-text {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-duration {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+}
+
+.execution-indicator {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+  animation: status-pulse 1.1s ease-in-out infinite;
+}
+
+.execution-process.complete .execution-indicator {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+  animation: none;
+}
+
+.execution-process summary::after {
+  flex: 0 0 auto;
+  color: var(--muted);
+  content: "⌄";
+  font-size: 12px;
+  transition: transform var(--transition-fast);
+}
+
+.execution-process[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.execution-duration {
+  margin-left: auto;
+}
+
+.execution-body {
+  padding: 4px 11px 11px;
+  border-top: 1px solid var(--line);
+}
+
+.execution-steps {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 8px 0 2px;
+  list-style: none;
+}
+
+.execution-steps li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 7px;
+  padding-bottom: 11px;
+}
+
+.execution-steps li:last-child {
+  padding-bottom: 2px;
+}
+
+.execution-step-index {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  z-index: 1;
+  place-items: center;
+  border: 1px solid rgba(130, 156, 255, 0.28);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--brand-strong);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+}
+
+.execution-steps li:not(:last-child)::before {
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  left: 9px;
+  width: 1px;
+  background: var(--line-strong);
+  content: "";
+}
+
+.execution-steps strong {
+  display: block;
+  margin: 0 0 2px;
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.execution-steps p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.execution-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.execution-tools > span {
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.execution-tools code {
+  padding: 3px 6px;
+  border: 1px solid rgba(130, 156, 255, 0.18);
+  border-radius: 6px;
+  background: var(--brand-pale);
+  color: var(--brand-strong);
+  font-size: 8.5px;
+}
+
+.response-placeholder {
+  color: var(--muted);
+}
+
+.response-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+}
+
+.response-metrics span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.response-metrics small {
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 8px;
+  text-transform: uppercase;
 }
 
 .typing-indicator {

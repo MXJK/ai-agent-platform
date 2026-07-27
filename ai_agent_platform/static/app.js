@@ -1,6 +1,7 @@
 const API_BASE = "/api/v1";
 const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "waiting_approval"]);
+const responseTimers = new WeakMap();
 
 const state = {
   conversationId: "",
@@ -154,6 +155,189 @@ function formatDuration(value) {
     return `${milliseconds} ms`;
   }
   return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
+}
+
+function formatTokenCount(value) {
+  return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
+}
+
+function humanizeAgentNode(value) {
+  const labels = {
+    setup_workspace: "准备工作区",
+    load_project_instructions: "加载项目指令",
+    classify_request: "识别任务意图",
+    decide_context_source: "选择上下文来源",
+    retrieve_knowledge: "检索知识库",
+    plan_exploration: "规划仓库探索",
+    execute_exploration: "执行仓库探索",
+    assess_context: "评估上下文",
+    merge_evidence: "合并证据",
+    plan_tools: "规划工具调用",
+    review_tool_plan: "等待工具审批",
+    inspect_repository: "检查代码仓库",
+    execute_changes: "执行代码修改",
+    validate_changes: "验证代码修改",
+    review_repair_plan: "等待修复审批",
+    collect_artifacts: "汇总变更产物",
+    compose_answer: "生成最终回答",
+    compose_error_answer: "生成错误说明",
+    model_request: "请求模型",
+    stream_response: "流式生成回答",
+  };
+  return labels[value] || value || "准备执行";
+}
+
+function traceToolNames(trace) {
+  const names = [];
+  for (const step of trace || []) {
+    const output = step.output || {};
+    for (const key of [
+      "called_tools",
+      "planned_tools",
+      "repair_planned_tools",
+      "approval_required_tools",
+    ]) {
+      const values = Array.isArray(output[key]) ? output[key] : [];
+      for (const value of values) {
+        const name = typeof value === "string" ? value : value?.name;
+        if (name && !names.includes(name)) {
+          names.push(name);
+        }
+      }
+    }
+  }
+  return names;
+}
+
+function ensureExecutionProcess(contentNode) {
+  const bubble = contentNode.closest(".chat-bubble");
+  let details = bubble.querySelector(".execution-process");
+  if (!details) {
+    details = document.createElement("details");
+    details.className = "execution-process";
+    details.open = true;
+    details.innerHTML = `
+      <summary>
+        <span class="execution-summary-main">
+          <span class="execution-indicator" aria-hidden="true"></span>
+          <strong>正在思考</strong>
+          <span class="execution-summary-text">准备执行…</span>
+        </span>
+        <span class="execution-duration">0 ms</span>
+      </summary>
+      <div class="execution-body">
+        <ol class="execution-steps"></ol>
+        <div class="execution-tools" hidden></div>
+      </div>
+    `;
+    bubble.insertBefore(details, contentNode);
+  }
+  return details;
+}
+
+function renderExecutionProcess(
+  contentNode,
+  {
+    trace = [],
+    status = "running",
+    elapsedMs = 0,
+    fallbackNode = "",
+    fallbackSummary = "",
+  } = {},
+) {
+  const details = ensureExecutionProcess(contentNode);
+  const terminal = TERMINAL_RUN_STATUSES.has(status) || status === "done";
+  const tools = traceToolNames(trace);
+  const steps = trace.length
+    ? trace
+    : [{
+        step: 1,
+        node: fallbackNode || "model_request",
+        summary: fallbackSummary || "正在建立请求并等待响应。",
+        output: {},
+      }];
+  details.classList.toggle("complete", terminal);
+  details.open = !terminal;
+  details.querySelector(".execution-summary-main strong").textContent = terminal
+    ? "思考过程"
+    : "正在思考";
+  details.querySelector(".execution-summary-text").textContent = terminal
+    ? `${steps.length} 个阶段${tools.length ? ` · ${tools.length} 个工具` : ""}`
+    : humanizeAgentNode(steps.at(-1)?.node);
+  details.querySelector(".execution-duration").textContent = formatDuration(elapsedMs);
+  details.querySelector(".execution-steps").innerHTML = steps
+    .map((step, index) => `
+      <li>
+        <span class="execution-step-index">${escapeHtml(step.step ?? index + 1)}</span>
+        <div>
+          <strong>${escapeHtml(humanizeAgentNode(step.node))}</strong>
+          <p>${escapeHtml(step.summary || "")}</p>
+        </div>
+      </li>
+    `)
+    .join("");
+  const toolList = details.querySelector(".execution-tools");
+  toolList.hidden = tools.length === 0;
+  toolList.innerHTML = tools.length
+    ? `<span>工具</span>${tools.map((name) => `<code>${escapeHtml(name)}</code>`).join("")}`
+    : "";
+  return details;
+}
+
+function startResponseTimer(contentNode, startedAt) {
+  stopResponseTimer(contentNode);
+  const timer = window.setInterval(() => {
+    const duration = contentNode.closest(".chat-bubble")
+      ?.querySelector(".execution-duration");
+    if (duration) {
+      duration.textContent = formatDuration(performance.now() - startedAt);
+    }
+  }, 200);
+  responseTimers.set(contentNode, timer);
+}
+
+function stopResponseTimer(contentNode) {
+  const timer = responseTimers.get(contentNode);
+  if (timer) {
+    window.clearInterval(timer);
+    responseTimers.delete(contentNode);
+  }
+}
+
+function renderResponseMetrics(contentNode, metrics) {
+  const bubble = contentNode.closest(".chat-bubble");
+  let footer = bubble.querySelector(".response-metrics");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "response-metrics";
+    bubble.appendChild(footer);
+  }
+  const values = [];
+  if (metrics.elapsed_ms !== undefined) {
+    values.push(["耗时", formatDuration(metrics.elapsed_ms)]);
+  }
+  if (metrics.input_tokens !== undefined) {
+    values.push(["输入", `${formatTokenCount(metrics.input_tokens)} tokens`]);
+  }
+  if (metrics.output_tokens !== undefined) {
+    values.push(["输出", `${formatTokenCount(metrics.output_tokens)} tokens`]);
+  }
+  if (metrics.thoughts_tokens) {
+    values.push(["思考", `${formatTokenCount(metrics.thoughts_tokens)} tokens`]);
+  }
+  if (metrics.total_tokens !== undefined) {
+    values.push(["合计", `${formatTokenCount(metrics.total_tokens)} tokens`]);
+  }
+  if (metrics.node_count !== undefined) {
+    values.push(["阶段", formatTokenCount(metrics.node_count)]);
+  }
+  if (metrics.tool_call_count !== undefined) {
+    values.push(["工具", formatTokenCount(metrics.tool_call_count)]);
+  }
+  footer.innerHTML = values
+    .map(([label, value]) => `<span><small>${escapeHtml(label)}</small>${escapeHtml(value)}</span>`)
+    .join("");
+  footer.hidden = values.length === 0;
 }
 
 function humanizeStatus(value) {
@@ -337,7 +521,6 @@ function updateContextSummary() {
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceId;
   $("composer-context").textContent = modelLabel;
-  $("composer-provider-input").value = provider;
   $("agent-workspace-badge").textContent = workspaceId;
   $("header-session-id").textContent = state.conversationId || "尚未创建";
 }
@@ -605,11 +788,13 @@ async function loadSessionSummary() {
   }
 }
 
-async function refreshMessages(showRaw = true) {
+async function refreshMessages(showRaw = true, renderChat = true) {
   const conversationId = await ensureSession();
   const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`);
   renderMessages(body.messages || []);
-  renderChatHistory(body.messages || []);
+  if (renderChat) {
+    renderChatHistory(body.messages || []);
+  }
   if (showRaw) {
     setRaw(body);
   }
@@ -718,6 +903,82 @@ async function submitComposerMessage() {
   await streamChat();
 }
 
+function renderAgentChatResponse(
+  contentNode,
+  body,
+  startedAt,
+  { visibleTrace = null, holdAnswer = false } = {},
+) {
+  const result = body?.result || {};
+  const actualStatus = body?.status || result.status || "running";
+  const status = holdAnswer ? "running" : actualStatus;
+  const trace = visibleTrace || body?.trace || result.trace || [];
+  const elapsedMs = result.metrics?.elapsed_ms ?? Math.round(performance.now() - startedAt);
+  renderExecutionProcess(contentNode, {
+    trace,
+    status,
+    elapsedMs,
+    fallbackNode: body?.latest_node || "setup_workspace",
+    fallbackSummary: actualStatus === "queued"
+      ? "Agent 任务已进入执行队列。"
+      : "Agent 正在运行 LangGraph 工作流。",
+  });
+
+  if (!holdAnswer && actualStatus === "completed") {
+    contentNode.innerHTML = result.answer
+      ? renderMarkdown(result.answer)
+      : "<p>Agent 已完成，但没有返回文本内容。</p>";
+  } else if (!holdAnswer && actualStatus === "waiting_approval") {
+    contentNode.innerHTML = "<p>Agent 已暂停并等待审批。请前往代码 Agent 页面查看工具计划。</p>";
+  } else if (!holdAnswer && actualStatus === "failed") {
+    contentNode.innerHTML = `<p>${escapeHtml(body.error || "Agent 运行失败，请查看运行详情。")}</p>`;
+  } else {
+    const currentNode = trace.at(-1)?.node || body?.latest_node;
+    contentNode.innerHTML = `<p class="response-placeholder">${escapeHtml(
+      currentNode
+        ? `${humanizeAgentNode(currentNode)}…`
+        : "Agent 正在理解任务并规划下一步…",
+    )}</p>`;
+  }
+
+  if (result.metrics) {
+    renderResponseMetrics(contentNode, {
+      elapsed_ms: result.metrics.elapsed_ms,
+      node_count: result.metrics.node_count,
+      tool_call_count: result.metrics.tool_call_count,
+      input_tokens: result.metrics.input_tokens,
+      output_tokens: result.metrics.output_tokens,
+      thoughts_tokens: result.metrics.thoughts_tokens,
+      total_tokens: result.metrics.total_tokens,
+    });
+  }
+}
+
+function createAgentProgressPresenter(contentNode, startedAt) {
+  const visibleTrace = [];
+  let pending = Promise.resolve();
+
+  return {
+    update(body) {
+      pending = pending.then(async () => {
+        const result = body?.result || {};
+        const fullTrace = body?.trace || result.trace || [];
+        const newSteps = fullTrace.slice(visibleTrace.length);
+        for (const step of newSteps) {
+          visibleTrace.push(step);
+          renderAgentChatResponse(contentNode, body, startedAt, {
+            visibleTrace,
+            holdAnswer: true,
+          });
+          await new Promise((resolve) => window.setTimeout(resolve, 240));
+        }
+        renderAgentChatResponse(contentNode, body, startedAt, { visibleTrace });
+      });
+      return pending;
+    },
+  };
+}
+
 async function runAgentFromComposer() {
   const input = $("chat-message-input");
   const message = input.value.trim();
@@ -737,18 +998,26 @@ async function runAgentFromComposer() {
   $("focus-files-input").value = "";
   input.value = "";
   let submitted = false;
+  let assistantContent = null;
+  let progressPresenter = null;
+  const startedAt = performance.now();
   setChatStatus("正在提交给 Agent", "running");
   try {
     const run = await runAgent({
-      onSubmitted: () => {
+      onSubmitted: (body) => {
         submitted = true;
         appendChatMessage("user", message);
-        appendChatMessage(
-          "assistant",
-          "代码 Agent 已接收任务。你可以继续留在对话工作台，运行详情和审批请前往代码 Agent 页面查看。",
-        );
+        assistantContent = appendChatMessage("assistant");
+        progressPresenter = createAgentProgressPresenter(assistantContent, startedAt);
+        progressPresenter.update(body);
+        startResponseTimer(assistantContent, startedAt);
         setChatStatus("Agent 运行中", "running");
         showToast("任务已交给代码 Agent；运行详情可前往代码 Agent 页面查看");
+      },
+      onProgress: async (body) => {
+        if (progressPresenter) {
+          await progressPresenter.update(body);
+        }
       },
     });
     if (!run && !submitted) {
@@ -756,25 +1025,23 @@ async function runAgentFromComposer() {
       setChatStatus("Agent 提交失败", "failed");
       return;
     }
+    if (progressPresenter && run) {
+      await progressPresenter.update(run);
+    }
     if (state.latestRunStatus === "completed") {
       setChatStatus("Agent 已完成", "completed");
     } else if (state.latestRunStatus === "waiting_approval") {
-      appendChatMessage(
-        "assistant",
-        "代码 Agent 正在等待审批。请前往代码 Agent 页面查看计划并决定是否继续。",
-      );
       setChatStatus("Agent 等待审批", "waiting_approval");
       showToast("Agent 正在等待审批，请前往代码 Agent 页面处理", "warning");
     } else if (state.latestRunStatus === "failed") {
-      appendChatMessage(
-        "assistant",
-        "代码 Agent 运行失败。请前往代码 Agent 页面查看错误详情。",
-      );
       setChatStatus("Agent 运行失败", "failed");
     } else {
       setChatStatus("Agent 在后台运行", "running");
     }
   } finally {
+    if (assistantContent && TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
+      stopResponseTimer(assistantContent);
+    }
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
@@ -804,11 +1071,21 @@ async function streamChat() {
   state.chatController = new AbortController();
   let assistantContent = null;
   let answer = "";
+  let latestUsage = null;
+  const startedAt = performance.now();
+  const chatTrace = [];
 
   try {
     const conversationId = await ensureSession();
     appendChatMessage("user", message);
     assistantContent = appendChatMessage("assistant");
+    renderExecutionProcess(assistantContent, {
+      trace: chatTrace,
+      status: "running",
+      fallbackNode: "model_request",
+      fallbackSummary: "正在建立模型请求并等待首个响应。",
+    });
+    startResponseTimer(assistantContent, startedAt);
     input.value = "";
     const payload = { conversation_id: conversationId, message, ...optionalModelFields() };
     const events = [];
@@ -823,17 +1100,51 @@ async function streamChat() {
         if (eventName === "meta") {
           const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
           setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
+          chatTrace.push({
+            step: 1,
+            node: "model_request",
+            summary: `已请求 ${data.provider} / ${data.model}${thinking}。`,
+            output: {},
+          });
+          renderExecutionProcess(assistantContent, {
+            trace: chatTrace,
+            status: "running",
+            elapsedMs: performance.now() - startedAt,
+          });
         } else if (eventName === "delta") {
           answer += data.text || "";
           assistantContent.innerHTML = renderMarkdown(answer);
+          if (!chatTrace.some((step) => step.node === "stream_response")) {
+            chatTrace.push({
+              step: chatTrace.length + 1,
+              node: "stream_response",
+              summary: "模型正在流式生成最终回答。",
+              output: {},
+            });
+            renderExecutionProcess(assistantContent, {
+              trace: chatTrace,
+              status: "running",
+              elapsedMs: performance.now() - startedAt,
+            });
+          }
         } else if (eventName === "usage") {
+          latestUsage = data;
           const thoughts = data.thoughts_tokens
             ? ` · ${data.thoughts_tokens} thinking`
             : "";
           setChatStatus(`${data.total_tokens || 0} tokens${thoughts}`, "running");
+          renderResponseMetrics(assistantContent, data);
         } else if (eventName === "done") {
+          latestUsage = data;
+          renderExecutionProcess(assistantContent, {
+            trace: chatTrace,
+            status: "done",
+            elapsedMs: data.elapsed_ms,
+          });
+          renderResponseMetrics(assistantContent, data);
           setChatStatus(`已完成 · ${formatDuration(data.elapsed_ms)}`, "completed");
         } else if (eventName === "error") {
+          latestUsage = data;
           const streamError = new Error(data.message || data.code || "模型响应失败");
           streamError.code = data.code || "llm_provider_error";
           streamError.finishReason = data.finish_reason || "";
@@ -846,7 +1157,7 @@ async function streamChat() {
     if (!answer) {
       assistantContent.innerHTML = "<p>模型没有返回文本内容。</p>";
     }
-    await refreshMessages(false);
+    await refreshMessages(false, false);
   } catch (error) {
     if (error.name === "AbortError") {
       if (assistantContent) {
@@ -871,7 +1182,22 @@ async function streamChat() {
         error.code === "max_output_tokens" ? "warning" : "error",
       );
     }
+    if (assistantContent) {
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      renderExecutionProcess(assistantContent, {
+        trace: chatTrace,
+        status: "failed",
+        elapsedMs,
+      });
+      renderResponseMetrics(assistantContent, {
+        elapsed_ms: elapsedMs,
+        ...(latestUsage || {}),
+      });
+    }
   } finally {
+    if (assistantContent) {
+      stopResponseTimer(assistantContent);
+    }
     state.chatController = null;
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
@@ -981,7 +1307,7 @@ function setAgentStatus(status, runId = "") {
   node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
-async function runAgent({ onSubmitted = null } = {}) {
+async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
   const message = $("agent-message-input").value.trim();
   if (!message) {
     $("agent-message-input").setAttribute("aria-invalid", "true");
@@ -1015,8 +1341,11 @@ async function runAgent({ onSubmitted = null } = {}) {
     if (onSubmitted) {
       onSubmitted(body);
     }
-    await pollRunUntilTerminal();
-    return body;
+    const finalBody = await pollRunUntilTerminal({
+      onProgress,
+      preserveChat: Boolean(onProgress),
+    });
+    return finalBody || body;
   } catch (error) {
     setAgentStatus("failed");
     $("agent-answer").className = "rich-output";
@@ -1092,8 +1421,17 @@ function renderAgentMetrics(metrics) {
         ["节点", metrics.node_count],
         ["工具调用", `${metrics.successful_tool_call_count}/${metrics.tool_call_count}`],
         ["变更文件", metrics.changed_file_count],
+        ["Token", formatTokenCount(metrics.total_tokens)],
+        ["思考 Token", formatTokenCount(metrics.thoughts_tokens)],
       ]
-    : [["耗时", "—"], ["节点", "—"], ["工具调用", "—"], ["变更文件", "—"]];
+    : [
+        ["耗时", "—"],
+        ["节点", "—"],
+        ["工具调用", "—"],
+        ["变更文件", "—"],
+        ["Token", "—"],
+        ["思考 Token", "—"],
+      ];
   $("agent-metrics").innerHTML = values
     .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
     .join("");
@@ -1188,9 +1526,10 @@ async function resumeRun(approved) {
   }
 }
 
-async function pollRunUntilTerminal() {
+async function pollRunUntilTerminal({ onProgress = null, preserveChat = false } = {}) {
   const generation = ++state.agentPollGeneration;
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  let latestBody = null;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     if (
       generation !== state.agentPollGeneration ||
       !state.latestRunId ||
@@ -1198,21 +1537,25 @@ async function pollRunUntilTerminal() {
     ) {
       break;
     }
-    await new Promise((resolve) => window.setTimeout(resolve, 750));
-    await refreshRun();
-    if (attempt % 2 === 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, 300));
+    latestBody = await refreshRun();
+    if (onProgress) {
+      await onProgress(latestBody);
+    }
+    if (attempt % 3 === 0) {
       await refreshEvents(false);
     }
   }
   await refreshEvents(false);
   try {
-    await refreshMessages(false);
+    await refreshMessages(false, !preserveChat);
   } catch (error) {
     showToast(`Agent 已结束，但共享会话刷新失败：${humanizeError(error)}`, "warning");
   }
   if (!TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
     showToast("Agent 仍在后台运行，可稍后刷新状态", "warning");
   }
+  return latestBody;
 }
 
 async function ingestDocument() {
@@ -1759,14 +2102,6 @@ function bindEvents() {
   $("stop-chat-btn").addEventListener("click", stopChat);
   $("composer-mode-input").addEventListener("change", (event) => {
     updateComposerMode(event.target.value);
-  });
-  $("composer-provider-input").addEventListener("change", (event) => {
-    $("provider-input").value = event.target.value;
-    updateContextSummary();
-  });
-  $("composer-attachment-btn").addEventListener("click", () => {
-    switchView("rag");
-    $("document-files-input").click();
   });
   $("chat-message-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {

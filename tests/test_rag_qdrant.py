@@ -53,6 +53,38 @@ class QdrantVectorStoreTests(unittest.TestCase):
             [],
         )
 
+    def test_replace_document_removes_stale_points_after_upsert(self) -> None:
+        store = QdrantVectorStore(
+            url=":memory:",
+            api_key=None,
+            collection_name="replace_document_chunks",
+        )
+        chunks = [
+            DocumentChunk(
+                id=f"chk_{index}",
+                knowledge_base_id="docs",
+                document_id="doc_1",
+                filename="guide.md",
+                chunk_index=index,
+                text=f"chunk {index}",
+            )
+            for index in range(2)
+        ]
+        store.upsert_chunks(chunks, [[1.0, 0.0], [1.0, 0.0]])
+
+        store.replace_document(
+            document_id="doc_1",
+            chunks=[chunks[0]],
+            embeddings=[[1.0, 0.0]],
+        )
+
+        results = store.search(
+            knowledge_base_id="docs",
+            query_embedding=[1.0, 0.0],
+            limit=10,
+        )
+        self.assertEqual([item.id for item in results], ["chk_0"])
+
 
 if __name__ == "__main__":
     unittest.main()

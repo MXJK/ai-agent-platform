@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import math
 import re
 from threading import Lock
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 from docx import Document
@@ -25,6 +27,8 @@ from ai_agent_platform.integrations.rag.models import (
     DocumentChunk,
     DocumentStore,
     EmbeddingProvider,
+    IndexJob,
+    IndexJobStore,
     IngestedDocument,
     ParsedDocument,
     RAGAnswer,
@@ -64,6 +68,127 @@ CODE_TEXT_EXTENSIONS = {
     ".ts",
     ".tsx",
 }
+INDEX_JOB_TRANSITIONS = {
+    "pending": {"parsing", "failed"},
+    "parsing": {"embedding", "failed"},
+    "embedding": {"vector_written", "failed"},
+    "vector_written": {"active", "failed"},
+    "active": set(),
+    "failed": set(),
+}
+
+
+class InMemoryRAGMetadataStore:
+    """Process-local lexical index and index-job journal."""
+
+    def __init__(self) -> None:
+        self._chunks: dict[str, DocumentChunk] = {}
+        self._jobs: dict[str, IndexJob] = {}
+        self._lock = Lock()
+
+    def save_document(
+        self,
+        document: ParsedDocument,
+        chunks: list[DocumentChunk],
+    ) -> None:
+        with self._lock:
+            self._chunks = {
+                chunk_id: chunk
+                for chunk_id, chunk in self._chunks.items()
+                if chunk.document_id != document.id
+            }
+            self._chunks.update({chunk.id: chunk for chunk in chunks})
+
+    def search_lexical(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        limit: int,
+    ) -> list[RetrievedDocument]:
+        with self._lock:
+            chunks = [
+                chunk
+                for chunk in self._chunks.values()
+                if chunk.knowledge_base_id == knowledge_base_id
+            ]
+        return _bm25_rank_chunks(query=query, chunks=chunks, limit=limit)
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        with self._lock:
+            self._chunks = {
+                chunk_id: chunk
+                for chunk_id, chunk in self._chunks.items()
+                if chunk.knowledge_base_id != knowledge_base_id
+            }
+            self._jobs = {
+                job_id: job
+                for job_id, job in self._jobs.items()
+                if job.knowledge_base_id != knowledge_base_id
+            }
+
+    def create_index_job(self, job: IndexJob) -> None:
+        with self._lock:
+            if job.id in self._jobs:
+                raise RAGProviderError(f"index job already exists: {job.id}")
+            self._jobs[job.id] = job
+
+    def transition_index_job(
+        self,
+        *,
+        job_id: str,
+        expected_status: str,
+        status: str,
+        document_id: str | None = None,
+        chunk_count: int | None = None,
+        error: str | None = None,
+    ) -> IndexJob:
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is None:
+                raise RAGProviderError(f"index job not found: {job_id}")
+            if current.status != expected_status:
+                raise RAGProviderError(
+                    f"index job {job_id} expected {expected_status}, "
+                    f"found {current.status}"
+                )
+            if status not in INDEX_JOB_TRANSITIONS[current.status]:
+                raise RAGProviderError(
+                    f"invalid index transition: {current.status} -> {status}"
+                )
+            now = _utcnow()
+            updated = replace(
+                current,
+                status=status,
+                document_id=document_id or current.document_id,
+                chunk_count=(
+                    chunk_count if chunk_count is not None else current.chunk_count
+                ),
+                error=error,
+                updated_at=now,
+                completed_at=now if status in {"active", "failed"} else None,
+            )
+            self._jobs[job_id] = updated
+            return updated
+
+    def get_index_job(self, job_id: str) -> IndexJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def list_index_jobs(
+        self,
+        *,
+        knowledge_base_id: str,
+        limit: int,
+    ) -> list[IndexJob]:
+        with self._lock:
+            jobs = [
+                job
+                for job in self._jobs.values()
+                if job.knowledge_base_id == knowledge_base_id
+            ]
+        jobs.sort(key=lambda job: (job.created_at, job.id), reverse=True)
+        return jobs[:limit]
 
 
 class TextDocumentParser:
@@ -536,6 +661,7 @@ class InMemoryVectorStore:
         chunks: list[DocumentChunk],
         embeddings: list[list[float]],
     ) -> None:
+        _validate_embeddings(chunks, embeddings)
         with self._lock:
             existing_ids = {chunk.id for chunk in chunks}
             self._rows = [
@@ -544,6 +670,22 @@ class InMemoryVectorStore:
                 if chunk.id not in existing_ids
             ]
             self._rows.extend(zip(chunks, embeddings))
+
+    def replace_document(
+        self,
+        *,
+        document_id: str,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+    ) -> None:
+        _validate_embeddings(chunks, embeddings)
+        with self._lock:
+            retained = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.document_id != document_id
+            ]
+            self._rows = retained + list(zip(chunks, embeddings))
 
     def search(
         self,
@@ -606,6 +748,7 @@ class ChromaVectorStore:
     ) -> None:
         if not chunks:
             return
+        _validate_embeddings(chunks, embeddings)
 
         self._collection.upsert(
             ids=[chunk.id for chunk in chunks],
@@ -613,6 +756,26 @@ class ChromaVectorStore:
             documents=[chunk.text for chunk in chunks],
             metadatas=[_chroma_chunk_metadata(chunk) for chunk in chunks],
         )
+
+    def replace_document(
+        self,
+        *,
+        document_id: str,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+    ) -> None:
+        _validate_embeddings(chunks, embeddings)
+        existing = self._collection.get(
+            where={"document_id": document_id},
+            include=[],
+        )
+        existing_ids = {
+            str(item) for item in (existing.get("ids") or [])
+        }
+        self.upsert_chunks(chunks, embeddings)
+        stale_ids = existing_ids - {chunk.id for chunk in chunks}
+        if stale_ids:
+            self._collection.delete(ids=sorted(stale_ids))
 
     def search(
         self,
@@ -727,6 +890,7 @@ class QdrantVectorStore:
     ) -> None:
         if not chunks:
             return
+        _validate_embeddings(chunks, embeddings)
 
         self._ensure_collection(vector_size=len(embeddings[0]))
         PointStruct = _qdrant_model("PointStruct")
@@ -749,6 +913,24 @@ class QdrantVectorStore:
             for chunk, embedding in zip(chunks, embeddings)
         ]
         self._client.upsert(collection_name=self._collection_name, points=points)
+
+    def replace_document(
+        self,
+        *,
+        document_id: str,
+        chunks: list[DocumentChunk],
+        embeddings: list[list[float]],
+    ) -> None:
+        _validate_embeddings(chunks, embeddings)
+        existing_ids = self._document_point_ids(document_id=document_id)
+        self.upsert_chunks(chunks, embeddings)
+        current_ids = {_qdrant_point_id(chunk.id) for chunk in chunks}
+        stale_ids = existing_ids - current_ids
+        if stale_ids:
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=sorted(stale_ids),
+            )
 
     def search(
         self,
@@ -839,6 +1021,36 @@ class QdrantVectorStore:
         collections = self._client.get_collections().collections
         return any(item.name == self._collection_name for item in collections)
 
+    def _document_point_ids(self, *, document_id: str) -> set[str]:
+        if not self._collection_exists():
+            return set()
+        FieldCondition = _qdrant_model("FieldCondition")
+        Filter = _qdrant_model("Filter")
+        MatchValue = _qdrant_model("MatchValue")
+        document_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="document_id",
+                    match=MatchValue(value=document_id),
+                )
+            ]
+        )
+        point_ids: set[str] = set()
+        offset = None
+        while True:
+            points, next_offset = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=document_filter,
+                limit=256,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            point_ids.update(str(point.id) for point in points)
+            if next_offset is None:
+                return point_ids
+            offset = next_offset
+
 
 class RAGService:
     def __init__(
@@ -853,9 +1065,13 @@ class RAGService:
         max_prompt_chars: int,
         lexical_weight: float = 0.35,
         document_store: DocumentStore | None = None,
+        index_job_store: IndexJobStore | None = None,
+        rrf_k: int = 60,
     ) -> None:
         if not 0.0 <= lexical_weight <= 1.0:
             raise ValueError("lexical_weight must be between 0 and 1")
+        if rrf_k <= 0:
+            raise ValueError("rrf_k must be positive")
         self._parser = parser
         self._chunker = chunker
         self._embedding_provider = embedding_provider
@@ -865,6 +1081,16 @@ class RAGService:
         self._max_prompt_chars = max_prompt_chars
         self._lexical_weight = lexical_weight
         self._document_store = document_store
+        self._rrf_k = rrf_k
+        self._memory_metadata_store = InMemoryRAGMetadataStore()
+        self._index_job_store = (
+            index_job_store
+            or (
+                document_store
+                if _supports_index_job_store(document_store)
+                else self._memory_metadata_store
+            )
+        )
 
     def ingest_document(
         self,
@@ -874,42 +1100,125 @@ class RAGService:
         content: str,
         source_uri: str | None = None,
     ) -> IngestedDocument:
-        document = self._parser.parse(
+        return self._run_index_job(
             knowledge_base_id=knowledge_base_id,
             filename=filename,
-            content=content,
-            source_uri=source_uri,
+            parse_document=lambda: self._parser.parse(
+                knowledge_base_id=knowledge_base_id,
+                filename=filename,
+                content=content,
+                source_uri=source_uri,
+            ),
         )
-        return self._ingest_parsed_document(document)
 
-    def _ingest_parsed_document(
+    def _run_index_job(
         self,
-        document: ParsedDocument,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+        parse_document,
     ) -> IngestedDocument:
-        chunks = self._chunker.split(document)
-        if not chunks:
-            raise RAGValidationError("document produced no chunks")
-
-        embeddings = self._embedding_provider.embed_texts(
-            [chunk.text for chunk in chunks],
-            task_type="document",
+        now = _utcnow()
+        job = IndexJob(
+            id=f"idx_{uuid4().hex[:16]}",
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            status="pending",
+            document_id=None,
+            chunk_count=0,
+            error=None,
+            created_at=now,
+            updated_at=now,
         )
-        self._vector_store.delete_document(document_id=document.id)
-        self._vector_store.upsert_chunks(chunks, embeddings)
-        if self._document_store is not None:
-            try:
+        self._index_job_store.create_index_job(job)
+        current_status = "pending"
+        document: ParsedDocument | None = None
+        chunks: list[DocumentChunk] = []
+        try:
+            job = self._transition_index_job(
+                job=job,
+                status="parsing",
+            )
+            current_status = job.status
+            document = parse_document()
+            chunks = self._chunker.split(document)
+            if not chunks:
+                raise RAGValidationError("document produced no chunks")
+            job = self._transition_index_job(
+                job=job,
+                status="embedding",
+                document_id=document.id,
+                chunk_count=len(chunks),
+            )
+            current_status = job.status
+            embeddings = self._embedding_provider.embed_texts(
+                [chunk.text for chunk in chunks],
+                task_type="document",
+            )
+            _validate_embeddings(chunks, embeddings)
+            replace_document = getattr(
+                self._vector_store,
+                "replace_document",
+                None,
+            )
+            if callable(replace_document):
+                replace_document(
+                    document_id=document.id,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                )
+            else:
+                self._vector_store.upsert_chunks(chunks, embeddings)
+            job = self._transition_index_job(
+                job=job,
+                status="vector_written",
+            )
+            current_status = job.status
+            if self._document_store is not None:
                 self._document_store.save_document(document, chunks)
-            except Exception:
+            self._memory_metadata_store.save_document(document, chunks)
+            job = self._transition_index_job(job=job, status="active")
+            return IngestedDocument(
+                knowledge_base_id=document.knowledge_base_id,
+                document_id=document.id,
+                filename=document.filename,
+                chunk_count=len(chunks),
+                index_job_id=job.id,
+                index_status=job.status,
+            )
+        except Exception as exc:
+            if current_status not in {"active", "failed"}:
                 try:
-                    self._vector_store.delete_document(document_id=document.id)
+                    self._index_job_store.transition_index_job(
+                        job_id=job.id,
+                        expected_status=current_status,
+                        status="failed",
+                        document_id=document.id if document is not None else None,
+                        chunk_count=len(chunks) if chunks else None,
+                        error=_index_error_message(exc),
+                    )
                 except Exception:
                     pass
-                raise
-        return IngestedDocument(
-            knowledge_base_id=document.knowledge_base_id,
-            document_id=document.id,
-            filename=document.filename,
-            chunk_count=len(chunks),
+            raise
+
+    def _transition_index_job(
+        self,
+        *,
+        job: IndexJob,
+        status: str,
+        document_id: str | None = None,
+        chunk_count: int | None = None,
+    ) -> IndexJob:
+        if status not in INDEX_JOB_TRANSITIONS.get(job.status, set()):
+            raise RAGProviderError(
+                f"invalid index transition: {job.status} -> {status}"
+            )
+        return self._index_job_store.transition_index_job(
+            job_id=job.id,
+            expected_status=job.status,
+            status=status,
+            document_id=document_id,
+            chunk_count=chunk_count,
         )
 
     def ingest_file(
@@ -920,17 +1229,37 @@ class RAGService:
         content: bytes,
         source_uri: str | None = None,
     ) -> IngestedDocument:
-        document = self._parser.parse_bytes(
+        return self._run_index_job(
             knowledge_base_id=knowledge_base_id,
             filename=filename,
-            content=content,
-            source_uri=source_uri,
+            parse_document=lambda: self._parser.parse_bytes(
+                knowledge_base_id=knowledge_base_id,
+                filename=filename,
+                content=content,
+                source_uri=source_uri,
+            ),
         )
-        return self._ingest_parsed_document(document)
 
     def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
         self._vector_store.delete_knowledge_base(
             knowledge_base_id=knowledge_base_id
+        )
+        self._memory_metadata_store.delete_knowledge_base(
+            knowledge_base_id=knowledge_base_id
+        )
+
+    def get_index_job(self, *, job_id: str) -> IndexJob | None:
+        return self._index_job_store.get_index_job(job_id)
+
+    def list_index_jobs(
+        self,
+        *,
+        knowledge_base_id: str,
+        limit: int = 50,
+    ) -> list[IndexJob]:
+        return self._index_job_store.list_index_jobs(
+            knowledge_base_id=knowledge_base_id,
+            limit=limit,
         )
 
     def search(
@@ -950,15 +1279,30 @@ class RAGService:
         )[0]
         candidate_limit = recall_limit or self._default_recall_limit
         candidate_limit = max(candidate_limit, limit)
-        candidates = self._vector_store.search(
+        dense_candidates = self._vector_store.search(
             knowledge_base_id=knowledge_base_id,
             query_embedding=query_embedding,
             limit=candidate_limit,
         )
-        candidates = _hybrid_rank_candidates(
-            query=query,
-            candidates=candidates,
+        lexical_search = getattr(self._document_store, "search_lexical", None)
+        lexical_candidates = (
+            lexical_search(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                limit=candidate_limit,
+            )
+            if callable(lexical_search)
+            else self._memory_metadata_store.search_lexical(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                limit=candidate_limit,
+            )
+        )
+        candidates = _reciprocal_rank_fusion(
+            dense_candidates=dense_candidates,
+            lexical_candidates=lexical_candidates,
             lexical_weight=self._lexical_weight,
+            rrf_k=self._rrf_k,
         )
         return self._reranker.rerank(
             query=query,
@@ -1228,6 +1572,15 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _metadata_symbols(value: object) -> list[str]:
     if value is None:
         return []
@@ -1268,90 +1621,164 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]", text.lower())
 
 
-def _hybrid_rank_candidates(
+def _reciprocal_rank_fusion(
     *,
-    query: str,
-    candidates: list[RetrievedDocument],
+    dense_candidates: list[RetrievedDocument],
+    lexical_candidates: list[RetrievedDocument],
     lexical_weight: float,
+    rrf_k: int,
 ) -> list[RetrievedDocument]:
-    """Blend vector recall with exact code, symbol, and path matches."""
+    """Fuse independent dense and lexical rankings with weighted RRF."""
 
-    query_terms = _search_terms(query)
-    ranked: list[RetrievedDocument] = []
-    for candidate in candidates:
-        recall_score = (
-            candidate.recall_score
-            if candidate.recall_score is not None
+    dense_weight = 1.0 - lexical_weight
+    rows: dict[str, dict[str, object]] = {}
+    for rank, candidate in enumerate(dense_candidates, start=1):
+        rows[candidate.id] = {
+            "candidate": candidate,
+            "dense_rank": rank,
+            "dense_score": (
+                candidate.recall_score
+                if candidate.recall_score is not None
+                else candidate.score
+            ),
+        }
+    for rank, candidate in enumerate(lexical_candidates, start=1):
+        row = rows.setdefault(candidate.id, {"candidate": candidate})
+        row["lexical_rank"] = rank
+        row["lexical_score"] = (
+            candidate.lexical_score
+            if candidate.lexical_score is not None
             else candidate.score
         )
-        vector_score = max(0.0, min(1.0, (recall_score + 1.0) / 2.0))
-        lexical_score = _lexical_relevance(query_terms, candidate)
-        hybrid_score = (
-            (1.0 - lexical_weight) * vector_score
-            + lexical_weight * lexical_score
-        )
-        ranked.append(
+
+    fused: list[RetrievedDocument] = []
+    for row in rows.values():
+        candidate = row["candidate"]
+        assert isinstance(candidate, RetrievedDocument)
+        dense_rank = _optional_int(row.get("dense_rank"))
+        lexical_rank = _optional_int(row.get("lexical_rank"))
+        fusion_score = 0.0
+        if dense_rank is not None and dense_weight > 0:
+            fusion_score += dense_weight / (rrf_k + dense_rank)
+        if lexical_rank is not None and lexical_weight > 0:
+            fusion_score += lexical_weight / (rrf_k + lexical_rank)
+        fused.append(
             replace(
                 candidate,
-                score=hybrid_score,
-                recall_score=recall_score,
-                lexical_score=lexical_score,
-                hybrid_score=hybrid_score,
+                score=fusion_score,
+                recall_score=_optional_float(row.get("dense_score")),
+                lexical_score=_optional_float(row.get("lexical_score")),
+                hybrid_score=fusion_score,
+                dense_rank=dense_rank,
+                lexical_rank=lexical_rank,
+                fusion_score=fusion_score,
             )
         )
-    ranked.sort(
+    fused.sort(
         key=lambda item: (
-            item.score,
-            item.recall_score if item.recall_score is not None else -1.0,
+            item.fusion_score or 0.0,
+            -(item.dense_rank or 10**9),
+            -(item.lexical_rank or 10**9),
         ),
         reverse=True,
     )
-    return ranked
+    return fused
 
 
-def _lexical_relevance(
-    query_terms: set[str],
-    candidate: RetrievedDocument,
-) -> float:
-    if not query_terms:
-        return 0.0
-
-    text_terms = _search_terms(candidate.text)
-    symbol_terms = _search_terms(" ".join(candidate.symbols))
-    filename_terms = _search_terms(candidate.filename)
-    text_coverage = len(query_terms & text_terms) / len(query_terms)
-    symbol_coverage = _metadata_coverage(query_terms, symbol_terms)
-    filename_coverage = _metadata_coverage(query_terms, filename_terms)
-    return min(
-        1.0,
-        0.55 * text_coverage
-        + 0.35 * symbol_coverage
-        + 0.10 * filename_coverage,
+def _bm25_rank_chunks(
+    *,
+    query: str,
+    chunks: list[DocumentChunk],
+    limit: int,
+) -> list[RetrievedDocument]:
+    query_tokens = _lexical_tokens(query)
+    if not query_tokens or not chunks:
+        return []
+    document_tokens = [
+        _lexical_tokens(
+            " ".join(
+                [
+                    chunk.filename,
+                    " ".join(chunk.symbols),
+                    " ".join(chunk.symbols),
+                    chunk.text,
+                ]
+            )
+        )
+        for chunk in chunks
+    ]
+    document_frequency = Counter(
+        token
+        for tokens in document_tokens
+        for token in set(tokens)
     )
-
-
-def _metadata_coverage(query_terms: set[str], metadata_terms: set[str]) -> float:
-    meaningful_terms = {term for term in metadata_terms if len(term) > 1}
-    if not meaningful_terms:
-        return 0.0
-    return len(query_terms & meaningful_terms) / len(meaningful_terms)
-
-
-def _search_terms(text: str) -> set[str]:
-    terms: set[str] = set()
-    for raw_term in _tokenize(text):
-        if not raw_term:
+    average_length = (
+        sum(len(tokens) for tokens in document_tokens) / len(document_tokens)
+    )
+    scored: list[RetrievedDocument] = []
+    for chunk, tokens in zip(chunks, document_tokens):
+        if not tokens:
             continue
-        terms.add(raw_term)
-        for snake_part in raw_term.split("_"):
-            if snake_part:
-                terms.add(snake_part)
-        for camel_part in re.findall(
-            r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+",
-            raw_term,
-        ):
-            terms.add(camel_part.lower())
-    return terms
+        frequencies = Counter(tokens)
+        score = 0.0
+        for term in query_tokens:
+            frequency = frequencies.get(term, 0)
+            if not frequency:
+                continue
+            doc_frequency = document_frequency[term]
+            inverse_document_frequency = math.log(
+                1.0
+                + (
+                    len(chunks) - doc_frequency + 0.5
+                )
+                / (doc_frequency + 0.5)
+            )
+            length_normalization = frequency + 1.5 * (
+                1.0 - 0.75
+                + 0.75 * len(tokens) / max(average_length, 1.0)
+            )
+            score += inverse_document_frequency * (
+                frequency * 2.5 / length_normalization
+            )
+        if score <= 0:
+            continue
+        scored.append(
+            RetrievedDocument(
+                id=chunk.id,
+                knowledge_base_id=chunk.knowledge_base_id,
+                document_id=chunk.document_id,
+                filename=chunk.filename,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                score=score,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                symbols=chunk.symbols,
+                lexical_score=score,
+            )
+        )
+    scored.sort(key=lambda item: (item.score, item.id), reverse=True)
+    return scored[:limit]
+
+
+def _lexical_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw_term in _tokenize(text):
+        tokens.append(raw_term)
+        tokens.extend(
+            part
+            for part in raw_term.split("_")
+            if part and part != raw_term
+        )
+        tokens.extend(
+            part.lower()
+            for part in re.findall(
+                r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+",
+                raw_term,
+            )
+            if part.lower() != raw_term
+        )
+    return tokens
 
 
 def _gemini_task_type(task_type: str) -> str:
@@ -1402,3 +1829,37 @@ def _qdrant_vector_size(collection_info: object) -> int | None:
         named_size = getattr(first_vector, "size", None)
         return int(named_size) if named_size is not None else None
     return None
+
+
+def _validate_embeddings(
+    chunks: list[DocumentChunk],
+    embeddings: list[list[float]],
+) -> None:
+    if len(chunks) != len(embeddings):
+        raise RAGProviderError(
+            "embedding provider returned a different number of vectors than chunks"
+        )
+    dimensions = {len(embedding) for embedding in embeddings}
+    if chunks and (dimensions == {0} or len(dimensions) != 1):
+        raise RAGProviderError("embedding provider returned invalid vector dimensions")
+
+
+def _supports_index_job_store(store: object) -> bool:
+    return store is not None and all(
+        callable(getattr(store, name, None))
+        for name in (
+            "create_index_job",
+            "transition_index_job",
+            "get_index_job",
+            "list_index_jobs",
+        )
+    )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _index_error_message(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    return message[:2000]

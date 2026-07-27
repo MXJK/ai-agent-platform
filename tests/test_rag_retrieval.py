@@ -10,8 +10,10 @@ from ai_agent_platform.integrations.rag import (
     RAGService,
     RecursiveCharacterChunker,
     TextDocumentParser,
+    RetrievedDocument,
     evaluate_retrieval,
 )
+from ai_agent_platform.integrations.rag.service import InMemoryRAGMetadataStore
 
 
 def _simple_pdf(text: str) -> bytes:
@@ -59,6 +61,46 @@ class ConstantEmbeddingProvider:
         task_type: str = "document",
     ) -> list[list[float]]:
         return [[1.0, 0.0] for _ in texts]
+
+
+class MutableEmbeddingProvider(ConstantEmbeddingProvider):
+    fail = False
+
+    def embed_texts(
+        self,
+        texts: list[str],
+        *,
+        task_type: str = "document",
+    ) -> list[list[float]]:
+        if self.fail and task_type == "document":
+            raise RuntimeError("embedding outage")
+        return super().embed_texts(texts, task_type=task_type)
+
+
+class DenseDistractorVectorStore(InMemoryVectorStore):
+    def search(
+        self,
+        *,
+        knowledge_base_id: str,
+        query_embedding: list[float],
+        limit: int,
+    ) -> list[RetrievedDocument]:
+        results = super().search(
+            knowledge_base_id=knowledge_base_id,
+            query_embedding=query_embedding,
+            limit=100,
+        )
+        return [item for item in results if item.filename == "distractor.md"][:limit]
+
+
+class RecordingIndexJobStore(InMemoryRAGMetadataStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.transitions: list[tuple[str, str]] = []
+
+    def transition_index_job(self, **kwargs):
+        self.transitions.append((kwargs["expected_status"], kwargs["status"]))
+        return super().transition_index_job(**kwargs)
 
 
 class RAGRetrievalTests(unittest.TestCase):
@@ -159,6 +201,71 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertGreater(results[0].lexical_score or 0.0, 0.0)
         self.assertIsNotNone(results[0].hybrid_score)
         self.assertEqual(results[0].score, results[0].hybrid_score)
+        self.assertEqual(results[0].dense_rank, 1)
+        self.assertEqual(results[0].lexical_rank, 1)
+        self.assertEqual(results[0].fusion_score, results[0].score)
+
+    def test_lexical_recall_adds_candidate_missing_from_dense_recall(self) -> None:
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=DenseDistractorVectorStore(),
+            reranker=NoopReranker(),
+            default_recall_limit=1,
+            max_prompt_chars=2000,
+            lexical_weight=0.7,
+        )
+        service.ingest_document(
+            knowledge_base_id="docs",
+            filename="distractor.md",
+            content="General retention overview without a control identifier.",
+        )
+        service.ingest_document(
+            knowledge_base_id="docs",
+            filename="target.md",
+            content="The exact control is QUASAR_RETENTION_47X.",
+        )
+
+        results = service.search(
+            knowledge_base_id="docs",
+            query="QUASAR_RETENTION_47X",
+            limit=1,
+            recall_limit=1,
+        )
+
+        self.assertEqual(results[0].filename, "target.md")
+        self.assertIsNone(results[0].dense_rank)
+        self.assertEqual(results[0].lexical_rank, 1)
+
+    def test_successful_index_job_follows_all_state_transitions(self) -> None:
+        job_store = RecordingIndexJobStore()
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=InMemoryVectorStore(),
+            reranker=NoopReranker(),
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+            index_job_store=job_store,
+        )
+
+        service.ingest_document(
+            knowledge_base_id="docs",
+            filename="guide.md",
+            content="state machine reference",
+        )
+
+        self.assertEqual(
+            job_store.transitions,
+            [
+                ("pending", "parsing"),
+                ("parsing", "embedding"),
+                ("embedding", "vector_written"),
+                ("vector_written", "active"),
+            ],
+        )
 
     def test_retrieval_metrics_compute_recall_and_mrr(self) -> None:
         metrics = evaluate_retrieval(
@@ -171,43 +278,42 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertEqual(metrics.recall_at_k, 0.5)
         self.assertEqual(metrics.mean_reciprocal_rank, 0.25)
 
-    def test_delete_knowledge_base_keeps_other_namespaces(self) -> None:
+    def test_failed_reindex_records_job_and_preserves_previous_vectors(self) -> None:
+        embedding_provider = MutableEmbeddingProvider()
         service = RAGService(
             parser=TextDocumentParser(),
             chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
-            embedding_provider=ConstantEmbeddingProvider(),
+            embedding_provider=embedding_provider,
             vector_store=InMemoryVectorStore(),
             reranker=NoopReranker(),
             default_recall_limit=10,
             max_prompt_chars=2000,
         )
-        for knowledge_base_id in ("delete_me", "keep_me"):
+        first = service.ingest_document(
+            knowledge_base_id="docs",
+            filename="guide.md",
+            content="stable previous content",
+        )
+        embedding_provider.fail = True
+
+        with self.assertRaisesRegex(RuntimeError, "embedding outage"):
             service.ingest_document(
-                knowledge_base_id=knowledge_base_id,
-                filename=f"{knowledge_base_id}.md",
-                content=f"{knowledge_base_id} reference content",
+                knowledge_base_id="docs",
+                filename="guide.md",
+                content="replacement content",
             )
 
-        service.delete_knowledge_base(knowledge_base_id="delete_me")
-
-        self.assertEqual(
-            service.search(
-                knowledge_base_id="delete_me",
-                query="reference",
-                limit=5,
-            ),
-            [],
+        jobs = service.list_index_jobs(knowledge_base_id="docs")
+        self.assertEqual([job.status for job in jobs], ["failed", "active"])
+        self.assertEqual(jobs[0].error, "embedding outage")
+        self.assertEqual(first.index_status, "active")
+        embedding_provider.fail = False
+        results = service.search(
+            knowledge_base_id="docs",
+            query="stable previous content",
+            limit=1,
         )
-        self.assertEqual(
-            len(
-                service.search(
-                    knowledge_base_id="keep_me",
-                    query="reference",
-                    limit=5,
-                )
-            ),
-            1,
-        )
+        self.assertIn("stable previous content", results[0].text)
 
     def test_delete_knowledge_base_keeps_other_namespaces(self) -> None:
         service = RAGService(

@@ -17,8 +17,14 @@ and agent cases, and reports checks for:
 - tool planning
 - RAG retrieval hit rate
 - code citation symbols
-- retrieval Recall@5 and mean reciprocal rank (MRR)
+- RAG-only Recall@5, Precision@5, MRR@5, NDCG@5, and Hit Rate@5
 - approval pause behavior
 
-The evals are intentionally small and deterministic. They are a regression
-baseline, not a benchmark of model quality.
+Agent repository navigation is reported per case but is deliberately excluded
+from the RAG aggregate. `agent_cases.json` also defines minimum retrieval
+quality gates; a metric below its configured threshold makes the command fail.
+The corpus includes multi-document recall, an exact-token lexical rescue,
+a hard negative, and an empty-knowledge-base/no-evidence case.
+
+The evals remain deterministic regression tests, not a production benchmark of
+model or answer quality.

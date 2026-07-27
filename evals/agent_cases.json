@@ -1,6 +1,19 @@
 {
   "workspace_id": "workspace_main",
   "knowledge_base_id": "eval_docs",
+  "additional_knowledge_bases": [
+    {
+      "id": "empty_eval_docs",
+      "name": "Empty evaluation knowledge base"
+    }
+  ],
+  "retrieval_thresholds": {
+    "min_recall_at_k": 0.9,
+    "min_precision_at_k": 0.2,
+    "min_mrr": 0.8,
+    "min_ndcg_at_k": 0.85,
+    "min_hit_rate_at_k": 1.0
+  },
   "fixtures": [
     {
       "filename": "ai_agent_platform/api/routes/agent_runs.py",
@@ -13,6 +26,26 @@
     {
       "filename": "ai_agent_platform/integrations/tools.py",
       "content": "class ToolRegistry:\n    \"\"\"Registry that validates tool arguments and audits execution.\"\"\"\n\n    def execute(self, tool_call: ToolCall, context: ToolExecutionContext | None = None) -> ToolResult:\n        validation_error = _validate_arguments(tool_call.arguments, spec.input_schema)\n        arguments_summary = summarize_tool_arguments(tool_call.arguments)\n        result, output_truncated = _truncate_output(result, max_chars=spec.max_output_chars)\n        return ToolResult(arguments_summary=arguments_summary, output_truncated=output_truncated)\n"
+    },
+    {
+      "filename": "policies/data-retention.md",
+      "content": "# Data retention\nThe exact compliance control QUASAR_RETENTION_47X requires audit records to be retained for 47 months."
+    },
+    {
+      "filename": "operations/disaster-primary.md",
+      "content": "# Disaster recovery\nThe primary service has a recovery time objective RTO of 30 minutes and uses cross-region replication."
+    },
+    {
+      "filename": "operations/disaster-database.md",
+      "content": "# Database recovery\nThe database disaster recovery plan has an RTO of 45 minutes and restores encrypted snapshots."
+    },
+    {
+      "filename": "policies/refund-policy.md",
+      "content": "# Customer refund policy\nCustomers may request a refund within seven days after order completion."
+    },
+    {
+      "filename": "engineering/refund-logging.md",
+      "content": "# Refund event logging\nEngineers must attach an internal trace identifier when debugging refund event delivery."
     }
   ],
   "cases": [
@@ -51,6 +84,38 @@
       "expected_tools": ["repo.search_code"],
       "expected_files": ["ai_agent_platform/agents/coding_agent.py"],
       "expected_answer_keywords": ["resume", "coding_agent.py"]
+    },
+    {
+      "id": "rag_lexical_channel_rescues_exact_control",
+      "type": "search",
+      "query": "QUASAR_RETENTION_47X",
+      "check_limit": 3,
+      "expected_files": ["policies/data-retention.md"]
+    },
+    {
+      "id": "rag_recalls_multiple_recovery_documents",
+      "type": "search",
+      "query": "disaster recovery RTO",
+      "check_limit": 5,
+      "expected_files": [
+        "operations/disaster-primary.md",
+        "operations/disaster-database.md"
+      ]
+    },
+    {
+      "id": "rag_rejects_refund_hard_negative",
+      "type": "search",
+      "query": "customer refund seven days after order completion",
+      "check_limit": 1,
+      "expected_files": ["policies/refund-policy.md"],
+      "expected_absent_files": ["engineering/refund-logging.md"]
+    },
+    {
+      "id": "rag_empty_knowledge_base_returns_no_evidence",
+      "type": "search",
+      "knowledge_base_id": "empty_eval_docs",
+      "query": "What is the production retention policy?",
+      "expect_empty_results": true
     }
   ]
 }

@@ -1,10 +1,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 
 from ai_agent_platform.agents.coding.context import load_project_instructions
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
+from ai_agent_platform.agents.coding.planner import RuleBasedAgentPlanner
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.repositories import InMemoryWorkspaceRepository
 from ai_agent_platform.services import WorkspaceService, WorkspaceValidationError
@@ -183,6 +185,43 @@ class ProjectInstructionTests(unittest.TestCase):
 
 
 class AgentContextBudgetTests(unittest.TestCase):
+    def test_running_record_exposes_completed_checkpoint_trace(self) -> None:
+        entered_classification = Event()
+        release_classification = Event()
+
+        class BlockingPlanner(RuleBasedAgentPlanner):
+            def classify_request(self, user_input, knowledge_bases):
+                entered_classification.set()
+                release_classification.wait(timeout=2)
+                return super().classify_request(user_input, knowledge_bases)
+
+        with TemporaryDirectory() as temp_dir:
+            runtime = CodingAgentRuntime(planner=BlockingPlanner())
+            results = []
+            worker = Thread(
+                target=lambda: results.append(
+                    runtime.run(
+                        run_id="run_live_trace",
+                        conversation_id="session",
+                        user_input="解释项目结构",
+                        history=[],
+                        workspace_id="workspace",
+                        workspace_root=temp_dir,
+                    )
+                )
+            )
+            worker.start()
+            self.assertTrue(entered_classification.wait(timeout=2))
+            running = runtime.get_run("run_live_trace")
+            release_classification.set()
+            worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(running.status, "running")
+        self.assertGreaterEqual(len(running.trace), 1)
+        self.assertEqual(running.trace[0]["node"], "setup_workspace")
+        self.assertEqual(len(results), 1)
+
     def test_agent_caps_rounds_files_and_context_characters(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

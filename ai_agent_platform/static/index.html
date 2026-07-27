@@ -150,25 +150,11 @@
             <div class="composer">
               <div class="composer-mode-bar">
                 <div class="composer-tools">
-                  <button id="composer-attachment-btn" class="composer-tool" type="button" title="添加文件到知识库">
-                    <svg class="app-icon" aria-hidden="true"><use href="#icon-paperclip"></use></svg>
-                    <span>文件</span>
-                  </button>
                   <label class="composer-mode-control" for="composer-mode-input">
                     <span>模式</span>
                     <select id="composer-mode-input" aria-label="响应模式">
                       <option value="chat">快速对话</option>
                       <option value="agent">代码 Agent</option>
-                    </select>
-                  </label>
-                  <label class="composer-mode-control" for="composer-provider-input">
-                    <span>模型</span>
-                    <select id="composer-provider-input" aria-label="模型提供商">
-                      <option value="">默认</option>
-                      <option value="fake">Fake</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="anthropic">Anthropic</option>
-                      <option value="google">Google</option>
                     </select>
                   </label>
                 </div>
@@ -273,6 +259,8 @@
                   <div><dt>节点</dt><dd>—</dd></div>
                   <div><dt>工具调用</dt><dd>—</dd></div>
                   <div><dt>变更文件</dt><dd>—</dd></div>
+                  <div><dt>Token</dt><dd>—</dd></div>
+                  <div><dt>思考 Token</dt><dd>—</dd></div>
                 </dl>
               </article>
             </aside>

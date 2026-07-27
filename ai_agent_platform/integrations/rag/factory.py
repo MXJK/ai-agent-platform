@@ -84,5 +84,6 @@ def create_rag_service(
         default_recall_limit=settings.rag_recall_limit,
         max_prompt_chars=settings.rag_max_prompt_chars,
         lexical_weight=settings.rag_lexical_weight,
+        rrf_k=settings.rag_rrf_k,
         document_store=document_store,
     )

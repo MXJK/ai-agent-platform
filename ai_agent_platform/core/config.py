@@ -47,6 +47,7 @@ class Settings:
     rag_chunk_overlap: int = 120
     rag_recall_limit: int = 20
     rag_lexical_weight: float = 0.35
+    rag_rrf_k: int = 60
     rag_reranker_provider: str = "none"
     sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rag_max_prompt_chars: int = 6000
@@ -122,6 +123,7 @@ class Settings:
             ("local_embedding_dimensions", self.local_embedding_dimensions),
             ("rag_chunk_size", self.rag_chunk_size),
             ("rag_recall_limit", self.rag_recall_limit),
+            ("rag_rrf_k", self.rag_rrf_k),
             ("rag_max_prompt_chars", self.rag_max_prompt_chars),
             ("background_task_workers", self.background_task_workers),
             (
@@ -299,6 +301,7 @@ class Settings:
             rag_lexical_weight=_float_env(
                 "RAG_LEXICAL_WEIGHT", cls.rag_lexical_weight, dotenv
             ),
+            rag_rrf_k=_int_env("RAG_RRF_K", cls.rag_rrf_k, dotenv),
             rag_reranker_provider=_env(
                 "RAG_RERANKER_PROVIDER", cls.rag_reranker_provider, dotenv
             ),

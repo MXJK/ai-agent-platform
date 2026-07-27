@@ -1,4 +1,13 @@
-from fastapi import APIRouter, File, HTTPException, Path, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 
 from ai_agent_platform.integrations import (
     LLMClient,
@@ -9,6 +18,8 @@ from ai_agent_platform.integrations import (
 )
 from ai_agent_platform.schemas import (
     DocumentIngestResponse,
+    IndexJobResponse,
+    IndexJobsResponse,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseResponse,
     KnowledgeBasesResponse,
@@ -20,6 +31,7 @@ from ai_agent_platform.schemas import (
     RAGSearchResponse,
 )
 from ai_agent_platform.services import (
+    IndexJobNotFoundError,
     KnowledgeBaseAlreadyExistsError,
     KnowledgeBaseNotFoundError,
     KnowledgeBaseService,
@@ -161,7 +173,56 @@ def create_knowledge_bases_router(
                 status_code=404,
                 detail="knowledge base not found",
             ) from exc
+        except RAGProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         return DocumentIngestResponse.from_domain(ingested)
+
+    @router.get(
+        "/knowledge-bases/{knowledge_base_id}/index-jobs",
+        response_model=IndexJobsResponse,
+    )
+    def list_index_jobs(
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> IndexJobsResponse:
+        try:
+            jobs = knowledge_base_service.list_index_jobs(
+                knowledge_base_id=knowledge_base_id,
+                limit=limit,
+            )
+        except KnowledgeBaseNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="knowledge base not found",
+            ) from exc
+        return IndexJobsResponse(
+            index_jobs=[IndexJobResponse.from_domain(job) for job in jobs]
+        )
+
+    @router.get(
+        "/knowledge-bases/{knowledge_base_id}/index-jobs/{job_id}",
+        response_model=IndexJobResponse,
+    )
+    def get_index_job(
+        job_id: str = Path(min_length=1, max_length=128),
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> IndexJobResponse:
+        try:
+            job = knowledge_base_service.get_index_job(
+                knowledge_base_id=knowledge_base_id,
+                job_id=job_id,
+            )
+        except KnowledgeBaseNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="knowledge base not found",
+            ) from exc
+        except IndexJobNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="index job not found",
+            ) from exc
+        return IndexJobResponse.from_domain(job)
 
     @router.post(
         "/knowledge-bases/{knowledge_base_id}/search",
