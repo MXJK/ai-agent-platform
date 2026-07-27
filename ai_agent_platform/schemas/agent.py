@@ -67,6 +67,9 @@ class ContextSourceResponse(BaseModel):
     reason: str
     content_hash: str
     truncated: bool
+    knowledge_base_id: Optional[str] = None
+    document_id: Optional[str] = None
+    score: Optional[float] = None
 
     @classmethod
     def from_domain(cls, source: ContextSource) -> "ContextSourceResponse":
@@ -83,6 +86,8 @@ class AgentRunResponse(BaseModel):
     role: str
     objective: str
     intent: str
+    context_route: str
+    selected_knowledge_base_ids: list[str]
     answer: str
     graph_engine: str
     context_sources: list[ContextSourceResponse]
@@ -107,6 +112,8 @@ class AgentRunResponse(BaseModel):
             role=result.role,
             objective=result.objective,
             intent=result.intent,
+            context_route=result.context_route,
+            selected_knowledge_base_ids=result.selected_knowledge_base_ids,
             answer=result.answer,
             graph_engine=result.graph_engine,
             context_sources=[

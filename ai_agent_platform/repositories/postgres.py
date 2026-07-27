@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.models import (
     ContextSource,
 )
 from ai_agent_platform.domain import (
+    KnowledgeBaseRecord,
     Message,
     Session,
     TokenUsageRecord,
@@ -380,6 +381,128 @@ class PostgresDocumentRepository:
         return psycopg.connect(self._database_url)
 
 
+class PostgresKnowledgeBaseRepository:
+    """PostgreSQL-backed knowledge-base catalog."""
+
+    def __init__(self, *, database_url: str) -> None:
+        self._database_url = database_url
+        _require_psycopg()
+
+    def create(
+        self,
+        *,
+        knowledge_base_id: str,
+        name: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeBaseRecord | None:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO knowledge_bases (
+                    id, name, description, tags, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id, name, description, tags, created_at, updated_at
+                """,
+                (knowledge_base_id, name, description, Jsonb(tags)),
+            ).fetchone()
+        return _knowledge_base_from_row(row, document_count=0) if row else None
+
+    def get(self, knowledge_base_id: str) -> KnowledgeBaseRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    kb.id,
+                    kb.name,
+                    kb.description,
+                    kb.tags,
+                    kb.created_at,
+                    kb.updated_at,
+                    COUNT(documents.id)
+                FROM knowledge_bases AS kb
+                LEFT JOIN documents
+                    ON documents.knowledge_base_id = kb.id
+                WHERE kb.id = %s
+                GROUP BY kb.id
+                """,
+                (knowledge_base_id,),
+            ).fetchone()
+        return _knowledge_base_from_count_row(row) if row is not None else None
+
+    def list(self) -> list[KnowledgeBaseRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    kb.id,
+                    kb.name,
+                    kb.description,
+                    kb.tags,
+                    kb.created_at,
+                    kb.updated_at,
+                    COUNT(documents.id)
+                FROM knowledge_bases AS kb
+                LEFT JOIN documents
+                    ON documents.knowledge_base_id = kb.id
+                GROUP BY kb.id
+                ORDER BY kb.id ASC
+                """
+            ).fetchall()
+        return [_knowledge_base_from_count_row(row) for row in rows]
+
+    def update(
+        self,
+        *,
+        knowledge_base_id: str,
+        name: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeBaseRecord | None:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE knowledge_bases
+                SET name = %s, description = %s, tags = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING id, name, description, tags, created_at, updated_at
+                """,
+                (name, description, Jsonb(tags), knowledge_base_id),
+            ).fetchone()
+        if row is None:
+            return None
+        current = self.get(knowledge_base_id)
+        return current or _knowledge_base_from_row(row, document_count=0)
+
+    def delete(self, knowledge_base_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                DELETE FROM knowledge_bases
+                WHERE id = %s
+                RETURNING id
+                """,
+                (knowledge_base_id,),
+            ).fetchone()
+        return row is not None
+
+    def record_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        del knowledge_base_id, document_id
+
+    def _connect(self):
+        psycopg = _require_psycopg()
+        return psycopg.connect(self._database_url)
+
+
 class PostgresWorkspaceRepository:
     """PostgreSQL source of truth for registered workspaces."""
 
@@ -526,6 +649,8 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     payload["tool_calls"] = [
         ToolCall(**item) for item in payload.get("tool_calls", [])
     ]
+    payload.setdefault("context_route", "repo")
+    payload.setdefault("selected_knowledge_base_ids", [])
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
         payload["metrics"] = AgentRunMetrics(**metrics)
@@ -563,3 +688,23 @@ def _workspace_from_row(row: tuple[Any, ...]) -> WorkspaceRecord:
         created_at=row[2],
         updated_at=row[3],
     )
+
+
+def _knowledge_base_from_row(
+    row: tuple[Any, ...],
+    *,
+    document_count: int,
+) -> KnowledgeBaseRecord:
+    return KnowledgeBaseRecord(
+        id=str(row[0]),
+        name=str(row[1]),
+        description=str(row[2] or ""),
+        tags=[str(tag) for tag in (row[3] or [])],
+        document_count=document_count,
+        created_at=row[4],
+        updated_at=row[5],
+    )
+
+
+def _knowledge_base_from_count_row(row: tuple[Any, ...]) -> KnowledgeBaseRecord:
+    return _knowledge_base_from_row(row[:6], document_count=int(row[6]))

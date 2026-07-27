@@ -10,6 +10,7 @@ const state = {
   sessions: [],
   requestLog: [],
   workspaces: [],
+  knowledgeBases: [],
   currentView: "chat",
   composerMode: "chat",
   chatController: null,
@@ -1115,9 +1116,13 @@ async function ingestDocument() {
     showToast("请粘贴需要录入的文档内容", "warning");
     return;
   }
+  const kbId = $("kb-id-input").value.trim();
+  if (!kbId) {
+    showToast("请先创建并选择知识库", "warning");
+    return;
+  }
   $("rag-status").textContent = "正在录入…";
   try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/documents`, {
       method: "POST",
       body: JSON.stringify({
@@ -1127,6 +1132,8 @@ async function ingestDocument() {
     });
     $("rag-status").textContent = `已录入 ${body.chunk_count} 个片段`;
     setRaw(body);
+    await listKnowledgeBases();
+    $("kb-id-input").value = kbId;
     showToast(`文档已录入，共 ${body.chunk_count} 个片段`);
   } catch (error) {
     $("rag-status").textContent = "录入失败";
@@ -1142,7 +1149,10 @@ async function searchRag() {
   }
   $("rag-status").textContent = "正在检索…";
   try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
+    const kbId = $("kb-id-input").value.trim();
+    if (!kbId) {
+      throw new Error("请先选择知识库");
+    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/search`, {
       method: "POST",
       body: JSON.stringify({
@@ -1175,7 +1185,10 @@ async function askRag() {
   $("rag-answer").className = "rich-output empty-output";
   $("rag-answer").textContent = "正在检索相关内容并组织回答…";
   try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
+    const kbId = $("kb-id-input").value.trim();
+    if (!kbId) {
+      throw new Error("请先选择知识库");
+    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/ask`, {
       method: "POST",
       body: JSON.stringify({
@@ -1213,6 +1226,131 @@ function renderCitations(citations) {
       <p>${escapeHtml(citation.text)}</p>
     `;
     list.appendChild(item);
+  }
+}
+
+function knowledgeBasePayload() {
+  return {
+    name: $("kb-name-input").value.trim(),
+    description: $("kb-description-input").value.trim(),
+    tags: $("kb-tags-input").value
+      .split(/[,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  };
+}
+
+function selectKnowledgeBase(knowledgeBase) {
+  if (!knowledgeBase) {
+    return;
+  }
+  $("kb-catalog-id-input").value = knowledgeBase.id;
+  $("kb-name-input").value = knowledgeBase.name;
+  $("kb-description-input").value = knowledgeBase.description || "";
+  $("kb-tags-input").value = (knowledgeBase.tags || []).join(", ");
+  $("kb-id-input").value = knowledgeBase.id;
+}
+
+function renderKnowledgeBases() {
+  const list = $("knowledge-base-list");
+  const select = $("kb-id-input");
+  const selectedId = select.value;
+  select.innerHTML = '<option value="">请选择知识库</option>';
+  for (const knowledgeBase of state.knowledgeBases) {
+    const option = document.createElement("option");
+    option.value = knowledgeBase.id;
+    option.textContent = `${knowledgeBase.name} (${knowledgeBase.id})`;
+    select.appendChild(option);
+  }
+  if (state.knowledgeBases.some((item) => item.id === selectedId)) {
+    select.value = selectedId;
+  } else if (state.knowledgeBases.length) {
+    select.value = state.knowledgeBases[0].id;
+  }
+  if (!state.knowledgeBases.length) {
+    list.innerHTML = '<div class="empty-state">暂无知识库，请先创建目录。</div>';
+    return;
+  }
+  list.innerHTML = state.knowledgeBases
+    .map(
+      (item) => `
+        <button class="session-row" type="button" data-knowledge-base-id="${escapeHtml(item.id)}">
+          <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.id)} · ${escapeHtml(item.document_count)} 个文档</small></span>
+          <small>${escapeHtml(truncate(item.description || (item.tags || []).join(", ") || "暂无描述", 80))}</small>
+        </button>
+      `,
+    )
+    .join("");
+}
+
+async function listKnowledgeBases() {
+  const body = await fetchJson("/knowledge-bases");
+  state.knowledgeBases = body.knowledge_bases || [];
+  renderKnowledgeBases();
+  return state.knowledgeBases;
+}
+
+async function createKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  const payload = knowledgeBasePayload();
+  if (!id || !payload.name) {
+    showToast("知识库 ID 和名称不能为空", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson("/knowledge-bases", {
+      method: "POST",
+      body: JSON.stringify({ id, ...payload }),
+    });
+    await listKnowledgeBases();
+    selectKnowledgeBase(body);
+    setRaw(body);
+    showToast("知识库已创建");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function updateKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  const payload = knowledgeBasePayload();
+  if (!id || !payload.name) {
+    showToast("请选择知识库并填写名称", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    await listKnowledgeBases();
+    selectKnowledgeBase(body);
+    setRaw(body);
+    showToast("知识库元数据已更新");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function deleteKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  if (!id) {
+    showToast("请选择要删除的知识库", "warning");
+    return;
+  }
+  if (!window.confirm(`删除知识库 ${id}？其中的文档、分块和向量也会被删除。`)) {
+    return;
+  }
+  try {
+    await fetchJson(`/knowledge-bases/${encodeURIComponent(id)}`, { method: "DELETE" });
+    $("kb-catalog-id-input").value = "";
+    $("kb-name-input").value = "";
+    $("kb-description-input").value = "";
+    $("kb-tags-input").value = "";
+    await listKnowledgeBases();
+    showToast("知识库已删除");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
   }
 }
 
@@ -1366,6 +1504,26 @@ function bindEvents() {
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
+  $("refresh-knowledge-bases-btn").addEventListener("click", () => {
+    listKnowledgeBases().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("create-knowledge-base-btn").addEventListener("click", createKnowledgeBase);
+  $("update-knowledge-base-btn").addEventListener("click", updateKnowledgeBase);
+  $("delete-knowledge-base-btn").addEventListener("click", deleteKnowledgeBase);
+  $("knowledge-base-list").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-knowledge-base-id]");
+    if (!row) {
+      return;
+    }
+    selectKnowledgeBase(
+      state.knowledgeBases.find((item) => item.id === row.dataset.knowledgeBaseId),
+    );
+  });
+  $("kb-id-input").addEventListener("change", (event) => {
+    selectKnowledgeBase(
+      state.knowledgeBases.find((item) => item.id === event.target.value),
+    );
+  });
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("register-workspace-btn").addEventListener("click", registerWorkspace);
@@ -1433,7 +1591,12 @@ async function init() {
   renderSessions();
   renderOverview();
   updateContextSummary();
-  await Promise.allSettled([checkHealth(), listSessions(false), listWorkspaces()]);
+  await Promise.allSettled([
+    checkHealth(),
+    listSessions(false),
+    listWorkspaces(),
+    listKnowledgeBases(),
+  ]);
 }
 
 init();

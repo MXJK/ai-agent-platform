@@ -6,6 +6,7 @@ from threading import Lock
 from uuid import uuid4
 
 from ai_agent_platform.domain import (
+    KnowledgeBaseRecord,
     Message,
     Session,
     TokenUsageRecord,
@@ -130,6 +131,104 @@ class InMemoryWorkspaceRepository:
                 self._workspaces.values(),
                 key=lambda record: record.id,
             )
+
+
+class InMemoryKnowledgeBaseRepository:
+    """Stores knowledge-base catalog metadata for local and test runtimes."""
+
+    def __init__(self) -> None:
+        self._knowledge_bases: dict[str, KnowledgeBaseRecord] = {}
+        self._document_ids: dict[str, set[str]] = defaultdict(set)
+        self._lock = Lock()
+
+    def create(
+        self,
+        *,
+        knowledge_base_id: str,
+        name: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeBaseRecord | None:
+        with self._lock:
+            if knowledge_base_id in self._knowledge_bases:
+                return None
+            now = _now()
+            record = KnowledgeBaseRecord(
+                id=knowledge_base_id,
+                name=name,
+                description=description,
+                tags=list(tags),
+                document_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            self._knowledge_bases[knowledge_base_id] = record
+            return record
+
+    def get(self, knowledge_base_id: str) -> KnowledgeBaseRecord | None:
+        with self._lock:
+            record = self._knowledge_bases.get(knowledge_base_id)
+            return self._with_count(record) if record is not None else None
+
+    def list(self) -> list[KnowledgeBaseRecord]:
+        with self._lock:
+            return [
+                self._with_count(self._knowledge_bases[item_id])
+                for item_id in sorted(self._knowledge_bases)
+            ]
+
+    def update(
+        self,
+        *,
+        knowledge_base_id: str,
+        name: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeBaseRecord | None:
+        with self._lock:
+            existing = self._knowledge_bases.get(knowledge_base_id)
+            if existing is None:
+                return None
+            record = KnowledgeBaseRecord(
+                id=existing.id,
+                name=name,
+                description=description,
+                tags=list(tags),
+                document_count=len(self._document_ids[knowledge_base_id]),
+                created_at=existing.created_at,
+                updated_at=_now(),
+            )
+            self._knowledge_bases[knowledge_base_id] = record
+            return record
+
+    def delete(self, knowledge_base_id: str) -> bool:
+        with self._lock:
+            if knowledge_base_id not in self._knowledge_bases:
+                return False
+            del self._knowledge_bases[knowledge_base_id]
+            self._document_ids.pop(knowledge_base_id, None)
+            return True
+
+    def record_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        with self._lock:
+            if knowledge_base_id in self._knowledge_bases:
+                self._document_ids[knowledge_base_id].add(document_id)
+
+    def _with_count(self, record: KnowledgeBaseRecord) -> KnowledgeBaseRecord:
+        return KnowledgeBaseRecord(
+            id=record.id,
+            name=record.name,
+            description=record.description,
+            tags=list(record.tags),
+            document_count=len(self._document_ids[record.id]),
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
 
 
 def _now() -> datetime:

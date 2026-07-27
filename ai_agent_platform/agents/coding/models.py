@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, TypedDict
 
+from ai_agent_platform.domain import KnowledgeBaseRecord
+from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
 
@@ -36,6 +38,13 @@ class CodingAgentState(TypedDict, total=False):
     intent_reason: str
     intent_confidence: float
     planner_source: str
+    context_route: str
+    route_reason: str
+    selected_knowledge_base_ids: list[str]
+    knowledge_base_catalog: list[dict[str, Any]]
+    catalog_truncated: bool
+    rag_context_sources: list["ContextSource"]
+    context_warnings: list[str]
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
     exploration_round: int
@@ -69,7 +78,7 @@ class CodingAgentState(TypedDict, total=False):
 AgentRoute = Literal["plan_exploration", "compose_answer"]
 PlanRoute = Literal["review_tool_plan", "inspect_repository"]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
-ContextRoute = Literal["plan_exploration", "plan_tools", "compose_answer"]
+ContextRoute = Literal["plan_exploration", "merge_evidence"]
 AnswerRoute = Literal["handle_error", "end"]
 InspectionRoute = Literal[
     "execute_changes", "validate_changes", "collect_artifacts", "compose_answer"
@@ -91,6 +100,9 @@ class ContextSource:
     reason: str
     content_hash: str
     truncated: bool = False
+    knowledge_base_id: str | None = None
+    document_id: str | None = None
+    score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +138,8 @@ class AgentRunResult:
     role: str
     objective: str
     intent: str
+    context_route: str
+    selected_knowledge_base_ids: list[str]
     answer: str
     graph_engine: str
     context_sources: list[ContextSource]
@@ -185,6 +199,13 @@ class AgentPlanner(Protocol):
     def classify_intent(self, user_input: str) -> dict[str, Any]:
         ...
 
+    def classify_request(
+        self,
+        user_input: str,
+        knowledge_bases: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ...
+
     def plan_tool_calls(
         self,
         state: CodingAgentState,
@@ -200,4 +221,19 @@ class AgentPlanner(Protocol):
         ...
 
     def compose_answer(self, state: CodingAgentState) -> str:
+        ...
+
+
+class KnowledgeContextProvider(Protocol):
+    def list(self) -> list[KnowledgeBaseRecord]:
+        ...
+
+    def search(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        limit: int,
+        recall_limit: int | None,
+    ) -> list[RetrievedDocument]:
         ...

@@ -244,11 +244,37 @@
             <span id="rag-status" class="meta-badge">等待操作</span>
           </header>
 
+          <article class="surface">
+            <div class="surface-heading">
+              <div><span class="step-kicker">01 · 目录</span><h2>管理知识库</h2></div>
+              <button id="refresh-knowledge-bases-btn" class="text-button" type="button">刷新</button>
+            </div>
+            <div class="field-grid">
+              <label for="kb-catalog-id-input">知识库 ID<input id="kb-catalog-id-input" maxlength="128" placeholder="例如 product_docs" /></label>
+              <label for="kb-name-input">名称<input id="kb-name-input" maxlength="128" placeholder="例如 产品文档" /></label>
+            </div>
+            <label for="kb-description-input">描述</label>
+            <textarea id="kb-description-input" rows="3" maxlength="1000" placeholder="说明这个知识库适合回答哪些问题"></textarea>
+            <label for="kb-tags-input">标签</label>
+            <input id="kb-tags-input" maxlength="1000" placeholder="逗号分隔，例如 产品, API, 使用指南" />
+            <div class="surface-actions">
+              <p>Agent 只读取目录元数据判断是否需要检索，不会在分类阶段读取正文。</p>
+              <div class="button-row">
+                <button id="create-knowledge-base-btn" class="button primary" type="button">创建</button>
+                <button id="update-knowledge-base-btn" class="button secondary" type="button">保存修改</button>
+                <button id="delete-knowledge-base-btn" class="button ghost" type="button">删除</button>
+              </div>
+            </div>
+            <div id="knowledge-base-list" class="session-list"><div class="empty-state">暂无知识库</div></div>
+          </article>
+
           <div class="content-grid equal-grid">
             <article class="surface">
-              <div class="surface-heading"><div><span class="step-kicker">01 · 录入</span><h2>添加知识</h2></div></div>
+              <div class="surface-heading"><div><span class="step-kicker">02 · 录入</span><h2>添加知识</h2></div></div>
               <div class="field-grid">
-                <label for="kb-id-input">知识库 ID<input id="kb-id-input" value="demo_kb" /></label>
+                <label for="kb-id-input">知识库
+                  <select id="kb-id-input"><option value="">请先创建知识库</option></select>
+                </label>
                 <label for="document-filename-input">文件名<input id="document-filename-input" value="notes.md" /></label>
               </div>
               <label for="document-content-input">文档内容</label>
@@ -265,7 +291,7 @@ AI Agent Platform 是一个 Python FastAPI 后端项目，包含 SSE、独立知
             </article>
 
             <article class="surface">
-              <div class="surface-heading"><div><span class="step-kicker">02 · 提问</span><h2>检索并生成回答</h2></div></div>
+              <div class="surface-heading"><div><span class="step-kicker">03 · 提问</span><h2>检索并生成回答</h2></div></div>
               <label for="rag-question-input">问题或搜索词</label>
               <textarea id="rag-question-input" rows="6" maxlength="4000">这个项目主要包含哪些后端能力？</textarea>
               <details class="advanced-options">

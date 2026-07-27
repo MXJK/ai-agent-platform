@@ -103,6 +103,44 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertEqual(metrics.recall_at_k, 0.5)
         self.assertEqual(metrics.mean_reciprocal_rank, 0.25)
 
+    def test_delete_knowledge_base_keeps_other_namespaces(self) -> None:
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=InMemoryVectorStore(),
+            reranker=NoopReranker(),
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+        )
+        for knowledge_base_id in ("delete_me", "keep_me"):
+            service.ingest_document(
+                knowledge_base_id=knowledge_base_id,
+                filename=f"{knowledge_base_id}.md",
+                content=f"{knowledge_base_id} reference content",
+            )
+
+        service.delete_knowledge_base(knowledge_base_id="delete_me")
+
+        self.assertEqual(
+            service.search(
+                knowledge_base_id="delete_me",
+                query="reference",
+                limit=5,
+            ),
+            [],
+        )
+        self.assertEqual(
+            len(
+                service.search(
+                    knowledge_base_id="keep_me",
+                    query="reference",
+                    limit=5,
+                )
+            ),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from ai_agent_platform.agents.coding.models import AgentRunRecord
 from ai_agent_platform.repositories.postgres import (
     PostgresAgentRunRepository,
     PostgresDocumentRepository,
+    PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
     PostgresWorkspaceRepository,
     _agent_result_from_json,
@@ -23,10 +24,29 @@ class PostgresRepositoryTests(unittest.TestCase):
                 PostgresSessionRepository(database_url=database_url),
                 PostgresAgentRunRepository(database_url=database_url),
                 PostgresDocumentRepository(database_url=database_url),
+                PostgresKnowledgeBaseRepository(database_url=database_url),
                 PostgresWorkspaceRepository(database_url=database_url),
             ]
         self.assertTrue(all(item._database_url == database_url for item in repositories))
-        self.assertEqual(require_psycopg.call_count, 4)
+        self.assertEqual(require_psycopg.call_count, 5)
+
+    def test_knowledge_base_catalog_maps_document_count(self) -> None:
+        now = datetime(2026, 7, 24, tzinfo=timezone.utc)
+        row = ("docs", "Docs", "Reference", ["guide"], now, now, 3)
+        connection = FakeConnection([row, [row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresKnowledgeBaseRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            loaded = repository.get("docs")
+            listed = repository.list()
+        self.assertEqual(loaded.document_count, 3)
+        self.assertEqual(loaded.tags, ["guide"])
+        self.assertEqual([item.id for item in listed], ["docs"])
 
     def test_workspace_upsert_get_and_list_map_rows(self) -> None:
         now = datetime(2026, 7, 23, tzinfo=timezone.utc)
@@ -105,6 +125,8 @@ class PostgresRepositoryTests(unittest.TestCase):
             }
         )
         self.assertEqual(result.workspace_id, "legacy_repo")
+        self.assertEqual(result.context_route, "repo")
+        self.assertEqual(result.selected_knowledge_base_ids, [])
         self.assertEqual(result.context_sources[0].kind, "legacy_index")
         self.assertEqual(result.context_sources[0].path, "app.py")
 

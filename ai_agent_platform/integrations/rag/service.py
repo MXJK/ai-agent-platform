@@ -493,6 +493,14 @@ class InMemoryVectorStore:
                 if chunk.document_id != document_id
             ]
 
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        with self._lock:
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.knowledge_base_id != knowledge_base_id
+            ]
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -557,6 +565,9 @@ class ChromaVectorStore:
 
     def delete_document(self, *, document_id: str) -> None:
         self._collection.delete(where={"document_id": document_id})
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        self._collection.delete(where={"knowledge_base_id": knowledge_base_id})
 
     def upsert_chunks(
         self,
@@ -652,6 +663,27 @@ class QdrantVectorStore:
                         FieldCondition(
                             key="document_id",
                             match=MatchValue(value=document_id),
+                        )
+                    ]
+                )
+            ),
+        )
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        if not self._collection_exists():
+            return
+        FieldCondition = _qdrant_model("FieldCondition")
+        Filter = _qdrant_model("Filter")
+        MatchValue = _qdrant_model("MatchValue")
+        FilterSelector = _qdrant_model("FilterSelector")
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="knowledge_base_id",
+                            match=MatchValue(value=knowledge_base_id),
                         )
                     ]
                 )
@@ -842,6 +874,11 @@ class RAGService:
             document_id=document.id,
             filename=document.filename,
             chunk_count=len(chunks),
+        )
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        self._vector_store.delete_knowledge_base(
+            knowledge_base_id=knowledge_base_id
         )
 
     def search(

@@ -74,6 +74,9 @@ class VectorStore(Protocol):
     def delete_document(self, *, document_id: str) -> None:
         ...
 
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        ...
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],

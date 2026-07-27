@@ -29,12 +29,14 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunStore,
     CodingAgentState,
     ContextSource,
+    KnowledgeContextProvider,
 )
 from ai_agent_platform.agents.coding.planner import (
     LLMStructuredAgentPlanner,
     RuleBasedAgentPlanner,
     approval_required_tools as collect_approval_required_tools,
     bounded_confidence,
+    classify_context_source,
 )
 from ai_agent_platform.agents.coding.runtime_support import (
     append_errors as _append_errors,
@@ -72,6 +74,11 @@ READ_ONLY_REPOSITORY_TOOLS = {
     "repo.read_file",
     "repo.search_code",
 }
+VALID_CONTEXT_ROUTES = {"none", "repo", "rag", "hybrid"}
+MAX_ROUTING_CATALOG_ENTRIES = 50
+MAX_ROUTING_CATALOG_CHARS = 12000
+MAX_SELECTED_KNOWLEDGE_BASES = 3
+RAG_RESULTS_PER_KNOWLEDGE_BASE = 5
 
 
 class CodingAgentRuntime:
@@ -90,6 +97,8 @@ class CodingAgentRuntime:
         max_context_chars: int = 32000,
         max_instruction_chars: int = 16000,
         max_history_messages: int = 12,
+        knowledge_context_provider: KnowledgeContextProvider | None = None,
+        max_rag_context_chars: int = 6000,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -101,6 +110,8 @@ class CodingAgentRuntime:
         self._max_context_chars = max_context_chars
         self._max_instruction_chars = max_instruction_chars
         self._max_history_messages = max_history_messages
+        self._knowledge_context_provider = knowledge_context_provider
+        self._max_rag_context_chars = max_rag_context_chars
         self._change_loop = ChangeLoopExecutor(tools=self._tools, planner=self._planner)
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
@@ -151,6 +162,13 @@ class CodingAgentRuntime:
             "tool_calls": [],
             "tool_results": [],
             "context_sources": [],
+            "rag_context_sources": [],
+            "context_warnings": [],
+            "knowledge_base_catalog": [],
+            "selected_knowledge_base_ids": [],
+            "context_route": "repo",
+            "route_reason": "",
+            "catalog_truncated": False,
             "project_instructions": [],
             "context_chars": 0,
             "context_files": [],
@@ -401,6 +419,10 @@ class CodingAgentRuntime:
             role=CODING_AGENT_ROLE,
             objective=CODING_AGENT_OBJECTIVE,
             intent=state.get("intent", "repository_question"),
+            context_route=state.get("context_route", "repo"),
+            selected_knowledge_base_ids=list(
+                state.get("selected_knowledge_base_ids", [])
+            ),
             answer=state.get("answer", "") if status == "completed" else "",
             graph_engine=self.graph_engine,
             context_sources=(
@@ -428,9 +450,12 @@ class CodingAgentRuntime:
         workflow.add_node("setup_workspace", self._setup_workspace)
         workflow.add_node("load_project_instructions", self._load_project_instructions)
         workflow.add_node("classify_request", self._classify_request)
+        workflow.add_node("decide_context_source", self._decide_context_source)
+        workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("plan_exploration", self._plan_exploration)
         workflow.add_node("execute_exploration", self._execute_exploration)
         workflow.add_node("assess_context", self._assess_context)
+        workflow.add_node("merge_evidence", self._merge_evidence)
         workflow.add_node("plan_tools", self._plan_tools)
         workflow.add_node("review_tool_plan", self._review_tool_plan)
         workflow.add_node("inspect_repository", self._inspect_repository)
@@ -443,16 +468,27 @@ class CodingAgentRuntime:
         workflow.set_entry_point("setup_workspace")
         workflow.add_edge("setup_workspace", "load_project_instructions")
         workflow.add_edge("load_project_instructions", "classify_request")
+        workflow.add_edge("classify_request", "decide_context_source")
         workflow.add_conditional_edges(
-            "classify_request",
+            "decide_context_source",
+            lambda state: state.get("context_route", "repo"),
+            {
+                "none": "merge_evidence",
+                "repo": "plan_exploration",
+                "rag": "retrieve_knowledge",
+                "hybrid": "retrieve_knowledge",
+            },
+        )
+        workflow.add_conditional_edges(
+            "retrieve_knowledge",
             lambda state: (
-                "compose_answer"
-                if state.get("intent") == "small_talk"
-                else "plan_exploration"
+                "plan_exploration"
+                if state.get("context_route") == "hybrid"
+                else "merge_evidence"
             ),
             {
-                "compose_answer": "compose_answer",
                 "plan_exploration": "plan_exploration",
+                "merge_evidence": "merge_evidence",
             },
         )
         workflow.add_edge("plan_exploration", "execute_exploration")
@@ -462,6 +498,17 @@ class CodingAgentRuntime:
             self._route_after_context,
             {
                 "plan_exploration": "plan_exploration",
+                "merge_evidence": "merge_evidence",
+            },
+        )
+        workflow.add_conditional_edges(
+            "merge_evidence",
+            lambda state: (
+                "plan_tools"
+                if state.get("context_route") in {"repo", "hybrid"}
+                else "compose_answer"
+            ),
+            {
                 "plan_tools": "plan_tools",
                 "compose_answer": "compose_answer",
             },
@@ -567,18 +614,211 @@ class CodingAgentRuntime:
         }
 
     def _classify_request(self, state: CodingAgentState) -> CodingAgentState:
-        decision = self._planner.classify_intent(state["user_input"])
+        warnings = list(state.get("context_warnings", []))
+        catalog: list[dict[str, Any]] = []
+        catalog_truncated = False
+        if self._knowledge_context_provider is not None:
+            try:
+                catalog, catalog_truncated = _routing_catalog(
+                    self._knowledge_context_provider.list(),
+                    query=state["user_input"],
+                )
+            except Exception as exc:
+                warnings.append(f"knowledge base catalog unavailable: {exc}")
+        classify_request = getattr(self._planner, "classify_request", None)
+        if callable(classify_request):
+            decision = classify_request(state["user_input"], catalog)
+        else:
+            decision = self._planner.classify_intent(state["user_input"])
+            route, route_reason, selected = classify_context_source(
+                state["user_input"],
+                intent=str(decision.get("intent") or "repository_question"),
+                knowledge_bases=catalog,
+            )
+            decision = {
+                **decision,
+                "context_route": route,
+                "route_reason": route_reason,
+                "selected_knowledge_base_ids": selected,
+            }
         intent = str(decision.get("intent") or "repository_question")
         return {
             "intent": intent,
             "intent_reason": str(decision.get("reason") or ""),
             "intent_confidence": bounded_confidence(decision.get("confidence")),
             "planner_source": str(decision.get("source") or "unknown"),
+            "context_route": str(decision.get("context_route") or "repo"),
+            "route_reason": str(decision.get("route_reason") or ""),
+            "selected_knowledge_base_ids": list(
+                decision.get("selected_knowledge_base_ids") or []
+            ),
+            "knowledge_base_catalog": catalog,
+            "catalog_truncated": catalog_truncated,
+            "context_warnings": warnings,
             "trace": _append_trace(
                 state,
                 node="classify_request",
-                summary="分类问答、定位、解释、排错、修改或测试任务。",
-                output={"intent": intent, "source": decision.get("source")},
+                summary="分类任务意图并提出上下文来源。",
+                output={
+                    "intent": intent,
+                    "proposed_context_route": decision.get("context_route"),
+                    "catalog_size": len(catalog),
+                    "catalog_truncated": catalog_truncated,
+                    "source": decision.get("source"),
+                },
+            ),
+        }
+
+    def _decide_context_source(
+        self,
+        state: CodingAgentState,
+    ) -> CodingAgentState:
+        catalog = state.get("knowledge_base_catalog", [])
+        valid_ids = {str(item.get("id")) for item in catalog if item.get("id")}
+        route = str(state.get("context_route") or "repo")
+        if route not in VALID_CONTEXT_ROUTES:
+            route = "repo"
+        selected: list[str] = []
+        for item in state.get("selected_knowledge_base_ids", []):
+            item_id = str(item)
+            if item_id in valid_ids and item_id not in selected:
+                selected.append(item_id)
+            if len(selected) >= MAX_SELECTED_KNOWLEDGE_BASES:
+                break
+
+        fallback_route, fallback_reason, fallback_selected = classify_context_source(
+            state["user_input"],
+            intent=state.get("intent", "repository_question"),
+            knowledge_bases=catalog,
+        )
+        if route in {"rag", "hybrid"} and not selected:
+            selected = [
+                item_id
+                for item_id in fallback_selected
+                if item_id in valid_ids
+            ][:MAX_SELECTED_KNOWLEDGE_BASES]
+        if state.get("intent") in CHANGE_INTENTS | {"test_strategy"}:
+            if route == "rag":
+                route = "hybrid" if selected else "repo"
+            elif route == "none":
+                route = "repo"
+        if state.get("intent") == "small_talk":
+            route = "none"
+            selected = []
+
+        warnings = list(state.get("context_warnings", []))
+        if route in {"rag", "hybrid"} and not selected:
+            warnings.append("no routable knowledge base was available")
+        route_reason = str(state.get("route_reason") or fallback_reason)
+        if route == "repo" and fallback_route == "repo" and not route_reason:
+            route_reason = fallback_reason
+        return {
+            "context_route": route,
+            "route_reason": route_reason,
+            "selected_knowledge_base_ids": selected,
+            "context_warnings": warnings,
+            "trace": _append_trace(
+                state,
+                node="decide_context_source",
+                summary="校验上下文路由和知识库选择边界。",
+                output={
+                    "context_route": route,
+                    "selected_knowledge_base_ids": selected,
+                    "route_reason": route_reason,
+                    "catalog_truncated": state.get("catalog_truncated", False),
+                    "warnings": warnings,
+                },
+            ),
+        }
+
+    def _retrieve_knowledge(
+        self,
+        state: CodingAgentState,
+    ) -> CodingAgentState:
+        warnings = list(state.get("context_warnings", []))
+        selected = state.get("selected_knowledge_base_ids", [])
+        retrieved: list[Any] = []
+        hit_counts: dict[str, int] = {}
+        if self._knowledge_context_provider is None:
+            warnings.append("knowledge retrieval is not configured")
+        else:
+            query = build_workspace_query(state)
+            for knowledge_base_id in selected:
+                try:
+                    results = self._knowledge_context_provider.search(
+                        knowledge_base_id=knowledge_base_id,
+                        query=query,
+                        limit=RAG_RESULTS_PER_KNOWLEDGE_BASE,
+                        recall_limit=None,
+                    )
+                    hit_counts[knowledge_base_id] = len(results)
+                    retrieved.extend(results)
+                except Exception as exc:
+                    hit_counts[knowledge_base_id] = 0
+                    warnings.append(
+                        f"knowledge retrieval failed for {knowledge_base_id}: {exc}"
+                    )
+
+        retrieved.sort(key=lambda item: float(item.score), reverse=True)
+        seen: set[tuple[str, str, str]] = set()
+        sources: list[ContextSource] = []
+        used_chars = 0
+        truncated = False
+        for item in retrieved:
+            key = (item.knowledge_base_id, item.document_id, item.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            remaining = self._max_rag_context_chars - used_chars
+            if remaining <= 0:
+                truncated = True
+                break
+            text = str(item.text)
+            source_truncated = len(text) > remaining
+            if source_truncated:
+                text = text[:remaining]
+                truncated = True
+            sources.append(
+                ContextSource(
+                    kind="knowledge_chunk",
+                    path=(
+                        f"knowledge://{item.knowledge_base_id}/"
+                        f"{item.filename}#chunk-{item.chunk_index}"
+                    ),
+                    start_line=item.start_line,
+                    end_line=item.end_line,
+                    text=text,
+                    reason=f"RAG retrieval score={float(item.score):.3f}",
+                    content_hash=hashlib.sha256(
+                        text.encode("utf-8")
+                    ).hexdigest(),
+                    truncated=source_truncated,
+                    knowledge_base_id=item.knowledge_base_id,
+                    document_id=item.document_id,
+                    score=float(item.score),
+                )
+            )
+            used_chars += len(text)
+        if selected and not sources and not any(
+            warning.startswith("knowledge retrieval failed") for warning in warnings
+        ):
+            warnings.append("knowledge retrieval returned no evidence")
+        return {
+            "rag_context_sources": sources,
+            "context_warnings": warnings,
+            "trace": _append_trace(
+                state,
+                node="retrieve_knowledge",
+                summary="从选定知识库检索并裁剪文档证据。",
+                output={
+                    "selected_knowledge_base_ids": selected,
+                    "hit_counts": hit_counts,
+                    "source_count": len(sources),
+                    "chars": used_chars,
+                    "limit": self._max_rag_context_chars,
+                    "truncated": truncated,
+                    "warnings": warnings,
+                },
             ),
         }
 
@@ -800,7 +1040,49 @@ class CodingAgentRuntime:
     def _route_after_context(self, state: CodingAgentState) -> str:
         if not state.get("context_sufficient"):
             return "plan_exploration"
-        return "plan_tools"
+        return "merge_evidence"
+
+    def _merge_evidence(self, state: CodingAgentState) -> CodingAgentState:
+        merged: list[ContextSource] = []
+        seen: set[tuple[Any, ...]] = set()
+        repo_count = 0
+        knowledge_count = 0
+        for source in (
+            list(state.get("context_sources", []))
+            + list(state.get("rag_context_sources", []))
+        ):
+            key = (
+                source.kind,
+                source.path,
+                source.start_line,
+                source.end_line,
+                source.knowledge_base_id,
+                source.document_id,
+                source.content_hash,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(source)
+            if source.kind == "knowledge_chunk":
+                knowledge_count += 1
+            else:
+                repo_count += 1
+        return {
+            "context_sources": merged,
+            "trace": _append_trace(
+                state,
+                node="merge_evidence",
+                summary="合并工作区和知识库证据并保留各自来源。",
+                output={
+                    "context_route": state.get("context_route", "repo"),
+                    "repo_source_count": repo_count,
+                    "knowledge_source_count": knowledge_count,
+                    "source_count": len(merged),
+                    "warnings": state.get("context_warnings", []),
+                },
+            ),
+        }
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         tool_specs = self._tools.list_specs()
@@ -886,8 +1168,12 @@ class CodingAgentRuntime:
             "trace": _append_trace(
                 state,
                 node="compose_answer",
-                summary="根据会话、项目指令、源码证据、测试和 Diff 生成回答。",
-                output={"answer_chars": len(answer), "source_count": len(state.get("context_sources", []))},
+                summary="根据会话、项目指令、合并证据、测试和 Diff 生成回答。",
+                output={
+                    "answer_chars": len(answer),
+                    "source_count": len(state.get("context_sources", [])),
+                    "context_route": state.get("context_route", "repo"),
+                },
             ),
         }
 
@@ -926,6 +1212,53 @@ def _unique_calls(calls: list[ToolCall]) -> list[ToolCall]:
         seen.add(key)
         result.append(call)
     return result
+
+
+def _routing_catalog(
+    records: list[Any],
+    *,
+    query: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    normalized = query.casefold()
+
+    def relevance(record: Any) -> tuple[int, str]:
+        score = 0
+        for value, weight in (
+            (record.id, 4),
+            (record.name, 4),
+            (record.description, 1),
+        ):
+            text = str(value or "").casefold()
+            if text and text in normalized:
+                score += weight
+        for tag in record.tags:
+            if str(tag).casefold() in normalized:
+                score += 3
+        return (-score, str(record.id))
+
+    ranked = sorted(records, key=relevance)
+    catalog: list[dict[str, Any]] = []
+    used_chars = 0
+    truncated = len(ranked) > MAX_ROUTING_CATALOG_ENTRIES
+    for record in ranked[:MAX_ROUTING_CATALOG_ENTRIES]:
+        item = {
+            "id": str(record.id),
+            "name": str(record.name),
+            "description": str(record.description)[:1000],
+            "tags": [str(tag) for tag in record.tags[:20]],
+        }
+        item_chars = len(json.dumps(item, ensure_ascii=False))
+        if catalog and used_chars + item_chars > MAX_ROUTING_CATALOG_CHARS:
+            truncated = True
+            break
+        if item_chars > MAX_ROUTING_CATALOG_CHARS:
+            item["description"] = item["description"][
+                : max(0, MAX_ROUTING_CATALOG_CHARS // 2)
+            ]
+            item_chars = len(json.dumps(item, ensure_ascii=False))
+        catalog.append(item)
+        used_chars += item_chars
+    return catalog, truncated
 
 
 def _candidate_paths(results: list[dict[str, Any]]) -> list[str]:

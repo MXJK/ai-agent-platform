@@ -151,12 +151,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-mode-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertIn('id="workspace-id-input"', response.text)
+        self.assertIn('id="knowledge-base-list"', response.text)
         self.assertNotIn('id="repository-id-input"', response.text)
         self.assertEqual(script_response.status_code, 200)
         self.assertIn("thinking_level", script_response.text)
         self.assertIn("submitComposerMessage", script_response.text)
         self.assertIn("runAgentFromComposer", script_response.text)
         self.assertIn("workspace_id", script_response.text)
+        self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
 
@@ -300,6 +302,16 @@ class ApiTests(unittest.TestCase):
 
     def test_independent_knowledge_base_still_ingests_searches_and_answers(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            created = client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "docs",
+                    "name": "Documentation",
+                    "description": "Falcon mode and offline testing guides.",
+                    "tags": ["falcon", "testing"],
+                },
+            )
+            self.assertEqual(created.status_code, 201)
             ingested = client.post(
                 "/api/v1/knowledge-bases/docs/documents",
                 json={
@@ -321,8 +333,168 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(answer.status_code, 200)
             self.assertGreaterEqual(len(answer.json()["citations"]), 1)
 
+    def test_knowledge_base_catalog_crud_and_cascade_delete(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            missing_ingest = client.post(
+                "/api/v1/knowledge-bases/missing/documents",
+                json={"filename": "missing.md", "content": "missing"},
+            )
+            self.assertEqual(missing_ingest.status_code, 404)
+
+            created = client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "product_docs",
+                    "name": "Product Docs",
+                    "description": "Product manuals and API policies.",
+                    "tags": ["product", "manual", "product"],
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(created.json()["tags"], ["product", "manual"])
+            duplicate = client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "product_docs",
+                    "name": "Duplicate",
+                    "description": "",
+                    "tags": [],
+                },
+            )
+            self.assertEqual(duplicate.status_code, 409)
+
+            ingested = client.post(
+                "/api/v1/knowledge-bases/product_docs/documents",
+                json={
+                    "filename": "manual.md",
+                    "content": "Falcon mode is enabled from the product settings.",
+                },
+            )
+            self.assertEqual(ingested.status_code, 201)
+            loaded = client.get("/api/v1/knowledge-bases/product_docs")
+            self.assertEqual(loaded.json()["document_count"], 1)
+            updated = client.put(
+                "/api/v1/knowledge-bases/product_docs",
+                json={
+                    "name": "Product Knowledge",
+                    "description": "Updated product reference.",
+                    "tags": ["product", "reference"],
+                },
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["name"], "Product Knowledge")
+            listed = client.get("/api/v1/knowledge-bases").json()["knowledge_bases"]
+            self.assertEqual([item["id"] for item in listed], ["product_docs"])
+
+            deleted = client.delete("/api/v1/knowledge-bases/product_docs")
+            self.assertEqual(deleted.status_code, 204)
+            self.assertEqual(
+                client.get("/api/v1/knowledge-bases/product_docs").status_code,
+                404,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/knowledge-bases/product_docs/search",
+                    json={"query": "Falcon"},
+                ).status_code,
+                404,
+            )
+
+    def test_agent_automatically_routes_to_rag_and_hybrid_context(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text(
+                "FALCON_ENABLED = False\n",
+                encoding="utf-8",
+            )
+            with self._client(root) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "routing-test"},
+                ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(root)},
+                ).raise_for_status()
+                client.post(
+                    "/api/v1/knowledge-bases",
+                    json={
+                        "id": "falcon_docs",
+                        "name": "Falcon Guide",
+                        "description": "Falcon mode product policy and setup manual.",
+                        "tags": ["Falcon", "manual", "policy"],
+                    },
+                ).raise_for_status()
+                client.post(
+                    "/api/v1/knowledge-bases/falcon_docs/documents",
+                    json={
+                        "filename": "falcon.md",
+                        "content": "Falcon mode enables deterministic offline testing.",
+                    },
+                ).raise_for_status()
+
+                rag_run = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "message": "根据 Falcon 知识库文档说明它的用途",
+                    },
+                )
+                rag_result = wait_for_run(client, rag_run.json()["run_id"])["result"]
+                self.assertEqual(rag_result["context_route"], "rag")
+                self.assertEqual(
+                    rag_result["selected_knowledge_base_ids"],
+                    ["falcon_docs"],
+                )
+                self.assertTrue(
+                    any(
+                        item["kind"] == "knowledge_chunk"
+                        and item["knowledge_base_id"] == "falcon_docs"
+                        and item["path"].startswith("knowledge://falcon_docs/")
+                        for item in rag_result["context_sources"]
+                    )
+                )
+
+                hybrid_run = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "focus_files": ["app.py"],
+                        "message": "根据 Falcon 规范修改 app.py 的实现方案",
+                    },
+                )
+                hybrid_result = wait_for_run(
+                    client,
+                    hybrid_run.json()["run_id"],
+                )["result"]
+                self.assertEqual(hybrid_result["context_route"], "hybrid")
+                source_kinds = {
+                    item["kind"] for item in hybrid_result["context_sources"]
+                }
+                self.assertIn("knowledge_chunk", source_kinds)
+                self.assertIn("file", source_kinds)
+                trace_nodes = [item["node"] for item in hybrid_result["trace"]]
+                self.assertIn("retrieve_knowledge", trace_nodes)
+                self.assertIn("merge_evidence", trace_nodes)
+
     def test_rag_search_is_scoped_and_rejects_unsupported_types(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            for knowledge_base_id, name in (
+                ("customer_faq", "Customer FAQ"),
+                ("hr_policy", "HR Policy"),
+            ):
+                response = client.post(
+                    "/api/v1/knowledge-bases",
+                    json={
+                        "id": knowledge_base_id,
+                        "name": name,
+                        "description": name,
+                        "tags": [],
+                    },
+                )
+                self.assertEqual(response.status_code, 201)
             client.post(
                 "/api/v1/knowledge-bases/customer_faq/documents",
                 json={

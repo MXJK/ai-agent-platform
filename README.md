@@ -74,15 +74,22 @@ The LangGraph chain starts with:
 setup_workspace
 → load_project_instructions
 → classify_request
-→ plan_exploration
-→ execute_exploration
-→ assess_context
+→ decide_context_source
+   ├─ repo   → plan_exploration → execute_exploration → assess_context
+   ├─ rag    → retrieve_knowledge
+   ├─ hybrid → retrieve_knowledge → repository exploration
+   └─ none
+→ merge_evidence
 ```
 
-`assess_context` either loops back to exploration or proceeds to tool/change
-planning and final answer generation. Change runs retain human approval,
-per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
-artifacts. The registered source workspace is never modified directly.
+The classifier receives a bounded catalog containing only knowledge-base IDs,
+names, descriptions, and tags. It selects `none`, `repo`, `rag`, or `hybrid`
+and at most three managed knowledge bases. Repository evidence still comes from
+live files; document evidence reuses the independent RAG search stack.
+`merge_evidence` preserves both provenance types before tool/change planning or
+answer generation. Change runs retain human approval, per-run sandbox copying,
+validation, one bounded repair attempt, and Diff/test artifacts. The registered
+source workspace is never modified directly.
 
 Default exploration budgets:
 
@@ -141,10 +148,11 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   }'
 ```
 
-Responses expose `context_sources`, each containing `kind`, `path`,
-`start_line`, `end_line`, `text`, `reason`, `content_hash`, and `truncated`.
-The removed `repository_id`, `knowledge_base_id`, and `rag_context` Agent fields
-are not accepted or returned.
+Responses expose `context_route`, `selected_knowledge_base_ids`, and
+`context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
+optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
+The removed `repository_id` and `rag_context` Agent fields are not accepted or
+returned.
 
 ### Live source tools
 
@@ -159,7 +167,19 @@ and common credential files.
 
 ## Independent knowledge base
 
-Document RAG remains separate from the code Agent:
+Create catalog metadata before ingesting documents:
+
+```text
+POST   /api/v1/knowledge-bases
+GET    /api/v1/knowledge-bases
+GET    /api/v1/knowledge-bases/{knowledge_base_id}
+PUT    /api/v1/knowledge-bases/{knowledge_base_id}
+DELETE /api/v1/knowledge-bases/{knowledge_base_id}
+```
+
+Catalog records contain an immutable ID plus editable name, description, and
+tags. Deletion removes vectors first and then cascades PostgreSQL documents and
+chunks. Document RAG endpoints remain available independently:
 
 ```text
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
@@ -168,7 +188,8 @@ POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
 ```
 
 Only these document endpoints use chunking, embeddings, and the configured
-vector store.
+vector store. Agent RAG routing calls the same search implementation and
+degrades to an evidence warning when retrieval is unavailable.
 
 ## Storage and migration
 
@@ -184,6 +205,10 @@ Revision `20260723_0006`:
 - renames `repositories` to `workspaces` and removes `last_indexed_at`;
 - renames `agent_runs.repository_id` to `workspace_id`;
 - adds and backfills nullable `agent_runs.workspace_root`.
+
+Revision `20260724_0007` creates the managed `knowledge_bases` catalog,
+backfills IDs already present in `documents`, and adds the cascading document
+foreign key.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
