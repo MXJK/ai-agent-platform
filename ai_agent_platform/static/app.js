@@ -10,6 +10,7 @@ const state = {
   sessions: [],
   requestLog: [],
   workspaces: [],
+  knowledgeBases: [],
   currentView: "chat",
   composerMode: "chat",
   chatController: null,
@@ -17,6 +18,14 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+function iconMarkup(name) {
+  return `<svg class="app-icon" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
+}
+
+function preferredScrollBehavior() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
 
 function jsonPretty(value) {
   return JSON.stringify(value, null, 2);
@@ -160,6 +169,16 @@ function humanizeStatus(value) {
   return labels[value] || value || "未知";
 }
 
+function statusClass(value) {
+  if (value === "completed_with_errors") {
+    return "warning";
+  }
+  if (["completed", "failed", "waiting_approval", "running", "queued"].includes(value)) {
+    return value;
+  }
+  return "neutral";
+}
+
 function truncate(value, maxLength = 120) {
   const text = String(value ?? "");
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
@@ -263,8 +282,13 @@ function switchView(viewName, updateHash = true) {
 }
 
 function setInspectorVisible(visible) {
+  const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
+  $("toggle-inspector-btn").setAttribute("aria-label", visible ? "隐藏运行详情" : "显示运行详情");
+  panel.setAttribute("aria-hidden", String(!visible));
+  panel.inert = !visible;
+  panel.hidden = !visible;
   saveUiPreferences();
 }
 
@@ -304,6 +328,7 @@ function updateContextSummary() {
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceId;
   $("composer-context").textContent = modelLabel;
+  $("composer-provider-input").value = provider;
   $("agent-workspace-badge").textContent = workspaceId;
   $("header-session-id").textContent = state.conversationId || "尚未创建";
 }
@@ -320,15 +345,21 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("composer-mode-input").value = state.composerMode;
   const isAgent = state.composerMode === "agent";
   $("composer-mode-description").textContent = isAgent
-    ? "按任务读取工作区文件并运行工具；需要权限的操作会等待审批。"
-    : "直接调用模型并流式回答，不执行代码工具。";
+    ? "读取工作区并运行工具；高风险操作等待审批。"
+    : "流式回答，不执行代码工具。";
   $("chat-message-input").placeholder = isAgent
     ? "描述代码任务，Enter 交给代码 Agent，Shift + Enter 换行…"
     : "输入消息，Enter 发送，Shift + Enter 换行…";
   $("send-chat-btn").innerHTML = isAgent
-    ? '交给 Agent <span aria-hidden="true">→</span>'
-    : '发送 <span aria-hidden="true">↑</span>';
+    ? `交给 Agent ${iconMarkup("arrow-right")}`
+    : `发送 ${iconMarkup("arrow-up")}`;
   saveUiPreferences();
+}
+
+function setChatStatus(label, status = "neutral") {
+  const node = $("chat-meta");
+  node.className = `status-pill ${status}`;
+  node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
 function pushRequestLog(entry) {
@@ -391,13 +422,14 @@ async function fetchJson(path, options = {}) {
   const startedAt = performance.now();
   let status = "ERR";
   let requestId = "";
+  const headers = { ...(options.headers || {}) };
+  if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   try {
     const response = await fetch(`${API_BASE}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
       ...options,
+      headers,
     });
     status = response.status;
     requestId = response.headers.get("X-Request-ID") || "";
@@ -466,9 +498,9 @@ async function ensureSession() {
 function resetChatView() {
   $("chat-output").innerHTML = `
     <div class="welcome-state">
-      <div class="welcome-orbit" aria-hidden="true"><span>✦</span></div>
+      <div class="welcome-mark" aria-hidden="true"><strong>A</strong><span>READY</span></div>
       <h2>从一个具体问题开始</h2>
-      <p>我可以解释代码、分析架构，也可以按需读取工作区文件或检索独立知识库。</p>
+      <p>解释代码、分析架构，或把需要执行的任务交给 Agent。</p>
       <div class="prompt-grid" aria-label="推荐问题">
         <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
         <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
@@ -476,6 +508,7 @@ function resetChatView() {
       </div>
     </div>
   `;
+  setChatStatus("等待输入");
 }
 
 async function createSession() {
@@ -658,7 +691,7 @@ function appendChatMessage(role, content = "", createdAt = null) {
     </div>
   `;
   output.appendChild(item);
-  item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  item.scrollIntoView({ behavior: preferredScrollBehavior(), block: "nearest" });
   return item.querySelector(".message-content");
 }
 
@@ -680,6 +713,7 @@ async function runAgentFromComposer() {
   const input = $("chat-message-input");
   const message = input.value.trim();
   if (!message) {
+    input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
     input.focus();
     return;
@@ -688,6 +722,7 @@ async function runAgentFromComposer() {
   const sendButton = $("send-chat-btn");
   const modeInput = $("composer-mode-input");
   sendButton.disabled = true;
+  sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
   $("agent-message-input").value = message;
   $("focus-files-input").value = "";
@@ -698,6 +733,7 @@ async function runAgentFromComposer() {
     await runAgent();
   } finally {
     sendButton.disabled = false;
+    sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
   }
 }
@@ -706,6 +742,7 @@ async function streamChat() {
   const input = $("chat-message-input");
   const message = input.value.trim();
   if (!message) {
+    input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
     input.focus();
     return;
@@ -715,9 +752,11 @@ async function streamChat() {
   const stopButton = $("stop-chat-btn");
   const modeInput = $("composer-mode-input");
   sendButton.disabled = true;
+  sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
   stopButton.classList.remove("hidden");
-  $("chat-meta").textContent = "正在准备…";
+  $("chat-output").setAttribute("aria-busy", "true");
+  setChatStatus("正在准备", "running");
   setTrace([]);
   state.chatController = new AbortController();
   let assistantContent = null;
@@ -740,7 +779,7 @@ async function streamChat() {
         }
         if (eventName === "meta") {
           const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          $("chat-meta").textContent = `${data.provider} · ${data.model}${thinking}`;
+          setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
         } else if (eventName === "delta") {
           answer += data.text || "";
           assistantContent.innerHTML = renderMarkdown(answer);
@@ -748,9 +787,9 @@ async function streamChat() {
           const thoughts = data.thoughts_tokens
             ? ` · ${data.thoughts_tokens} thinking`
             : "";
-          $("chat-meta").textContent = `${data.total_tokens || 0} tokens${thoughts}`;
+          setChatStatus(`${data.total_tokens || 0} tokens${thoughts}`, "running");
         } else if (eventName === "done") {
-          $("chat-meta").textContent = `已完成 · ${formatDuration(data.elapsed_ms)}`;
+          setChatStatus(`已完成 · ${formatDuration(data.elapsed_ms)}`, "completed");
         } else if (eventName === "error") {
           const streamError = new Error(data.message || data.code || "模型响应失败");
           streamError.code = data.code || "llm_provider_error";
@@ -770,7 +809,7 @@ async function streamChat() {
       if (assistantContent) {
         assistantContent.innerHTML = `${assistantContent.innerHTML}<p><em>生成已由你停止。</em></p>`;
       }
-      $("chat-meta").textContent = "已停止";
+      setChatStatus("已停止", "neutral");
     } else {
       if (assistantContent) {
         const detail = error.code === "max_output_tokens"
@@ -780,7 +819,10 @@ async function streamChat() {
           ? `${renderMarkdown(answer)}<p><em>${escapeHtml(detail)}</em></p>`
           : `<p>${escapeHtml(detail)}</p>`;
       }
-      $("chat-meta").textContent = error.code === "max_output_tokens" ? "输出已截断" : "生成失败";
+      setChatStatus(
+        error.code === "max_output_tokens" ? "输出已截断" : "生成失败",
+        error.code === "max_output_tokens" ? "warning" : "failed",
+      );
       showToast(
         error.code === "max_output_tokens" ? "回答达到输出额度上限" : humanizeError(error),
         error.code === "max_output_tokens" ? "warning" : "error",
@@ -789,8 +831,10 @@ async function streamChat() {
   } finally {
     state.chatController = null;
     sendButton.disabled = false;
+    sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
     stopButton.classList.add("hidden");
+    $("chat-output").removeAttribute("aria-busy");
     input.focus();
   }
 }
@@ -889,18 +933,22 @@ function parseSseBlock(block) {
 
 function setAgentStatus(status, runId = "") {
   const node = $("agent-status");
-  node.className = `status-pill ${status || "neutral"}`;
-  node.textContent = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
+  node.className = `status-pill ${statusClass(status)}`;
+  const label = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
+  node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
 }
 
 async function runAgent() {
   const message = $("agent-message-input").value.trim();
   if (!message) {
+    $("agent-message-input").setAttribute("aria-invalid", "true");
     showToast("请先描述 Agent 任务", "warning");
     return;
   }
   const button = $("run-agent-btn");
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  $("agent-answer").setAttribute("aria-busy", "true");
   setAgentStatus("running");
   $("agent-answer").className = "rich-output empty-output";
   $("agent-answer").textContent = "Agent 正在理解任务并规划下一步…";
@@ -927,6 +975,8 @@ async function runAgent() {
     showToast(humanizeError(error), "error");
   } finally {
     button.disabled = false;
+    button.removeAttribute("aria-busy");
+    $("agent-answer").removeAttribute("aria-busy");
   }
 }
 
@@ -973,16 +1023,16 @@ function renderApproval(approval) {
   const calls = approval.tool_calls || (approval.planned_tools || []).map((name) => ({ name, arguments: {} }));
   for (const call of calls) {
     const risk = requiredByName.get(call.name) || {};
-    const item = document.createElement("article");
+    const item = document.createElement("details");
     item.className = "approval-tool";
     item.innerHTML = `
-      <header><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></header>
+      <summary><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></summary>
       <p>${escapeHtml(risk.risk_summary || "只读或低风险工具；请确认参数符合预期。")}</p>
       <pre>${escapeHtml(jsonPretty(risk.arguments_summary || call.arguments || {}))}</pre>
     `;
     tools.appendChild(item);
   }
-  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
 }
 
 function renderAgentMetrics(metrics) {
@@ -1044,9 +1094,13 @@ function renderAgentEvents(events) {
   }
   for (const event of events) {
     const item = document.createElement("div");
-    item.className = "timeline-item";
+    const eventStatus = event.status || "pending";
+    item.className = `timeline-item ${statusClass(eventStatus)}`;
     item.innerHTML = `
-      <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
+      <div class="timeline-heading">
+        <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
+        <span>${escapeHtml(humanizeStatus(eventStatus))}</span>
+      </div>
       <p>${escapeHtml(event.summary || humanizeStatus(event.status))}</p>
     `;
     list.appendChild(item);
@@ -1061,6 +1115,7 @@ async function resumeRun(approved) {
   const rejectButton = $("reject-run-btn");
   approveButton.disabled = true;
   rejectButton.disabled = true;
+  approveButton.setAttribute("aria-busy", "true");
   setAgentStatus("running", state.latestRunId);
   try {
     const feedback = $("approval-feedback-input").value.trim();
@@ -1079,6 +1134,7 @@ async function resumeRun(approved) {
   } finally {
     approveButton.disabled = false;
     rejectButton.disabled = false;
+    approveButton.removeAttribute("aria-busy");
   }
 }
 
@@ -1110,28 +1166,64 @@ async function pollRunUntilTerminal() {
 }
 
 async function ingestDocument() {
-  const content = $("document-content-input").value;
-  if (!content.trim()) {
-    showToast("请粘贴需要录入的文档内容", "warning");
+  const input = $("document-files-input");
+  const files = Array.from(input.files || []);
+  if (!files.length) {
+    showToast("请先选择需要录入的文件", "warning");
     return;
   }
-  $("rag-status").textContent = "正在录入…";
-  try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
-    const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/documents`, {
-      method: "POST",
-      body: JSON.stringify({
-        filename: $("document-filename-input").value.trim() || "notes.md",
-        content,
-      }),
-    });
-    $("rag-status").textContent = `已录入 ${body.chunk_count} 个片段`;
-    setRaw(body);
-    showToast(`文档已录入，共 ${body.chunk_count} 个片段`);
-  } catch (error) {
-    $("rag-status").textContent = "录入失败";
-    showToast(humanizeError(error), "error");
+
+  const kbId = $("kb-id-input").value.trim();
+  if (!kbId) {
+    showToast("请先创建并选择知识库", "warning");
+    return;
   }
+
+  const ingested = [];
+  const failures = [];
+  $("ingest-doc-btn").disabled = true;
+  try {
+    for (const [index, file] of files.entries()) {
+      $("rag-status").textContent = `正在录入 ${index + 1}/${files.length}…`;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      try {
+        const body = await fetchJson(
+          `/knowledge-bases/${encodeURIComponent(kbId)}/documents`,
+          { method: "POST", body: form },
+        );
+        ingested.push(body);
+      } catch (error) {
+        failures.push({ filename: file.name, error: humanizeError(error) });
+      }
+    }
+    await listKnowledgeBases();
+    $("kb-id-input").value = kbId;
+    const chunkCount = ingested.reduce((total, item) => total + item.chunk_count, 0);
+    $("rag-status").textContent = failures.length
+      ? `已录入 ${ingested.length}，失败 ${failures.length}`
+      : `已录入 ${ingested.length} 个文件`;
+    setRaw({ documents: ingested, failures });
+    input.value = "";
+    renderSelectedDocumentFiles();
+    if (failures.length) {
+      showToast(
+        `${ingested.length} 个文件录入成功，${failures.length} 个失败；详情见原始数据`,
+        ingested.length ? "warning" : "error",
+      );
+    } else {
+      showToast(`已录入 ${ingested.length} 个文件，共 ${chunkCount} 个片段`);
+    }
+  } finally {
+    $("ingest-doc-btn").disabled = false;
+  }
+}
+
+function renderSelectedDocumentFiles() {
+  const files = Array.from($("document-files-input").files || []);
+  $("selected-document-files").textContent = files.length
+    ? `已选择 ${files.length} 个文件：${files.map((file) => file.name).join("、")}`
+    : "尚未选择文件";
 }
 
 async function searchRag() {
@@ -1142,7 +1234,10 @@ async function searchRag() {
   }
   $("rag-status").textContent = "正在检索…";
   try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
+    const kbId = $("kb-id-input").value.trim();
+    if (!kbId) {
+      throw new Error("请先选择知识库");
+    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/search`, {
       method: "POST",
       body: JSON.stringify({
@@ -1175,7 +1270,10 @@ async function askRag() {
   $("rag-answer").className = "rich-output empty-output";
   $("rag-answer").textContent = "正在检索相关内容并组织回答…";
   try {
-    const kbId = $("kb-id-input").value.trim() || "demo_kb";
+    const kbId = $("kb-id-input").value.trim();
+    if (!kbId) {
+      throw new Error("请先选择知识库");
+    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/ask`, {
       method: "POST",
       body: JSON.stringify({
@@ -1213,6 +1311,131 @@ function renderCitations(citations) {
       <p>${escapeHtml(citation.text)}</p>
     `;
     list.appendChild(item);
+  }
+}
+
+function knowledgeBasePayload() {
+  return {
+    name: $("kb-name-input").value.trim(),
+    description: $("kb-description-input").value.trim(),
+    tags: $("kb-tags-input").value
+      .split(/[,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  };
+}
+
+function selectKnowledgeBase(knowledgeBase) {
+  if (!knowledgeBase) {
+    return;
+  }
+  $("kb-catalog-id-input").value = knowledgeBase.id;
+  $("kb-name-input").value = knowledgeBase.name;
+  $("kb-description-input").value = knowledgeBase.description || "";
+  $("kb-tags-input").value = (knowledgeBase.tags || []).join(", ");
+  $("kb-id-input").value = knowledgeBase.id;
+}
+
+function renderKnowledgeBases() {
+  const list = $("knowledge-base-list");
+  const select = $("kb-id-input");
+  const selectedId = select.value;
+  select.innerHTML = '<option value="">请选择知识库</option>';
+  for (const knowledgeBase of state.knowledgeBases) {
+    const option = document.createElement("option");
+    option.value = knowledgeBase.id;
+    option.textContent = `${knowledgeBase.name} (${knowledgeBase.id})`;
+    select.appendChild(option);
+  }
+  if (state.knowledgeBases.some((item) => item.id === selectedId)) {
+    select.value = selectedId;
+  } else if (state.knowledgeBases.length) {
+    select.value = state.knowledgeBases[0].id;
+  }
+  if (!state.knowledgeBases.length) {
+    list.innerHTML = '<div class="empty-state">暂无知识库，请先创建目录。</div>';
+    return;
+  }
+  list.innerHTML = state.knowledgeBases
+    .map(
+      (item) => `
+        <button class="session-row" type="button" data-knowledge-base-id="${escapeHtml(item.id)}">
+          <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.id)} · ${escapeHtml(item.document_count)} 个文档</small></span>
+          <small>${escapeHtml(truncate(item.description || (item.tags || []).join(", ") || "暂无描述", 80))}</small>
+        </button>
+      `,
+    )
+    .join("");
+}
+
+async function listKnowledgeBases() {
+  const body = await fetchJson("/knowledge-bases");
+  state.knowledgeBases = body.knowledge_bases || [];
+  renderKnowledgeBases();
+  return state.knowledgeBases;
+}
+
+async function createKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  const payload = knowledgeBasePayload();
+  if (!id || !payload.name) {
+    showToast("知识库 ID 和名称不能为空", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson("/knowledge-bases", {
+      method: "POST",
+      body: JSON.stringify({ id, ...payload }),
+    });
+    await listKnowledgeBases();
+    selectKnowledgeBase(body);
+    setRaw(body);
+    showToast("知识库已创建");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function updateKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  const payload = knowledgeBasePayload();
+  if (!id || !payload.name) {
+    showToast("请选择知识库并填写名称", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    await listKnowledgeBases();
+    selectKnowledgeBase(body);
+    setRaw(body);
+    showToast("知识库元数据已更新");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function deleteKnowledgeBase() {
+  const id = $("kb-catalog-id-input").value.trim();
+  if (!id) {
+    showToast("请选择要删除的知识库", "warning");
+    return;
+  }
+  if (!window.confirm(`删除知识库 ${id}？其中的文档、分块和向量也会被删除。`)) {
+    return;
+  }
+  try {
+    await fetchJson(`/knowledge-bases/${encodeURIComponent(id)}`, { method: "DELETE" });
+    $("kb-catalog-id-input").value = "";
+    $("kb-name-input").value = "";
+    $("kb-description-input").value = "";
+    $("kb-tags-input").value = "";
+    await listKnowledgeBases();
+    showToast("知识库已删除");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
   }
 }
 
@@ -1340,11 +1563,22 @@ function bindEvents() {
   $("composer-mode-input").addEventListener("change", (event) => {
     updateComposerMode(event.target.value);
   });
+  $("composer-provider-input").addEventListener("change", (event) => {
+    $("provider-input").value = event.target.value;
+    updateContextSummary();
+  });
+  $("composer-attachment-btn").addEventListener("click", () => {
+    switchView("rag");
+    $("document-files-input").click();
+  });
   $("chat-message-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       submitComposerMessage();
     }
+  });
+  ["chat-message-input", "agent-message-input", "rag-question-input"].forEach((id) => {
+    $(id).addEventListener("input", () => $(id).removeAttribute("aria-invalid"));
   });
 
   $("run-agent-btn").addEventListener("click", runAgent);
@@ -1366,6 +1600,27 @@ function bindEvents() {
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
+  $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);
+  $("refresh-knowledge-bases-btn").addEventListener("click", () => {
+    listKnowledgeBases().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("create-knowledge-base-btn").addEventListener("click", createKnowledgeBase);
+  $("update-knowledge-base-btn").addEventListener("click", updateKnowledgeBase);
+  $("delete-knowledge-base-btn").addEventListener("click", deleteKnowledgeBase);
+  $("knowledge-base-list").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-knowledge-base-id]");
+    if (!row) {
+      return;
+    }
+    selectKnowledgeBase(
+      state.knowledgeBases.find((item) => item.id === row.dataset.knowledgeBaseId),
+    );
+  });
+  $("kb-id-input").addEventListener("change", (event) => {
+    selectKnowledgeBase(
+      state.knowledgeBases.find((item) => item.id === event.target.value),
+    );
+  });
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("register-workspace-btn").addEventListener("click", registerWorkspace);
@@ -1433,7 +1688,12 @@ async function init() {
   renderSessions();
   renderOverview();
   updateContextSummary();
-  await Promise.allSettled([checkHealth(), listSessions(false), listWorkspaces()]);
+  await Promise.allSettled([
+    checkHealth(),
+    listSessions(false),
+    listWorkspaces(),
+    listKnowledgeBases(),
+  ]);
 }
 
 init();

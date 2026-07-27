@@ -41,6 +41,24 @@ class RuleBasedAgentPlanner:
             "source": self.source,
         }
 
+    def classify_request(
+        self,
+        user_input: str,
+        knowledge_bases: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        decision = self.classify_intent(user_input)
+        route, route_reason, selected = classify_context_source(
+            user_input,
+            intent=str(decision["intent"]),
+            knowledge_bases=knowledge_bases,
+        )
+        return {
+            **decision,
+            "context_route": route,
+            "route_reason": route_reason,
+            "selected_knowledge_base_ids": selected,
+        }
+
     def plan_tool_calls(
         self,
         state: CodingAgentState,
@@ -74,20 +92,45 @@ class LLMStructuredAgentPlanner:
         self._fallback = fallback or RuleBasedAgentPlanner()
 
     def classify_intent(self, user_input: str) -> dict[str, Any]:
+        return self.classify_request(user_input, [])
+
+    def classify_request(
+        self,
+        user_input: str,
+        knowledge_bases: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         try:
             body = json_object_from_llm(
-                self._llm_client.complete(intent_classification_prompt(user_input)).text
+                self._llm_client.complete(
+                    request_classification_prompt(user_input, knowledge_bases)
+                ).text
             )
             intent = str(body.get("intent", ""))
             if intent not in VALID_AGENT_INTENTS:
                 raise ValueError(f"unsupported intent: {intent}")
+            context_route = str(body.get("context_route") or "")
+            if context_route not in {"none", "repo", "rag", "hybrid"}:
+                raise ValueError(f"unsupported context route: {context_route}")
+            selected = body.get("selected_knowledge_base_ids", [])
+            if not isinstance(selected, list):
+                selected = []
             return {
                 "intent": intent,
                 "reason": str(body.get("reason") or "LLM structured decision"),
                 "confidence": bounded_confidence(body.get("confidence")),
                 "source": self.source,
+                "context_route": context_route,
+                "route_reason": str(
+                    body.get("route_reason") or "LLM structured context decision"
+                ),
+                "selected_knowledge_base_ids": [
+                    str(item) for item in selected[:3]
+                ],
             }
         except Exception:
+            classify_request = getattr(self._fallback, "classify_request", None)
+            if callable(classify_request):
+                return classify_request(user_input, knowledge_bases)
             return self._fallback.classify_intent(user_input)
 
     def plan_tool_calls(
@@ -134,6 +177,17 @@ class LLMStructuredAgentPlanner:
 
 def classify_intent(text: str) -> tuple[str, str]:
     normalized = text.lower()
+    if normalized.strip() in {
+        "hi",
+        "hello",
+        "hey",
+        "你好",
+        "您好",
+        "早上好",
+        "下午好",
+        "晚上好",
+    }:
+        return "small_talk", "greeting matched"
     if re.search(r"(帮我|需要|请|新增|修改|改成|支持|接入).{0,12}实现", normalized):
         return "change_planning", "implementation planning phrase matched"
     rules: list[tuple[str, tuple[str, ...], str]] = [
@@ -170,13 +224,127 @@ def classify_intent(text: str) -> tuple[str, str]:
 
 
 def intent_classification_prompt(user_input: str) -> str:
+    return request_classification_prompt(user_input, [])
+
+
+def request_classification_prompt(
+    user_input: str,
+    knowledge_bases: list[dict[str, Any]],
+) -> str:
     intents = ", ".join(sorted(VALID_AGENT_INTENTS))
+    payload = {
+        "user_request": user_input,
+        "knowledge_bases": knowledge_bases,
+    }
     return (
         "You are classifying a coding-agent user request. "
-        "Return only one JSON object with keys intent, reason, confidence. "
+        "Return only one JSON object with keys intent, reason, confidence, "
+        "context_route, route_reason, selected_knowledge_base_ids. "
         f"Allowed intent values: {intents}.\n"
-        f"User request:\n{user_input}"
+        "Allowed context_route values: none, repo, rag, hybrid. Use repo for "
+        "live source code, rag for managed business/reference documentation, "
+        "hybrid when both are needed, and none for small talk. Select at most "
+        "three IDs and only from the supplied knowledge_bases. A code change, "
+        "bug investigation, or test task must include repo.\n"
+        + json.dumps(payload, ensure_ascii=False)
     )
+
+
+def classify_context_source(
+    user_input: str,
+    *,
+    intent: str,
+    knowledge_bases: list[dict[str, Any]],
+) -> tuple[str, str, list[str]]:
+    if intent == "small_talk":
+        return "none", "small talk needs no external context", []
+
+    normalized = user_input.casefold()
+    repo_keywords = (
+        "代码",
+        "源码",
+        "实现",
+        "函数",
+        "类",
+        "接口",
+        "文件",
+        "调用链",
+        "报错",
+        "bug",
+        "test",
+        "pytest",
+        ".py",
+        ".js",
+        ".ts",
+        ".go",
+        ".java",
+    )
+    rag_keywords = (
+        "文档",
+        "知识库",
+        "规范",
+        "手册",
+        "政策",
+        "流程",
+        "制度",
+        "指南",
+        "需求",
+        "说明书",
+        "policy",
+        "manual",
+        "guide",
+        "spec",
+    )
+    needs_repo = intent in {
+        "repository_question",
+        "repo_navigation",
+        "code_explanation",
+        "change_planning",
+        "bug_investigation",
+        "test_strategy",
+    } and (
+        intent != "repository_question"
+        or any(keyword in normalized for keyword in repo_keywords)
+    )
+    if intent in {"change_planning", "bug_investigation", "test_strategy"}:
+        needs_repo = True
+    needs_rag = any(keyword in normalized for keyword in rag_keywords)
+    selected = select_knowledge_bases(user_input, knowledge_bases) if needs_rag else []
+    if needs_repo and needs_rag:
+        return "hybrid", "request needs source code and managed documentation", selected
+    if needs_rag:
+        return "rag", "request targets managed documentation", selected
+    return "repo", "default to live workspace evidence", []
+
+
+def select_knowledge_bases(
+    user_input: str,
+    knowledge_bases: list[dict[str, Any]],
+) -> list[str]:
+    normalized = user_input.casefold()
+    scored: list[tuple[int, str]] = []
+    for item in knowledge_bases:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        name = str(item.get("name") or "")
+        description = str(item.get("description") or "")
+        tags = [str(tag) for tag in item.get("tags", [])]
+        score = 0
+        for value, weight in ((item_id, 4), (name, 4)):
+            if value and value.casefold() in normalized:
+                score += weight
+        for tag in tags:
+            if tag and tag.casefold() in normalized:
+                score += 3
+        metadata = " ".join([item_id, name, description, *tags]).casefold()
+        for token in re.findall(r"[A-Za-z0-9_.-]{2,}", normalized):
+            if token in metadata:
+                score += 1
+        scored.append((score, item_id))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    positive = [item_id for score, item_id in scored if score > 0]
+    return (positive or [item_id for _, item_id in scored[:1]])[:3]
 
 
 def tool_planning_prompt(
@@ -462,6 +630,9 @@ def answer_prompt(state: CodingAgentState) -> str:
             "text": source.text,
             "reason": source.reason,
             "truncated": source.truncated,
+            "knowledge_base_id": source.knowledge_base_id,
+            "document_id": source.document_id,
+            "score": source.score,
         }
         for source in (
             list(state.get("project_instructions", []))
@@ -471,17 +642,23 @@ def answer_prompt(state: CodingAgentState) -> str:
     payload = {
         "task": state["user_input"],
         "intent": state.get("intent"),
+        "context_route": state.get("context_route", "repo"),
+        "selected_knowledge_base_ids": state.get(
+            "selected_knowledge_base_ids", []
+        ),
         "history": state.get("history", [])[-8:],
         "sources": sources,
+        "context_warnings": state.get("context_warnings", []),
         "tool_summaries": _tool_summaries(state.get("tool_results", [])),
         "artifacts": state.get("artifacts", []),
         "budget_exhausted": state.get("context_budget_exhausted", False),
     }
     return (
-        "Answer the coding task using only the supplied live-workspace evidence. "
-        "Cite code as path:start-end. Explain uncertainty when evidence is "
-        "insufficient. Include validation and diff outcomes when present. Do not "
-        "claim that a repository index or embedding exists.\n"
+        "Answer using only the supplied evidence. Cite live code as path:start-end "
+        "and managed documentation with its knowledge:// path. Distinguish code "
+        "from documentation, explain context warnings or insufficient evidence, "
+        "and include validation and diff outcomes when present. Do not claim that "
+        "the live repository uses an index or embedding.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
 
@@ -518,15 +695,20 @@ def _tool_summaries(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def grounded_answer_fallback(state: CodingAgentState) -> str:
     sources = state.get("context_sources", [])
-    lines = [f"工作区 `{state['workspace_id']}` 的按需读取结果："]
+    lines = [
+        f"上下文路由：`{state.get('context_route', 'repo')}`；"
+        f"工作区：`{state['workspace_id']}`。"
+    ]
     if not sources:
-        lines.append("当前没有收集到足够的可读源码证据，无法可靠回答具体实现细节。")
+        lines.append("当前没有收集到足够的代码或知识库证据，无法可靠回答。")
     else:
         for source in sources:
             location = source.path
             if source.start_line is not None:
                 location += f":{source.start_line}-{source.end_line or source.start_line}"
             lines.append(f"- {location}：{snippet(source.text, limit=240)}")
+    for warning in state.get("context_warnings", []):
+        lines.append(f"- 上下文提示：{warning}")
     if state.get("context_budget_exhausted"):
         lines.append("探索预算已耗尽；未覆盖到的部分需要下一次任务继续定向读取。")
     for decision_name in ("review_decision", "repair_review_decision"):

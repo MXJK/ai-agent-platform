@@ -3,12 +3,15 @@ from __future__ import annotations
 import ast
 from dataclasses import replace
 import hashlib
+from io import BytesIO
 import math
 import re
 from threading import Lock
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from docx import Document
+from pypdf import PdfReader
 
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import LLMClient
@@ -50,6 +53,7 @@ SUPPORTED_TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+SUPPORTED_DOCUMENT_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | {".docx", ".pdf"}
 CODE_TEXT_EXTENSIONS = {
     ".go",
     ".java",
@@ -63,14 +67,7 @@ CODE_TEXT_EXTENSIONS = {
 
 
 class TextDocumentParser:
-    """Parses first-version text documents.
-
-    TODO: Extend this parser boundary for more document types such as PDF,
-    Word, HTML, OCR output, tables, and crawled web pages.
-
-    Production systems usually add PDF, HTML, docx, OCR, tables, and image
-    extraction here. The first version keeps this boundary small and explicit.
-    """
+    """Extracts and normalizes supported text, PDF, and DOCX documents."""
 
     def parse(
         self,
@@ -81,8 +78,8 @@ class TextDocumentParser:
         source_uri: str | None = None,
     ) -> ParsedDocument:
         extension = _file_extension(filename)
-        if extension not in SUPPORTED_TEXT_EXTENSIONS:
-            supported = ", ".join(sorted(SUPPORTED_TEXT_EXTENSIONS))
+        if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
+            supported = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
             raise RAGValidationError(
                 f"unsupported document type: {extension or '<none>'}; "
                 f"supported types: {supported}"
@@ -104,6 +101,39 @@ class TextDocumentParser:
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             text=text,
+            source_uri=source_uri,
+        )
+
+    def parse_bytes(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+        content: bytes,
+        source_uri: str | None = None,
+    ) -> ParsedDocument:
+        extension = _file_extension(filename)
+        if extension in SUPPORTED_TEXT_EXTENSIONS:
+            try:
+                text = content.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise RAGValidationError(
+                    "text documents must use UTF-8 encoding"
+                ) from exc
+        elif extension == ".pdf":
+            text = _extract_pdf_text(content)
+        elif extension == ".docx":
+            text = _extract_docx_text(content)
+        else:
+            supported = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
+            raise RAGValidationError(
+                f"unsupported document type: {extension or '<none>'}; "
+                f"supported types: {supported}"
+            )
+        return self.parse(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            content=text,
             source_uri=source_uri,
         )
 
@@ -493,6 +523,14 @@ class InMemoryVectorStore:
                 if chunk.document_id != document_id
             ]
 
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        with self._lock:
+            self._rows = [
+                (chunk, embedding)
+                for chunk, embedding in self._rows
+                if chunk.knowledge_base_id != knowledge_base_id
+            ]
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -557,6 +595,9 @@ class ChromaVectorStore:
 
     def delete_document(self, *, document_id: str) -> None:
         self._collection.delete(where={"document_id": document_id})
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        self._collection.delete(where={"knowledge_base_id": knowledge_base_id})
 
     def upsert_chunks(
         self,
@@ -652,6 +693,27 @@ class QdrantVectorStore:
                         FieldCondition(
                             key="document_id",
                             match=MatchValue(value=document_id),
+                        )
+                    ]
+                )
+            ),
+        )
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        if not self._collection_exists():
+            return
+        FieldCondition = _qdrant_model("FieldCondition")
+        Filter = _qdrant_model("Filter")
+        MatchValue = _qdrant_model("MatchValue")
+        FilterSelector = _qdrant_model("FilterSelector")
+        self._client.delete(
+            collection_name=self._collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="knowledge_base_id",
+                            match=MatchValue(value=knowledge_base_id),
                         )
                     ]
                 )
@@ -818,6 +880,12 @@ class RAGService:
             content=content,
             source_uri=source_uri,
         )
+        return self._ingest_parsed_document(document)
+
+    def _ingest_parsed_document(
+        self,
+        document: ParsedDocument,
+    ) -> IngestedDocument:
         chunks = self._chunker.split(document)
         if not chunks:
             raise RAGValidationError("document produced no chunks")
@@ -838,10 +906,31 @@ class RAGService:
                     pass
                 raise
         return IngestedDocument(
-            knowledge_base_id=knowledge_base_id,
+            knowledge_base_id=document.knowledge_base_id,
             document_id=document.id,
             filename=document.filename,
             chunk_count=len(chunks),
+        )
+
+    def ingest_file(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+        content: bytes,
+        source_uri: str | None = None,
+    ) -> IngestedDocument:
+        document = self._parser.parse_bytes(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            content=content,
+            source_uri=source_uri,
+        )
+        return self._ingest_parsed_document(document)
+
+    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
+        self._vector_store.delete_knowledge_base(
+            knowledge_base_id=knowledge_base_id
         )
 
     def search(
@@ -964,6 +1053,36 @@ def _normalize_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _extract_pdf_text(content: bytes) -> str:
+    if not content:
+        raise RAGValidationError("uploaded file is empty")
+    try:
+        reader = PdfReader(BytesIO(content))
+        if reader.is_encrypted and reader.decrypt("") == 0:
+            raise RAGValidationError("encrypted PDF files are not supported")
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except RAGValidationError:
+        raise
+    except Exception as exc:
+        raise RAGValidationError("unable to read PDF document") from exc
+    return "\n\n".join(pages)
+
+
+def _extract_docx_text(content: bytes) -> str:
+    if not content:
+        raise RAGValidationError("uploaded file is empty")
+    try:
+        document = Document(BytesIO(content))
+    except Exception as exc:
+        raise RAGValidationError("unable to read DOCX document") from exc
+
+    blocks = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            blocks.append("\t".join(cell.text for cell in row.cells))
+    return "\n".join(blocks)
 
 
 def _normalize_code_text(text: str) -> str:

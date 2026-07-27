@@ -53,3 +53,14 @@ class WorkspaceRecord:
     root_path: str
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class KnowledgeBaseRecord:
+    id: str
+    name: str
+    description: str
+    tags: list[str]
+    document_count: int
+    created_at: datetime
+    updated_at: datetime

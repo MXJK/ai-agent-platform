@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,19 @@ def wait_for_run(client: TestClient, run_id: str) -> dict:
             return body
         time.sleep(0.01)
     raise AssertionError("agent run did not finish")
+
+
+def upload_document(
+    client: TestClient,
+    knowledge_base_id: str,
+    filename: str,
+    content: str | bytes,
+):
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    return client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
+        files={"file": (filename, payload)},
+    )
 
 
 class ApiTests(unittest.TestCase):
@@ -151,12 +165,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-mode-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertIn('id="workspace-id-input"', response.text)
+        self.assertIn('id="knowledge-base-list"', response.text)
+        self.assertIn('id="document-files-input"', response.text)
+        self.assertIn("重排数量", response.text)
+        self.assertNotIn('id="document-content-input"', response.text)
+        self.assertNotIn('id="document-filename-input"', response.text)
         self.assertNotIn('id="repository-id-input"', response.text)
         self.assertEqual(script_response.status_code, 200)
         self.assertIn("thinking_level", script_response.text)
         self.assertIn("submitComposerMessage", script_response.text)
         self.assertIn("runAgentFromComposer", script_response.text)
         self.assertIn("workspace_id", script_response.text)
+        self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
 
@@ -300,12 +320,21 @@ class ApiTests(unittest.TestCase):
 
     def test_independent_knowledge_base_still_ingests_searches_and_answers(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
-            ingested = client.post(
-                "/api/v1/knowledge-bases/docs/documents",
+            created = client.post(
+                "/api/v1/knowledge-bases",
                 json={
-                    "filename": "guide.md",
-                    "content": "Falcon mode enables deterministic offline testing.",
+                    "id": "docs",
+                    "name": "Documentation",
+                    "description": "Falcon mode and offline testing guides.",
+                    "tags": ["falcon", "testing"],
                 },
+            )
+            self.assertEqual(created.status_code, 201)
+            ingested = upload_document(
+                client,
+                "docs",
+                "guide.md",
+                "Falcon mode enables deterministic offline testing.",
             )
             self.assertEqual(ingested.status_code, 201)
             search = client.post(
@@ -321,21 +350,211 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(answer.status_code, 200)
             self.assertGreaterEqual(len(answer.json()["citations"]), 1)
 
-    def test_rag_search_is_scoped_and_rejects_unsupported_types(self) -> None:
+    def test_knowledge_base_catalog_crud_and_cascade_delete(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
-            client.post(
-                "/api/v1/knowledge-bases/customer_faq/documents",
+            missing_ingest = upload_document(client, "missing", "missing.md", "missing")
+            self.assertEqual(missing_ingest.status_code, 404)
+
+            created = client.post(
+                "/api/v1/knowledge-bases",
                 json={
-                    "filename": "refund.md",
-                    "content": "退款申请需要在订单完成后 7 天内提交。",
+                    "id": "product_docs",
+                    "name": "Product Docs",
+                    "description": "Product manuals and API policies.",
+                    "tags": ["product", "manual", "product"],
                 },
             )
-            client.post(
-                "/api/v1/knowledge-bases/hr_policy/documents",
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(created.json()["tags"], ["product", "manual"])
+            duplicate = client.post(
+                "/api/v1/knowledge-bases",
                 json={
-                    "filename": "vacation.md",
-                    "content": "年假需要提前 3 个工作日提交审批。",
+                    "id": "product_docs",
+                    "name": "Duplicate",
+                    "description": "",
+                    "tags": [],
                 },
+            )
+            self.assertEqual(duplicate.status_code, 409)
+
+            ingested = upload_document(
+                client,
+                "product_docs",
+                "manual.md",
+                "Falcon mode is enabled from the product settings.",
+            )
+            self.assertEqual(ingested.status_code, 201)
+            loaded = client.get("/api/v1/knowledge-bases/product_docs")
+            self.assertEqual(loaded.json()["document_count"], 1)
+            updated = client.put(
+                "/api/v1/knowledge-bases/product_docs",
+                json={
+                    "name": "Product Knowledge",
+                    "description": "Updated product reference.",
+                    "tags": ["product", "reference"],
+                },
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["name"], "Product Knowledge")
+            listed = client.get("/api/v1/knowledge-bases").json()["knowledge_bases"]
+            self.assertEqual([item["id"] for item in listed], ["product_docs"])
+
+            deleted = client.delete("/api/v1/knowledge-bases/product_docs")
+            self.assertEqual(deleted.status_code, 204)
+            self.assertEqual(
+                client.get("/api/v1/knowledge-bases/product_docs").status_code,
+                404,
+            )
+            self.assertEqual(
+                client.post(
+                    "/api/v1/knowledge-bases/product_docs/search",
+                    json={"query": "Falcon"},
+                ).status_code,
+                404,
+            )
+
+    def test_document_upload_rejects_empty_invalid_and_oversized_files(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "uploads",
+                    "name": "Uploads",
+                    "description": "",
+                    "tags": [],
+                },
+            ).raise_for_status()
+
+            empty = upload_document(client, "uploads", "empty.md", b"")
+            invalid_utf8 = upload_document(
+                client,
+                "uploads",
+                "invalid.md",
+                b"\xff\xfe",
+            )
+            with patch(
+                "ai_agent_platform.api.routes.knowledge_bases.MAX_DOCUMENT_BYTES",
+                4,
+            ):
+                oversized = upload_document(
+                    client,
+                    "uploads",
+                    "large.md",
+                    b"12345",
+                )
+
+            self.assertEqual(empty.status_code, 400)
+            self.assertIn("document text is empty", empty.json()["detail"])
+            self.assertEqual(invalid_utf8.status_code, 400)
+            self.assertIn("UTF-8", invalid_utf8.json()["detail"])
+            self.assertEqual(oversized.status_code, 413)
+            self.assertIn("20 MiB", oversized.json()["detail"])
+
+    def test_agent_automatically_routes_to_rag_and_hybrid_context(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text(
+                "FALCON_ENABLED = False\n",
+                encoding="utf-8",
+            )
+            with self._client(root) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "routing-test"},
+                ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(root)},
+                ).raise_for_status()
+                client.post(
+                    "/api/v1/knowledge-bases",
+                    json={
+                        "id": "falcon_docs",
+                        "name": "Falcon Guide",
+                        "description": "Falcon mode product policy and setup manual.",
+                        "tags": ["Falcon", "manual", "policy"],
+                    },
+                ).raise_for_status()
+                upload_document(
+                    client,
+                    "falcon_docs",
+                    "falcon.md",
+                    "Falcon mode enables deterministic offline testing.",
+                ).raise_for_status()
+
+                rag_run = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "message": "根据 Falcon 知识库文档说明它的用途",
+                    },
+                )
+                rag_result = wait_for_run(client, rag_run.json()["run_id"])["result"]
+                self.assertEqual(rag_result["context_route"], "rag")
+                self.assertEqual(
+                    rag_result["selected_knowledge_base_ids"],
+                    ["falcon_docs"],
+                )
+                self.assertTrue(
+                    any(
+                        item["kind"] == "knowledge_chunk"
+                        and item["knowledge_base_id"] == "falcon_docs"
+                        and item["path"].startswith("knowledge://falcon_docs/")
+                        for item in rag_result["context_sources"]
+                    )
+                )
+
+                hybrid_run = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "focus_files": ["app.py"],
+                        "message": "根据 Falcon 规范修改 app.py 的实现方案",
+                    },
+                )
+                hybrid_result = wait_for_run(
+                    client,
+                    hybrid_run.json()["run_id"],
+                )["result"]
+                self.assertEqual(hybrid_result["context_route"], "hybrid")
+                source_kinds = {
+                    item["kind"] for item in hybrid_result["context_sources"]
+                }
+                self.assertIn("knowledge_chunk", source_kinds)
+                self.assertIn("file", source_kinds)
+                trace_nodes = [item["node"] for item in hybrid_result["trace"]]
+                self.assertIn("retrieve_knowledge", trace_nodes)
+                self.assertIn("merge_evidence", trace_nodes)
+
+    def test_rag_search_is_scoped_and_rejects_unsupported_types(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            for knowledge_base_id, name in (
+                ("customer_faq", "Customer FAQ"),
+                ("hr_policy", "HR Policy"),
+            ):
+                response = client.post(
+                    "/api/v1/knowledge-bases",
+                    json={
+                        "id": knowledge_base_id,
+                        "name": name,
+                        "description": name,
+                        "tags": [],
+                    },
+                )
+                self.assertEqual(response.status_code, 201)
+            upload_document(
+                client,
+                "customer_faq",
+                "refund.md",
+                "退款申请需要在订单完成后 7 天内提交。",
+            )
+            upload_document(
+                client,
+                "hr_policy",
+                "vacation.md",
+                "年假需要提前 3 个工作日提交审批。",
             )
             response = client.post(
                 "/api/v1/knowledge-bases/hr_policy/search",
@@ -347,12 +566,11 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(
                 all(result["knowledge_base_id"] == "hr_policy" for result in results)
             )
-            unsupported = client.post(
-                "/api/v1/knowledge-bases/hr_policy/documents",
-                json={
-                    "filename": "manual.pdf",
-                    "content": "PDF binary requires a parser.",
-                },
+            unsupported = upload_document(
+                client,
+                "hr_policy",
+                "legacy.doc",
+                b"legacy Word binary",
             )
             self.assertEqual(unsupported.status_code, 400)
             self.assertIn("unsupported document type", unsupported.json()["detail"])

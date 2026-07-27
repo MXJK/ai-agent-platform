@@ -13,9 +13,11 @@ from ai_agent_platform.agents import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueueError
-from ai_agent_platform.integrations import LLMClient
+from ai_agent_platform.integrations import LLMClient, create_rag_service
 from ai_agent_platform.main import (
     _create_agent_run_store,
+    _create_document_store,
+    _create_knowledge_base_store,
     _create_langgraph_checkpointer,
     _create_mcp_providers,
     _create_session_repository,
@@ -23,6 +25,7 @@ from ai_agent_platform.main import (
 )
 from ai_agent_platform.services import (
     AgentRunService,
+    KnowledgeBaseService,
     SessionService,
     WorkspaceService,
 )
@@ -84,6 +87,14 @@ def _create_worker_services() -> WorkerServices:
     metrics = MetricsRegistry()
     session_repository = _create_session_repository(settings)
     llm_client = LLMClient(settings)
+    rag_service = create_rag_service(
+        settings,
+        document_store=_create_document_store(settings),
+    )
+    knowledge_base_service = KnowledgeBaseService(
+        store=_create_knowledge_base_store(settings),
+        rag_service=rag_service,
+    )
     mcp_providers = _create_mcp_providers(settings)
     tool_registry = create_coding_tool_registry(
         mcp_providers=mcp_providers,
@@ -104,6 +115,8 @@ def _create_worker_services() -> WorkerServices:
         max_context_chars=settings.agent_max_context_chars,
         max_instruction_chars=settings.agent_max_instruction_chars,
         max_history_messages=settings.llm_max_context_messages,
+        knowledge_context_provider=knowledge_base_service,
+        max_rag_context_chars=settings.rag_max_prompt_chars,
     )
     session_service = SessionService(
         repository=session_repository,

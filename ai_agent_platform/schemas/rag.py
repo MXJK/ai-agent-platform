@@ -1,17 +1,54 @@
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime
+from typing import Annotated, Optional
 
 from pydantic import BaseModel, Field
 
+from ai_agent_platform.domain import KnowledgeBaseRecord
 from ai_agent_platform.integrations.rag import IngestedDocument, RetrievedDocument
 from ai_agent_platform.schemas.chat import LLMThinkingLevel
 
 
-class DocumentIngestRequest(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
-    content: str = Field(min_length=1)
-    source_uri: Optional[str] = Field(default=None, max_length=1000)
+KnowledgeBaseTag = Annotated[str, Field(min_length=1, max_length=64)]
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=1000)
+    tags: list[KnowledgeBaseTag] = Field(default_factory=list, max_length=20)
+
+
+class KnowledgeBaseUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=1000)
+    tags: list[KnowledgeBaseTag] = Field(default_factory=list, max_length=20)
+
+
+class KnowledgeBaseResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    tags: list[str]
+    document_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(
+        cls,
+        knowledge_base: KnowledgeBaseRecord,
+    ) -> "KnowledgeBaseResponse":
+        return cls(**knowledge_base.__dict__)
+
+
+class KnowledgeBasesResponse(BaseModel):
+    knowledge_bases: list[KnowledgeBaseResponse]
 
 
 class DocumentIngestResponse(BaseModel):

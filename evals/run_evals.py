@@ -92,6 +92,15 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
                 f"/api/v1/workspaces/{workspace_id}",
                 json={"root_path": str(workspace_root)},
             ).raise_for_status()
+            client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": knowledge_base_id,
+                    "name": "Evaluation documents",
+                    "description": "Source fixtures used by the offline evaluation suite.",
+                    "tags": ["evaluation", "source"],
+                },
+            ).raise_for_status()
             _ingest_fixtures(
                 client=client,
                 knowledge_base_id=knowledge_base_id,
@@ -161,9 +170,11 @@ def _ingest_fixtures(
     for fixture in fixtures:
         response = client.post(
             f"/api/v1/knowledge-bases/{knowledge_base_id}/documents",
-            json={
-                "filename": fixture["filename"],
-                "content": fixture["content"],
+            files={
+                "file": (
+                    fixture["filename"],
+                    fixture["content"].encode("utf-8"),
+                )
             },
         )
         if response.status_code != 201:

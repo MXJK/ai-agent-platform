@@ -16,12 +16,27 @@ Python 3.10 or newer is required by the Google Gen AI SDK:
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m uvicorn ai_agent_platform.main:app --reload
+cp -n .env.example .env
+./scripts/start.sh
+```
+
+After the initial environment setup, `./scripts/start.sh` is the only command
+needed for local startup. It validates the persistent configuration, starts
+PostgreSQL/Qdrant/Redis, waits for them to become reachable, applies pending
+Alembic migrations, and runs both Celery Worker and FastAPI. Press `Ctrl+C` to
+stop the API and Worker; persistent database containers remain running.
+
+Useful startup options:
+
+```bash
+./scripts/start.sh --check  # Validate dependencies/configuration without writes.
+APP_RELOAD=0 ./scripts/start.sh
+APP_HOST=0.0.0.0 APP_PORT=8000 ./scripts/start.sh
 ```
 
 The web UI is available at `http://127.0.0.1:8000`. It is served directly by
-FastAPI and requires no separate frontend build. The default fake LLM and local
-embedding provider require no API key.
+FastAPI and requires no separate frontend build. The example configuration uses
+the fake LLM and local embedding provider, which require no API key.
 
 The shared composer offers:
 
@@ -59,15 +74,22 @@ The LangGraph chain starts with:
 setup_workspace
 → load_project_instructions
 → classify_request
-→ plan_exploration
-→ execute_exploration
-→ assess_context
+→ decide_context_source
+   ├─ repo   → plan_exploration → execute_exploration → assess_context
+   ├─ rag    → retrieve_knowledge
+   ├─ hybrid → retrieve_knowledge → repository exploration
+   └─ none
+→ merge_evidence
 ```
 
-`assess_context` either loops back to exploration or proceeds to tool/change
-planning and final answer generation. Change runs retain human approval,
-per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
-artifacts. The registered source workspace is never modified directly.
+The classifier receives a bounded catalog containing only knowledge-base IDs,
+names, descriptions, and tags. It selects `none`, `repo`, `rag`, or `hybrid`
+and at most three managed knowledge bases. Repository evidence still comes from
+live files; document evidence reuses the independent RAG search stack.
+`merge_evidence` preserves both provenance types before tool/change planning or
+answer generation. Change runs retain human approval, per-run sandbox copying,
+validation, one bounded repair attempt, and Diff/test artifacts. The registered
+source workspace is never modified directly.
 
 Default exploration budgets:
 
@@ -126,10 +148,11 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
   }'
 ```
 
-Responses expose `context_sources`, each containing `kind`, `path`,
-`start_line`, `end_line`, `text`, `reason`, `content_hash`, and `truncated`.
-The removed `repository_id`, `knowledge_base_id`, and `rag_context` Agent fields
-are not accepted or returned.
+Responses expose `context_route`, `selected_knowledge_base_ids`, and
+`context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
+optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
+The removed `repository_id` and `rag_context` Agent fields are not accepted or
+returned.
 
 ### Live source tools
 
@@ -144,7 +167,19 @@ and common credential files.
 
 ## Independent knowledge base
 
-Document RAG remains separate from the code Agent:
+Create catalog metadata before ingesting documents:
+
+```text
+POST   /api/v1/knowledge-bases
+GET    /api/v1/knowledge-bases
+GET    /api/v1/knowledge-bases/{knowledge_base_id}
+PUT    /api/v1/knowledge-bases/{knowledge_base_id}
+DELETE /api/v1/knowledge-bases/{knowledge_base_id}
+```
+
+Catalog records contain an immutable ID plus editable name, description, and
+tags. Deletion removes vectors first and then cascades PostgreSQL documents and
+chunks. Document RAG endpoints remain available independently:
 
 ```text
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
@@ -152,8 +187,20 @@ POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
 ```
 
+Document ingestion accepts a multipart `file` upload (20 MiB maximum):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge-bases/product_docs/documents \
+  -F 'file=@/absolute/path/to/manual.pdf'
+```
+
+Supported uploads include PDF, DOCX, Markdown, UTF-8 text/configuration files,
+and the existing UTF-8 source-code formats. Legacy `.doc` files and scanned
+documents requiring OCR are not supported.
+
 Only these document endpoints use chunking, embeddings, and the configured
-vector store.
+vector store. Agent RAG routing calls the same search implementation and
+degrades to an evidence warning when retrieval is unavailable.
 
 ## Storage and migration
 
@@ -169,6 +216,10 @@ Revision `20260723_0006`:
 - renames `repositories` to `workspaces` and removes `last_indexed_at`;
 - renames `agent_runs.repository_id` to `workspace_id`;
 - adds and backfills nullable `agent_runs.workspace_root`.
+
+Revision `20260724_0007` creates the managed `knowledge_bases` catalog,
+backfills IDs already present in `documents`, and adds the cascading document
+foreign key.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
@@ -186,6 +237,29 @@ WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
+```
+
+The persistent runtime assigns one responsibility to each database:
+
+| Component | Responsibility |
+| --- | --- |
+| PostgreSQL | Sessions/messages, Agent runs, workspace and knowledge-base catalogs, document/chunk metadata, and LangGraph checkpoints |
+| Qdrant | RAG embeddings, vector similarity search, knowledge-base filtering, and retrieval payloads |
+| Redis | Celery broker and result backend; it is not the source of truth for business records |
+| Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
+
+`RAG_VECTOR_STORE` selects either Qdrant or Chroma. They implement the same
+vector-store boundary and are not written simultaneously. The checked-in
+example and current persistent runtime select Qdrant; in-memory repositories
+remain available only as explicit test doubles.
+
+Before starting the API and Celery worker, start the backing services and apply
+the schema migration:
+
+```bash
+docker compose up -d postgres qdrant redis
+.venv/bin/alembic upgrade head
+.venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
 
 Workers register only Agent run/resume tasks. An inaccessible captured root

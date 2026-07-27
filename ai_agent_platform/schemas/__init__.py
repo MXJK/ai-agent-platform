@@ -14,8 +14,11 @@ from .chat import ChatStreamRequest
 from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
 from .rag import (
-    DocumentIngestRequest,
     DocumentIngestResponse,
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseResponse,
+    KnowledgeBasesResponse,
+    KnowledgeBaseUpdateRequest,
     RAGAskRequest,
     RAGAskResponse,
     RAGChunkResponse,
@@ -40,8 +43,11 @@ __all__ = [
     "ContextSourceResponse",
     "ChatStreamRequest",
     "CreateSessionRequest",
-    "DocumentIngestRequest",
     "DocumentIngestResponse",
+    "KnowledgeBaseCreateRequest",
+    "KnowledgeBaseResponse",
+    "KnowledgeBasesResponse",
+    "KnowledgeBaseUpdateRequest",
     "HealthResponse",
     "MessageResponse",
     "MessagesResponse",

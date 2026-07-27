@@ -37,6 +37,7 @@ from ai_agent_platform.integrations.rag.service import (
     RAGService,
     RecursiveCharacterChunker,
     SentenceTransformerCrossEncoderReranker,
+    SUPPORTED_DOCUMENT_EXTENSIONS,
     SUPPORTED_TEXT_EXTENSIONS,
     TextDocumentParser,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "RetrievedDocument",
     "RetrievalMetrics",
     "SentenceTransformerCrossEncoderReranker",
+    "SUPPORTED_DOCUMENT_EXTENSIONS",
     "SUPPORTED_TEXT_EXTENSIONS",
     "TextDocumentParser",
     "VectorStore",

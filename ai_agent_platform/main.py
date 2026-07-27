@@ -32,15 +32,18 @@ from ai_agent_platform.integrations import (
     create_rag_service,
 )
 from ai_agent_platform.repositories import (
+    InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
     InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
     PostgresDocumentRepository,
+    PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
     PostgresWorkspaceRepository,
 )
 from ai_agent_platform.services import (
     AgentRunService,
+    KnowledgeBaseService,
     SessionService,
     WorkspaceService,
 )
@@ -85,6 +88,10 @@ def create_app(
         settings,
         document_store=_create_document_store(settings),
     )
+    knowledge_base_service = KnowledgeBaseService(
+        store=_create_knowledge_base_store(settings),
+        rag_service=rag_service,
+    )
     mcp_providers = _create_mcp_providers(settings)
     tool_registry = create_coding_tool_registry(
         mcp_providers=mcp_providers,
@@ -107,6 +114,8 @@ def create_app(
             max_context_chars=settings.agent_max_context_chars,
             max_instruction_chars=settings.agent_max_instruction_chars,
             max_history_messages=settings.llm_max_context_messages,
+            knowledge_context_provider=knowledge_base_service,
+            max_rag_context_chars=settings.rag_max_prompt_chars,
         )
     workspace_service = WorkspaceService(
         store=_create_workspace_store(settings),
@@ -146,6 +155,7 @@ def create_app(
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
     app.state.workspace_service = workspace_service
+    app.state.knowledge_base_service = knowledge_base_service
     app.state.task_queue = task_queue
     static_dir = Path(__file__).parent / "static"
 
@@ -153,7 +163,7 @@ def create_app(
         create_api_router(
             session_service=session_service,
             llm_client=llm_client,
-            rag_service=rag_service,
+            knowledge_base_service=knowledge_base_service,
             agent_run_service=agent_run_service,
             workspace_service=workspace_service,
             settings=settings,
@@ -203,6 +213,16 @@ def _create_document_store(settings: Settings):
     if settings.document_store == "postgres":
         return PostgresDocumentRepository(database_url=settings.database_url)
     raise ValueError(f"unsupported document store: {settings.document_store}")
+
+
+def _create_knowledge_base_store(settings: Settings):
+    if settings.document_store == "memory":
+        return InMemoryKnowledgeBaseRepository()
+    if settings.document_store == "postgres":
+        return PostgresKnowledgeBaseRepository(database_url=settings.database_url)
+    raise ValueError(
+        f"unsupported knowledge-base store: {settings.document_store}"
+    )
 
 
 def _create_workspace_store(settings: Settings):

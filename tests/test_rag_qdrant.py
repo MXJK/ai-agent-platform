@@ -43,6 +43,16 @@ class QdrantVectorStoreTests(unittest.TestCase):
         self.assertEqual(results[0].symbols, ["hello"])
         self.assertEqual(scoped_results, [])
 
+        store.delete_knowledge_base(knowledge_base_id="repo_main")
+        self.assertEqual(
+            store.search(
+                knowledge_base_id="repo_main",
+                query_embedding=[1.0, 0.0, 0.0],
+                limit=1,
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
