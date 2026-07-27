@@ -33,6 +33,18 @@ services:
       retries: 10
     restart: unless-stopped
 
+  adminer:
+    image: adminer:5.5.0-standalone
+    container_name: ai-agent-platform-adminer
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:v1.16.1
     container_name: ai-agent-platform-qdrant

@@ -257,10 +257,29 @@ Before starting the API and Celery worker, start the backing services and apply
 the schema migration:
 
 ```bash
-docker compose up -d postgres qdrant redis
+docker compose up -d postgres adminer qdrant redis
 .venv/bin/alembic upgrade head
 .venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
+
+### Browse PostgreSQL with Adminer
+
+The Compose stack includes an Adminer web interface bound to the local machine
+only. After starting `postgres` and `adminer`, open
+<http://localhost:8081> and use:
+
+| Field | Value |
+| --- | --- |
+| System | PostgreSQL |
+| Server | `postgres` |
+| Username | `ai_agent` |
+| Password | `ai_agent_password` |
+| Database | `ai_agent_platform` |
+
+The server name must be `postgres`, not `localhost`, because Adminer connects to
+PostgreSQL over the internal Compose network. The local-only port binding is
+intended for development; do not publish Adminer without adding appropriate
+access controls.
 
 Workers register only Agent run/resume tasks. An inaccessible captured root
 fails with the structured `workspace_unavailable` message.
