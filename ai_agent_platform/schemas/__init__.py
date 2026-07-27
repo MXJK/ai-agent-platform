@@ -27,7 +27,13 @@ from .rag import (
 )
 from .session import CreateSessionRequest, SessionResponse, SessionsResponse
 from .summary import SessionSummaryResponse
-from .workspace import WorkspaceResponse, WorkspacesResponse, WorkspaceUpsertRequest
+from .workspace import (
+    WorkspaceDirectoryBrowseResponse,
+    WorkspaceDirectoryResponse,
+    WorkspaceResponse,
+    WorkspacesResponse,
+    WorkspaceUpsertRequest,
+)
 
 __all__ = [
     "AddMessageRequest",
@@ -61,6 +67,8 @@ __all__ = [
     "SessionsResponse",
     "SessionSummaryResponse",
     "TimingMetricResponse",
+    "WorkspaceDirectoryBrowseResponse",
+    "WorkspaceDirectoryResponse",
     "WorkspaceResponse",
     "WorkspacesResponse",
     "WorkspaceUpsertRequest",

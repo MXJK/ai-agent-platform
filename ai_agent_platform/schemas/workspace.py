@@ -29,3 +29,14 @@ class WorkspaceResponse(BaseModel):
 
 class WorkspacesResponse(BaseModel):
     workspaces: list[WorkspaceResponse]
+
+
+class WorkspaceDirectoryResponse(BaseModel):
+    name: str
+    path: str
+
+
+class WorkspaceDirectoryBrowseResponse(BaseModel):
+    current_path: str | None
+    parent_path: str | None
+    directories: list[WorkspaceDirectoryResponse]

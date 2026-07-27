@@ -60,6 +60,42 @@ class WorkspaceService:
     def list(self) -> list[WorkspaceRecord]:
         return self._store.list()
 
+    def browse_directories(
+        self,
+        root_path: str | None = None,
+    ) -> tuple[str | None, str | None, list[Path]]:
+        if root_path is None:
+            roots = [
+                root
+                for root in self._allowed_roots
+                if root.exists() and root.is_dir()
+            ]
+            return None, None, roots
+
+        current = self._resolve_allowed_root(root_path)
+        directories: set[Path] = set()
+        try:
+            children = current.iterdir()
+            for child in children:
+                try:
+                    resolved = child.resolve()
+                    if resolved.is_dir() and self._is_allowed_root(resolved):
+                        directories.add(resolved)
+                except OSError:
+                    continue
+        except OSError as exc:
+            raise WorkspaceValidationError(
+                "workspace directory cannot be read"
+            ) from exc
+
+        parent = current.parent
+        parent_path = str(parent) if self._is_allowed_root(parent) else None
+        return (
+            str(current),
+            parent_path,
+            sorted(directories, key=lambda item: (item.name.casefold(), str(item))),
+        )
+
     def resolve_for_run(self, workspace_id: str) -> str:
         workspace = self.get(workspace_id)
         root = self._resolve_allowed_root(workspace.root_path)
@@ -71,8 +107,14 @@ class WorkspaceService:
             raise WorkspaceValidationError(
                 "workspace root must be an existing directory"
             )
-        if not any(root == allowed or allowed in root.parents for allowed in self._allowed_roots):
+        if not self._is_allowed_root(root):
             raise WorkspaceValidationError(
                 "workspace root is outside WORKSPACE_ALLOWED_ROOTS"
             )
         return root
+
+    def _is_allowed_root(self, root: Path) -> bool:
+        return any(
+            root == allowed or allowed in root.parents
+            for allowed in self._allowed_roots
+        )

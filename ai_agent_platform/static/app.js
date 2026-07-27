@@ -10,6 +10,8 @@ const state = {
   sessions: [],
   requestLog: [],
   workspaces: [],
+  workspaceDirectoryPath: null,
+  workspaceDirectoryParentPath: null,
   knowledgeBases: [],
   currentView: "chat",
   composerMode: "chat",
@@ -311,6 +313,13 @@ function openSettings() {
 
 function closeSettings() {
   const dialog = $("settings-dialog");
+  if (dialog.open) {
+    dialog.close();
+  }
+}
+
+function closeWorkspacePicker() {
+  const dialog = $("workspace-picker-dialog");
   if (dialog.open) {
     dialog.close();
   }
@@ -1461,10 +1470,130 @@ async function registerWorkspace() {
     await listWorkspaces();
     $("workspace-select").value = workspaceId;
     showToast(`工作区 ${workspaceId} 已注册`, "success");
+    return body;
   } catch (error) {
     showToast(humanizeError(error), "error");
+    return null;
   } finally {
     $("register-workspace-btn").disabled = false;
+  }
+}
+
+function workspaceIdForPath(path) {
+  const existing = state.workspaces.find((workspace) => workspace.root_path === path);
+  if (existing) {
+    return existing.id;
+  }
+  const leaf = path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
+  const normalized = leaf
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 110) || "workspace";
+  let candidate = normalized;
+  let suffix = 2;
+  while (state.workspaces.some((workspace) => workspace.id === candidate)) {
+    candidate = `${normalized}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function renderWorkspaceDirectories(body) {
+  state.workspaceDirectoryPath = body.current_path || null;
+  state.workspaceDirectoryParentPath = body.parent_path || null;
+  const list = $("workspace-directory-list");
+  const currentPath = state.workspaceDirectoryPath;
+  $("workspace-picker-current-path").textContent = currentPath || "允许的位置";
+  $("workspace-picker-up-btn").disabled = !currentPath;
+  $("workspace-picker-roots-btn").disabled = !currentPath;
+  $("choose-workspace-directory-btn").disabled = !currentPath;
+  list.innerHTML = "";
+
+  if (!body.directories || body.directories.length === 0) {
+    list.innerHTML = `<div class="empty-state">${
+      currentPath ? "这个文件夹中没有可进入的子文件夹。" : "服务端没有配置可访问的文件夹。"
+    }</div>`;
+    return;
+  }
+
+  for (const directory of body.directories) {
+    const item = document.createElement("button");
+    item.className = "workspace-directory-item";
+    item.type = "button";
+    item.dataset.directoryPath = directory.path;
+    item.innerHTML = `
+      ${iconMarkup("folder")}
+      <span class="workspace-directory-copy">
+        <strong>${escapeHtml(directory.name)}</strong>
+        <small>${escapeHtml(directory.path)}</small>
+      </span>
+      <span class="workspace-directory-arrow" aria-hidden="true">›</span>
+    `;
+    list.appendChild(item);
+  }
+}
+
+async function browseWorkspaceDirectories(path = null) {
+  const list = $("workspace-directory-list");
+  const chooseButton = $("choose-workspace-directory-btn");
+  list.setAttribute("aria-busy", "true");
+  list.innerHTML = '<div class="empty-state">正在加载文件夹…</div>';
+  chooseButton.disabled = true;
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const body = await fetchJson(`/workspace-directories${query}`);
+    renderWorkspaceDirectories(body);
+  } finally {
+    list.removeAttribute("aria-busy");
+  }
+}
+
+async function openWorkspacePicker() {
+  const dialog = $("workspace-picker-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+  const currentValue = $("workspace-root-input").value.trim();
+  try {
+    await browseWorkspaceDirectories(currentValue || null);
+  } catch (error) {
+    if (currentValue) {
+      showToast("当前路径不可浏览，已显示允许的位置", "warning");
+      try {
+        await browseWorkspaceDirectories();
+        return;
+      } catch (fallbackError) {
+        error = fallbackError;
+      }
+    }
+    $("workspace-directory-list").innerHTML =
+      `<div class="empty-state">${escapeHtml(humanizeError(error))}</div>`;
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function chooseWorkspaceDirectory() {
+  const path = state.workspaceDirectoryPath;
+  if (!path) {
+    return;
+  }
+  const chooseButton = $("choose-workspace-directory-btn");
+  $("workspace-root-input").value = path;
+  $("workspace-id-input").value = workspaceIdForPath(path);
+  updateContextSummary();
+  chooseButton.disabled = true;
+  chooseButton.setAttribute("aria-busy", "true");
+  try {
+    const workspace = await registerWorkspace();
+    if (workspace) {
+      closeWorkspacePicker();
+    }
+  } finally {
+    chooseButton.disabled = false;
+    chooseButton.removeAttribute("aria-busy");
   }
 }
 
@@ -1509,6 +1638,33 @@ function bindEvents() {
       closeSettings();
     }
   });
+  $("open-workspace-picker-btn").addEventListener("click", openWorkspacePicker);
+  $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
+  $("workspace-picker-dialog").addEventListener("click", (event) => {
+    if (event.target === $("workspace-picker-dialog")) {
+      closeWorkspacePicker();
+    }
+  });
+  $("workspace-directory-list").addEventListener("click", (event) => {
+    const directory = event.target.closest("[data-directory-path]");
+    if (!directory) {
+      return;
+    }
+    browseWorkspaceDirectories(directory.dataset.directoryPath)
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("workspace-picker-up-btn").addEventListener("click", () => {
+    browseWorkspaceDirectories(state.workspaceDirectoryParentPath)
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("workspace-picker-roots-btn").addEventListener("click", () => {
+    browseWorkspaceDirectories()
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("choose-workspace-directory-btn").addEventListener(
+    "click",
+    chooseWorkspaceDirectory,
+  );
 
   $("toggle-inspector-btn").addEventListener("click", () => {
     setInspectorVisible(document.body.classList.contains("inspector-hidden"));

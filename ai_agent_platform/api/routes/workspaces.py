@@ -1,6 +1,10 @@
-from fastapi import APIRouter, HTTPException, Path
+from pathlib import Path as FileSystemPath
+
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from ai_agent_platform.schemas import (
+    WorkspaceDirectoryBrowseResponse,
+    WorkspaceDirectoryResponse,
     WorkspaceResponse,
     WorkspacesResponse,
     WorkspaceUpsertRequest,
@@ -14,6 +18,31 @@ from ai_agent_platform.services import (
 
 def create_workspaces_router(workspace_service: WorkspaceService) -> APIRouter:
     router = APIRouter()
+
+    @router.get(
+        "/workspace-directories",
+        response_model=WorkspaceDirectoryBrowseResponse,
+    )
+    def browse_workspace_directories(
+        path: str | None = Query(default=None, min_length=1, max_length=2000),
+    ) -> WorkspaceDirectoryBrowseResponse:
+        try:
+            current_path, parent_path, directories = (
+                workspace_service.browse_directories(path)
+            )
+        except WorkspaceValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return WorkspaceDirectoryBrowseResponse(
+            current_path=current_path,
+            parent_path=parent_path,
+            directories=[
+                WorkspaceDirectoryResponse(
+                    name=_directory_name(directory),
+                    path=str(directory),
+                )
+                for directory in directories
+            ],
+        )
 
     @router.put("/workspaces/{workspace_id}", response_model=WorkspaceResponse)
     def upsert_workspace(
@@ -57,3 +86,7 @@ def create_workspaces_router(workspace_service: WorkspaceService) -> APIRouter:
         return WorkspaceResponse.from_domain(workspace)
 
     return router
+
+
+def _directory_name(directory: FileSystemPath) -> str:
+    return directory.name or str(directory)

@@ -25,6 +25,8 @@
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
       <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></symbol>
       <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5" /></symbol>
+      <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6" /></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6A2.5 2.5 0 0 1 20.5 9.5v7A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5Z" /></symbol>
       <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1" /></symbol>
       <symbol id="icon-close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17" /></symbol>
     </svg>
@@ -509,7 +511,16 @@
             </label>
             <div class="field-grid">
               <label for="workspace-id-input">工作区 ID<input id="workspace-id-input" value="workspace_main" /></label>
-              <label for="workspace-root-input">根路径<input id="workspace-root-input" placeholder="/path/to/local/workspace" autocomplete="off" /></label>
+              <div class="field-control">
+                <label for="workspace-root-input">根路径</label>
+                <div class="input-action">
+                  <input id="workspace-root-input" placeholder="/path/to/local/workspace" autocomplete="off" />
+                  <button id="open-workspace-picker-btn" class="button ghost" type="button">
+                    <svg class="app-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
+                    选择文件夹
+                  </button>
+                </div>
+              </div>
             </div>
             <div class="button-row">
               <button id="refresh-workspaces-btn" class="button ghost" type="button">刷新列表</button>
@@ -523,6 +534,42 @@
           <div class="button-row">
             <button class="button ghost" type="submit" value="cancel">取消</button>
             <button id="save-settings-btn" class="button primary" type="button">保存设置</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="workspace-picker-dialog" class="settings-dialog workspace-picker-dialog" aria-labelledby="workspace-picker-title">
+      <form method="dialog" class="settings-shell workspace-picker-shell">
+        <header class="dialog-header">
+          <div><p class="eyebrow">Local Workspace</p><h2 id="workspace-picker-title">选择工作区文件夹</h2><p>仅显示服务端通过 WORKSPACE_ALLOWED_ROOTS 允许访问的位置。</p></div>
+          <button id="close-workspace-picker-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭文件夹选择器">
+            <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+          </button>
+        </header>
+
+        <div class="workspace-picker-body">
+          <div class="workspace-picker-toolbar">
+            <button id="workspace-picker-up-btn" class="button ghost" type="button">
+              <svg class="app-icon" aria-hidden="true"><use href="#icon-chevron-left"></use></svg>
+              上一级
+            </button>
+            <button id="workspace-picker-roots-btn" class="button ghost" type="button">允许的位置</button>
+          </div>
+          <div class="workspace-picker-path">
+            <span>当前位置</span>
+            <code id="workspace-picker-current-path">允许的位置</code>
+          </div>
+          <div id="workspace-directory-list" class="workspace-directory-list" aria-live="polite">
+            <div class="empty-state">正在加载文件夹…</div>
+          </div>
+        </div>
+
+        <footer class="dialog-footer">
+          <p>选择后会自动注册工作区；不会上传目录内容。</p>
+          <div class="button-row">
+            <button class="button ghost" type="submit" value="cancel">取消</button>
+            <button id="choose-workspace-directory-btn" class="button primary" type="button" disabled>选择此文件夹</button>
           </div>
         </footer>
       </form>

@@ -82,6 +82,63 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(direct.status_code, 400)
             self.assertEqual(linked.status_code, 400)
 
+    def test_workspace_directory_browser_stays_within_allowed_roots(self) -> None:
+        with TemporaryDirectory() as allowed_dir, TemporaryDirectory() as outside_dir:
+            allowed = Path(allowed_dir)
+            alpha = allowed / "alpha"
+            nested = alpha / "nested"
+            beta = allowed / "Beta"
+            alpha.mkdir()
+            nested.mkdir()
+            beta.mkdir()
+            (allowed / "notes.txt").write_text("not a directory", encoding="utf-8")
+            (allowed / "escape").symlink_to(
+                Path(outside_dir),
+                target_is_directory=True,
+            )
+
+            with self._client(allowed) as client:
+                roots = client.get("/api/v1/workspace-directories")
+                listing = client.get(
+                    "/api/v1/workspace-directories",
+                    params={"path": str(allowed)},
+                )
+                nested_listing = client.get(
+                    "/api/v1/workspace-directories",
+                    params={"path": str(alpha)},
+                )
+                outside = client.get(
+                    "/api/v1/workspace-directories",
+                    params={"path": outside_dir},
+                )
+
+            self.assertEqual(roots.status_code, 200)
+            self.assertIsNone(roots.json()["current_path"])
+            self.assertEqual(
+                [item["path"] for item in roots.json()["directories"]],
+                [str(allowed.resolve())],
+            )
+            self.assertEqual(listing.status_code, 200)
+            self.assertEqual(listing.json()["current_path"], str(allowed.resolve()))
+            self.assertIsNone(listing.json()["parent_path"])
+            self.assertEqual(
+                [item["name"] for item in listing.json()["directories"]],
+                ["alpha", "Beta"],
+            )
+            self.assertEqual(
+                nested_listing.json()["parent_path"],
+                str(allowed.resolve()),
+            )
+            self.assertEqual(
+                [item["name"] for item in nested_listing.json()["directories"]],
+                ["nested"],
+            )
+            self.assertEqual(outside.status_code, 400)
+            self.assertEqual(
+                outside.json()["detail"],
+                "workspace root is outside WORKSPACE_ALLOWED_ROOTS",
+            )
+
     def test_agent_uses_workspace_contract_and_live_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -165,6 +222,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-mode-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertIn('id="workspace-id-input"', response.text)
+        self.assertIn('id="open-workspace-picker-btn"', response.text)
+        self.assertIn('id="workspace-picker-dialog"', response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
         self.assertIn("重排数量", response.text)
@@ -176,6 +235,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("submitComposerMessage", script_response.text)
         self.assertIn("runAgentFromComposer", script_response.text)
         self.assertIn("workspace_id", script_response.text)
+        self.assertIn("browseWorkspaceDirectories", script_response.text)
+        self.assertIn("/workspace-directories", script_response.text)
         self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
