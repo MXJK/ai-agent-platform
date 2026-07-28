@@ -34,16 +34,51 @@ def create_coding_tool_registry(
         "file_symbol_locator",
         file_symbol_locator_tool,
         description="Suggest file and symbol location commands from retrieved context.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "focus_files": {"type": "array", "items": {"type": "string"}},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["query", "focus_files", "symbols"],
+            "additionalProperties": False,
+        },
     )
     registry.register(
         "code_explainer",
         code_explainer_tool,
         description="Build a structured explanation plan from retrieved snippets.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "minLength": 1},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "context_snippets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["query", "files", "context_snippets"],
+            "additionalProperties": False,
+        },
     )
     registry.register(
         "change_planner",
         change_planner_tool,
         description="Plan a safe code change across candidate files.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "minLength": 1},
+                "candidate_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["goal", "candidate_files"],
+            "additionalProperties": False,
+        },
         permission_level="write_safe",
         requires_approval=True,
         risk_summary=(
@@ -55,11 +90,35 @@ def create_coding_tool_registry(
         "bug_investigator",
         bug_investigator_tool,
         description="Plan a focused debugging path for a reported symptom.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "symptom": {"type": "string", "minLength": 1},
+                "candidate_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["symptom", "candidate_files"],
+            "additionalProperties": False,
+        },
     )
     registry.register(
         "test_designer",
         test_designer_tool,
         description="Suggest focused tests for a requested behavior or fix.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "minLength": 1},
+                "candidate_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["goal", "candidate_files"],
+            "additionalProperties": False,
+        },
     )
     return registry
 

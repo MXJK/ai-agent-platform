@@ -113,6 +113,8 @@ def create_app(
             max_context_files=settings.agent_max_context_files,
             max_context_chars=settings.agent_max_context_chars,
             max_instruction_chars=settings.agent_max_instruction_chars,
+            max_tool_rounds=settings.agent_max_tool_rounds,
+            max_tool_calls=settings.agent_max_tool_calls,
             max_history_messages=settings.llm_max_context_messages,
             knowledge_context_provider=knowledge_base_service,
             max_rag_context_chars=settings.rag_max_prompt_chars,

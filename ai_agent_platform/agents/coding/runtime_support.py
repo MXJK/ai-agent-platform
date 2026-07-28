@@ -192,6 +192,16 @@ def unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
 
 
 def route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
+    if state.get("native_tool_answer") and not state.get("analysis_tool_calls"):
+        return "compose_answer"
+    if state.get("native_tool_loop_active") and not any(
+        (
+            state.get("analysis_tool_calls"),
+            state.get("change_tool_calls"),
+            state.get("validation_tool_calls"),
+        )
+    ):
+        return "compose_answer"
     return "review_tool_plan" if state.get("approval_required_tools") else "inspect_repository"
 
 
@@ -210,6 +220,8 @@ def route_after_inspection(state: CodingAgentState) -> InspectionRoute:
         for call in state.get("tool_calls", [])
     ):
         return "collect_artifacts"
+    if state.get("native_tool_loop_active") and state.get("analysis_tool_calls"):
+        return "plan_tools"
     return "compose_answer"
 
 
@@ -308,6 +320,10 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
             1
             for error in errors
             if int(error.get("attempt", 1)) < int(error.get("max_attempts", 1))
+        )
+        + sum(
+            max(0, int(result.get("attempts", 1)) - 1)
+            for result in tool_results
         ),
         error_count=len(errors),
         recovered_error_count=sum(

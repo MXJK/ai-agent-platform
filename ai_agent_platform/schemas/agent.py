@@ -27,8 +27,10 @@ class AgentRunResumeRequest(BaseModel):
 
 
 class AgentToolCallResponse(BaseModel):
+    call_id: str
     name: str
     arguments: dict[str, Any]
+    source: str
 
 
 class AgentTraceStepResponse(BaseModel):
@@ -126,8 +128,10 @@ class AgentRunResponse(BaseModel):
             ],
             tool_calls=[
                 AgentToolCallResponse(
+                    call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=tool_call.arguments,
+                    source=tool_call.source,
                 )
                 for tool_call in result.tool_calls
             ],

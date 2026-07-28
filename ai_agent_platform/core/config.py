@@ -76,6 +76,8 @@ class Settings:
     agent_max_context_files: int = 12
     agent_max_context_chars: int = 32000
     agent_max_instruction_chars: int = 16000
+    agent_max_tool_rounds: int = 4
+    agent_max_tool_calls: int = 12
 
     def __post_init__(self) -> None:
         if not self.api_prefix.startswith("/"):
@@ -164,6 +166,8 @@ class Settings:
             ("agent_max_context_files", self.agent_max_context_files),
             ("agent_max_context_chars", self.agent_max_context_chars),
             ("agent_max_instruction_chars", self.agent_max_instruction_chars),
+            ("agent_max_tool_rounds", self.agent_max_tool_rounds),
+            ("agent_max_tool_calls", self.agent_max_tool_calls),
         ):
             _require_positive(name, value)
         if self.llm_max_retries < 0:
@@ -412,6 +416,16 @@ class Settings:
             agent_max_instruction_chars=_int_env(
                 "AGENT_MAX_INSTRUCTION_CHARS",
                 cls.agent_max_instruction_chars,
+                dotenv,
+            ),
+            agent_max_tool_rounds=_int_env(
+                "AGENT_MAX_TOOL_ROUNDS",
+                cls.agent_max_tool_rounds,
+                dotenv,
+            ),
+            agent_max_tool_calls=_int_env(
+                "AGENT_MAX_TOOL_CALLS",
+                cls.agent_max_tool_calls,
                 dotenv,
             ),
         )

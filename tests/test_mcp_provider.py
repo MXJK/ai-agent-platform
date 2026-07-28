@@ -14,6 +14,7 @@ from ai_agent_platform.integrations.mcp import (
     MCPToolProvider,
     create_mcp_providers_from_configs,
     load_mcp_server_configs,
+    normalize_mcp_tool_result,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
@@ -77,6 +78,27 @@ class FakeMCPClient:
 
 
 class MCPProviderTests(unittest.TestCase):
+    def test_normalizes_structured_content_and_mcp_tool_errors(self) -> None:
+        self.assertEqual(
+            normalize_mcp_tool_result(
+                {
+                    "structuredContent": {"issue_id": "ISSUE-1"},
+                    "content": [{"type": "text", "text": "created"}],
+                    "isError": False,
+                }
+            ),
+            {"issue_id": "ISSUE-1"},
+        )
+
+        with self.assertRaisesRegex(Exception, "permission denied") as raised:
+            normalize_mcp_tool_result(
+                {
+                    "content": [{"type": "text", "text": "permission denied"}],
+                    "isError": True,
+                }
+            )
+        self.assertEqual(raised.exception.code, "mcp_tool_error")
+
     def test_registers_and_executes_mcp_tools_through_tool_registry(self) -> None:
         client = FakeMCPClient()
         provider = MCPToolProvider(server_name="demo_server", client=client)
@@ -191,15 +213,7 @@ class MCPProviderTests(unittest.TestCase):
                 self.assertTrue(result.ok)
                 self.assertEqual(
                     result.result,
-                    {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "from subprocess",
-                            }
-                        ],
-                        "isError": False,
-                    },
+                    {"content": "from subprocess"},
                 )
                 self.assertEqual(result.provider, "mcp:stdio_demo")
             finally:
