@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "NATIVE-TOOL-CALLING"
-next_action: "人工审阅并决定是否提交 codex/native-tool-calling 分支改动"
+next_action: "在 GitHub 审阅 codex/native-tool-calling 分支并按需创建 PR"
 blockers: []
-last_verified_commit: "b3041afb490b5272c69079fa79c2047ae0a6d4db"
-updated_at: "2026-07-28T10:35:51+08:00"
+last_verified_commit: "395697197e8145806585f76cbf60b846873acdf1"
+updated_at: "2026-07-28T11:07:54+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
