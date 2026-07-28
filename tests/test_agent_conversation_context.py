@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from ai_agent_platform.agents.coding.planner import tool_planning_prompt
+from ai_agent_platform.agents.coding.planner import native_tool_messages
 from ai_agent_platform.agents.coding.runtime_support import (
     MAX_AGENT_HISTORY_CHARS,
     build_workspace_query,
@@ -37,11 +37,11 @@ class AgentConversationContextTests(unittest.TestCase):
         self.assertIn("最近会话上下文", query)
         self.assertIn("历史消息 7", query)
 
-    def test_structured_tool_planning_receives_recent_context(self) -> None:
-        prompt = tool_planning_prompt(self.state, [])
-        payload = json.loads(prompt.split("\n", 1)[1])
+    def test_native_tool_planning_receives_recent_context(self) -> None:
+        messages = native_tool_messages(self.state)
+        payload = json.loads(messages[1]["content"])
 
-        self.assertEqual(payload["user_input"], "继续检查刚才提到的调用链")
+        self.assertEqual(payload["task"], "继续检查刚才提到的调用链")
         self.assertIn("历史消息 7", payload["conversation_context"])
 
 

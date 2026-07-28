@@ -45,7 +45,7 @@ The shared composer offers:
 - `代码 Agent` for task-driven workspace exploration, approvals, progress, and
   artifacts;
 - a common conversation history, so bounded recent messages can inform Agent
-  exploration and structured tool planning.
+  exploration and native tool selection.
 
 Both response modes render an in-message execution process and response
 metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
@@ -125,6 +125,38 @@ Default exploration budgets:
 Repeated tool calls, identical line segments, and duplicate content do not
 consume the evidence budget again. When a budget is exhausted the Agent answers
 from collected evidence and marks uncertainty.
+
+### Native tool-calling loop
+
+OpenAI, Anthropic, and Google adapters send `ToolSpec` definitions through each
+provider's native Function/Tool Calling API. The Agent no longer asks production
+models to manufacture a JSON tool plan in prompt text. Provider-specific
+function calls are normalized to `LLMToolDecision`, including a stable tool-call
+ID; dotted registry names receive provider-safe aliases and are mapped back
+before execution. The fake provider retains deterministic rule planning for
+offline tests.
+
+Read-only analysis follows a bounded observe/replan loop:
+
+```text
+native tool call
+→ ToolRegistry validation and execution
+→ result/error linked by call ID
+→ provider-native tool result message
+→ model observes and either calls another tool or answers
+```
+
+The default limits are four model tool rounds and twelve calls per run,
+configured by `AGENT_MAX_TOOL_ROUNDS` and `AGENT_MAX_TOOL_CALLS`. Repeating an
+identical tool name and arguments is treated as no progress.
+
+`ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
+validates both input and output at execution. Tool specs also declare timeout,
+retry, and idempotency behavior. Retries are limited to retryable failures on
+idempotent tools; the same `run_id + call_id` replays a cached result and rejects
+argument changes. MCP tools use the same registry contract: `structuredContent`
+is preferred, text blocks are normalized, and `isError=true` becomes a stable
+tool failure instead of a successful payload.
 
 ### Project instructions
 

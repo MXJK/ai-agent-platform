@@ -15,7 +15,16 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 
 
 class MCPStdioClientError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "mcp_transport_error",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class MCPStdioClient:
@@ -215,7 +224,9 @@ class MCPStdioClient:
                 stderr = self._collect_stderr()
                 detail = f"; stderr: {stderr}" if stderr else ""
                 raise MCPStdioClientError(
-                    f"timed out waiting for MCP response id={request_id}{detail}"
+                    f"timed out waiting for MCP response id={request_id}{detail}",
+                    code="mcp_timeout",
+                    retryable=True,
                 ) from exc
 
             message_id = message.get("id")
