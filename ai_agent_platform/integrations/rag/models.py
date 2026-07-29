@@ -78,6 +78,33 @@ class IndexJob:
 class RAGAnswer:
     answer: str
     citations: list[RetrievedDocument]
+    retrieval: "RetrievalExecution"
+
+
+@dataclass(frozen=True)
+class RerankerCapabilities:
+    available: bool
+    provider: str | None
+    model: str | None
+    default_enabled: bool
+    status: str
+
+
+@dataclass(frozen=True)
+class RetrievalExecution:
+    rerank_requested: bool
+    rerank_applied: bool
+    provider: str | None
+    model: str | None
+    candidate_count: int
+    result_count: int
+    rerank_duration_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class RAGSearchResult:
+    results: list[RetrievedDocument]
+    retrieval: RetrievalExecution
 
 
 class EmbeddingProvider(Protocol):

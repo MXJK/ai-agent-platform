@@ -9,7 +9,9 @@ from ai_agent_platform.domain import KnowledgeBaseRecord
 from ai_agent_platform.integrations.rag import (
     IndexJob,
     IngestedDocument,
+    RerankerCapabilities,
     RetrievedDocument,
+    RetrievalExecution,
 )
 from ai_agent_platform.schemas.chat import LLMThinkingLevel
 
@@ -100,6 +102,7 @@ class RAGSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     limit: int = Field(default=5, ge=1, le=20)
     recall_limit: Optional[int] = Field(default=None, ge=1, le=100)
+    rerank_enabled: Optional[bool] = None
 
 
 class RAGChunkResponse(BaseModel):
@@ -144,21 +147,60 @@ class RAGChunkResponse(BaseModel):
         )
 
 
-class RAGSearchResponse(BaseModel):
-    knowledge_base_id: str
-    results: list[RAGChunkResponse]
-
-
 class RAGAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     limit: int = Field(default=5, ge=1, le=20)
     recall_limit: Optional[int] = Field(default=None, ge=1, le=100)
+    rerank_enabled: Optional[bool] = None
     provider: Optional[str] = Field(default=None, max_length=50)
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
     thinking_level: Optional[LLMThinkingLevel] = None
+
+
+class RerankerCapabilitiesResponse(BaseModel):
+    available: bool
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    default_enabled: bool
+    status: str
+
+    @classmethod
+    def from_domain(
+        cls,
+        capabilities: RerankerCapabilities,
+    ) -> "RerankerCapabilitiesResponse":
+        return cls(**capabilities.__dict__)
+
+
+class RAGCapabilitiesResponse(BaseModel):
+    reranker: RerankerCapabilitiesResponse
+
+
+class RetrievalExecutionResponse(BaseModel):
+    rerank_requested: bool
+    rerank_applied: bool
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    candidate_count: int
+    result_count: int
+    rerank_duration_ms: Optional[float] = None
+
+    @classmethod
+    def from_domain(
+        cls,
+        execution: RetrievalExecution,
+    ) -> "RetrievalExecutionResponse":
+        return cls(**execution.__dict__)
+
+
+class RAGSearchResponse(BaseModel):
+    knowledge_base_id: str
+    results: list[RAGChunkResponse]
+    retrieval: RetrievalExecutionResponse
 
 
 class RAGAskResponse(BaseModel):
     knowledge_base_id: str
     answer: str
     citations: list[RAGChunkResponse]
+    retrieval: RetrievalExecutionResponse

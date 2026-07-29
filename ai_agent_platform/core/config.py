@@ -48,8 +48,10 @@ class Settings:
     rag_recall_limit: int = 20
     rag_lexical_weight: float = 0.35
     rag_rrf_k: int = 60
-    rag_reranker_provider: str = "none"
-    sentence_transformer_reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rag_reranker_provider: str = "sentence_transformer"
+    sentence_transformer_reranker_model: str = "BAAI/bge-reranker-base"
+    sentence_transformer_reranker_device: str = "cpu"
+    rag_rerank_default_enabled: bool = False
     rag_max_prompt_chars: int = 6000
     background_task_workers: int = 4
     background_task_queue_capacity: int = 100
@@ -108,6 +110,19 @@ class Settings:
             self.rag_vector_store,
             {"memory", "chroma", "qdrant"},
         )
+        _require_choice(
+            "rag_reranker_provider",
+            self.rag_reranker_provider,
+            {"none", "sentence_transformer"},
+        )
+        if self.rag_rerank_default_enabled and self.rag_reranker_provider == "none":
+            raise ValueError(
+                "rag_rerank_default_enabled requires a configured reranker provider"
+            )
+        if not self.sentence_transformer_reranker_device.strip():
+            raise ValueError(
+                "sentence_transformer_reranker_device must not be empty"
+            )
         _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
         _require_choice(
             "task_queue_backend",
@@ -308,6 +323,16 @@ class Settings:
             sentence_transformer_reranker_model=_env(
                 "SENTENCE_TRANSFORMER_RERANKER_MODEL",
                 cls.sentence_transformer_reranker_model,
+                dotenv,
+            ),
+            sentence_transformer_reranker_device=_env(
+                "SENTENCE_TRANSFORMER_RERANKER_DEVICE",
+                cls.sentence_transformer_reranker_device,
+                dotenv,
+            ),
+            rag_rerank_default_enabled=_bool_env(
+                "RAG_RERANK_DEFAULT_ENABLED",
+                cls.rag_rerank_default_enabled,
                 dotenv,
             ),
             rag_max_prompt_chars=_int_env(

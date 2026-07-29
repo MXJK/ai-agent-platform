@@ -238,7 +238,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="workspace-picker-dialog"', response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
-        self.assertIn("重排数量", response.text)
+        self.assertIn("最终结果数", response.text)
+        self.assertIn('id="rag-rerank-toggle"', response.text)
+        self.assertIn('id="rag-strategy-summary"', response.text)
+        self.assertIn('aria-pressed="false"', response.text)
+        self.assertEqual(
+            script_response.text.count("rerank_enabled: rerankEnabled"),
+            2,
+        )
+        self.assertIn("new AbortController()", script_response.text)
+        self.assertIn("setRagRequestBusy", script_response.text)
+        self.assertIn("isCurrentRagRequest", script_response.text)
+        self.assertIn('signal: request.controller.signal', script_response.text)
         self.assertNotIn('id="document-content-input"', response.text)
         self.assertNotIn('id="document-filename-input"', response.text)
         self.assertNotIn('id="repository-id-input"', response.text)
@@ -450,12 +461,14 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(search.status_code, 200)
             self.assertGreaterEqual(len(search.json()["results"]), 1)
             self.assertIsNotNone(search.json()["results"][0]["fusion_score"])
+            self.assertFalse(search.json()["retrieval"]["rerank_applied"])
             answer = client.post(
                 "/api/v1/knowledge-bases/docs/ask",
                 json={"question": "What enables offline testing?", "limit": 3},
             )
             self.assertEqual(answer.status_code, 200)
             self.assertGreaterEqual(len(answer.json()["citations"]), 1)
+            self.assertFalse(answer.json()["retrieval"]["rerank_applied"])
 
     def test_knowledge_base_catalog_crud_and_cascade_delete(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
@@ -637,6 +650,14 @@ class ApiTests(unittest.TestCase):
 
     def test_rag_search_is_scoped_and_rejects_unsupported_types(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            capabilities = client.get("/api/v1/rag/capabilities")
+            self.assertEqual(capabilities.status_code, 200)
+            self.assertTrue(capabilities.json()["reranker"]["available"])
+            self.assertFalse(capabilities.json()["reranker"]["default_enabled"])
+            self.assertEqual(
+                capabilities.json()["reranker"]["model"],
+                "BAAI/bge-reranker-base",
+            )
             for knowledge_base_id, name in (
                 ("customer_faq", "Customer FAQ"),
                 ("hr_policy", "HR Policy"),
@@ -668,8 +689,12 @@ class ApiTests(unittest.TestCase):
                 json={"query": "退款规则是什么？", "limit": 5},
             )
             self.assertEqual(response.status_code, 200)
-            results = response.json()["results"]
+            body = response.json()
+            results = body["results"]
             self.assertGreaterEqual(len(results), 1)
+            self.assertFalse(body["retrieval"]["rerank_requested"])
+            self.assertFalse(body["retrieval"]["rerank_applied"])
+            self.assertEqual(body["retrieval"]["result_count"], len(results))
             self.assertTrue(
                 all(result["knowledge_base_id"] == "hr_policy" for result in results)
             )
@@ -681,6 +706,36 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual(unsupported.status_code, 400)
             self.assertIn("unsupported document type", unsupported.json()["detail"])
+
+    def test_rag_rejects_requested_reranking_when_provider_is_disabled(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(
+            Path(temp_dir),
+            rag_reranker_provider="none",
+        ) as client:
+            capabilities = client.get("/api/v1/rag/capabilities")
+            self.assertFalse(capabilities.json()["reranker"]["available"])
+            created = client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "docs",
+                    "name": "Docs",
+                    "description": "",
+                    "tags": [],
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+
+            response = client.post(
+                "/api/v1/knowledge-bases/docs/search",
+                json={
+                    "query": "reranking",
+                    "limit": 5,
+                    "rerank_enabled": True,
+                },
+            )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("reranker is not configured", response.json()["detail"])
 
     def test_missing_agent_run_returns_404(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
@@ -704,12 +759,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(usage.total_tokens, 24)
 
     @staticmethod
-    def _client(allowed_root: Path) -> TestClient:
+    def _client(allowed_root: Path, **settings_overrides) -> TestClient:
+        settings_values = {
+            "llm_provider": "fake",
+            "embedding_provider": "local",
+            "workspace_allowed_roots": (str(allowed_root.resolve()),),
+            "background_task_workers": 2,
+        }
+        settings_values.update(settings_overrides)
         settings = Settings(
-            llm_provider="fake",
-            embedding_provider="local",
-            workspace_allowed_roots=(str(allowed_root.resolve()),),
-            background_task_workers=2,
+            **settings_values,
         )
         return TestClient(create_app(settings=settings))
 

@@ -10,6 +10,13 @@ class SettingsTests(unittest.TestCase):
         settings = Settings()
 
         self.assertEqual(settings.embedding_provider, "local")
+        self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
+        self.assertEqual(
+            settings.sentence_transformer_reranker_model,
+            "BAAI/bge-reranker-base",
+        )
+        self.assertEqual(settings.sentence_transformer_reranker_device, "cpu")
+        self.assertFalse(settings.rag_rerank_default_enabled)
         self.assertTrue(settings.workspace_allowed_roots)
 
     def test_blank_allowed_roots_falls_back_to_startup_directory(self) -> None:
@@ -32,6 +39,10 @@ class SettingsTests(unittest.TestCase):
                 "LANGGRAPH_CHECKPOINTER": "postgres",
                 "RAG_VECTOR_STORE": "qdrant",
                 "RAG_LEXICAL_WEIGHT": "0.45",
+                "RAG_RERANKER_PROVIDER": "sentence_transformer",
+                "SENTENCE_TRANSFORMER_RERANKER_MODEL": "test/bilingual-reranker",
+                "SENTENCE_TRANSFORMER_RERANKER_DEVICE": "cuda:0",
+                "RAG_RERANK_DEFAULT_ENABLED": "true",
                 "BACKGROUND_TASK_WORKERS": "6",
                 "BACKGROUND_TASK_QUEUE_CAPACITY": "25",
                 "TASK_QUEUE_BACKEND": "celery",
@@ -79,6 +90,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.langgraph_checkpointer, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.rag_lexical_weight, 0.45)
+        self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
+        self.assertEqual(
+            settings.sentence_transformer_reranker_model,
+            "test/bilingual-reranker",
+        )
+        self.assertEqual(settings.sentence_transformer_reranker_device, "cuda:0")
+        self.assertTrue(settings.rag_rerank_default_enabled)
         self.assertEqual(settings.background_task_workers, 6)
         self.assertEqual(settings.background_task_queue_capacity, 25)
         self.assertEqual(settings.task_queue_backend, "celery")
@@ -122,6 +140,24 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_rag_lexical_weight(self) -> None:
         with self.assertRaisesRegex(ValueError, "rag_lexical_weight"):
             Settings(rag_lexical_weight=1.1)
+
+    def test_rejects_unknown_reranker_provider(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rag_reranker_provider"):
+            Settings(rag_reranker_provider="unknown")
+
+    def test_rejects_default_reranking_without_provider(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rag_rerank_default_enabled"):
+            Settings(
+                rag_reranker_provider="none",
+                rag_rerank_default_enabled=True,
+            )
+
+    def test_rejects_blank_reranker_device(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "sentence_transformer_reranker_device",
+        ):
+            Settings(sentence_transformer_reranker_device=" ")
 
     def test_rejects_invalid_background_task_capacity(self) -> None:
         with self.assertRaisesRegex(ValueError, "background_task_queue_capacity"):

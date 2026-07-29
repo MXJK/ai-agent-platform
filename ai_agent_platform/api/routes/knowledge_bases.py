@@ -14,6 +14,7 @@ from ai_agent_platform.integrations import (
     LLMProviderError,
     RAGConfigurationError,
     RAGProviderError,
+    RAGRerankerUnavailableError,
     RAGValidationError,
 )
 from ai_agent_platform.schemas import (
@@ -24,11 +25,14 @@ from ai_agent_platform.schemas import (
     KnowledgeBaseResponse,
     KnowledgeBasesResponse,
     KnowledgeBaseUpdateRequest,
+    RAGCapabilitiesResponse,
     RAGAskRequest,
     RAGAskResponse,
     RAGChunkResponse,
     RAGSearchRequest,
     RAGSearchResponse,
+    RerankerCapabilitiesResponse,
+    RetrievalExecutionResponse,
 )
 from ai_agent_platform.services import (
     IndexJobNotFoundError,
@@ -51,6 +55,14 @@ def create_knowledge_bases_router(
     llm_client: LLMClient,
 ) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/rag/capabilities", response_model=RAGCapabilitiesResponse)
+    def get_rag_capabilities() -> RAGCapabilitiesResponse:
+        return RAGCapabilitiesResponse(
+            reranker=RerankerCapabilitiesResponse.from_domain(
+                knowledge_base_service.reranker_capabilities()
+            )
+        )
 
     @router.post(
         "/knowledge-bases",
@@ -233,14 +245,25 @@ def create_knowledge_bases_router(
         knowledge_base_id: str = KNOWLEDGE_BASE_ID,
     ) -> RAGSearchResponse:
         try:
-            results = knowledge_base_service.search(
+            search_result = knowledge_base_service.search_with_metadata(
                 knowledge_base_id=knowledge_base_id,
                 query=request.query,
                 limit=request.limit,
                 recall_limit=request.recall_limit,
+                rerank_enabled=request.rerank_enabled,
             )
+        except RAGRerankerUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
         except RAGValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (RAGConfigurationError, RAGProviderError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except KnowledgeBaseNotFoundError as exc:
             raise HTTPException(
                 status_code=404,
@@ -248,7 +271,13 @@ def create_knowledge_bases_router(
             ) from exc
         return RAGSearchResponse(
             knowledge_base_id=knowledge_base_id,
-            results=[RAGChunkResponse.from_domain(result) for result in results],
+            results=[
+                RAGChunkResponse.from_domain(result)
+                for result in search_result.results
+            ],
+            retrieval=RetrievalExecutionResponse.from_domain(
+                search_result.retrieval
+            ),
         )
 
     @router.post(
@@ -269,7 +298,13 @@ def create_knowledge_bases_router(
                 thinking_level=request.thinking_level,
                 limit=request.limit,
                 recall_limit=request.recall_limit,
+                rerank_enabled=request.rerank_enabled,
             )
+        except RAGRerankerUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
         except RAGValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KnowledgeBaseNotFoundError as exc:
@@ -277,9 +312,12 @@ def create_knowledge_bases_router(
                 status_code=404,
                 detail="knowledge base not found",
             ) from exc
-        except RAGProviderError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        except (RAGConfigurationError, LLMProviderError) as exc:
+        except (RAGConfigurationError, RAGProviderError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except LLMProviderError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return RAGAskResponse(
             knowledge_base_id=knowledge_base_id,
@@ -288,6 +326,7 @@ def create_knowledge_bases_router(
                 RAGChunkResponse.from_domain(citation)
                 for citation in answer.citations
             ],
+            retrieval=RetrievalExecutionResponse.from_domain(answer.retrieval),
         )
 
     return router

@@ -14,10 +14,20 @@ const state = {
   workspaceDirectoryPath: null,
   workspaceDirectoryParentPath: null,
   knowledgeBases: [],
+  rerankEnabled: false,
+  rerankerCapabilities: {
+    available: false,
+    provider: null,
+    model: null,
+    default_enabled: false,
+    status: "checking",
+  },
   currentView: "chat",
   composerMode: "chat",
   chatController: null,
   agentPollGeneration: 0,
+  ragRequestController: null,
+  ragRequestGeneration: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -433,6 +443,7 @@ function saveUiPreferences() {
         view: state.currentView,
         composerMode: state.composerMode,
         inspectorHidden: document.body.classList.contains("inspector-hidden"),
+        rerankEnabled: state.rerankEnabled,
       }),
     );
   } catch {
@@ -1619,28 +1630,158 @@ function renderSelectedDocumentFiles() {
     : "尚未选择文件";
 }
 
+function renderRerankControl() {
+  const capabilities = state.rerankerCapabilities;
+  const button = $("rag-rerank-toggle");
+  const description = $("rag-rerank-description");
+  const strategy = $("rag-strategy-summary");
+  const available = Boolean(capabilities.available);
+  const operable = available && capabilities.status !== "error";
+  const pressed = operable && state.rerankEnabled;
+  button.disabled = !operable || Boolean(state.ragRequestController);
+  button.setAttribute("aria-pressed", String(pressed));
+  button.textContent = `精排：${pressed ? "开启" : "关闭"}`;
+  strategy.textContent = capabilities.status === "checking"
+    ? "策略：检测中"
+    : `策略：${pressed ? "CrossEncoder" : "RRF"}`;
+  strategy.dataset.strategy = pressed ? "rerank" : "rrf";
+
+  if (!available) {
+    description.textContent = capabilities.status === "checking"
+      ? "正在检查服务端精排能力…"
+      : "服务端未配置精排模型，当前仅使用 RRF 排序。";
+    return;
+  }
+  const model = capabilities.model || capabilities.provider || "已配置模型";
+  const status = capabilities.status === "ready"
+    ? "模型已加载"
+    : capabilities.status === "error"
+      ? "模型加载失败"
+      : "首次开启时加载模型";
+  description.textContent = `${model} · ${status}；精排会增加响应时间。`;
+}
+
+async function loadRagCapabilities() {
+  try {
+    const body = await fetchJson("/rag/capabilities");
+    state.rerankerCapabilities = body.reranker || {
+      available: false,
+      status: "unavailable",
+    };
+  } catch {
+    state.rerankerCapabilities = {
+      available: false,
+      status: "unavailable",
+    };
+  }
+  renderRerankControl();
+}
+
+function toggleRerank() {
+  if (!state.rerankerCapabilities.available) {
+    return;
+  }
+  state.rerankEnabled = !state.rerankEnabled;
+  renderRerankControl();
+  saveUiPreferences();
+}
+
+function retrievalStatus(retrieval) {
+  if (!retrieval?.rerank_applied) {
+    return "RRF 排序";
+  }
+  state.rerankerCapabilities.status = "ready";
+  renderRerankControl();
+  const duration = retrieval.rerank_duration_ms;
+  return duration === null || duration === undefined
+    ? "CrossEncoder 精排"
+    : `CrossEncoder 精排 ${formatDuration(duration)}`;
+}
+
+function setRagRequestBusy(mode, busy) {
+  const searchButton = $("search-rag-btn");
+  const askButton = $("ask-rag-btn");
+  const controls = [
+    $("rag-question-input"),
+    $("kb-id-input"),
+    $("rag-limit-input"),
+    $("rag-recall-limit-input"),
+  ];
+  searchButton.disabled = busy;
+  askButton.disabled = busy;
+  searchButton.textContent = busy && mode === "search" ? "检索中…" : "仅检索";
+  askButton.textContent = busy && mode === "ask" ? "生成中…" : "生成回答";
+  searchButton.toggleAttribute("aria-busy", busy && mode === "search");
+  askButton.toggleAttribute("aria-busy", busy && mode === "ask");
+  $("rag-answer").toggleAttribute("aria-busy", busy);
+  for (const control of controls) {
+    control.disabled = busy;
+  }
+  renderRerankControl();
+}
+
+function beginRagRequest(mode) {
+  if (state.ragRequestController) {
+    state.ragRequestController.abort();
+  }
+  state.ragRequestGeneration += 1;
+  state.ragRequestController = new AbortController();
+  setRagRequestBusy(mode, true);
+  return {
+    controller: state.ragRequestController,
+    generation: state.ragRequestGeneration,
+  };
+}
+
+function isCurrentRagRequest(generation) {
+  return generation === state.ragRequestGeneration;
+}
+
+function finishRagRequest(generation) {
+  if (!isCurrentRagRequest(generation)) {
+    return;
+  }
+  state.ragRequestController = null;
+  setRagRequestBusy("", false);
+}
+
+function prepareRagOutput(message) {
+  $("rag-answer").className = "rich-output empty-output";
+  $("rag-answer").textContent = message;
+  renderCitations([]);
+}
+
 async function searchRag() {
   const question = $("rag-question-input").value.trim();
   if (!question) {
     showToast("请输入搜索词", "warning");
     return;
   }
-  $("rag-status").textContent = "正在检索…";
+  const kbId = $("kb-id-input").value.trim();
+  if (!kbId) {
+    showToast("请先选择知识库", "warning");
+    return;
+  }
+  const rerankEnabled = state.rerankEnabled;
+  const request = beginRagRequest("search");
+  $("rag-status").textContent = rerankEnabled ? "正在召回并精排…" : "正在检索…";
+  prepareRagOutput(rerankEnabled ? "正在检索并精排相关内容…" : "正在检索相关内容…");
   try {
-    const kbId = $("kb-id-input").value.trim();
-    if (!kbId) {
-      throw new Error("请先选择知识库");
-    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/search`, {
       method: "POST",
+      signal: request.controller.signal,
       body: JSON.stringify({
         query: question,
         limit: numberValue("rag-limit-input", 5),
-        recall_limit: numberValue("rag-recall-limit-input", 10),
+        recall_limit: numberValue("rag-recall-limit-input", 20),
+        rerank_enabled: rerankEnabled,
       }),
     });
+    if (!isCurrentRagRequest(request.generation)) {
+      return;
+    }
     const results = body.results || [];
-    $("rag-status").textContent = `找到 ${results.length} 条结果`;
+    $("rag-status").textContent = `找到 ${results.length} 条结果 · ${retrievalStatus(body.retrieval)}`;
     $("rag-answer").className = "rich-output";
     $("rag-answer").innerHTML = results.length
       ? `<h3>检索完成</h3><p>在知识库 <code>${escapeHtml(kbId)}</code> 中找到 ${results.length} 条相关内容。</p>`
@@ -1648,8 +1789,15 @@ async function searchRag() {
     renderCitations(results);
     setRaw(body);
   } catch (error) {
+    if (error.name === "AbortError" || !isCurrentRagRequest(request.generation)) {
+      return;
+    }
     $("rag-status").textContent = "检索失败";
+    $("rag-answer").className = "rich-output";
+    $("rag-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
     showToast(humanizeError(error), "error");
+  } finally {
+    finishRagRequest(request.generation);
   }
 }
 
@@ -1659,33 +1807,45 @@ async function askRag() {
     showToast("请输入问题", "warning");
     return;
   }
-  $("rag-status").textContent = "正在生成…";
-  $("rag-answer").className = "rich-output empty-output";
-  $("rag-answer").textContent = "正在检索相关内容并组织回答…";
+  const kbId = $("kb-id-input").value.trim();
+  if (!kbId) {
+    showToast("请先选择知识库", "warning");
+    return;
+  }
+  const rerankEnabled = state.rerankEnabled;
+  const request = beginRagRequest("ask");
+  $("rag-status").textContent = rerankEnabled ? "正在精排并生成…" : "正在生成…";
+  prepareRagOutput("正在检索相关内容并组织回答…");
   try {
-    const kbId = $("kb-id-input").value.trim();
-    if (!kbId) {
-      throw new Error("请先选择知识库");
-    }
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/ask`, {
       method: "POST",
+      signal: request.controller.signal,
       body: JSON.stringify({
         question,
         limit: numberValue("rag-limit-input", 5),
-        recall_limit: numberValue("rag-recall-limit-input", 10),
+        recall_limit: numberValue("rag-recall-limit-input", 20),
+        rerank_enabled: rerankEnabled,
         ...optionalModelFields(),
       }),
     });
-    $("rag-status").textContent = `${body.citations.length} 条引用`;
+    if (!isCurrentRagRequest(request.generation)) {
+      return;
+    }
+    $("rag-status").textContent = `${body.citations.length} 条引用 · ${retrievalStatus(body.retrieval)}`;
     $("rag-answer").className = "rich-output";
     $("rag-answer").innerHTML = renderMarkdown(body.answer || "模型没有返回回答。");
     renderCitations(body.citations || []);
     setRaw(body);
   } catch (error) {
+    if (error.name === "AbortError" || !isCurrentRagRequest(request.generation)) {
+      return;
+    }
     $("rag-status").textContent = "生成失败";
     $("rag-answer").className = "rich-output";
     $("rag-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
     showToast(humanizeError(error), "error");
+  } finally {
+    finishRagRequest(request.generation);
   }
 }
 
@@ -1693,14 +1853,26 @@ function renderCitations(citations) {
   const list = $("rag-citations");
   list.innerHTML = "";
   for (const [index, citation] of citations.entries()) {
-    const score = Number(citation.score || 0).toFixed(3);
+    const scores = [];
+    if (citation.fusion_score !== null && citation.fusion_score !== undefined) {
+      scores.push(`RRF ${Number(citation.fusion_score).toFixed(3)}`);
+    }
+    if (citation.rerank_score !== null && citation.rerank_score !== undefined) {
+      scores.push(`精排 ${Number(citation.rerank_score).toFixed(3)}`);
+    }
+    if (!scores.length) {
+      scores.push(`相关度 ${Number(citation.score ?? 0).toFixed(3)}`);
+    }
     const lines = citation.start_line || citation.end_line
       ? ` · 行 ${citation.start_line || "?"}–${citation.end_line || "?"}`
       : "";
     const item = document.createElement("article");
     item.className = "citation-card";
     item.innerHTML = `
-      <header><strong>[${index + 1}] ${escapeHtml(citation.filename)} · #${escapeHtml(citation.chunk_index)}${escapeHtml(lines)}</strong><span class="score-pill">${escapeHtml(score)}</span></header>
+      <header>
+        <strong>[${index + 1}] ${escapeHtml(citation.filename)} · #${escapeHtml(citation.chunk_index)}${escapeHtml(lines)}</strong>
+        <span class="citation-scores">${scores.map((score) => `<span class="score-pill">${escapeHtml(score)}</span>`).join("")}</span>
+      </header>
       <p>${escapeHtml(citation.text)}</p>
     `;
     list.appendChild(item);
@@ -2155,6 +2327,7 @@ function bindEvents() {
   });
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
+  $("rag-rerank-toggle").addEventListener("click", toggleRerank);
   $("register-workspace-btn").addEventListener("click", registerWorkspace);
   $("refresh-workspaces-btn").addEventListener("click", () => {
     listWorkspaces().catch((error) => showToast(humanizeError(error), "error"));
@@ -2211,6 +2384,8 @@ async function init() {
     ? requestedView
     : preferredView;
   state.composerMode = preferences.composerMode === "agent" ? "agent" : "chat";
+  state.rerankEnabled = preferences.rerankEnabled === true;
+  renderRerankControl();
   updateComposerMode(state.composerMode);
   switchView(initialView, !location.hash);
   setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);
@@ -2225,6 +2400,7 @@ async function init() {
     listSessions(false),
     listWorkspaces(),
     listKnowledgeBases(),
+    loadRagCapabilities(),
   ]);
 }
 

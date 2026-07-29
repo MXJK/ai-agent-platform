@@ -1619,9 +1619,75 @@ textarea:focus {
   font-weight: 750;
 }
 
+.advanced-options summary {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.advanced-options summary::marker {
+  color: var(--muted);
+}
+
+.strategy-pill {
+  float: right;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.strategy-pill[data-strategy="rerank"] {
+  border-color: rgba(130, 156, 255, 0.62);
+  background: var(--brand-pale);
+  color: var(--brand-strong);
+}
+
 .advanced-options[open] summary,
 .developer-message[open] summary {
   margin-bottom: 12px;
+}
+
+.rerank-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.rerank-control > div {
+  display: grid;
+  gap: 4px;
+}
+
+.rerank-control strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.rerank-control span {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.button.rerank-toggle {
+  flex: 0 0 auto;
+  min-width: 92px;
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+}
+
+.button.rerank-toggle[aria-pressed="true"] {
+  border-color: rgba(130, 156, 255, 0.62);
+  background: var(--brand-pale);
+  color: var(--brand-strong);
 }
 
 .rag-actions {
@@ -1648,6 +1714,12 @@ textarea:focus {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+.citation-scores {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
 }
 
 .citation-card strong {

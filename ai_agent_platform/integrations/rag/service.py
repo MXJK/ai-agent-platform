@@ -9,6 +9,7 @@ from io import BytesIO
 import math
 import re
 from threading import Lock
+from time import perf_counter
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
@@ -21,6 +22,7 @@ from ai_agent_platform.integrations.rag.errors import (
     RAGConfigurationError,
     RAGError,
     RAGProviderError,
+    RAGRerankerUnavailableError,
     RAGValidationError,
 )
 from ai_agent_platform.integrations.rag.models import (
@@ -32,8 +34,11 @@ from ai_agent_platform.integrations.rag.models import (
     IngestedDocument,
     ParsedDocument,
     RAGAnswer,
+    RAGSearchResult,
     Reranker,
+    RerankerCapabilities,
     RetrievedDocument,
+    RetrievalExecution,
     VectorStore,
 )
 
@@ -584,6 +589,8 @@ class GeminiEmbeddingProvider:
 
 
 class NoopReranker:
+    status = "unavailable"
+
     def rerank(
         self,
         *,
@@ -595,16 +602,48 @@ class NoopReranker:
 
 
 class SentenceTransformerCrossEncoderReranker:
-    def __init__(self, *, model_name: str) -> None:
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as exc:
-            raise RAGConfigurationError(
-                "sentence-transformers is not installed; "
-                "run pip install -r requirements.txt"
-            ) from exc
+    def __init__(self, *, model_name: str, device: str = "cpu") -> None:
+        device = device.strip()
+        if not device:
+            raise ValueError("device must not be empty")
+        self.model_name = model_name
+        self.device = device
+        self._model = None
+        self._model_lock = Lock()
+        self._load_error: Exception | None = None
 
-        self._model = CrossEncoder(model_name)
+    @property
+    def status(self) -> str:
+        if self._model is not None:
+            return "ready"
+        if self._load_error is not None:
+            return "error"
+        return "not_loaded"
+
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
+            if self._load_error is not None:
+                raise RAGProviderError(
+                    "reranker model failed to load"
+                ) from self._load_error
+            try:
+                from sentence_transformers import CrossEncoder
+
+                self._model = CrossEncoder(self.model_name, device=self.device)
+            except ImportError as exc:
+                self._load_error = exc
+                raise RAGConfigurationError(
+                    "sentence-transformers is not installed; "
+                    "run pip install -r requirements.txt"
+                ) from exc
+            except Exception as exc:
+                self._load_error = exc
+                raise RAGProviderError("reranker model failed to load") from exc
+        return self._model
 
     def rerank(
         self,
@@ -617,7 +656,12 @@ class SentenceTransformerCrossEncoderReranker:
             return []
 
         pairs = [(query, candidate.text) for candidate in candidates]
-        raw_scores = self._model.predict(pairs)
+        try:
+            raw_scores = self._get_model().predict(pairs)
+        except (RAGConfigurationError, RAGProviderError):
+            raise
+        except Exception as exc:
+            raise RAGProviderError("reranker inference failed") from exc
         scored = [
             replace(
                 candidate,
@@ -1067,6 +1111,9 @@ class RAGService:
         document_store: DocumentStore | None = None,
         index_job_store: IndexJobStore | None = None,
         rrf_k: int = 60,
+        reranker_provider: str | None = None,
+        reranker_model: str | None = None,
+        rerank_default_enabled: bool | None = None,
     ) -> None:
         if not 0.0 <= lexical_weight <= 1.0:
             raise ValueError("lexical_weight must be between 0 and 1")
@@ -1077,6 +1124,18 @@ class RAGService:
         self._embedding_provider = embedding_provider
         self._vector_store = vector_store
         self._reranker = reranker
+        self._reranker_available = not isinstance(reranker, NoopReranker)
+        self._reranker_provider = (
+            reranker_provider if self._reranker_available else None
+        )
+        self._reranker_model = reranker_model if self._reranker_available else None
+        self._rerank_default_enabled = (
+            self._reranker_available
+            if rerank_default_enabled is None
+            else rerank_default_enabled
+        )
+        if self._rerank_default_enabled and not self._reranker_available:
+            raise ValueError("rerank_default_enabled requires a configured reranker")
         self._default_recall_limit = default_recall_limit
         self._max_prompt_chars = max_prompt_chars
         self._lexical_weight = lexical_weight
@@ -1269,10 +1328,50 @@ class RAGService:
         query: str,
         limit: int = 5,
         recall_limit: int | None = None,
+        rerank_enabled: bool | None = None,
     ) -> list[RetrievedDocument]:
+        return self.search_with_metadata(
+            knowledge_base_id=knowledge_base_id,
+            query=query,
+            limit=limit,
+            recall_limit=recall_limit,
+            rerank_enabled=rerank_enabled,
+        ).results
+
+    def reranker_capabilities(self) -> RerankerCapabilities:
+        return RerankerCapabilities(
+            available=self._reranker_available,
+            provider=self._reranker_provider,
+            model=self._reranker_model,
+            default_enabled=self._rerank_default_enabled,
+            status=(
+                str(getattr(self._reranker, "status", "ready"))
+                if self._reranker_available
+                else "unavailable"
+            ),
+        )
+
+    def search_with_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        limit: int = 5,
+        recall_limit: int | None = None,
+        rerank_enabled: bool | None = None,
+    ) -> RAGSearchResult:
         query = _normalize_text(query)
         if not query:
             raise RAGValidationError("query is empty")
+        rerank_requested = (
+            self._rerank_default_enabled
+            if rerank_enabled is None
+            else rerank_enabled
+        )
+        if rerank_requested and not self._reranker_available:
+            raise RAGRerankerUnavailableError(
+                "reranker is not configured on this server"
+            )
         query_embedding = self._embedding_provider.embed_texts(
             [query],
             task_type="query",
@@ -1304,10 +1403,30 @@ class RAGService:
             lexical_weight=self._lexical_weight,
             rrf_k=self._rrf_k,
         )
-        return self._reranker.rerank(
-            query=query,
-            candidates=candidates,
-            limit=limit,
+        rerank_duration_ms: float | None = None
+        rerank_applied = False
+        if rerank_requested:
+            started_at = perf_counter()
+            results = self._reranker.rerank(
+                query=query,
+                candidates=candidates,
+                limit=limit,
+            )
+            rerank_duration_ms = round((perf_counter() - started_at) * 1000, 3)
+            rerank_applied = bool(candidates)
+        else:
+            results = candidates[:limit]
+        return RAGSearchResult(
+            results=results,
+            retrieval=RetrievalExecution(
+                rerank_requested=rerank_requested,
+                rerank_applied=rerank_applied,
+                provider=self._reranker_provider if rerank_requested else None,
+                model=self._reranker_model if rerank_requested else None,
+                candidate_count=len(candidates),
+                result_count=len(results),
+                rerank_duration_ms=rerank_duration_ms,
+            ),
         )
 
     def answer_question(
@@ -1321,13 +1440,16 @@ class RAGService:
         thinking_level: str | None = None,
         limit: int = 5,
         recall_limit: int | None = None,
+        rerank_enabled: bool | None = None,
     ) -> RAGAnswer:
-        citations = self.search(
+        search_result = self.search_with_metadata(
             knowledge_base_id=knowledge_base_id,
             query=question,
             limit=limit,
             recall_limit=recall_limit,
+            rerank_enabled=rerank_enabled,
         )
+        citations = search_result.results
         messages = self.build_prompt_messages(question=question, citations=citations)
 
         answer_parts: list[str] = []
@@ -1342,7 +1464,11 @@ class RAGService:
             elif event.type == "done":
                 break
 
-        return RAGAnswer(answer="".join(answer_parts).strip(), citations=citations)
+        return RAGAnswer(
+            answer="".join(answer_parts).strip(),
+            citations=citations,
+            retrieval=search_result.retrieval,
+        )
 
     def build_prompt_messages(
         self,

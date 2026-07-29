@@ -63,7 +63,8 @@ def create_rag_service(
 
     if settings.rag_reranker_provider == "sentence_transformer":
         reranker: Reranker = SentenceTransformerCrossEncoderReranker(
-            model_name=settings.sentence_transformer_reranker_model
+            model_name=settings.sentence_transformer_reranker_model,
+            device=settings.sentence_transformer_reranker_device,
         )
     elif settings.rag_reranker_provider == "none":
         reranker = NoopReranker()
@@ -86,4 +87,7 @@ def create_rag_service(
         lexical_weight=settings.rag_lexical_weight,
         rrf_k=settings.rag_rrf_k,
         document_store=document_store,
+        reranker_provider=settings.rag_reranker_provider,
+        reranker_model=settings.sentence_transformer_reranker_model,
+        rerank_default_enabled=settings.rag_rerank_default_enabled,
     )

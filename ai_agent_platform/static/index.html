@@ -329,10 +329,26 @@
               <label for="rag-question-input">问题或搜索词</label>
               <textarea id="rag-question-input" rows="6" maxlength="4000">这个项目主要包含哪些后端能力？</textarea>
               <details class="advanced-options">
-                <summary>检索参数</summary>
+                <summary>
+                  <span>检索参数</span>
+                  <span id="rag-strategy-summary" class="strategy-pill" data-strategy="rrf">策略：检测中</span>
+                </summary>
                 <div class="field-grid">
-                  <label for="rag-limit-input">重排数量<input id="rag-limit-input" type="number" min="1" max="20" value="5" /></label>
-                  <label for="rag-recall-limit-input">召回数量<input id="rag-recall-limit-input" type="number" min="1" max="100" value="10" /></label>
+                  <label for="rag-limit-input">最终结果数<input id="rag-limit-input" type="number" min="1" max="20" value="5" /></label>
+                  <label for="rag-recall-limit-input">召回候选数<input id="rag-recall-limit-input" type="number" min="1" max="100" value="20" /></label>
+                </div>
+                <div class="rerank-control">
+                  <div>
+                    <strong>CrossEncoder 精排</strong>
+                    <span id="rag-rerank-description">正在检查服务端精排能力…</span>
+                  </div>
+                  <button
+                    id="rag-rerank-toggle"
+                    class="button rerank-toggle"
+                    type="button"
+                    aria-pressed="false"
+                    disabled
+                  >精排：关闭</button>
                 </div>
               </details>
               <div class="button-row rag-actions">

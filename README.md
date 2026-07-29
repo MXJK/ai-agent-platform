@@ -208,6 +208,7 @@ chunks. Document RAG endpoints remain available independently:
 POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
+GET  /api/v1/rag/capabilities
 GET  /api/v1/knowledge-bases/{knowledge_base_id}/index-jobs
 GET  /api/v1/knowledge-bases/{knowledge_base_id}/index-jobs/{job_id}
 ```
@@ -244,6 +245,37 @@ optional CrossEncoder reranker selects the final results. Responses expose the
 raw dense/lexical scores, `dense_rank`, `lexical_rank`, `fusion_score`, and the
 optional reranker score. `RAG_LEXICAL_WEIGHT` controls the RRF channel weights
 and `RAG_RRF_K` controls rank smoothing.
+
+The knowledge-base page exposes CrossEncoder as an accessible pressed/unpressed
+button. Both search and ask accept an optional `rerank_enabled` boolean. When
+omitted, `RAG_RERANK_DEFAULT_ENABLED` supplies the server default; the checked-in
+default is `false`. Responses include `retrieval.rerank_requested`,
+`rerank_applied`, provider/model, candidate/result counts, and rerank duration.
+An explicit request returns HTTP 409 when no reranker is configured rather than
+silently falling back to RRF.
+
+The collapsed retrieval-parameter summary always shows the active RRF or
+CrossEncoder strategy. While search or answer generation is running, the page
+locks the related controls, clears stale results, and uses request cancellation
+plus generation checks so repeated actions cannot let an older response overwrite
+the latest result.
+
+The default Sentence Transformers model is `BAAI/bge-reranker-base`, a
+Chinese-and-English CrossEncoder. It is loaded lazily on the first request that
+enables reranking, so normal startup and RRF-only requests do not download or
+initialize the model. The bilingual model is larger than the previous
+English-only MiniLM reranker, so its first download and CPU warm-up take longer.
+Its device defaults to `cpu` to avoid process-level crashes in unsupported or
+unstable accelerator runtimes (including PyTorch MPS); deployments can explicitly
+select another tested device. Set the provider to `none` to disable the
+capability and its page button:
+
+```dotenv
+RAG_RERANKER_PROVIDER=sentence_transformer
+SENTENCE_TRANSFORMER_RERANKER_MODEL=BAAI/bge-reranker-base
+SENTENCE_TRANSFORMER_RERANKER_DEVICE=cpu
+RAG_RERANK_DEFAULT_ENABLED=false
+```
 
 ## Storage and migration
 

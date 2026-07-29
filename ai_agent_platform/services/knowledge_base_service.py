@@ -8,6 +8,8 @@ from ai_agent_platform.integrations.rag import (
     IndexJob,
     IngestedDocument,
     RAGAnswer,
+    RAGSearchResult,
+    RerankerCapabilities,
     RetrievedDocument,
 )
 
@@ -179,6 +181,27 @@ class KnowledgeBaseService:
             recall_limit=recall_limit,
         )
 
+    def search_with_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        limit: int,
+        recall_limit: int | None,
+        rerank_enabled: bool | None,
+    ) -> RAGSearchResult:
+        self.get(knowledge_base_id)
+        return self._rag_service.search_with_metadata(
+            knowledge_base_id=knowledge_base_id,
+            query=query,
+            limit=limit,
+            recall_limit=recall_limit,
+            rerank_enabled=rerank_enabled,
+        )
+
+    def reranker_capabilities(self) -> RerankerCapabilities:
+        return self._rag_service.reranker_capabilities()
+
     def get_index_job(
         self,
         *,
@@ -214,6 +237,7 @@ class KnowledgeBaseService:
         thinking_level: str | None,
         limit: int,
         recall_limit: int | None,
+        rerank_enabled: bool | None,
     ) -> RAGAnswer:
         self.get(knowledge_base_id)
         return self._rag_service.answer_question(
@@ -225,6 +249,7 @@ class KnowledgeBaseService:
             thinking_level=thinking_level,
             limit=limit,
             recall_limit=recall_limit,
+            rerank_enabled=rerank_enabled,
         )
 
 
