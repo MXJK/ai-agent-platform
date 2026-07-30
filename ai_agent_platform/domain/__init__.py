@@ -1,5 +1,6 @@
 from .models import (
     AgentDecision,
+    ConversationSummary,
     KnowledgeBaseRecord,
     Message,
     Session,
@@ -10,6 +11,7 @@ from .models import (
 
 __all__ = [
     "AgentDecision",
+    "ConversationSummary",
     "KnowledgeBaseRecord",
     "Message",
     "Session",

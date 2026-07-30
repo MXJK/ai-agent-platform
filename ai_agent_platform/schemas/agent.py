@@ -27,8 +27,10 @@ class AgentRunResumeRequest(BaseModel):
 
 
 class AgentToolCallResponse(BaseModel):
+    call_id: str
     name: str
     arguments: dict[str, Any]
+    source: str
 
 
 class AgentTraceStepResponse(BaseModel):
@@ -74,6 +76,13 @@ class ContextSourceResponse(BaseModel):
     knowledge_base_id: Optional[str] = None
     document_id: Optional[str] = None
     score: Optional[float] = None
+    memory_id: Optional[str] = None
+    memory_kind: Optional[str] = None
+    confidence: Optional[float] = None
+    last_confirmed_at: Optional[str] = None
+    relevance_score: Optional[float] = None
+    recency_score: Optional[float] = None
+    importance_score: Optional[float] = None
 
     @classmethod
     def from_domain(cls, source: ContextSource) -> "ContextSourceResponse":
@@ -126,8 +135,10 @@ class AgentRunResponse(BaseModel):
             ],
             tool_calls=[
                 AgentToolCallResponse(
+                    call_id=tool_call.call_id,
                     name=tool_call.name,
                     arguments=tool_call.arguments,
+                    source=tool_call.source,
                 )
                 for tool_call in result.tool_calls
             ],

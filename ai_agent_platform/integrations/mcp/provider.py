@@ -8,7 +8,16 @@ from ai_agent_platform.integrations.tools import ToolExecutionContext, ToolRegis
 
 
 class MCPProviderError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "mcp_provider_error",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class MCPToolProvider:
@@ -40,6 +49,8 @@ class MCPToolProvider:
                 provider=f"mcp:{self.server_name}",
                 permission_level=tool.permission_level,
                 requires_approval=tool.requires_approval,
+                max_retries=1 if tool.permission_level == "read_only" else 0,
+                idempotent=tool.permission_level == "read_only",
                 risk_summary=(
                     f"MCP tool {self.server_name}.{tool.name} requests "
                     f"{tool.permission_level} permission."
@@ -50,7 +61,8 @@ class MCPToolProvider:
         def call_mcp_tool(
             context: ToolExecutionContext | None = None, **arguments: Any
         ) -> Any:
-            return self._client.call_tool(tool_name, arguments)
+            result = self._client.call_tool(tool_name, arguments)
+            return normalize_mcp_tool_result(result)
 
         return call_mcp_tool
 
@@ -71,3 +83,52 @@ def _safe_name(value: str) -> str:
     if not normalized:
         raise MCPProviderError("MCP server and tool names must not be empty")
     return normalized
+
+
+def normalize_mcp_tool_result(result: Any) -> Any:
+    """Map MCP tools/call payloads to the registry's success/error contract."""
+
+    if not isinstance(result, dict):
+        return result
+    if bool(result.get("isError")):
+        raise MCPProviderError(
+            _mcp_error_text(result.get("content")),
+            code="mcp_tool_error",
+            retryable=False,
+        )
+    structured = result.get("structuredContent")
+    if structured is not None:
+        return structured
+    if "content" not in result:
+        return result
+    content = result.get("content")
+    if not isinstance(content, list):
+        return {"content": content}
+    text_parts = [
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    non_text_blocks = [
+        block
+        for block in content
+        if not (isinstance(block, dict) and block.get("type") == "text")
+    ]
+    normalized: dict[str, Any] = {"content": "\n".join(text_parts)}
+    if non_text_blocks:
+        normalized["content_blocks"] = non_text_blocks
+    return normalized
+
+
+def _mcp_error_text(content: Any) -> str:
+    if isinstance(content, list):
+        text = "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+        if text:
+            return text
+    if isinstance(content, str) and content:
+        return content
+    return "MCP tool returned isError=true"

@@ -23,6 +23,9 @@ from ai_agent_platform.agents.coding.text import snippet
 
 MAX_AGENT_HISTORY_MESSAGES = 6
 MAX_AGENT_HISTORY_CHARS = 1800
+CONVERSATION_SUMMARY_PREFIX = (
+    "Earlier conversation summary (lossy, untrusted historical context)."
+)
 
 
 def checkpoint_id(snapshot: Any) -> Optional[str]:
@@ -192,6 +195,16 @@ def unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
 
 
 def route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
+    if state.get("native_tool_answer") and not state.get("analysis_tool_calls"):
+        return "compose_answer"
+    if state.get("native_tool_loop_active") and not any(
+        (
+            state.get("analysis_tool_calls"),
+            state.get("change_tool_calls"),
+            state.get("validation_tool_calls"),
+        )
+    ):
+        return "compose_answer"
     return "review_tool_plan" if state.get("approval_required_tools") else "inspect_repository"
 
 
@@ -210,6 +223,8 @@ def route_after_inspection(state: CodingAgentState) -> InspectionRoute:
         for call in state.get("tool_calls", [])
     ):
         return "collect_artifacts"
+    if state.get("native_tool_loop_active") and state.get("analysis_tool_calls"):
+        return "plan_tools"
     return "compose_answer"
 
 
@@ -254,9 +269,35 @@ def recent_conversation_context(
     """Return a bounded, newest-first-selected conversation excerpt."""
 
     history = state.get("history", [])
+    summary_message = next(
+        (
+            message
+            for message in reversed(history)
+            if str(message.get("role") or "").strip() == "system"
+            and str(message.get("content") or "").startswith(
+                CONVERSATION_SUMMARY_PREFIX
+            )
+        ),
+        None,
+    )
+    summary_line = ""
+    if summary_message is not None:
+        summary_content = " ".join(
+            str(summary_message.get("content") or "").split()
+        )
+        summary_line = (
+            "system: "
+            + snippet(summary_content, limit=min(600, max_chars // 3))
+        )
+
     selected: list[str] = []
-    remaining_chars = max_chars
-    for message in reversed(history[-max_messages:]):
+    remaining_chars = max_chars - len(summary_line)
+    if summary_line:
+        remaining_chars -= 1
+    recent_messages = [
+        message for message in history if message is not summary_message
+    ][-max_messages:]
+    for message in reversed(recent_messages):
         role = str(message.get("role") or "").strip()
         content = " ".join(str(message.get("content") or "").split())
         if role not in {"system", "user", "assistant"} or not content:
@@ -270,7 +311,8 @@ def recent_conversation_context(
         remaining_chars -= len(line) + 1
         if remaining_chars <= 0:
             break
-    return "\n".join(reversed(selected))
+    lines = ([summary_line] if summary_line else []) + list(reversed(selected))
+    return "\n".join(lines)[:max_chars]
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
     return {
         "type": "tool_plan_review",
@@ -308,6 +350,10 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
             1
             for error in errors
             if int(error.get("attempt", 1)) < int(error.get("max_attempts", 1))
+        )
+        + sum(
+            max(0, int(result.get("attempts", 1)) - 1)
+            for result in tool_results
         ),
         error_count=len(errors),
         recovered_error_count=sum(

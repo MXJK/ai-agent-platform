@@ -32,6 +32,7 @@ class CodingAgentState(TypedDict, total=False):
     user_input: str
     workspace_id: str
     workspace_root: str
+    actor_user_id: str
     history: list[dict[str, str]]
     focus_files: list[str]
     intent: str
@@ -44,6 +45,7 @@ class CodingAgentState(TypedDict, total=False):
     knowledge_base_catalog: list[dict[str, Any]]
     catalog_truncated: bool
     rag_context_sources: list["ContextSource"]
+    memory_context_sources: list["ContextSource"]
     context_warnings: list[str]
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
@@ -59,6 +61,13 @@ class CodingAgentState(TypedDict, total=False):
     validation_tool_calls: list[ToolCall]
     repair_tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
+    native_tool_messages: list[dict[str, Any]]
+    native_tool_round: int
+    native_tool_call_count: int
+    native_tool_signatures: list[str]
+    native_tool_loop_active: bool
+    native_tool_answer: str
+    native_tool_stop_reason: str
     exploration_results: list[dict[str, Any]]
     validation_results: list[dict[str, Any]]
     validation_history: list[dict[str, Any]]
@@ -79,12 +88,16 @@ class CodingAgentState(TypedDict, total=False):
 
 
 AgentRoute = Literal["plan_exploration", "compose_answer"]
-PlanRoute = Literal["review_tool_plan", "inspect_repository"]
+PlanRoute = Literal["review_tool_plan", "inspect_repository", "compose_answer"]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
 ContextRoute = Literal["plan_exploration", "merge_evidence"]
 AnswerRoute = Literal["handle_error", "end"]
 InspectionRoute = Literal[
-    "execute_changes", "validate_changes", "collect_artifacts", "compose_answer"
+    "plan_tools",
+    "execute_changes",
+    "validate_changes",
+    "collect_artifacts",
+    "compose_answer",
 ]
 ValidationRoute = Literal["review_repair_plan", "collect_artifacts"]
 RepairReviewRoute = Literal["execute_changes", "collect_artifacts"]
@@ -106,6 +119,13 @@ class ContextSource:
     knowledge_base_id: str | None = None
     document_id: str | None = None
     score: float | None = None
+    memory_id: str | None = None
+    memory_kind: str | None = None
+    confidence: float | None = None
+    last_confirmed_at: str | None = None
+    relevance_score: float | None = None
+    recency_score: float | None = None
+    importance_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -243,4 +263,15 @@ class KnowledgeContextProvider(Protocol):
         limit: int,
         recall_limit: int | None,
     ) -> list[RetrievedDocument]:
+        ...
+
+
+class ProjectMemoryContextProvider(Protocol):
+    def retrieve(
+        self,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        query: str,
+    ) -> list[Any]:
         ...

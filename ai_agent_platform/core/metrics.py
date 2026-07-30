@@ -19,6 +19,7 @@ class MetricsRegistry:
     def __init__(self) -> None:
         self._lock = Lock()
         self._counters: dict[str, int] = {}
+        self._gauges: dict[str, int] = {}
         self._timings: dict[str, _Timing] = {}
 
     def increment(self, name: str, amount: int = 1) -> None:
@@ -35,9 +36,14 @@ class MetricsRegistry:
             timing.total_ms += value
             timing.max_ms = max(timing.max_ms, value)
 
+    def set_gauge(self, name: str, value: int) -> None:
+        with self._lock:
+            self._gauges[name] = max(0, int(value))
+
     def snapshot(self) -> dict[str, dict[str, object]]:
         with self._lock:
             counters = dict(sorted(self._counters.items()))
+            gauges = dict(sorted(self._gauges.items()))
             timings = {
                 name: {
                     "count": timing.count,
@@ -51,4 +57,4 @@ class MetricsRegistry:
                 }
                 for name, timing in sorted(self._timings.items())
             }
-        return {"counters": counters, "timings": timings}
+        return {"counters": counters, "gauges": gauges, "timings": timings}

@@ -60,9 +60,17 @@ class ChangeLoopExecutor:
         }
 
     def validate_changes(self, state: CodingAgentState) -> CodingAgentState:
+        validation_calls = [
+            ToolCall(
+                name=call.name,
+                arguments=call.arguments,
+                source=f"{call.source}:iteration-{state.get('change_iteration', 0)}",
+            )
+            for call in state.get("validation_tool_calls", [])
+        ]
         validation_results = self.execute_tool_calls(
             state,
-            state.get("validation_tool_calls", []),
+            validation_calls,
         )
         validation_history = list(state.get("validation_history", []))
         validation_history.append(

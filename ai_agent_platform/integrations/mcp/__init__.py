@@ -4,7 +4,7 @@ from .factory import (
     create_mcp_providers_from_config_file,
     create_mcp_providers_from_configs,
 )
-from .provider import MCPToolProvider, register_mcp_tools
+from .provider import MCPToolProvider, normalize_mcp_tool_result, register_mcp_tools
 from .stdio_client import MCPStdioClient, MCPStdioClientError
 
 __all__ = [
@@ -18,4 +18,5 @@ __all__ = [
     "create_mcp_providers_from_configs",
     "load_mcp_server_configs",
     "register_mcp_tools",
+    "normalize_mcp_tool_result",
 ]

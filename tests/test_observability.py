@@ -19,11 +19,13 @@ class MetricsRegistryTests(unittest.TestCase):
         metrics = MetricsRegistry()
 
         metrics.increment("runs_total", 2)
+        metrics.set_gauge("queue_depth", 7)
         metrics.observe_ms("run_duration_ms", 10)
         metrics.observe_ms("run_duration_ms", 30)
 
         snapshot = metrics.snapshot()
         self.assertEqual(snapshot["counters"]["runs_total"], 2)
+        self.assertEqual(snapshot["gauges"]["queue_depth"], 7)
         self.assertEqual(snapshot["timings"]["run_duration_ms"]["count"], 2)
         self.assertEqual(snapshot["timings"]["run_duration_ms"]["max_ms"], 30)
         self.assertEqual(

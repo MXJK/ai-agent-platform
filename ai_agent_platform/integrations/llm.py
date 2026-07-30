@@ -3,13 +3,17 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
 import json
+import re
 import time
 from typing import Any, Iterable, Iterator, Literal
+from uuid import uuid4
 
 import httpx
 
 from ai_agent_platform.core import Settings
+from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
 
 LLMEventType = Literal["delta", "usage", "done"]
@@ -31,6 +35,17 @@ class LLMResponse:
     text: str
     model: str
     usage: LLMUsage | None = None
+
+
+@dataclass(frozen=True)
+class LLMToolDecision:
+    text: str
+    tool_calls: list[ToolCall]
+    model: str
+    provider: str
+    stop_reason: str
+    usage: LLMUsage | None = None
+    provider_items: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -93,6 +108,66 @@ class LLMClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
+    @property
+    def native_tool_calling_enabled(self) -> bool:
+        return self._settings.llm_provider != "fake"
+
+    def decide_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> LLMToolDecision:
+        selected_provider = provider or self._settings.llm_provider
+        selected_model = model or self._settings.llm_model
+        aliases = _tool_aliases(tools)
+        last_error: LLMProviderError | None = None
+        for attempt in range(self._settings.llm_max_retries + 1):
+            try:
+                if selected_provider == "openai":
+                    decision = self._decide_openai_tools(
+                        messages,
+                        tools,
+                        aliases,
+                        selected_model,
+                    )
+                elif selected_provider == "anthropic":
+                    decision = self._decide_anthropic_tools(
+                        messages,
+                        tools,
+                        aliases,
+                        selected_model,
+                    )
+                elif selected_provider == "google":
+                    decision = self._decide_google_tools(
+                        messages,
+                        tools,
+                        aliases,
+                        selected_model,
+                    )
+                elif selected_provider == "fake":
+                    decision = self._decide_fake_tools(
+                        messages,
+                        selected_model,
+                    )
+                else:
+                    raise LLMProviderError(
+                        f"unsupported llm provider: {selected_provider}"
+                    )
+                accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                if accumulator is not None and decision.usage is not None:
+                    accumulator.add(decision.usage)
+                return decision
+            except LLMProviderError as exc:
+                last_error = exc
+                if not exc.retryable or attempt >= self._settings.llm_max_retries:
+                    raise
+                time.sleep(min(0.2 * (2**attempt), 2.0))
+        assert last_error is not None
+        raise last_error
+
     def stream_chat(
         self,
         messages: list[dict[str, str]],
@@ -145,6 +220,314 @@ class LLMClient:
             model=self._settings.llm_model,
             usage=latest_usage,
         )
+
+    def _decide_fake_tools(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+    ) -> LLMToolDecision:
+        text = "fake model completed the native tool turn"
+        usage = LLMUsage(
+            input_tokens=_estimate_tokens(_join_any_message_text(messages)),
+            output_tokens=_estimate_tokens(text),
+        )
+        return LLMToolDecision(
+            text=text,
+            tool_calls=[],
+            model=model,
+            provider="fake",
+            stop_reason="end_turn",
+            usage=usage,
+            provider_items=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                }
+            ],
+        )
+
+    def _decide_openai_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        model: str,
+    ) -> LLMToolDecision:
+        if not self._settings.openai_api_key:
+            raise LLMProviderError("OPENAI_API_KEY is not configured")
+        reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": _openai_tool_input(messages, reverse_aliases),
+            "tools": [
+                {
+                    "type": "function",
+                    "name": reverse_aliases[spec.name],
+                    "description": spec.description,
+                    "parameters": spec.input_schema,
+                }
+                for spec in tools
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "max_output_tokens": self._settings.llm_max_output_tokens,
+        }
+        body = self._post_json(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {self._settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
+        output = body.get("output", [])
+        output = output if isinstance(output, list) else []
+        calls: list[ToolCall] = []
+        text_parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                calls.append(
+                    ToolCall(
+                        call_id=str(item.get("call_id") or f"tool_{uuid4().hex[:12]}"),
+                        name=aliases.get(str(item.get("name") or ""), str(item.get("name") or "")),
+                        arguments=_json_arguments(item.get("arguments")),
+                        source="openai_native",
+                    )
+                )
+            if item.get("type") == "message":
+                for block in item.get("content", []):
+                    if isinstance(block, dict) and block.get("type") in {
+                        "output_text",
+                        "refusal",
+                    }:
+                        text_parts.append(str(block.get("text") or block.get("refusal") or ""))
+        usage = _usage_from_mapping(body.get("usage"))
+        return LLMToolDecision(
+            text="".join(text_parts).strip(),
+            tool_calls=calls,
+            model=str(body.get("model") or model),
+            provider="openai",
+            stop_reason="tool_use" if calls else str(body.get("status") or "completed"),
+            usage=usage,
+            provider_items=[dict(item) for item in output if isinstance(item, dict)],
+        )
+
+    def _decide_anthropic_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        model: str,
+    ) -> LLMToolDecision:
+        if not self._settings.anthropic_api_key:
+            raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+        reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
+        system = [
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") == "system"
+        ]
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": _anthropic_tool_messages(messages, reverse_aliases),
+            "tools": [
+                {
+                    "name": reverse_aliases[spec.name],
+                    "description": spec.description,
+                    "input_schema": spec.input_schema,
+                }
+                for spec in tools
+            ],
+            "tool_choice": {"type": "auto"},
+            "max_tokens": self._settings.llm_max_output_tokens,
+        }
+        if system:
+            payload["system"] = "\n\n".join(system)
+        body = self._post_json(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": self._settings.anthropic_api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
+        content = body.get("content", [])
+        content = content if isinstance(content, list) else []
+        calls: list[ToolCall] = []
+        text_parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                calls.append(
+                    ToolCall(
+                        call_id=str(block.get("id") or f"tool_{uuid4().hex[:12]}"),
+                        name=aliases.get(str(block.get("name") or ""), str(block.get("name") or "")),
+                        arguments=dict(block.get("input") or {}),
+                        source="anthropic_native",
+                    )
+                )
+            elif block.get("type") == "text":
+                text_parts.append(str(block.get("text") or ""))
+        return LLMToolDecision(
+            text="".join(text_parts).strip(),
+            tool_calls=calls,
+            model=str(body.get("model") or model),
+            provider="anthropic",
+            stop_reason=str(body.get("stop_reason") or ("tool_use" if calls else "end_turn")),
+            usage=_usage_from_mapping(body.get("usage")),
+            provider_items=[dict(block) for block in content if isinstance(block, dict)],
+        )
+
+    def _decide_google_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        model: str,
+    ) -> LLMToolDecision:
+        if not self._settings.google_api_key:
+            raise LLMProviderError("GOOGLE_API_KEY is not configured")
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise LLMProviderError(
+                "google-genai is not installed; run pip install google-genai"
+            ) from exc
+
+        reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
+        declarations = [
+            types.FunctionDeclaration(
+                name=reverse_aliases[spec.name],
+                description=spec.description,
+                parameters_json_schema=spec.input_schema,
+                response_json_schema=spec.output_schema,
+            )
+            for spec in tools
+        ]
+        config_kwargs: dict[str, Any] = {
+            "max_output_tokens": self._settings.llm_max_output_tokens,
+            "tools": [types.Tool(function_declarations=declarations)],
+        }
+        system_instruction = _google_system_instruction_any(messages)
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+        client = genai.Client(
+            api_key=self._settings.google_api_key,
+            http_options=types.HttpOptions(
+                timeout=max(1, int(self._settings.llm_timeout_seconds * 1000))
+            ),
+        )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=_google_tool_contents(messages, types, reverse_aliases),
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+        except Exception as exc:
+            if _is_timeout_exception(exc):
+                raise LLMProviderError(
+                    "llm provider request timed out",
+                    retryable=True,
+                    code="llm_timeout",
+                ) from exc
+            raise LLMProviderError(str(exc), retryable=True) from exc
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                with suppress(Exception):
+                    close()
+
+        candidates = getattr(response, "candidates", None) or []
+        candidate = candidates[0] if candidates else None
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        calls: list[ToolCall] = []
+        text_parts: list[str] = []
+        for part in parts:
+            function_call = getattr(part, "function_call", None)
+            if function_call is not None and getattr(function_call, "name", None):
+                alias = str(function_call.name)
+                calls.append(
+                    ToolCall(
+                        call_id=str(
+                            getattr(function_call, "id", None)
+                            or f"tool_{uuid4().hex[:12]}"
+                        ),
+                        name=aliases.get(alias, alias),
+                        arguments=dict(getattr(function_call, "args", None) or {}),
+                        source="google_native",
+                    )
+                )
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        provider_items: list[dict[str, Any]] = []
+        if content is not None:
+            dump = getattr(content, "model_dump", None)
+            if callable(dump):
+                provider_items.append(dump(mode="json", by_alias=False))
+        finish_reason = _google_candidate_finish_reason(candidate)
+        return LLMToolDecision(
+            text="".join(text_parts).strip(),
+            tool_calls=calls,
+            model=model,
+            provider="google",
+            stop_reason="tool_use" if calls else (finish_reason or "STOP"),
+            usage=_google_usage(getattr(response, "usage_metadata", None)),
+            provider_items=provider_items,
+        )
+
+    def _post_json(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(self._settings.llm_timeout_seconds)
+            ) as client:
+                response = client.post(url, headers=headers, json=payload)
+                if response.status_code >= 400:
+                    retryable = response.status_code in {408, 409, 429} or (
+                        response.status_code >= 500
+                    )
+                    raise LLMProviderError(
+                        f"llm provider returned HTTP {response.status_code}",
+                        retryable=retryable,
+                        code="llm_http_error",
+                    )
+                body = response.json()
+        except httpx.TimeoutException as exc:
+            raise LLMProviderError(
+                "llm provider request timed out",
+                retryable=True,
+                code="llm_timeout",
+            ) from exc
+        except httpx.TransportError as exc:
+            raise LLMProviderError(
+                "llm provider network request failed",
+                retryable=True,
+                code="llm_transport_error",
+            ) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMProviderError(
+                "llm provider returned invalid JSON",
+                code="llm_invalid_json",
+            ) from exc
+        if not isinstance(body, dict):
+            raise LLMProviderError(
+                "llm provider returned an invalid response object",
+                code="llm_invalid_response",
+            )
+        return body
 
     def _stream_factory(
         self,
@@ -554,3 +937,272 @@ def _estimate_tokens(text: str) -> int:
 
 def _join_message_text(messages: list[dict[str, str]]) -> str:
     return "\n".join(message["content"] for message in messages)
+
+
+def _join_any_message_text(messages: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif content is not None:
+            parts.append(json.dumps(content, ensure_ascii=False, default=str))
+    return "\n".join(parts)
+
+
+def _tool_aliases(tools: list[ToolSpec]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for spec in tools:
+        base = re.sub(r"[^A-Za-z0-9_-]+", "_", spec.name).strip("_")
+        if not base:
+            base = "tool"
+        if not base[0].isalpha() and base[0] != "_":
+            base = f"tool_{base}"
+        digest = hashlib.sha256(spec.name.encode("utf-8")).hexdigest()[:8]
+        alias = base[:64]
+        if alias in aliases and aliases[alias] != spec.name:
+            alias = f"{base[:55]}_{digest}"
+        if len(alias) > 64:
+            alias = f"{alias[:55]}_{digest}"
+        aliases[alias] = spec.name
+    return aliases
+
+
+def _json_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise LLMProviderError(
+            "model returned malformed tool arguments",
+            code="invalid_tool_arguments",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise LLMProviderError(
+            "model returned non-object tool arguments",
+            code="invalid_tool_arguments",
+        )
+    return parsed
+
+
+def _usage_from_mapping(value: Any) -> LLMUsage | None:
+    if not isinstance(value, dict):
+        return None
+    output_details = value.get("output_tokens_details")
+    output_details = output_details if isinstance(output_details, dict) else {}
+    return LLMUsage(
+        input_tokens=int(value.get("input_tokens") or 0),
+        output_tokens=int(value.get("output_tokens") or 0),
+        thoughts_tokens=int(output_details.get("reasoning_tokens") or 0),
+    )
+
+
+def _openai_tool_input(
+    messages: list[dict[str, Any]],
+    reverse_aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "assistant" and message.get("provider") == "openai":
+            provider_items = message.get("provider_items")
+            if isinstance(provider_items, list):
+                items.extend(
+                    dict(item) for item in provider_items if isinstance(item, dict)
+                )
+                continue
+        if role in {"system", "user", "assistant"}:
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                items.append({"role": role, "content": content})
+            for call in message.get("tool_calls", []):
+                if not isinstance(call, dict):
+                    continue
+                registry_name = str(call.get("name") or "")
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": str(call.get("call_id") or ""),
+                        "name": reverse_aliases.get(registry_name, registry_name),
+                        "arguments": json.dumps(
+                            call.get("arguments") or {},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    }
+                )
+            continue
+        if role == "tool":
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(message.get("call_id") or ""),
+                    "output": json.dumps(
+                        message.get("content"),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+            )
+    return items
+
+
+def _anthropic_tool_messages(
+    messages: list[dict[str, Any]],
+    reverse_aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    pending_tool_results: list[dict[str, Any]] = []
+
+    def flush_tool_results() -> None:
+        if pending_tool_results:
+            converted.append({"role": "user", "content": list(pending_tool_results)})
+            pending_tool_results.clear()
+
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "system":
+            continue
+        if role == "tool":
+            pending_tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": str(message.get("call_id") or ""),
+                    "content": json.dumps(
+                        message.get("content"),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    "is_error": bool(message.get("is_error")),
+                }
+            )
+            continue
+        flush_tool_results()
+        if role == "assistant" and message.get("provider") == "anthropic":
+            provider_items = message.get("provider_items")
+            if isinstance(provider_items, list):
+                converted.append(
+                    {
+                        "role": "assistant",
+                        "content": [
+                            dict(item)
+                            for item in provider_items
+                            if isinstance(item, dict)
+                        ],
+                    }
+                )
+                continue
+        if role not in {"user", "assistant"}:
+            continue
+        blocks: list[dict[str, Any]] = []
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            blocks.append({"type": "text", "text": content})
+        for call in message.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            registry_name = str(call.get("name") or "")
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": str(call.get("call_id") or ""),
+                    "name": reverse_aliases.get(registry_name, registry_name),
+                    "input": dict(call.get("arguments") or {}),
+                }
+            )
+        if blocks:
+            converted.append({"role": role, "content": blocks})
+    flush_tool_results()
+    return converted
+
+
+def _google_tool_contents(
+    messages: list[dict[str, Any]],
+    types: Any,
+    reverse_aliases: dict[str, str],
+) -> list[Any]:
+    contents: list[Any] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "system":
+            continue
+        if role == "assistant" and message.get("provider") == "google":
+            provider_items = message.get("provider_items")
+            if isinstance(provider_items, list) and provider_items:
+                contents.extend(
+                    types.Content(**item)
+                    for item in provider_items
+                    if isinstance(item, dict)
+                )
+                continue
+        if role == "tool":
+            content = message.get("content")
+            response = content if isinstance(content, dict) else {"result": content}
+            registry_name = str(message.get("name") or "")
+            contents.append(
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=str(message.get("call_id") or ""),
+                                name=reverse_aliases.get(registry_name, registry_name),
+                                response=response,
+                            )
+                        )
+                    ],
+                )
+            )
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        parts: list[Any] = []
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            parts.append(types.Part.from_text(text=content))
+        for call in message.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            registry_name = str(call.get("name") or "")
+            parts.append(
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=str(call.get("call_id") or ""),
+                        name=reverse_aliases.get(registry_name, registry_name),
+                        args=dict(call.get("arguments") or {}),
+                    )
+                )
+            )
+        if parts:
+            contents.append(
+                types.Content(
+                    role="model" if role == "assistant" else "user",
+                    parts=parts,
+                )
+            )
+    return contents
+
+
+def _google_system_instruction_any(
+    messages: list[dict[str, Any]],
+) -> str | None:
+    system = [
+        str(message.get("content") or "")
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    return "\n\n".join(system) if system else None
+
+
+def _google_candidate_finish_reason(candidate: Any) -> str | None:
+    if candidate is None:
+        return None
+    reason = getattr(candidate, "finish_reason", None)
+    if reason is None:
+        return None
+    value = getattr(reason, "value", reason)
+    normalized = str(value).strip().upper()
+    return normalized.removeprefix("FINISHREASON.") if normalized else None

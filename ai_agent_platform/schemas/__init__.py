@@ -45,6 +45,18 @@ from .workspace import (
     WorkspacesResponse,
     WorkspaceUpsertRequest,
 )
+from .project_memory import (
+    MemoryExtractionJobResponse,
+    MemoryExtractionJobsResponse,
+    MemoryReindexResponse,
+    MemorySettingsResponse,
+    MemorySettingsUpdateRequest,
+    MemoryVersionRequest,
+    ProjectMemoriesResponse,
+    ProjectMemoryCreateRequest,
+    ProjectMemoryResponse,
+    ProjectMemoryUpdateRequest,
+)
 
 __all__ = [
     "AddMessageRequest",
@@ -90,4 +102,14 @@ __all__ = [
     "WorkspaceResponse",
     "WorkspacesResponse",
     "WorkspaceUpsertRequest",
+    "MemoryExtractionJobResponse",
+    "MemoryExtractionJobsResponse",
+    "MemoryReindexResponse",
+    "MemorySettingsResponse",
+    "MemorySettingsUpdateRequest",
+    "MemoryVersionRequest",
+    "ProjectMemoriesResponse",
+    "ProjectMemoryCreateRequest",
+    "ProjectMemoryResponse",
+    "ProjectMemoryUpdateRequest",
 ]

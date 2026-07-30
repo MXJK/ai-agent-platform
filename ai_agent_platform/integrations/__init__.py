@@ -3,6 +3,7 @@ from .llm import (
     LLMProviderError,
     LLMResponse,
     LLMStreamEvent,
+    LLMToolDecision,
     LLMUsage,
     LLMUsageAccumulator,
     collect_llm_usage,
@@ -17,6 +18,7 @@ from .mcp import (
     load_mcp_server_configs,
     create_mcp_providers_from_config_file,
     create_mcp_providers_from_configs,
+    normalize_mcp_tool_result,
     register_mcp_tools,
 )
 from .rag import (
@@ -45,6 +47,7 @@ __all__ = [
     "LLMProviderError",
     "LLMResponse",
     "LLMStreamEvent",
+    "LLMToolDecision",
     "LLMUsage",
     "LLMUsageAccumulator",
     "MCPClient",
@@ -72,6 +75,7 @@ __all__ = [
     "collect_llm_usage",
     "evaluate_retrieval",
     "load_mcp_server_configs",
+    "normalize_mcp_tool_result",
     "register_mcp_tools",
     "summarize_tool_arguments",
 ]

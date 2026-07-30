@@ -1,5 +1,6 @@
 from .config import Settings
 from .metrics import MetricsRegistry
+from .auth import request_user_id
 from .observability import RequestObservabilityMiddleware, configure_logging, log_context
 from .task_queue import (
     CeleryTaskQueue,
@@ -13,6 +14,7 @@ from .task_queue import (
 __all__ = [
     "CeleryTaskQueue",
     "MetricsRegistry",
+    "request_user_id",
     "InProcessTaskQueue",
     "RequestObservabilityMiddleware",
     "Settings",

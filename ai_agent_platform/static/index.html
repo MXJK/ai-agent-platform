@@ -90,6 +90,10 @@
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-knowledge"></use></svg></span>
             <span><strong>知识库</strong><small>检索与问答</small></span>
           </button>
+          <button class="nav-item" type="button" data-view="memory">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
+            <span><strong>项目记忆</strong><small>跨会话决策与经验</small></span>
+          </button>
           <button class="nav-item" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>会话记录</strong><small>历史消息与摘要</small></span>
@@ -357,6 +361,115 @@
               </div>
               <div id="rag-answer" class="rich-output empty-output">检索结果和回答会显示在这里。</div>
               <div id="rag-citations" class="citation-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="memory-view" class="view-panel" data-view-panel="memory" aria-labelledby="memory-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Workspace Memory</p>
+              <h1 id="memory-title">项目记忆</h1>
+              <p>管理当前工作区跨会话复用的架构事实、约束、决策、规范与任务经验。</p>
+            </div>
+            <span id="memory-status" class="meta-badge">等待加载</span>
+          </header>
+
+          <article class="surface">
+            <div class="surface-heading">
+              <div><span class="step-kicker">01 · 策略</span><h2>记忆模式</h2></div>
+              <button id="refresh-memory-btn" class="text-button" type="button">刷新</button>
+            </div>
+            <div class="field-grid">
+              <label for="memory-mode-input">工作区模式
+                <select id="memory-mode-input">
+                  <option value="off">off · 关闭</option>
+                  <option value="shadow">shadow · 只提炼不注入</option>
+                  <option value="review">review · 仅使用已确认记忆</option>
+                  <option value="auto">auto · 高置信度自动生效</option>
+                </select>
+              </label>
+              <div class="field-control">
+                <label>索引维护</label>
+                <div class="button-row">
+                  <button id="save-memory-mode-btn" class="button secondary" type="button">保存模式</button>
+                  <button id="reindex-memory-btn" class="button ghost" type="button">重建索引</button>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <div class="content-grid equal-grid">
+            <article class="surface">
+              <div class="surface-heading">
+                <div><span class="step-kicker">02 · 治理</span><h2>编辑记忆</h2></div>
+                <span id="memory-selection-label" class="meta-badge">新记忆</span>
+              </div>
+              <div class="field-grid">
+                <label for="memory-kind-input">类型
+                  <select id="memory-kind-input">
+                    <option value="architecture_fact">架构事实</option>
+                    <option value="constraint">项目约束</option>
+                    <option value="decision">技术决策</option>
+                    <option value="convention">项目规范</option>
+                    <option value="task_outcome">任务结果</option>
+                    <option value="incident_lesson">故障经验</option>
+                  </select>
+                </label>
+                <label for="memory-importance-input">重要度
+                  <input id="memory-importance-input" type="number" min="1" max="5" value="3" />
+                </label>
+              </div>
+              <label for="memory-title-input">标题</label>
+              <input id="memory-title-input" maxlength="160" placeholder="例如：数据库事实源选择" />
+              <label for="memory-content-input">内容</label>
+              <textarea id="memory-content-input" rows="7" maxlength="2000" placeholder="记录稳定、可复用且不含密钥的项目事实"></textarea>
+              <div id="memory-evidence" class="citation-list">
+                <div class="empty-state">选择记忆后查看置信度、冲突状态和来源证据。</div>
+              </div>
+              <div class="button-row">
+                <button id="create-memory-btn" class="button primary" type="button">新建</button>
+                <button id="update-memory-btn" class="button secondary" type="button">保存修改</button>
+                <button id="confirm-memory-btn" class="button ghost" type="button">确认生效</button>
+                <button id="reject-memory-btn" class="button ghost" type="button">拒绝</button>
+                <button id="delete-memory-btn" class="button ghost" type="button">遗忘</button>
+              </div>
+              <p class="privacy-note"><span aria-hidden="true">i</span> 遗忘会删除记忆正文、证据和向量，但不会删除来源会话消息。</p>
+            </article>
+
+            <article class="surface">
+              <div class="surface-heading">
+                <div><span class="step-kicker">03 · 检视</span><h2>当前 revision</h2></div>
+                <span id="memory-count" class="meta-badge">0</span>
+              </div>
+              <div class="field-grid">
+                <label for="memory-status-filter">状态
+                  <select id="memory-status-filter">
+                    <option value="">全部状态</option>
+                    <option value="active">active</option>
+                    <option value="candidate">candidate</option>
+                    <option value="stale">stale</option>
+                    <option value="superseded">superseded</option>
+                    <option value="rejected">rejected</option>
+                  </select>
+                </label>
+                <label for="memory-kind-filter">类型
+                  <select id="memory-kind-filter">
+                    <option value="">全部类型</option>
+                    <option value="architecture_fact">architecture_fact</option>
+                    <option value="constraint">constraint</option>
+                    <option value="decision">decision</option>
+                    <option value="convention">convention</option>
+                    <option value="task_outcome">task_outcome</option>
+                    <option value="incident_lesson">incident_lesson</option>
+                  </select>
+                </label>
+              </div>
+              <div id="memory-list" class="session-list"><div class="empty-state">暂无项目记忆</div></div>
+              <details class="advanced-options">
+                <summary>最近提炼任务</summary>
+                <div id="memory-job-list" class="request-list"><div class="empty-state">暂无提炼任务</div></div>
+              </details>
             </article>
           </div>
         </section>

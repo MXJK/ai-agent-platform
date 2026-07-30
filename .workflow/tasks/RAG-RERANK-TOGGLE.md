@@ -37,7 +37,7 @@ CrossEncoder reranker，并由 API 明确报告精排能力和实际执行状态
 - [x] 检索/问答请求期间锁定相关控件，取消旧请求并阻止过期响应覆盖新结果。
 - [x] 请求开始即清空旧结果，失败时在结果区显示错误。
 - [x] 折叠参数外始终显示当前 RRF/CrossEncoder 策略。
-- [ ] 测试、compileall 和 Interview Notes 校验通过。
+- [x] 测试、compileall 和 Interview Notes 校验通过。
 
 ## Decisions
 
@@ -57,7 +57,7 @@ CrossEncoder reranker，并由 API 明确报告精排能力和实际执行状态
 
 ## Verification
 
-- `.venv/bin/python -m pytest -q`：115 passed；保留 1 个第三方 Starlette
+- `.venv/bin/python -m pytest -q`：157 passed；保留 1 个第三方 Starlette
   弃用 warning。
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - `node --check ai_agent_platform/static/app.js`：通过。
@@ -76,9 +76,13 @@ CrossEncoder reranker，并由 API 明确报告精排能力和实际执行状态
   `true`，文案从“精排：关闭”变为“精排：开启”，刷新后偏好保留，布局正常。
 - 隔离浏览器回归：折叠参数摘要显示“策略：RRF”；双击“仅检索”仅产生一个
   search POST；服务停止后再次检索会清空旧引用、在结果区显示错误并恢复按钮。
-- `.venv/bin/python INTERVIEW_NOTES/validate.py`：未通过。当前 `main` 缺少
-  `codex/native-tool-calling` 分支中的 `tests/test_tool_execution.py` 和
-  `tests/test_native_tool_calling.py`，但本地忽略的 handbook 已引用这两个文件。
+- `.venv/bin/python INTERVIEW_NOTES/validate.py`：通过，校验 11 份 Markdown
+  和 22 项能力；evidence review 输出为变更提醒，不是校验错误。
+- 与最新 `origin/main` 合并后的 RAG/API/config 定向回归：47 passed。
+- `.venv/bin/python evals/run_memory_evals.py`：PASS；候选精确率和 Recall@6
+  均为 1.000，跨工作区泄漏为 0。
+- 当前环境没有 Go 工具链，因此没有重复运行 `main` 已合入的 Gateway Go 测试；
+  PR #9 的冲突解决没有修改 Gateway 文件内容。
 
 ## Result
 
@@ -89,9 +93,10 @@ Qdrant 客户端/服务端版本漂移也已消除。前端 search/ask 已增加
 和 generation 防竞态保护，请求期间锁定参数，开始时清除旧结果，失败信息直接
 显示在结果区；当前排序策略不再隐藏在折叠参数内部。
 
-任务仍不能按仓库规则关闭：Interview Notes 当前描述尚未合入的
-`codex/native-tool-calling` 分支。需要人工决定将本任务迁移到该分支，或让
-handbook 改回只描述当前分支；未擅自 merge、提交或删除无关事实映射。
+PR #9 已将最新 `origin/main` 合入 `codex/rag-rerank-toggle`。冲突集中在
+`.workflow/state.yaml`、reranker/项目记忆配置校验，以及前端 reranker/项目记忆
+状态；解决后同时保留两边能力。原先阻塞 Interview Notes 校验的原生工具调用
+测试文件现已由 `main` 提供，所有任务验收项和仓库规定验证均通过。
 
-当前改动已按用户要求从 `main` 移到新建的
-`codex/rag-rerank-toggle` 分支，且未合并其他分支。
+后续只剩运行环境首次下载 `BAAI/bge-reranker-base` 后的中英文排序观察，以及
+PR #9 的人工审阅与合并。

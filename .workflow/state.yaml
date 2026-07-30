@@ -1,9 +1,9 @@
 project_id: "ai-agent-platform"
 status: "blocked"
 active_task: "RAG-RERANK-TOGGLE"
-next_action: "审阅远端 codex/rag-rerank-toggle 分支；首次启用 BAAI/bge-reranker-base 后验证中英文排序，并协调 native-tool-calling handbook 事实"
+next_action: "完成 main 冲突合并验证；首次启用 BAAI/bge-reranker-base 后验证中英文排序"
 blockers:
-  - "本地 INTERVIEW_NOTES 引用仅存在于 codex/native-tool-calling 的 tests/test_tool_execution.py 和 tests/test_native_tool_calling.py，当前独立 RAG 分支无法通过 handbook 校验"
+  - "PR #9 正在解决与 main 的合并冲突，等待完整验证"
 last_verified_commit: "4318ccc377477b5164ea55af04ffdfc9f9bc98d2"
-updated_at: "2026-07-30T13:21:52+08:00"
+updated_at: "2026-07-30T14:00:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

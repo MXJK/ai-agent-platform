@@ -30,6 +30,7 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
     ContextSource,
     KnowledgeContextProvider,
+    ProjectMemoryContextProvider,
 )
 from ai_agent_platform.agents.coding.planner import (
     LLMStructuredAgentPlanner,
@@ -37,6 +38,7 @@ from ai_agent_platform.agents.coding.planner import (
     approval_required_tools as collect_approval_required_tools,
     bounded_confidence,
     classify_context_source,
+    native_tool_messages,
 )
 from ai_agent_platform.agents.coding.runtime_support import (
     append_errors as _append_errors,
@@ -117,8 +119,11 @@ class CodingAgentRuntime:
         max_context_files: int = 12,
         max_context_chars: int = 32000,
         max_instruction_chars: int = 16000,
+        max_tool_rounds: int = 4,
+        max_tool_calls: int = 12,
         max_history_messages: int = 12,
         knowledge_context_provider: KnowledgeContextProvider | None = None,
+        project_memory_provider: ProjectMemoryContextProvider | None = None,
         max_rag_context_chars: int = 6000,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
@@ -130,8 +135,11 @@ class CodingAgentRuntime:
         self._max_context_files = max_context_files
         self._max_context_chars = max_context_chars
         self._max_instruction_chars = max_instruction_chars
+        self._max_tool_rounds = max_tool_rounds
+        self._max_tool_calls = max_tool_calls
         self._max_history_messages = max_history_messages
         self._knowledge_context_provider = knowledge_context_provider
+        self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
         self._change_loop = ChangeLoopExecutor(tools=self._tools, planner=self._planner)
         self._graph = self._build_graph()
@@ -147,6 +155,7 @@ class CodingAgentRuntime:
         workspace_root: str,
         focus_files: Optional[list[str]] = None,
         run_id: Optional[str] = None,
+        actor_user_id: str = "demo_user",
     ) -> AgentRunResult:
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
@@ -165,6 +174,7 @@ class CodingAgentRuntime:
             "user_input": user_input,
             "workspace_id": workspace_id,
             "workspace_root": workspace_root,
+            "actor_user_id": actor_user_id,
             "focus_files": focus_files or [],
             "history": [
                 {
@@ -182,8 +192,16 @@ class CodingAgentRuntime:
             "artifacts": [],
             "tool_calls": [],
             "tool_results": [],
+            "native_tool_messages": [],
+            "native_tool_round": 0,
+            "native_tool_call_count": 0,
+            "native_tool_signatures": [],
+            "native_tool_loop_active": False,
+            "native_tool_answer": "",
+            "native_tool_stop_reason": "",
             "context_sources": [],
             "rag_context_sources": [],
+            "memory_context_sources": [],
             "context_warnings": [],
             "knowledge_base_catalog": [],
             "selected_knowledge_base_ids": [],
@@ -506,6 +524,7 @@ class CodingAgentRuntime:
         workflow.add_node("load_project_instructions", self._load_project_instructions)
         workflow.add_node("classify_request", self._classify_request)
         workflow.add_node("decide_context_source", self._decide_context_source)
+        workflow.add_node("retrieve_project_memory", self._retrieve_project_memory)
         workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("plan_exploration", self._plan_exploration)
         workflow.add_node("execute_exploration", self._execute_exploration)
@@ -524,8 +543,9 @@ class CodingAgentRuntime:
         workflow.add_edge("setup_workspace", "load_project_instructions")
         workflow.add_edge("load_project_instructions", "classify_request")
         workflow.add_edge("classify_request", "decide_context_source")
+        workflow.add_edge("decide_context_source", "retrieve_project_memory")
         workflow.add_conditional_edges(
-            "decide_context_source",
+            "retrieve_project_memory",
             lambda state: state.get("context_route", "repo"),
             {
                 "none": "merge_evidence",
@@ -574,6 +594,7 @@ class CodingAgentRuntime:
             {
                 "review_tool_plan": "review_tool_plan",
                 "inspect_repository": "inspect_repository",
+                "compose_answer": "compose_answer",
             },
         )
         workflow.add_conditional_edges(
@@ -588,6 +609,7 @@ class CodingAgentRuntime:
             "inspect_repository",
             _route_after_inspection,
             {
+                "plan_tools": "plan_tools",
                 "execute_changes": "execute_changes",
                 "validate_changes": "validate_changes",
                 "collect_artifacts": "collect_artifacts",
@@ -752,7 +774,20 @@ class CodingAgentRuntime:
                 for item_id in fallback_selected
                 if item_id in valid_ids
             ][:MAX_SELECTED_KNOWLEDGE_BASES]
-        if state.get("intent") in CHANGE_INTENTS | {"test_strategy"}:
+        live_repo_intents = CHANGE_INTENTS | {
+            "test_strategy",
+            "code_explanation",
+            "repo_navigation",
+            "bug_investigation",
+        }
+        requires_live_repo = (
+            state.get("intent") in live_repo_intents
+            or (
+                state.get("intent") == "repository_question"
+                and fallback_route == "repo"
+            )
+        )
+        if requires_live_repo:
             if route == "rag":
                 route = "hybrid" if selected else "repo"
             elif route == "none":
@@ -872,6 +907,73 @@ class CodingAgentRuntime:
                     "chars": used_chars,
                     "limit": self._max_rag_context_chars,
                     "truncated": truncated,
+                    "warnings": warnings,
+                },
+            ),
+        }
+
+    def _retrieve_project_memory(
+        self,
+        state: CodingAgentState,
+    ) -> CodingAgentState:
+        warnings = list(state.get("context_warnings", []))
+        sources: list[ContextSource] = []
+        if (
+            self._project_memory_provider is not None
+            and state.get("intent") != "small_talk"
+        ):
+            try:
+                retrieved = self._project_memory_provider.retrieve(
+                    workspace_id=state["workspace_id"],
+                    actor_user_id=state.get("actor_user_id", "demo_user"),
+                    query=build_workspace_query(state),
+                )
+                for item in retrieved:
+                    memory = item.memory
+                    sources.append(
+                        ContextSource(
+                            kind="project_memory",
+                            path=(
+                                f"memory://{memory.workspace_id}/{memory.id}"
+                            ),
+                            start_line=None,
+                            end_line=None,
+                            text=memory.content,
+                            reason=(
+                                "Historical project memory; verify mutable "
+                                f"claims against live sources (score={item.score:.4f})"
+                            ),
+                            content_hash=hashlib.sha256(
+                                memory.content.encode("utf-8")
+                            ).hexdigest(),
+                            memory_id=memory.id,
+                            memory_kind=memory.kind,
+                            confidence=memory.confidence,
+                            last_confirmed_at=(
+                                memory.last_confirmed_at.isoformat()
+                                if memory.last_confirmed_at
+                                else None
+                            ),
+                            relevance_score=item.relevance_score,
+                            recency_score=item.recency_score,
+                            importance_score=item.importance_score,
+                            score=item.score,
+                        )
+                    )
+            except Exception as exc:
+                warnings.append(f"project memory retrieval unavailable: {exc}")
+        return {
+            "memory_context_sources": sources,
+            "context_warnings": warnings,
+            "trace": _append_trace(
+                state,
+                node="retrieve_project_memory",
+                summary="检索工作区当前 revision 的可用项目记忆。",
+                output={
+                    "source_count": len(sources),
+                    "memory_ids": [
+                        item.memory_id for item in sources if item.memory_id
+                    ],
                     "warnings": warnings,
                 },
             ),
@@ -1105,6 +1207,7 @@ class CodingAgentRuntime:
         for source in (
             list(state.get("context_sources", []))
             + list(state.get("rag_context_sources", []))
+            + list(state.get("memory_context_sources", []))
         ):
             key = (
                 source.kind,
@@ -1121,6 +1224,8 @@ class CodingAgentRuntime:
             merged.append(source)
             if source.kind == "knowledge_chunk":
                 knowledge_count += 1
+            elif source.kind == "project_memory":
+                pass
             else:
                 repo_count += 1
         return {
@@ -1133,6 +1238,9 @@ class CodingAgentRuntime:
                     "context_route": state.get("context_route", "repo"),
                     "repo_source_count": repo_count,
                     "knowledge_source_count": knowledge_count,
+                    "memory_source_count": sum(
+                        item.kind == "project_memory" for item in merged
+                    ),
                     "source_count": len(merged),
                     "warnings": state.get("context_warnings", []),
                 },
@@ -1141,11 +1249,78 @@ class CodingAgentRuntime:
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         tool_specs = self._tools.list_specs()
-        tool_calls = [
-            call
-            for call in self._planner.plan_tool_calls(state, tool_specs)
-            if call.name not in READ_ONLY_REPOSITORY_TOOLS
-        ]
+        uses_native = bool(
+            getattr(self._planner, "uses_native_tool_calling", False)
+        )
+        native_messages = list(state.get("native_tool_messages", []))
+        native_round = state.get("native_tool_round", 0)
+        native_answer = ""
+        stop_reason = ""
+        warnings = list(state.get("context_warnings", []))
+        if uses_native and native_round < self._max_tool_rounds:
+            if not native_messages:
+                native_messages = native_tool_messages(state)
+            decision = self._planner.decide_tool_calls(native_messages, tool_specs)
+            native_round += 1
+            stop_reason = decision.stop_reason
+            proposed_calls = list(decision.tool_calls)
+            remaining_calls = max(
+                0,
+                self._max_tool_calls - state.get("native_tool_call_count", 0),
+            )
+            proposed_calls = proposed_calls[:remaining_calls]
+            previous_signatures = set(state.get("native_tool_signatures", []))
+            tool_calls = []
+            repeated = 0
+            for call in proposed_calls:
+                signature = _tool_call_key(call)
+                if signature in previous_signatures:
+                    repeated += 1
+                    continue
+                previous_signatures.add(signature)
+                tool_calls.append(call)
+            if repeated:
+                warnings.append(
+                    f"native tool loop suppressed {repeated} repeated call(s)"
+                )
+            native_messages.append(
+                {
+                    "role": "assistant",
+                    "content": decision.text,
+                    "provider": decision.provider,
+                    "provider_items": decision.provider_items or [],
+                    "tool_calls": [
+                        {
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }
+                        for call in decision.tool_calls
+                    ],
+                }
+            )
+            if not tool_calls:
+                native_answer = decision.text
+            native_signatures = list(previous_signatures)
+            native_call_count = (
+                state.get("native_tool_call_count", 0) + len(tool_calls)
+            )
+        else:
+            if uses_native:
+                warnings.append("native tool loop reached its configured round limit")
+                native_answer = state.get("native_tool_answer", "")
+                stop_reason = "max_tool_rounds"
+                tool_calls = []
+                native_signatures = list(state.get("native_tool_signatures", []))
+                native_call_count = state.get("native_tool_call_count", 0)
+            else:
+                tool_calls = [
+                    call
+                    for call in self._planner.plan_tool_calls(state, tool_specs)
+                    if call.name not in READ_ONLY_REPOSITORY_TOOLS
+                ]
+                native_signatures = []
+                native_call_count = 0
         analysis_calls, change_calls, validation_calls = partition_tool_calls(tool_calls)
         approval_tools = collect_approval_required_tools(tool_calls, tool_specs)
         return {
@@ -1155,6 +1330,14 @@ class CodingAgentRuntime:
             "validation_tool_calls": validation_calls,
             "repair_tool_calls": [],
             "approval_required_tools": approval_tools,
+            "native_tool_messages": native_messages,
+            "native_tool_round": native_round,
+            "native_tool_call_count": native_call_count,
+            "native_tool_signatures": native_signatures,
+            "native_tool_loop_active": uses_native,
+            "native_tool_answer": native_answer,
+            "native_tool_stop_reason": stop_reason,
+            "context_warnings": warnings,
             "trace": _append_trace(
                 state,
                 node="plan_tools",
@@ -1164,6 +1347,9 @@ class CodingAgentRuntime:
                     "approval_required_tools": [
                         item["name"] for item in approval_tools
                     ],
+                    "native": uses_native,
+                    "round": native_round,
+                    "stop_reason": stop_reason,
                 },
             ),
         }
@@ -1195,8 +1381,21 @@ class CodingAgentRuntime:
         results = self._change_loop.execute_tool_calls(
             state, state.get("analysis_tool_calls", [])
         )
+        native_messages = list(state.get("native_tool_messages", []))
+        if state.get("native_tool_loop_active"):
+            native_messages.extend(
+                {
+                    "role": "tool",
+                    "call_id": result.get("call_id"),
+                    "name": result.get("name"),
+                    "content": result,
+                    "is_error": not bool(result.get("ok")),
+                }
+                for result in results
+            )
         return {
             "tool_results": list(state.get("tool_results", [])) + results,
+            "native_tool_messages": native_messages,
             "trace": _append_trace(
                 state,
                 node="inspect_repository",
@@ -1208,11 +1407,15 @@ class CodingAgentRuntime:
     def _compose_answer(self, state: CodingAgentState) -> CodingAgentState:
         try:
             compose = getattr(self._planner, "compose_answer", None)
-            answer = (
-                compose(state)
-                if callable(compose)
-                else RuleBasedAgentPlanner().compose_answer(state)
-            )
+            native_answer = str(state.get("native_tool_answer") or "").strip()
+            if native_answer:
+                answer = native_answer
+            else:
+                answer = (
+                    compose(state)
+                    if callable(compose)
+                    else RuleBasedAgentPlanner().compose_answer(state)
+                )
             errors: list[dict[str, Any]] = []
         except Exception as exc:
             answer = ""
