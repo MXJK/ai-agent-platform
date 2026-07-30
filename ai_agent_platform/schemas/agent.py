@@ -76,6 +76,13 @@ class ContextSourceResponse(BaseModel):
     knowledge_base_id: Optional[str] = None
     document_id: Optional[str] = None
     score: Optional[float] = None
+    memory_id: Optional[str] = None
+    memory_kind: Optional[str] = None
+    confidence: Optional[float] = None
+    last_confirmed_at: Optional[str] = None
+    relevance_score: Optional[float] = None
+    recency_score: Optional[float] = None
+    importance_score: Optional[float] = None
 
     @classmethod
     def from_domain(cls, source: ContextSource) -> "ContextSourceResponse":

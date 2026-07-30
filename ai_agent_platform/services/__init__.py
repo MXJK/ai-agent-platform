@@ -11,6 +11,12 @@ from .workspace_service import (
     WorkspaceService,
     WorkspaceValidationError,
 )
+from .conversation_compression import (
+    ConversationCompressor,
+    LLMConversationCompressor,
+    RuleBasedConversationCompressor,
+    create_conversation_compressor,
+)
 
 __all__ = [
     "AgentRunService",
@@ -21,5 +27,9 @@ __all__ = [
     "SessionService",
     "WorkspaceNotFoundError",
     "WorkspaceService",
+    "ConversationCompressor",
+    "LLMConversationCompressor",
+    "RuleBasedConversationCompressor",
+    "create_conversation_compressor",
     "WorkspaceValidationError",
 ]

@@ -1,8 +1,9 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "NATIVE-TOOL-CALLING"
-next_action: "在 GitHub 审阅 codex/native-tool-calling 分支并按需创建 PR"
-blockers: []
+status: "blocked"
+active_task: "PROJECT-MEMORY-SYSTEM"
+next_action: "提供 Go 1.22 工具链并执行 go test ./gateway/...；通过后将任务标记 done"
+blockers:
+  - "当前环境没有 go 命令，网关 OIDC/JWT 变更尚未通过真实 Go 编译与测试"
 last_verified_commit: "395697197e8145806585f76cbf60b846873acdf1"
-updated_at: "2026-07-28T11:07:54+08:00"
+updated_at: "2026-07-30T13:16:56+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

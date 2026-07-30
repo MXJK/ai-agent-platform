@@ -16,4 +16,5 @@ class TimingMetricResponse(BaseModel):
 class MetricsResponse(BaseModel):
     service: str
     counters: dict[str, int] = Field(default_factory=dict)
+    gauges: dict[str, int] = Field(default_factory=dict)
     timings: dict[str, TimingMetricResponse] = Field(default_factory=dict)

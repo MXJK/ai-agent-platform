@@ -32,6 +32,7 @@ class CodingAgentState(TypedDict, total=False):
     user_input: str
     workspace_id: str
     workspace_root: str
+    actor_user_id: str
     history: list[dict[str, str]]
     focus_files: list[str]
     intent: str
@@ -44,6 +45,7 @@ class CodingAgentState(TypedDict, total=False):
     knowledge_base_catalog: list[dict[str, Any]]
     catalog_truncated: bool
     rag_context_sources: list["ContextSource"]
+    memory_context_sources: list["ContextSource"]
     context_warnings: list[str]
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
@@ -117,6 +119,13 @@ class ContextSource:
     knowledge_base_id: str | None = None
     document_id: str | None = None
     score: float | None = None
+    memory_id: str | None = None
+    memory_kind: str | None = None
+    confidence: float | None = None
+    last_confirmed_at: str | None = None
+    relevance_score: float | None = None
+    recency_score: float | None = None
+    importance_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -254,4 +263,15 @@ class KnowledgeContextProvider(Protocol):
         limit: int,
         recall_limit: int | None,
     ) -> list[RetrievedDocument]:
+        ...
+
+
+class ProjectMemoryContextProvider(Protocol):
+    def retrieve(
+        self,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        query: str,
+    ) -> list[Any]:
         ...

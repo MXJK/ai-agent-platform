@@ -12,8 +12,10 @@ from ai_agent_platform.agents import (
     LLMStructuredAgentPlanner,
     create_coding_tool_registry,
 )
-from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueueError
+from ai_agent_platform.core import CeleryTaskQueue, MetricsRegistry, Settings
 from ai_agent_platform.integrations import LLMClient, create_rag_service
+from ai_agent_platform.project_memory.factory import create_project_memory_service
+from ai_agent_platform.project_memory.service import ProjectMemoryService
 from ai_agent_platform.main import (
     _create_agent_run_store,
     _create_document_store,
@@ -28,28 +30,15 @@ from ai_agent_platform.services import (
     KnowledgeBaseService,
     SessionService,
     WorkspaceService,
+    create_conversation_compressor,
 )
-
-
-class WorkerOnlyTaskQueue:
-    """Prevents a worker handler from recursively publishing more tasks."""
-
-    def submit(
-        self,
-        task_name: str,
-        function: Callable[..., None],
-        **kwargs: Any,
-    ) -> Any:
-        del function, kwargs
-        raise TaskQueueError(f"worker cannot recursively submit {task_name}")
-
-    def close(self) -> None:
-        return None
 
 
 @dataclass
 class WorkerServices:
     agent_run_service: AgentRunService
+    project_memory_service: ProjectMemoryService
+    session_service: SessionService
     close_callbacks: list[Callable[[], None]]
 
     def close(self) -> None:
@@ -87,6 +76,34 @@ def _create_worker_services() -> WorkerServices:
     metrics = MetricsRegistry()
     session_repository = _create_session_repository(settings)
     llm_client = LLMClient(settings)
+    workspace_service = WorkspaceService(
+        store=_create_workspace_store(settings),
+        allowed_roots=settings.workspace_allowed_roots,
+    )
+    worker_queue = CeleryTaskQueue(
+        broker_url=settings.redis_url,
+        result_backend_url=settings.celery_result_backend_url,
+        visibility_timeout_seconds=settings.celery_visibility_timeout_seconds,
+        publish_max_retries=settings.celery_task_max_retries,
+        publish_retry_backoff_seconds=settings.celery_task_retry_backoff_seconds,
+        publish_retry_backoff_max_seconds=(
+            settings.celery_task_retry_backoff_max_seconds
+        ),
+        metrics=metrics,
+    )
+    project_memory_service = create_project_memory_service(
+        settings,
+        workspace_service=workspace_service,
+        llm_client=llm_client,
+        metrics=metrics,
+    )
+    project_memory_service.set_index_outbox_submitter(
+        lambda trigger_id: worker_queue.submit(
+            "memory_index_outbox",
+            project_memory_service.process_index_outbox,
+            trigger_id=trigger_id,
+        )
+    )
     rag_service = create_rag_service(
         settings,
         document_store=_create_document_store(settings),
@@ -118,16 +135,26 @@ def _create_worker_services() -> WorkerServices:
         max_tool_calls=settings.agent_max_tool_calls,
         max_history_messages=settings.llm_max_context_messages,
         knowledge_context_provider=knowledge_base_service,
+        project_memory_provider=project_memory_service,
         max_rag_context_chars=settings.rag_max_prompt_chars,
     )
     session_service = SessionService(
         repository=session_repository,
         agent_runtime=GameAgentRuntime(),
-    )
-    worker_queue = WorkerOnlyTaskQueue()
-    workspace_service = WorkspaceService(
-        store=_create_workspace_store(settings),
-        allowed_roots=settings.workspace_allowed_roots,
+        compressor=create_conversation_compressor(
+            llm_provider=settings.llm_provider,
+            llm_client=llm_client,
+        ),
+        summary_enabled=settings.conversation_summary_enabled,
+        summary_trigger_messages=settings.conversation_summary_trigger_messages,
+        summary_keep_recent_messages=(
+            settings.conversation_summary_keep_recent_messages
+        ),
+        summary_max_chars=settings.conversation_summary_max_chars,
+        summary_max_source_chars=(
+            settings.conversation_summary_max_source_chars
+        ),
+        metrics=metrics,
     )
     agent_run_service = AgentRunService(
         runtime=coding_runtime,
@@ -135,11 +162,16 @@ def _create_worker_services() -> WorkerServices:
         workspace_service=workspace_service,
         metrics=metrics,
         task_queue=worker_queue,
+        project_memory_service=project_memory_service,
+        max_context_messages=settings.llm_max_context_messages,
     )
     close_callbacks = [provider.close for provider in mcp_providers]
+    close_callbacks.append(worker_queue.close)
     if close_checkpointer is not None:
         close_callbacks.append(close_checkpointer)
     return WorkerServices(
         agent_run_service=agent_run_service,
+        project_memory_service=project_memory_service,
+        session_service=session_service,
         close_callbacks=close_callbacks,
     )

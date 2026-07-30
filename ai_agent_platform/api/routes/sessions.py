@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
+from ai_agent_platform.core import Settings, request_user_id
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import (
     AddMessageRequest,
@@ -15,42 +16,60 @@ from ai_agent_platform.schemas import (
 from ai_agent_platform.services import SessionService
 
 
-def create_sessions_router(session_service: SessionService) -> APIRouter:
+def create_sessions_router(
+    session_service: SessionService,
+    settings: Settings | None = None,
+) -> APIRouter:
     router = APIRouter()
+    settings = settings or Settings()
 
     @router.post(
         "/sessions",
         response_model=SessionResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_session(request: CreateSessionRequest) -> SessionResponse:
-        session = session_service.create_session(user_id=request.user_id)
+    def create_session(
+        request: CreateSessionRequest,
+        http_request: Request,
+    ) -> SessionResponse:
+        session = session_service.create_session(
+            user_id=request_user_id(
+                http_request,
+                settings,
+                claimed_user_id=request.user_id,
+            )
+        )
         return SessionResponse.from_domain(session)
 
     @router.get("/sessions", response_model=SessionsResponse)
-    def list_sessions() -> SessionsResponse:
+    def list_sessions(http_request: Request) -> SessionsResponse:
         sessions = session_service.list_sessions()
+        if settings.auth_mode != "disabled":
+            actor_user_id = request_user_id(http_request, settings)
+            sessions = [
+                session
+                for session in sessions
+                if session.user_id == actor_user_id
+            ]
         return SessionsResponse(
             sessions=[SessionResponse.from_domain(session) for session in sessions]
         )
 
     @router.get("/sessions/{session_id}", response_model=SessionResponse)
-    def get_session(session_id: str) -> SessionResponse:
-        try:
-            session = session_service.get_session(session_id=session_id)
-        except SessionNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="session not found") from exc
+    def get_session(session_id: str, http_request: Request) -> SessionResponse:
+        session = _owned_session(session_id, http_request)
         return SessionResponse.from_domain(session)
 
     @router.get(
         "/sessions/{session_id}/summary",
         response_model=SessionSummaryResponse,
     )
-    def get_session_summary(session_id: str) -> SessionSummaryResponse:
-        try:
-            summary = session_service.get_session_summary(session_id=session_id)
-        except SessionNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="session not found") from exc
+    def get_session_summary(
+        session_id: str,
+        http_request: Request,
+    ) -> SessionSummaryResponse:
+        _owned_session(session_id, http_request)
+        summary = session_service.get_session_summary(session_id=session_id)
         return SessionSummaryResponse.from_domain(summary)
 
     @router.post(
@@ -58,7 +77,12 @@ def create_sessions_router(session_service: SessionService) -> APIRouter:
         response_model=MessagesResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def add_message(session_id: str, request: AddMessageRequest) -> MessagesResponse:
+    def add_message(
+        session_id: str,
+        request: AddMessageRequest,
+        http_request: Request,
+    ) -> MessagesResponse:
+        _owned_session(session_id, http_request)
         try:
             messages = session_service.add_message(
                 session_id=session_id,
@@ -73,7 +97,11 @@ def create_sessions_router(session_service: SessionService) -> APIRouter:
         )
 
     @router.get("/sessions/{session_id}/messages", response_model=MessagesResponse)
-    def list_messages(session_id: str) -> MessagesResponse:
+    def list_messages(
+        session_id: str,
+        http_request: Request,
+    ) -> MessagesResponse:
+        _owned_session(session_id, http_request)
         try:
             messages = session_service.list_messages(session_id=session_id)
         except SessionNotFoundError as exc:
@@ -86,7 +114,11 @@ def create_sessions_router(session_service: SessionService) -> APIRouter:
         "/sessions/{session_id}/token-usage",
         response_model=TokenUsagesResponse,
     )
-    def list_token_usage(session_id: str) -> TokenUsagesResponse:
+    def list_token_usage(
+        session_id: str,
+        http_request: Request,
+    ) -> TokenUsagesResponse:
+        _owned_session(session_id, http_request)
         try:
             records = session_service.list_token_usage(session_id=session_id)
         except SessionNotFoundError as exc:
@@ -101,5 +133,17 @@ def create_sessions_router(session_service: SessionService) -> APIRouter:
                 for record in records
             ],
         )
+
+    def _owned_session(session_id: str, http_request: Request):
+        try:
+            session = session_service.get_session(session_id=session_id)
+        except SessionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        if (
+            settings.auth_mode != "disabled"
+            and session.user_id != request_user_id(http_request, settings)
+        ):
+            raise HTTPException(status_code=403, detail="conversation access denied")
+        return session
 
     return router

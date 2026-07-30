@@ -28,3 +28,13 @@ a hard negative, and an empty-knowledge-base/no-evidence case.
 
 The evals remain deterministic regression tests, not a production benchmark of
 model or answer quality.
+
+Project-memory quality gates run separately and cover candidate precision,
+Recall@6, and workspace isolation:
+
+```bash
+.venv/bin/python evals/run_memory_evals.py
+```
+
+The checked-in suite fails below 90% candidate precision or 85% Recall@6, and
+requires exactly zero cross-workspace leaks.

@@ -1,9 +1,10 @@
 # AI Agent Platform
 
 FastAPI backend with streaming chat, a task-driven code Agent, managed document
-knowledge bases, approval-aware sandbox execution, and optional PostgreSQL,
-Celery, Redis, and Qdrant infrastructure. A native browser workspace and an
-optional Go gateway provide the product and traffic boundaries.
+knowledge bases, workspace-scoped project memory, approval-aware sandbox
+execution, and optional PostgreSQL, Celery, Redis, and Qdrant infrastructure.
+A native browser workspace and an optional OIDC-validating Go gateway provide
+the product and traffic boundaries.
 
 The code Agent does not index a repository and does not use embeddings. A run
 captures a registered workspace root, searches the live filesystem for the
@@ -44,8 +45,10 @@ The shared composer offers:
 - `快速对话` for direct SSE model responses;
 - `代码 Agent` for task-driven workspace exploration, approvals, progress, and
   artifacts;
-- a common conversation history, so bounded recent messages can inform Agent
-  exploration and native tool selection.
+- a common conversation history with persistent rolling summaries, so a
+  compressed history plus bounded recent messages can inform Chat and Agent
+  exploration and native tool selection without discarding the original
+  messages.
 
 Both response modes render an in-message execution process and response
 metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
@@ -58,6 +61,8 @@ The browser workspace also includes:
 
 - managed knowledge-base catalog, multi-file upload, hybrid search, answers,
   citations, and index-job status;
+- a project-memory governance page with mode/status/type filters, evidence,
+  confidence, optimistic edits, confirm/reject/forget, and index repair;
 - local workspace folder selection constrained by `WORKSPACE_ALLOWED_ROOTS`;
 - Agent run details, approval risk, validation artifacts, errors, and metrics;
 - safe Markdown rendering, response cancellation, responsive navigation, and
@@ -92,6 +97,7 @@ setup_workspace
 → load_project_instructions
 → classify_request
 → decide_context_source
+→ retrieve_project_memory (orthogonal to repo/RAG routing)
    ├─ repo   → plan_exploration → execute_exploration → assess_context
    ├─ rag    → retrieve_knowledge
    ├─ hybrid → retrieve_knowledge → repository exploration
@@ -103,10 +109,11 @@ The classifier receives a bounded catalog containing only knowledge-base IDs,
 names, descriptions, and tags. It selects `none`, `repo`, `rag`, or `hybrid`
 and at most three managed knowledge bases. Repository evidence still comes from
 live files; document evidence reuses the independent RAG search stack.
-`merge_evidence` preserves both provenance types before tool/change planning or
-answer generation. Change runs retain human approval, per-run sandbox copying,
-validation, one bounded repair attempt, and Diff/test artifacts. The registered
-source workspace is never modified directly.
+Project memory contributes at most six current-revision active records within a
+3,000-character budget. `merge_evidence` preserves all provenance types before
+tool/change planning or answer generation. Change runs retain human approval,
+per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
+artifacts. The registered source workspace is never modified directly.
 
 Running Agent status is read from both the product run store and the latest
 LangGraph checkpoint. The API therefore exposes already-completed trace nodes
@@ -168,8 +175,19 @@ tasks retain each rule's applicable path.
 README files and directories are not injected automatically. They are read only
 when task-driven search selects them.
 
-Recent conversation context is bounded to six messages and 1,800 characters.
-It is included in deterministic workspace queries and structured tool planning.
+Conversation history uses two layers: an incrementally compressed rolling
+summary for older turns plus the latest unsummarized messages. Compression runs
+after successful Chat or Agent responses, preserves the original messages,
+redacts credential-like values, and stores an optimistic-lock version and the
+last summarized message. The summary is bounded, lossy, and injected as
+untrusted historical context; the current request and live evidence retain
+precedence.
+
+Project memory is a separate long-term workspace subsystem. It is neither
+conversation history nor LangGraph checkpoint state, and it does not ingest
+knowledge-base documents automatically. Memories are historical leads:
+system/project instructions, the current request, and live source code always
+take precedence.
 
 ## Workspace API
 
@@ -187,8 +205,10 @@ curl http://localhost:8000/api/v1/workspaces/project
 ```
 
 There is intentionally no workspace deletion endpoint in v1. Updating a root
-only affects new runs; every `agent_runs` row stores its captured
-`workspace_root`.
+increments `workspaces.revision`; old-revision memories stop participating in
+retrieval. An administrator can explicitly confirm an old record to copy it
+into the current revision; the historical record remains unchanged. Every
+`agent_runs` row keeps its captured `workspace_root`.
 
 Start an Agent run:
 
@@ -219,6 +239,98 @@ returned.
 The tools reject absolute or traversal paths, escaping symlinks, binary or
 oversized files, dependency/build directories, real `.env` files, private keys,
 and common credential files.
+
+## Project memory
+
+Project memory is shared by authorized members of one `workspace_id`. Supported
+kinds are `architecture_fact`, `constraint`, `decision`, `convention`,
+`task_outcome`, and `incident_lesson`. Full source files, temporary discussion,
+assistant speculation, credentials, private keys, tokens, connection strings,
+and complete environment-variable values are rejected.
+
+Modes are:
+
+- `off`: no extraction or retrieval;
+- `shadow`: extract review candidates but do not inject them;
+- `review`: retrieve only active records, normally after human confirmation;
+- `auto`: high-confidence authoritative candidates may become active.
+
+User-created records and explicit “remember/记住” requests are active with
+confidence `1.0`. Other candidates below `0.60` are discarded, values from
+`0.60` through `0.84` stay reviewable, and authoritative values at or above
+`0.85` may become active in `auto` mode. Assistant-only inference never becomes
+active automatically. Equal canonical content adds evidence; authoritative
+conflicts supersede the old record, while uncertain conflicts remain
+candidates. Source-backed mutable facts are hash-checked before injection and
+become `stale` after the source changes. Long-unconfirmed records are
+down-ranked rather than deleted solely because of age.
+
+Retrieval combines Qdrant dense recall and PostgreSQL full-text recall using
+weighted RRF, then reloads every result from PostgreSQL to verify workspace,
+revision, status, expiry, and version. Every eligible candidate receives an
+explainable final score:
+
+```text
+0.65 × normalized relevance
++ 0.20 × exponential recency
++ 0.15 × normalized importance
+```
+
+Recency uses `last_confirmed_at` (falling back to `updated_at`) with a
+configurable 180-day half-life. Candidates are globally ranked before the
+six-result/3,000-character budget is applied, and Chat/Agent provenance exposes
+the final score plus all three components. Qdrant failure degrades to lexical
+search, and memory failure never fails the main Chat or Agent answer.
+
+Management endpoints:
+
+```text
+GET/PATCH /api/v1/workspaces/{workspace_id}/memory-settings
+GET/POST  /api/v1/workspaces/{workspace_id}/memories
+GET/PATCH /api/v1/workspaces/{workspace_id}/memories/{memory_id}
+POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/confirm
+POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/reject
+DELETE    /api/v1/workspaces/{workspace_id}/memories/{memory_id}
+GET       /api/v1/workspaces/{workspace_id}/memory-jobs
+POST      /api/v1/workspaces/{workspace_id}/memories/reindex
+```
+
+PATCH/confirm/reject require the current `version`. Viewers can retrieve and
+view; editors can create, edit, confirm, and reject; admins can change mode,
+forget, and repair indexes. Forgetting hard-deletes memory/evidence/vector data
+but intentionally does not erase the source conversation.
+
+`ChatStreamRequest.workspace_id` remains optional for old clients. When present,
+Chat emits `memory_context` before answer tokens and enqueues post-response
+extraction. Agent runs execute `retrieve_project_memory` after context routing
+and enqueue extraction by `run_id` only after a completed result.
+
+Configuration defaults keep the subsystem disabled:
+
+```dotenv
+PROJECT_MEMORY_ENABLED=false
+PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
+PROJECT_MEMORY_AUTO_THRESHOLD=0.85
+PROJECT_MEMORY_RECALL_LIMIT=20
+PROJECT_MEMORY_RESULT_LIMIT=6
+PROJECT_MEMORY_MAX_CONTEXT_CHARS=3000
+PROJECT_MEMORY_QDRANT_COLLECTION=project_memories
+PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
+PROJECT_MEMORY_RECENCY_WEIGHT=0.20
+PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
+PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
+```
+
+Conversation compression is configured independently:
+
+```dotenv
+CONVERSATION_SUMMARY_ENABLED=true
+CONVERSATION_SUMMARY_TRIGGER_MESSAGES=12
+CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES=6
+CONVERSATION_SUMMARY_MAX_CHARS=2000
+CONVERSATION_SUMMARY_MAX_SOURCE_CHARS=12000
+```
 
 ## Independent knowledge base
 
@@ -299,6 +411,16 @@ foreign key.
 Revision `20260727_0008` adds PostgreSQL lexical search metadata, preserves
 chunk line/symbol provenance, and creates the `rag_index_jobs` state journal.
 
+Revision `20260730_0009` adds workspace revision/member/settings tables,
+project memories and evidence, extraction jobs, a transactional vector-index
+outbox, and body-free audit events. PostgreSQL is the memory source of truth;
+the separate Qdrant `project_memories` collection stores only vectors plus
+memory/workspace/revision/version identifiers and can be rebuilt.
+
+Revision `20260730_0010` adds persistent rolling conversation summaries with
+the summarized message boundary, source-size accounting, and optimistic
+versioning. Source messages remain in the session tables.
+
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
@@ -314,6 +436,8 @@ DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
+PROJECT_MEMORY_ENABLED=false
+PROJECT_MEMORY_MODE=off
 WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 ```
 
@@ -321,8 +445,8 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, Agent runs, workspace and knowledge-base catalogs, document/chunk metadata, lexical RAG search, index jobs, and LangGraph checkpoints |
-| Qdrant | RAG embeddings, vector similarity search, knowledge-base filtering, and retrieval payloads |
+| PostgreSQL | Sessions/messages and rolling summaries, Agent runs, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
+| Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
 
@@ -359,13 +483,18 @@ PostgreSQL over the internal Compose network. The local-only port binding is
 intended for development; do not publish Adminer without adding appropriate
 access controls.
 
-Workers register only Agent run/resume tasks. An inaccessible captured root
-fails with the structured `workspace_unavailable` message.
+Workers register Agent run/resume, idempotent conversation compression, memory
+extraction, and independent project-memory index-Outbox consumption tasks. An
+inaccessible captured root fails with the structured
+`workspace_unavailable` message.
+Failed memory-extraction jobs retain their attempt count; Celery can retry the
+same source, while a completed `source_type + source_id` remains idempotent.
 
 ## Optional Go gateway
 
 The `gateway/` service provides request admission, request-ID propagation,
-health/readiness probes, SSE-safe proxying, and graceful shutdown:
+optional OIDC/JWT validation through RS256 JWKS, health/readiness probes,
+SSE-safe proxying, and graceful shutdown:
 
 ```bash
 go run ./gateway/cmd/gateway
@@ -373,8 +502,13 @@ go test ./gateway/...
 go vet ./gateway/...
 ```
 
-It remains a transport boundary and does not own Agent, RAG, LLM, or database
-logic.
+In production, configure `GATEWAY_AUTH_MODE=oidc`, issuer, audience, JWKS URL,
+and a shared `GATEWAY_TRUST_SECRET`; configure FastAPI with
+`AUTH_MODE=trusted_header` and the same secret. The gateway removes forged
+identity headers, validates the bearer token, strips it, and injects the trusted
+subject. Local development can keep both auth modes disabled. This is a trusted
+identity boundary for sessions and workspace memory, not a claim of complete
+multi-tenant authorization across every legacy knowledge-base endpoint.
 
 ## Verification
 
@@ -391,4 +525,5 @@ Run offline Agent evaluations with:
 
 ```bash
 .venv/bin/python evals/run_evals.py
+.venv/bin/python evals/run_memory_evals.py
 ```

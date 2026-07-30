@@ -9,6 +9,12 @@ services:
       GATEWAY_UPSTREAM_URL: "http://host.docker.internal:8000"
       GATEWAY_MAX_CONCURRENT_REQUESTS: "256"
       GATEWAY_REQUESTS_PER_SECOND: "0"
+      GATEWAY_AUTH_MODE: "${GATEWAY_AUTH_MODE:-disabled}"
+      GATEWAY_OIDC_ISSUER: "${GATEWAY_OIDC_ISSUER:-}"
+      GATEWAY_OIDC_AUDIENCE: "${GATEWAY_OIDC_AUDIENCE:-}"
+      GATEWAY_OIDC_JWKS_URL: "${GATEWAY_OIDC_JWKS_URL:-}"
+      GATEWAY_OIDC_JWKS_CACHE_TTL: "${GATEWAY_OIDC_JWKS_CACHE_TTL:-5m}"
+      GATEWAY_TRUST_SECRET: "${GATEWAY_TRUST_SECRET:-}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

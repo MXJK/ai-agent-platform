@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import os
 from pathlib import Path
 
@@ -33,6 +34,11 @@ class Settings:
     llm_max_context_messages: int = 12
     llm_max_output_tokens: int = 4096
     llm_thinking_level: str = "low"
+    conversation_summary_enabled: bool = True
+    conversation_summary_trigger_messages: int = 12
+    conversation_summary_keep_recent_messages: int = 6
+    conversation_summary_max_chars: int = 2000
+    conversation_summary_max_source_chars: int = 12000
     sse_heartbeat_seconds: float = 10.0
     rag_vector_store: str = "memory"
     chroma_persist_directory: str = ".chroma"
@@ -40,6 +46,18 @@ class Settings:
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str | None = None
     qdrant_collection_name: str = "knowledge_chunks"
+    project_memory_enabled: bool = False
+    project_memory_mode: str = "off"
+    project_memory_candidate_threshold: float = 0.60
+    project_memory_auto_threshold: float = 0.85
+    project_memory_recall_limit: int = 20
+    project_memory_result_limit: int = 6
+    project_memory_max_context_chars: int = 3000
+    project_memory_qdrant_collection: str = "project_memories"
+    project_memory_relevance_weight: float = 0.65
+    project_memory_recency_weight: float = 0.20
+    project_memory_importance_weight: float = 0.15
+    project_memory_recency_half_life_days: float = 180.0
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
@@ -78,6 +96,8 @@ class Settings:
     agent_max_instruction_chars: int = 16000
     agent_max_tool_rounds: int = 4
     agent_max_tool_calls: int = 12
+    auth_mode: str = "disabled"
+    gateway_trust_secret: str | None = None
 
     def __post_init__(self) -> None:
         if not self.api_prefix.startswith("/"):
@@ -110,6 +130,16 @@ class Settings:
             self.rag_vector_store,
             {"memory", "chroma", "qdrant"},
         )
+        _require_choice(
+            "project_memory_mode",
+            self.project_memory_mode,
+            {"off", "shadow", "review", "auto"},
+        )
+        _require_choice(
+            "auth_mode",
+            self.auth_mode,
+            {"disabled", "trusted_header"},
+        )
         _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
         _require_choice(
             "task_queue_backend",
@@ -122,11 +152,37 @@ class Settings:
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
             ("llm_max_output_tokens", self.llm_max_output_tokens),
+            (
+                "conversation_summary_trigger_messages",
+                self.conversation_summary_trigger_messages,
+            ),
+            (
+                "conversation_summary_keep_recent_messages",
+                self.conversation_summary_keep_recent_messages,
+            ),
+            (
+                "conversation_summary_max_chars",
+                self.conversation_summary_max_chars,
+            ),
+            (
+                "conversation_summary_max_source_chars",
+                self.conversation_summary_max_source_chars,
+            ),
             ("local_embedding_dimensions", self.local_embedding_dimensions),
             ("rag_chunk_size", self.rag_chunk_size),
             ("rag_recall_limit", self.rag_recall_limit),
             ("rag_rrf_k", self.rag_rrf_k),
             ("rag_max_prompt_chars", self.rag_max_prompt_chars),
+            ("project_memory_recall_limit", self.project_memory_recall_limit),
+            ("project_memory_result_limit", self.project_memory_result_limit),
+            (
+                "project_memory_max_context_chars",
+                self.project_memory_max_context_chars,
+            ),
+            (
+                "project_memory_recency_half_life_days",
+                self.project_memory_recency_half_life_days,
+            ),
             ("background_task_workers", self.background_task_workers),
             (
                 "celery_visibility_timeout_seconds",
@@ -176,8 +232,50 @@ class Settings:
             raise ValueError("rag_chunk_overlap must be greater than or equal to 0")
         if self.rag_chunk_overlap >= self.rag_chunk_size:
             raise ValueError("rag_chunk_overlap must be smaller than rag_chunk_size")
+        if (
+            self.conversation_summary_keep_recent_messages
+            >= self.conversation_summary_trigger_messages
+        ):
+            raise ValueError(
+                "conversation_summary_keep_recent_messages must be smaller than "
+                "conversation_summary_trigger_messages"
+            )
         if not 0.0 <= self.rag_lexical_weight <= 1.0:
             raise ValueError("rag_lexical_weight must be between 0 and 1")
+        if not 0.0 <= self.project_memory_candidate_threshold <= 1.0:
+            raise ValueError(
+                "project_memory_candidate_threshold must be between 0 and 1"
+            )
+        if not 0.0 <= self.project_memory_auto_threshold <= 1.0:
+            raise ValueError(
+                "project_memory_auto_threshold must be between 0 and 1"
+            )
+        if (
+            self.project_memory_candidate_threshold
+            > self.project_memory_auto_threshold
+        ):
+            raise ValueError(
+                "project_memory_candidate_threshold must not exceed "
+                "project_memory_auto_threshold"
+            )
+        if self.project_memory_result_limit > self.project_memory_recall_limit:
+            raise ValueError(
+                "project_memory_result_limit must not exceed "
+                "project_memory_recall_limit"
+            )
+        memory_weights = (
+            self.project_memory_relevance_weight,
+            self.project_memory_recency_weight,
+            self.project_memory_importance_weight,
+        )
+        if any(weight < 0.0 or weight > 1.0 for weight in memory_weights):
+            raise ValueError("project memory ranking weights must be between 0 and 1")
+        if not math.isclose(sum(memory_weights), 1.0, abs_tol=1e-9):
+            raise ValueError("project memory ranking weights must sum to 1")
+        if self.auth_mode == "trusted_header" and not self.gateway_trust_secret:
+            raise ValueError(
+                "gateway_trust_secret is required when auth_mode=trusted_header"
+            )
         if self.background_task_queue_capacity < 0:
             raise ValueError(
                 "background_task_queue_capacity must be greater than or equal to 0"
@@ -275,6 +373,31 @@ class Settings:
             llm_thinking_level=_env(
                 "LLM_THINKING_LEVEL", cls.llm_thinking_level, dotenv
             ),
+            conversation_summary_enabled=_bool_env(
+                "CONVERSATION_SUMMARY_ENABLED",
+                cls.conversation_summary_enabled,
+                dotenv,
+            ),
+            conversation_summary_trigger_messages=_int_env(
+                "CONVERSATION_SUMMARY_TRIGGER_MESSAGES",
+                cls.conversation_summary_trigger_messages,
+                dotenv,
+            ),
+            conversation_summary_keep_recent_messages=_int_env(
+                "CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES",
+                cls.conversation_summary_keep_recent_messages,
+                dotenv,
+            ),
+            conversation_summary_max_chars=_int_env(
+                "CONVERSATION_SUMMARY_MAX_CHARS",
+                cls.conversation_summary_max_chars,
+                dotenv,
+            ),
+            conversation_summary_max_source_chars=_int_env(
+                "CONVERSATION_SUMMARY_MAX_SOURCE_CHARS",
+                cls.conversation_summary_max_source_chars,
+                dotenv,
+            ),
             sse_heartbeat_seconds=_float_env(
                 "SSE_HEARTBEAT_SECONDS", cls.sse_heartbeat_seconds, dotenv
             ),
@@ -289,6 +412,66 @@ class Settings:
             qdrant_api_key=_env("QDRANT_API_KEY", None, dotenv),
             qdrant_collection_name=_env(
                 "QDRANT_COLLECTION_NAME", cls.qdrant_collection_name, dotenv
+            ),
+            project_memory_enabled=_bool_env(
+                "PROJECT_MEMORY_ENABLED",
+                cls.project_memory_enabled,
+                dotenv,
+            ),
+            project_memory_mode=_env(
+                "PROJECT_MEMORY_MODE",
+                cls.project_memory_mode,
+                dotenv,
+            ),
+            project_memory_candidate_threshold=_float_env(
+                "PROJECT_MEMORY_CANDIDATE_THRESHOLD",
+                cls.project_memory_candidate_threshold,
+                dotenv,
+            ),
+            project_memory_auto_threshold=_float_env(
+                "PROJECT_MEMORY_AUTO_THRESHOLD",
+                cls.project_memory_auto_threshold,
+                dotenv,
+            ),
+            project_memory_recall_limit=_int_env(
+                "PROJECT_MEMORY_RECALL_LIMIT",
+                cls.project_memory_recall_limit,
+                dotenv,
+            ),
+            project_memory_result_limit=_int_env(
+                "PROJECT_MEMORY_RESULT_LIMIT",
+                cls.project_memory_result_limit,
+                dotenv,
+            ),
+            project_memory_max_context_chars=_int_env(
+                "PROJECT_MEMORY_MAX_CONTEXT_CHARS",
+                cls.project_memory_max_context_chars,
+                dotenv,
+            ),
+            project_memory_qdrant_collection=_env(
+                "PROJECT_MEMORY_QDRANT_COLLECTION",
+                cls.project_memory_qdrant_collection,
+                dotenv,
+            ),
+            project_memory_relevance_weight=_float_env(
+                "PROJECT_MEMORY_RELEVANCE_WEIGHT",
+                cls.project_memory_relevance_weight,
+                dotenv,
+            ),
+            project_memory_recency_weight=_float_env(
+                "PROJECT_MEMORY_RECENCY_WEIGHT",
+                cls.project_memory_recency_weight,
+                dotenv,
+            ),
+            project_memory_importance_weight=_float_env(
+                "PROJECT_MEMORY_IMPORTANCE_WEIGHT",
+                cls.project_memory_importance_weight,
+                dotenv,
+            ),
+            project_memory_recency_half_life_days=_float_env(
+                "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS",
+                cls.project_memory_recency_half_life_days,
+                dotenv,
             ),
             embedding_provider=_env(
                 "EMBEDDING_PROVIDER", cls.embedding_provider, dotenv
@@ -428,6 +611,8 @@ class Settings:
                 cls.agent_max_tool_calls,
                 dotenv,
             ),
+            auth_mode=_env("AUTH_MODE", cls.auth_mode, dotenv),
+            gateway_trust_secret=_env("GATEWAY_TRUST_SECRET", None, dotenv),
         )
 
     def _validate_distributed_task_storage(self) -> None:

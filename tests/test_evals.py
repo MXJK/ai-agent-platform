@@ -10,6 +10,11 @@ from evals.run_evals import (
     _retrieval_quality_failures,
 )
 from ai_agent_platform.integrations.rag import RetrievalMetrics
+from evals.run_memory_evals import (
+    format_memory_report,
+    load_memory_eval_suite,
+    run_memory_eval_suite,
+)
 
 
 class EvalRunnerTests(unittest.TestCase):
@@ -65,6 +70,14 @@ class EvalRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 2)
         self.assertIn("min_recall_at_k", failures[0])
+
+    def test_project_memory_quality_gates_pass_offline(self) -> None:
+        report = run_memory_eval_suite(load_memory_eval_suite())
+
+        self.assertTrue(report.passed, format_memory_report(report))
+        self.assertGreaterEqual(report.candidate_precision, 0.90)
+        self.assertGreaterEqual(report.recall_at_6, 0.85)
+        self.assertEqual(report.cross_workspace_leaks, 0)
 
 
 if __name__ == "__main__":

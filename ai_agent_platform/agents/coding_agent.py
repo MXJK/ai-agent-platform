@@ -30,6 +30,7 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
     ContextSource,
     KnowledgeContextProvider,
+    ProjectMemoryContextProvider,
 )
 from ai_agent_platform.agents.coding.planner import (
     LLMStructuredAgentPlanner,
@@ -122,6 +123,7 @@ class CodingAgentRuntime:
         max_tool_calls: int = 12,
         max_history_messages: int = 12,
         knowledge_context_provider: KnowledgeContextProvider | None = None,
+        project_memory_provider: ProjectMemoryContextProvider | None = None,
         max_rag_context_chars: int = 6000,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
@@ -137,6 +139,7 @@ class CodingAgentRuntime:
         self._max_tool_calls = max_tool_calls
         self._max_history_messages = max_history_messages
         self._knowledge_context_provider = knowledge_context_provider
+        self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
         self._change_loop = ChangeLoopExecutor(tools=self._tools, planner=self._planner)
         self._graph = self._build_graph()
@@ -152,6 +155,7 @@ class CodingAgentRuntime:
         workspace_root: str,
         focus_files: Optional[list[str]] = None,
         run_id: Optional[str] = None,
+        actor_user_id: str = "demo_user",
     ) -> AgentRunResult:
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
@@ -170,6 +174,7 @@ class CodingAgentRuntime:
             "user_input": user_input,
             "workspace_id": workspace_id,
             "workspace_root": workspace_root,
+            "actor_user_id": actor_user_id,
             "focus_files": focus_files or [],
             "history": [
                 {
@@ -196,6 +201,7 @@ class CodingAgentRuntime:
             "native_tool_stop_reason": "",
             "context_sources": [],
             "rag_context_sources": [],
+            "memory_context_sources": [],
             "context_warnings": [],
             "knowledge_base_catalog": [],
             "selected_knowledge_base_ids": [],
@@ -518,6 +524,7 @@ class CodingAgentRuntime:
         workflow.add_node("load_project_instructions", self._load_project_instructions)
         workflow.add_node("classify_request", self._classify_request)
         workflow.add_node("decide_context_source", self._decide_context_source)
+        workflow.add_node("retrieve_project_memory", self._retrieve_project_memory)
         workflow.add_node("retrieve_knowledge", self._retrieve_knowledge)
         workflow.add_node("plan_exploration", self._plan_exploration)
         workflow.add_node("execute_exploration", self._execute_exploration)
@@ -536,8 +543,9 @@ class CodingAgentRuntime:
         workflow.add_edge("setup_workspace", "load_project_instructions")
         workflow.add_edge("load_project_instructions", "classify_request")
         workflow.add_edge("classify_request", "decide_context_source")
+        workflow.add_edge("decide_context_source", "retrieve_project_memory")
         workflow.add_conditional_edges(
-            "decide_context_source",
+            "retrieve_project_memory",
             lambda state: state.get("context_route", "repo"),
             {
                 "none": "merge_evidence",
@@ -766,7 +774,20 @@ class CodingAgentRuntime:
                 for item_id in fallback_selected
                 if item_id in valid_ids
             ][:MAX_SELECTED_KNOWLEDGE_BASES]
-        if state.get("intent") in CHANGE_INTENTS | {"test_strategy"}:
+        live_repo_intents = CHANGE_INTENTS | {
+            "test_strategy",
+            "code_explanation",
+            "repo_navigation",
+            "bug_investigation",
+        }
+        requires_live_repo = (
+            state.get("intent") in live_repo_intents
+            or (
+                state.get("intent") == "repository_question"
+                and fallback_route == "repo"
+            )
+        )
+        if requires_live_repo:
             if route == "rag":
                 route = "hybrid" if selected else "repo"
             elif route == "none":
@@ -886,6 +907,73 @@ class CodingAgentRuntime:
                     "chars": used_chars,
                     "limit": self._max_rag_context_chars,
                     "truncated": truncated,
+                    "warnings": warnings,
+                },
+            ),
+        }
+
+    def _retrieve_project_memory(
+        self,
+        state: CodingAgentState,
+    ) -> CodingAgentState:
+        warnings = list(state.get("context_warnings", []))
+        sources: list[ContextSource] = []
+        if (
+            self._project_memory_provider is not None
+            and state.get("intent") != "small_talk"
+        ):
+            try:
+                retrieved = self._project_memory_provider.retrieve(
+                    workspace_id=state["workspace_id"],
+                    actor_user_id=state.get("actor_user_id", "demo_user"),
+                    query=build_workspace_query(state),
+                )
+                for item in retrieved:
+                    memory = item.memory
+                    sources.append(
+                        ContextSource(
+                            kind="project_memory",
+                            path=(
+                                f"memory://{memory.workspace_id}/{memory.id}"
+                            ),
+                            start_line=None,
+                            end_line=None,
+                            text=memory.content,
+                            reason=(
+                                "Historical project memory; verify mutable "
+                                f"claims against live sources (score={item.score:.4f})"
+                            ),
+                            content_hash=hashlib.sha256(
+                                memory.content.encode("utf-8")
+                            ).hexdigest(),
+                            memory_id=memory.id,
+                            memory_kind=memory.kind,
+                            confidence=memory.confidence,
+                            last_confirmed_at=(
+                                memory.last_confirmed_at.isoformat()
+                                if memory.last_confirmed_at
+                                else None
+                            ),
+                            relevance_score=item.relevance_score,
+                            recency_score=item.recency_score,
+                            importance_score=item.importance_score,
+                            score=item.score,
+                        )
+                    )
+            except Exception as exc:
+                warnings.append(f"project memory retrieval unavailable: {exc}")
+        return {
+            "memory_context_sources": sources,
+            "context_warnings": warnings,
+            "trace": _append_trace(
+                state,
+                node="retrieve_project_memory",
+                summary="检索工作区当前 revision 的可用项目记忆。",
+                output={
+                    "source_count": len(sources),
+                    "memory_ids": [
+                        item.memory_id for item in sources if item.memory_id
+                    ],
                     "warnings": warnings,
                 },
             ),
@@ -1119,6 +1207,7 @@ class CodingAgentRuntime:
         for source in (
             list(state.get("context_sources", []))
             + list(state.get("rag_context_sources", []))
+            + list(state.get("memory_context_sources", []))
         ):
             key = (
                 source.kind,
@@ -1135,6 +1224,8 @@ class CodingAgentRuntime:
             merged.append(source)
             if source.kind == "knowledge_chunk":
                 knowledge_count += 1
+            elif source.kind == "project_memory":
+                pass
             else:
                 repo_count += 1
         return {
@@ -1147,6 +1238,9 @@ class CodingAgentRuntime:
                     "context_route": state.get("context_route", "repo"),
                     "repo_source_count": repo_count,
                     "knowledge_source_count": knowledge_count,
+                    "memory_source_count": sum(
+                        item.kind == "project_memory" for item in merged
+                    ),
                     "source_count": len(merged),
                     "warnings": state.get("context_warnings", []),
                 },

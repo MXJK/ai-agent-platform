@@ -1,0 +1,100 @@
+{
+  "thresholds": {
+    "min_candidate_precision": 0.9,
+    "min_recall_at_6": 0.85,
+    "max_cross_workspace_leaks": 0
+  },
+  "memories": [
+    {
+      "id": "postgres-authority",
+      "workspace_id": "alpha",
+      "kind": "decision",
+      "title": "PostgreSQL authority",
+      "content": "PostgreSQL is the authoritative project-memory store."
+    },
+    {
+      "id": "outbox-indexing",
+      "workspace_id": "alpha",
+      "kind": "architecture_fact",
+      "title": "Outbox indexing",
+      "content": "Qdrant indexing is driven by a transactional outbox."
+    },
+    {
+      "id": "source-precedence",
+      "workspace_id": "alpha",
+      "kind": "constraint",
+      "title": "Source precedence",
+      "content": "Live source code and AGENTS.md override historical memory."
+    },
+    {
+      "id": "verification-command",
+      "workspace_id": "alpha",
+      "kind": "convention",
+      "title": "Verification command",
+      "content": "Run pytest and compileall before closing a task."
+    },
+    {
+      "id": "incident-secret",
+      "workspace_id": "alpha",
+      "kind": "incident_lesson",
+      "title": "Secret persistence lesson",
+      "content": "Credential-like values must be rejected before persistence."
+    },
+    {
+      "id": "beta-private",
+      "workspace_id": "beta",
+      "kind": "decision",
+      "title": "Beta-only database",
+      "content": "The beta workspace uses an isolated SQLite prototype."
+    }
+  ],
+  "queries": [
+    {
+      "workspace_id": "alpha",
+      "query": "What is the authoritative project memory database?",
+      "expected_ids": ["postgres-authority"]
+    },
+    {
+      "workspace_id": "alpha",
+      "query": "How does Qdrant indexing stay consistent?",
+      "expected_ids": ["outbox-indexing"]
+    },
+    {
+      "workspace_id": "alpha",
+      "query": "Which source wins over historical memory?",
+      "expected_ids": ["source-precedence"]
+    },
+    {
+      "workspace_id": "alpha",
+      "query": "What verification commands are required?",
+      "expected_ids": ["verification-command"]
+    },
+    {
+      "workspace_id": "alpha",
+      "query": "How are credential values handled?",
+      "expected_ids": ["incident-secret"]
+    }
+  ],
+  "extraction_cases": [
+    {
+      "user_message": "请记住：必须先运行 pytest 再提交",
+      "expected_candidate": true
+    },
+    {
+      "user_message": "Remember that PostgreSQL is the source of truth",
+      "expected_candidate": true
+    },
+    {
+      "user_message": "请记住：禁止在记忆中保存凭据",
+      "expected_candidate": true
+    },
+    {
+      "user_message": "项目现在怎么样？",
+      "expected_candidate": false
+    },
+    {
+      "user_message": "帮我解释这段代码",
+      "expected_candidate": false
+    }
+  ]
+}

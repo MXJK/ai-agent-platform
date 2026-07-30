@@ -98,7 +98,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
 
 
 class CeleryTaskQueueTests(unittest.TestCase):
-    def test_publishes_agent_task_and_rejects_removed_index_task(self) -> None:
+    def test_publishes_agent_and_memory_tasks(self) -> None:
         with patch("celery.Celery") as celery_factory:
             celery_app = celery_factory.return_value
             queue = CeleryTaskQueue(broker_url="redis://localhost:6379/0")
@@ -108,12 +108,42 @@ class CeleryTaskQueueTests(unittest.TestCase):
                 run_id="run_1",
                 workspace_id="workspace_main",
             )
+            queue.submit(
+                "memory_extraction",
+                lambda: None,
+                workspace_id="workspace_main",
+                source_type="agent_run",
+                source_id="run_1",
+            )
+            queue.submit(
+                "memory_index_outbox",
+                lambda: None,
+                trigger_id="mem_1:1",
+            )
+            queue.submit(
+                "conversation_compression",
+                lambda: None,
+                session_id="session_1",
+                trigger_message_id="msg_12",
+            )
             with self.assertRaises(TaskQueueError):
                 queue.submit("repository_index", lambda: None)
             queue.close()
-        call = celery_app.send_task.call_args
-        self.assertEqual(call.args, ("ai_agent_platform.agent_run",))
-        UUID(call.kwargs["task_id"])
+        calls = celery_app.send_task.call_args_list
+        self.assertEqual(calls[0].args, ("ai_agent_platform.agent_run",))
+        self.assertEqual(
+            calls[1].args,
+            ("ai_agent_platform.memory_extraction",),
+        )
+        self.assertEqual(
+            calls[2].args,
+            ("ai_agent_platform.memory_index_outbox",),
+        )
+        self.assertEqual(
+            calls[3].args,
+            ("ai_agent_platform.conversation_compression",),
+        )
+        UUID(calls[0].kwargs["task_id"])
 
     def test_duplicate_payloads_use_the_same_task_id(self) -> None:
         with patch("celery.Celery") as celery_factory:

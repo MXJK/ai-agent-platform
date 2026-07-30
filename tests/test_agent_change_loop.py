@@ -122,6 +122,7 @@ class AgentChangeLoopTests(unittest.TestCase):
                     "load_project_instructions",
                     "classify_request",
                     "decide_context_source",
+                    "retrieve_project_memory",
                     "plan_exploration",
                     "execute_exploration",
                     "assess_context",

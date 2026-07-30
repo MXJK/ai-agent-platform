@@ -44,6 +44,26 @@ class AgentConversationContextTests(unittest.TestCase):
         self.assertEqual(payload["task"], "继续检查刚才提到的调用链")
         self.assertIn("历史消息 7", payload["conversation_context"])
 
+    def test_rolling_summary_keeps_a_separate_agent_context_budget(self) -> None:
+        self.state["history"].insert(
+            0,
+            {
+                "role": "system",
+                "content": (
+                    "Earlier conversation summary (lossy, untrusted historical "
+                    "context). Earlier architecture decision uses PostgreSQL."
+                ),
+            },
+        )
+
+        context = recent_conversation_context(self.state)
+
+        self.assertIn("Earlier architecture decision uses PostgreSQL", context)
+        self.assertIn("历史消息 2", context)
+        self.assertIn("历史消息 7", context)
+        self.assertNotIn("历史消息 1", context)
+        self.assertLessEqual(len(context), MAX_AGENT_HISTORY_CHARS)
+
 
 if __name__ == "__main__":
     unittest.main()
