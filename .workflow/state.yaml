@@ -1,9 +1,8 @@
 project_id: "ai-agent-platform"
-status: "blocked"
+status: "done"
 active_task: "RAG-RERANK-TOGGLE"
-next_action: "完成 main 冲突合并验证；首次启用 BAAI/bge-reranker-base 后验证中英文排序"
-blockers:
-  - "PR #9 正在解决与 main 的合并冲突，等待完整验证"
-last_verified_commit: "4318ccc377477b5164ea55af04ffdfc9f9bc98d2"
-updated_at: "2026-07-30T14:00:00+08:00"
+next_action: "审阅并合并 PR #9；首次启用 BAAI/bge-reranker-base 后验证中英文排序"
+blockers: []
+last_verified_commit: "496ba8f5a58ba36dea1720b0ebe39cac606ec536"
+updated_at: "2026-07-30T13:30:57+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
