@@ -15,3 +15,7 @@ class RAGConfigurationError(RAGError):
 
 class RAGProviderError(RAGError):
     """Raised when an embedding, vector, or reranking provider fails."""
+
+
+class RAGRerankerUnavailableError(RAGError):
+    """Raised when a request requires a reranker that is not configured."""

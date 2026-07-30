@@ -1,5 +1,9 @@
+from dataclasses import replace
 from io import BytesIO
+import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from docx import Document
 
@@ -8,7 +12,9 @@ from ai_agent_platform.integrations.rag import (
     NoopReranker,
     ParsedDocument,
     RAGService,
+    RAGRerankerUnavailableError,
     RecursiveCharacterChunker,
+    SentenceTransformerCrossEncoderReranker,
     TextDocumentParser,
     RetrievedDocument,
     evaluate_retrieval,
@@ -101,6 +107,26 @@ class RecordingIndexJobStore(InMemoryRAGMetadataStore):
     def transition_index_job(self, **kwargs):
         self.transitions.append((kwargs["expected_status"], kwargs["status"]))
         return super().transition_index_job(**kwargs)
+
+
+class RecordingReranker:
+    status = "ready"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def rerank(
+        self,
+        *,
+        query: str,
+        candidates: list[RetrievedDocument],
+        limit: int,
+    ) -> list[RetrievedDocument]:
+        self.calls += 1
+        return [
+            replace(candidate, score=0.9, rerank_score=0.9)
+            for candidate in reversed(candidates)
+        ][:limit]
 
 
 class RAGRetrievalTests(unittest.TestCase):
@@ -204,6 +230,128 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertEqual(results[0].dense_rank, 1)
         self.assertEqual(results[0].lexical_rank, 1)
         self.assertEqual(results[0].fusion_score, results[0].score)
+
+    def test_request_can_enable_or_skip_configured_reranker(self) -> None:
+        reranker = RecordingReranker()
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=InMemoryVectorStore(),
+            reranker=reranker,
+            reranker_provider="sentence_transformer",
+            reranker_model="test-cross-encoder",
+            rerank_default_enabled=False,
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+        )
+        service.ingest_document(
+            knowledge_base_id="docs",
+            filename="guide.md",
+            content="request-scoped reranking reference",
+        )
+
+        skipped = service.search_with_metadata(
+            knowledge_base_id="docs",
+            query="reranking",
+            limit=1,
+            rerank_enabled=False,
+        )
+        applied = service.search_with_metadata(
+            knowledge_base_id="docs",
+            query="reranking",
+            limit=1,
+            rerank_enabled=True,
+        )
+
+        self.assertEqual(reranker.calls, 1)
+        self.assertFalse(skipped.retrieval.rerank_applied)
+        self.assertIsNone(skipped.results[0].rerank_score)
+        self.assertTrue(applied.retrieval.rerank_requested)
+        self.assertTrue(applied.retrieval.rerank_applied)
+        self.assertEqual(applied.retrieval.provider, "sentence_transformer")
+        self.assertEqual(applied.retrieval.model, "test-cross-encoder")
+        self.assertEqual(applied.results[0].rerank_score, 0.9)
+        self.assertIsNotNone(applied.retrieval.rerank_duration_ms)
+
+    def test_request_rejects_unavailable_reranker(self) -> None:
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=ConstantEmbeddingProvider(),
+            vector_store=InMemoryVectorStore(),
+            reranker=NoopReranker(),
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+            rerank_default_enabled=False,
+        )
+
+        with self.assertRaises(RAGRerankerUnavailableError):
+            service.search_with_metadata(
+                knowledge_base_id="docs",
+                query="reranking",
+                limit=1,
+                rerank_enabled=True,
+            )
+
+    def test_cross_encoder_loads_lazily_and_reuses_model(self) -> None:
+        created_models = []
+
+        class FakeCrossEncoder:
+            def __init__(self, model_name: str, *, device: str) -> None:
+                self.model_name = model_name
+                self.device = device
+                self.predict_calls = 0
+                created_models.append(self)
+
+            def predict(self, pairs):
+                self.predict_calls += 1
+                return [float(index) for index, _ in enumerate(pairs, start=1)]
+
+        reranker = SentenceTransformerCrossEncoderReranker(
+            model_name="test-cross-encoder",
+            device=" cpu ",
+        )
+        candidates = [
+            RetrievedDocument(
+                id="chunk_1",
+                knowledge_base_id="docs",
+                document_id="doc_1",
+                filename="guide.md",
+                chunk_index=0,
+                text="first",
+                score=0.2,
+            ),
+            RetrievedDocument(
+                id="chunk_2",
+                knowledge_base_id="docs",
+                document_id="doc_1",
+                filename="guide.md",
+                chunk_index=1,
+                text="second",
+                score=0.1,
+            ),
+        ]
+        self.assertEqual(reranker.status, "not_loaded")
+
+        with patch.dict(
+            sys.modules,
+            {
+                "sentence_transformers": SimpleNamespace(
+                    CrossEncoder=FakeCrossEncoder
+                )
+            },
+        ):
+            first = reranker.rerank(query="query", candidates=candidates, limit=2)
+            second = reranker.rerank(query="query", candidates=candidates, limit=1)
+
+        self.assertEqual(reranker.status, "ready")
+        self.assertEqual(len(created_models), 1)
+        self.assertEqual(created_models[0].model_name, "test-cross-encoder")
+        self.assertEqual(created_models[0].device, "cpu")
+        self.assertEqual(created_models[0].predict_calls, 2)
+        self.assertEqual([item.id for item in first], ["chunk_2", "chunk_1"])
+        self.assertEqual(second[0].rerank_score, 2.0)
 
     def test_lexical_recall_adds_candidate_missing_from_dense_recall(self) -> None:
         service = RAGService(

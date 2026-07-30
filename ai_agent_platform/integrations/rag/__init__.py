@@ -8,6 +8,7 @@ from ai_agent_platform.integrations.rag.errors import (
     RAGConfigurationError,
     RAGError,
     RAGProviderError,
+    RAGRerankerUnavailableError,
     RAGValidationError,
 )
 from ai_agent_platform.integrations.rag.evaluation import (
@@ -23,8 +24,11 @@ from ai_agent_platform.integrations.rag.models import (
     IngestedDocument,
     ParsedDocument,
     RAGAnswer,
+    RAGSearchResult,
     Reranker,
+    RerankerCapabilities,
     RetrievedDocument,
+    RetrievalExecution,
     VectorStore,
 )
 from ai_agent_platform.integrations.rag.factory import create_rag_service
@@ -60,14 +64,18 @@ __all__ = [
     "ParsedDocument",
     "QdrantVectorStore",
     "RAGAnswer",
+    "RAGSearchResult",
     "RAGConfigurationError",
     "RAGError",
     "RAGProviderError",
+    "RAGRerankerUnavailableError",
     "RAGService",
     "RAGValidationError",
     "RecursiveCharacterChunker",
     "Reranker",
+    "RerankerCapabilities",
     "RetrievedDocument",
+    "RetrievalExecution",
     "RetrievalMetrics",
     "SentenceTransformerCrossEncoderReranker",
     "SUPPORTED_DOCUMENT_EXTENSIONS",
