@@ -21,6 +21,7 @@ const (
 	defaultUpstreamHeaderTimeout       = 30 * time.Second
 	defaultReadinessTimeout            = 2 * time.Second
 	defaultShutdownTimeout             = 10 * time.Second
+	defaultOIDCJWKSCacheTTL             = 5 * time.Minute
 )
 
 // Config contains process-level gateway settings. A zero RequestsPerSecond
@@ -39,6 +40,12 @@ type Config struct {
 	ReadinessTimeout      time.Duration
 	ShutdownTimeout       time.Duration
 	LogLevel              string
+	AuthMode              string
+	OIDCIssuer            string
+	OIDCAudience          string
+	OIDCJWKSURL           *url.URL
+	OIDCJWKSCacheTTL      time.Duration
+	GatewayTrustSecret    string
 }
 
 // LoadConfig reads gateway settings from the process environment.
@@ -99,6 +106,38 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
 		return Config{}, fmt.Errorf("GATEWAY_LOG_LEVEL must be one of debug, info, warn, or error")
 	}
+	authMode := strings.ToLower(valueOrDefault(lookup, "GATEWAY_AUTH_MODE", "disabled"))
+	if authMode != "disabled" && authMode != "oidc" {
+		return Config{}, fmt.Errorf("GATEWAY_AUTH_MODE must be disabled or oidc")
+	}
+	var oidcJWKSURL *url.URL
+	oidcIssuer := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_OIDC_ISSUER", ""))
+	oidcAudience := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_OIDC_AUDIENCE", ""))
+	trustSecret := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_TRUST_SECRET", ""))
+	jwksCacheTTL, err := positiveDuration(
+		lookup,
+		"GATEWAY_OIDC_JWKS_CACHE_TTL",
+		defaultOIDCJWKSCacheTTL,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	if authMode == "oidc" {
+		rawJWKSURL := valueOrDefault(lookup, "GATEWAY_OIDC_JWKS_URL", "")
+		oidcJWKSURL, err = url.Parse(rawJWKSURL)
+		if err != nil || oidcJWKSURL.Host == "" || (oidcJWKSURL.Scheme != "http" && oidcJWKSURL.Scheme != "https") {
+			return Config{}, fmt.Errorf("GATEWAY_OIDC_JWKS_URL must be an absolute http(s) URL")
+		}
+		if oidcIssuer == "" {
+			return Config{}, fmt.Errorf("GATEWAY_OIDC_ISSUER is required in oidc mode")
+		}
+		if oidcAudience == "" {
+			return Config{}, fmt.Errorf("GATEWAY_OIDC_AUDIENCE is required in oidc mode")
+		}
+		if trustSecret == "" {
+			return Config{}, fmt.Errorf("GATEWAY_TRUST_SECRET is required in oidc mode")
+		}
+	}
 
 	return Config{
 		ListenAddress:         valueOrDefault(lookup, "GATEWAY_LISTEN_ADDRESS", defaultListenAddress),
@@ -114,6 +153,12 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 		ReadinessTimeout:      readinessTimeout,
 		ShutdownTimeout:       shutdownTimeout,
 		LogLevel:              logLevel,
+		AuthMode:              authMode,
+		OIDCIssuer:            oidcIssuer,
+		OIDCAudience:          oidcAudience,
+		OIDCJWKSURL:           oidcJWKSURL,
+		OIDCJWKSCacheTTL:      jwksCacheTTL,
+		GatewayTrustSecret:    trustSecret,
 	}, nil
 }
 

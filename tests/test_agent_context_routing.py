@@ -10,6 +10,7 @@ from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.domain import KnowledgeBaseRecord
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
+from ai_agent_platform.project_memory import ProjectMemory, RetrievedMemory
 
 
 class RoutingPlanner:
@@ -107,6 +108,43 @@ class FakeKnowledgeProvider:
         ]
 
 
+class FakeMemoryProvider:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    def retrieve(
+        self,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        query: str,
+    ) -> list[RetrievedMemory]:
+        del actor_user_id, query
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("memory vector unavailable")
+        now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        memory = ProjectMemory(
+            id="mem_0000000000000001",
+            workspace_id=workspace_id,
+            workspace_revision=1,
+            kind="architecture_fact",
+            title="Historical value",
+            content="Historically VALUE was 0; verify against live source.",
+            canonical_key="architecture_fact:historical-value",
+            status="active",
+            confidence=0.9,
+            importance=3,
+            version=1,
+            created_by="tester",
+            created_at=now,
+            updated_at=now,
+            last_confirmed_at=now,
+        )
+        return [RetrievedMemory(memory=memory, score=0.02)]
+
+
 class AgentContextRoutingTests(unittest.TestCase):
     def test_hybrid_filters_catalog_selection_and_merges_sources(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -186,6 +224,7 @@ class AgentContextRoutingTests(unittest.TestCase):
 
     def test_small_talk_skips_repo_and_rag(self) -> None:
         with TemporaryDirectory() as temp_dir:
+            memory_provider = FakeMemoryProvider()
             runtime = CodingAgentRuntime(
                 planner=RoutingPlanner(
                     route="repo",
@@ -193,6 +232,7 @@ class AgentContextRoutingTests(unittest.TestCase):
                     selected=[],
                 ),
                 knowledge_context_provider=FakeKnowledgeProvider(),
+                project_memory_provider=memory_provider,
             )
             result = runtime.run(
                 conversation_id="session",
@@ -207,6 +247,76 @@ class AgentContextRoutingTests(unittest.TestCase):
         self.assertNotIn("plan_exploration", nodes)
         self.assertNotIn("retrieve_knowledge", nodes)
         self.assertIn("merge_evidence", nodes)
+        self.assertEqual(memory_provider.calls, 0)
+
+    def test_project_memory_is_orthogonal_and_live_repo_evidence_is_retained(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            memory_provider = FakeMemoryProvider()
+            runtime = CodingAgentRuntime(
+                planner=RoutingPlanner(
+                    route="repo",
+                    intent="code_explanation",
+                    selected=[],
+                ),
+                project_memory_provider=memory_provider,
+            )
+            result = runtime.run(
+                conversation_id="session",
+                user_input="app.py 当前的 VALUE 是什么？",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+                focus_files=["app.py"],
+            )
+
+        self.assertEqual(memory_provider.calls, 1)
+        sources = {item.kind: item for item in result.context_sources}
+        self.assertIn("project_memory", sources)
+        self.assertIn("file", sources)
+        self.assertEqual(sources["project_memory"].memory_kind, "architecture_fact")
+        self.assertEqual(sources["project_memory"].confidence, 0.9)
+        self.assertIn("VALUE = 1", sources["file"].text)
+        nodes = [item["node"] for item in result.trace]
+        self.assertLess(
+            nodes.index("retrieve_project_memory"),
+            nodes.index("plan_exploration"),
+        )
+
+    def test_memory_failure_does_not_fail_agent_answer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            runtime = CodingAgentRuntime(
+                planner=RoutingPlanner(
+                    route="none",
+                    intent="repository_question",
+                    selected=[],
+                ),
+                project_memory_provider=FakeMemoryProvider(fail=True),
+            )
+            result = runtime.run(
+                conversation_id="session",
+                user_input="summarize the project",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=temp_dir,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.context_route, "repo")
+        trace = next(
+            item
+            for item in result.trace
+            if item["node"] == "retrieve_project_memory"
+        )
+        self.assertTrue(
+            any(
+                "memory vector unavailable" in warning
+                for warning in trace["output"]["warnings"]
+            )
+        )
 
 
 if __name__ == "__main__":

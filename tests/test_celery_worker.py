@@ -4,8 +4,11 @@ from unittest.mock import patch
 
 from ai_agent_platform.workers.celery_app import (
     celery_app,
+    execute_conversation_compression,
     execute_agent_resume,
     execute_agent_run,
+    execute_memory_extraction,
+    execute_memory_index_outbox,
 )
 
 
@@ -13,6 +16,9 @@ class CeleryWorkerTests(unittest.TestCase):
     def test_registers_only_agent_distributed_tasks(self) -> None:
         self.assertIn("ai_agent_platform.agent_run", celery_app.tasks)
         self.assertIn("ai_agent_platform.agent_resume", celery_app.tasks)
+        self.assertIn("ai_agent_platform.memory_extraction", celery_app.tasks)
+        self.assertIn("ai_agent_platform.memory_index_outbox", celery_app.tasks)
+        self.assertIn("ai_agent_platform.conversation_compression", celery_app.tasks)
         self.assertNotIn("ai_agent_platform.repository_index", celery_app.tasks)
 
     def test_agent_handlers_delegate_json_payloads(self) -> None:
@@ -34,6 +40,61 @@ class CeleryWorkerTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["run_id"], "run_1")
         self.assertFalse(calls[0][1]["broker_redelivered"])
         self.assertEqual(calls[1][0], "resume")
+
+    def test_memory_extraction_handler_delegates_json_payload(self) -> None:
+        calls: list[dict[str, object]] = []
+        services = SimpleNamespace(
+            project_memory_service=SimpleNamespace(
+                extract_and_store=lambda **kwargs: calls.append(kwargs),
+            )
+        )
+        with patch(
+            "ai_agent_platform.workers.celery_app.get_worker_services",
+            return_value=services,
+        ):
+            execute_memory_extraction.run(
+                workspace_id="project",
+                source_type="agent_run",
+                source_id="run_1",
+            )
+
+        self.assertEqual(calls[0]["source_id"], "run_1")
+
+    def test_memory_index_outbox_handler_delegates_json_payload(self) -> None:
+        calls: list[dict[str, object]] = []
+        services = SimpleNamespace(
+            project_memory_service=SimpleNamespace(
+                process_index_outbox=lambda **kwargs: calls.append(kwargs),
+            )
+        )
+        with patch(
+            "ai_agent_platform.workers.celery_app.get_worker_services",
+            return_value=services,
+        ):
+            execute_memory_index_outbox.run(trigger_id="mem_1:1")
+
+        self.assertEqual(calls, [{"trigger_id": "mem_1:1"}])
+
+    def test_conversation_compression_handler_delegates_json_payload(self) -> None:
+        calls: list[dict[str, object]] = []
+        services = SimpleNamespace(
+            session_service=SimpleNamespace(
+                compress_conversation=lambda **kwargs: calls.append(kwargs),
+            )
+        )
+        with patch(
+            "ai_agent_platform.workers.celery_app.get_worker_services",
+            return_value=services,
+        ):
+            execute_conversation_compression.run(
+                session_id="session_1",
+                trigger_message_id="msg_12",
+            )
+
+        self.assertEqual(
+            calls,
+            [{"session_id": "session_1", "trigger_message_id": "msg_12"}],
+        )
 
 
 if __name__ == "__main__":

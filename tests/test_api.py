@@ -40,6 +40,46 @@ def upload_document(
 
 
 class ApiTests(unittest.TestCase):
+    def test_chat_rolls_old_turns_into_summary_visible_from_api(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
+                background_task_workers=2,
+                conversation_summary_trigger_messages=4,
+                conversation_summary_keep_recent_messages=2,
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "user_1"},
+                ).json()["id"]
+                for message in ("first durable choice", "second question"):
+                    response = client.post(
+                        "/api/v1/chat/stream",
+                        json={
+                            "conversation_id": session_id,
+                            "message": message,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+
+                summary = None
+                for _ in range(100):
+                    summary = client.get(
+                        f"/api/v1/sessions/{session_id}/summary"
+                    ).json()
+                    if summary["summary_version"]:
+                        break
+                    time.sleep(0.01)
+
+                assert summary is not None
+                self.assertEqual(summary["message_count"], 4)
+                self.assertEqual(summary["summarized_message_count"], 2)
+                self.assertEqual(summary["summary_version"], 1)
+                self.assertIn("first durable choice", summary["compressed_summary"])
+
     def test_workspace_registration_listing_and_lookup(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

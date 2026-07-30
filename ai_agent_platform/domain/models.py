@@ -26,6 +26,22 @@ class SessionSummary:
     session_id: str
     message_count: int
     last_message: Optional[str]
+    compressed_summary: Optional[str] = None
+    summarized_message_count: int = 0
+    summary_version: int = 0
+    summary_updated_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class ConversationSummary:
+    session_id: str
+    content: str
+    summarized_message_count: int
+    through_message_id: str
+    version: int
+    source_chars: int
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -53,6 +69,7 @@ class WorkspaceRecord:
     root_path: str
     created_at: datetime
     updated_at: datetime
+    revision: int = 1
 
 
 @dataclass(frozen=True)

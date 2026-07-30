@@ -53,6 +53,11 @@ class SettingsTests(unittest.TestCase):
                 "LLM_MAX_OUTPUT_TOKENS": "8192",
                 "LLM_THINKING_LEVEL": "medium",
                 "SSE_HEARTBEAT_SECONDS": "4.5",
+                "CONVERSATION_SUMMARY_ENABLED": "true",
+                "CONVERSATION_SUMMARY_TRIGGER_MESSAGES": "16",
+                "CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES": "8",
+                "CONVERSATION_SUMMARY_MAX_CHARS": "1800",
+                "CONVERSATION_SUMMARY_MAX_SOURCE_CHARS": "9000",
                 "MCP_ENABLED": "true",
                 "MCP_CONFIG_PATH": "mcp.json",
                 "MCP_REQUEST_TIMEOUT_SECONDS": "3.5",
@@ -60,6 +65,20 @@ class SettingsTests(unittest.TestCase):
                 "SANDBOX_DOCKER_IMAGE": "python:3.12-slim",
                 "SANDBOX_COMMAND_TIMEOUT_SECONDS": "7.5",
                 "SANDBOX_WORKSPACE_PARENT": "/tmp/agent-workspaces",
+                "PROJECT_MEMORY_ENABLED": "true",
+                "PROJECT_MEMORY_MODE": "review",
+                "PROJECT_MEMORY_CANDIDATE_THRESHOLD": "0.65",
+                "PROJECT_MEMORY_AUTO_THRESHOLD": "0.9",
+                "PROJECT_MEMORY_RECALL_LIMIT": "24",
+                "PROJECT_MEMORY_RESULT_LIMIT": "5",
+                "PROJECT_MEMORY_MAX_CONTEXT_CHARS": "2500",
+                "PROJECT_MEMORY_QDRANT_COLLECTION": "test_project_memories",
+                "PROJECT_MEMORY_RELEVANCE_WEIGHT": "0.55",
+                "PROJECT_MEMORY_RECENCY_WEIGHT": "0.30",
+                "PROJECT_MEMORY_IMPORTANCE_WEIGHT": "0.15",
+                "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS": "90",
+                "AUTH_MODE": "trusted_header",
+                "GATEWAY_TRUST_SECRET": "test-trust-secret",
             },
         ):
             settings = Settings.from_env()
@@ -103,6 +122,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.llm_max_output_tokens, 8192)
         self.assertEqual(settings.llm_thinking_level, "medium")
         self.assertEqual(settings.sse_heartbeat_seconds, 4.5)
+        self.assertTrue(settings.conversation_summary_enabled)
+        self.assertEqual(settings.conversation_summary_trigger_messages, 16)
+        self.assertEqual(settings.conversation_summary_keep_recent_messages, 8)
+        self.assertEqual(settings.conversation_summary_max_chars, 1800)
+        self.assertEqual(settings.conversation_summary_max_source_chars, 9000)
         self.assertTrue(settings.mcp_enabled)
         self.assertEqual(settings.mcp_config_path, "mcp.json")
         self.assertEqual(settings.mcp_request_timeout_seconds, 3.5)
@@ -110,6 +134,23 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sandbox_docker_image, "python:3.12-slim")
         self.assertEqual(settings.sandbox_command_timeout_seconds, 7.5)
         self.assertEqual(settings.sandbox_workspace_parent, "/tmp/agent-workspaces")
+        self.assertTrue(settings.project_memory_enabled)
+        self.assertEqual(settings.project_memory_mode, "review")
+        self.assertEqual(settings.project_memory_candidate_threshold, 0.65)
+        self.assertEqual(settings.project_memory_auto_threshold, 0.9)
+        self.assertEqual(settings.project_memory_recall_limit, 24)
+        self.assertEqual(settings.project_memory_result_limit, 5)
+        self.assertEqual(settings.project_memory_max_context_chars, 2500)
+        self.assertEqual(
+            settings.project_memory_qdrant_collection,
+            "test_project_memories",
+        )
+        self.assertEqual(settings.project_memory_relevance_weight, 0.55)
+        self.assertEqual(settings.project_memory_recency_weight, 0.30)
+        self.assertEqual(settings.project_memory_importance_weight, 0.15)
+        self.assertEqual(settings.project_memory_recency_half_life_days, 90)
+        self.assertEqual(settings.auth_mode, "trusted_header")
+        self.assertEqual(settings.gateway_trust_secret, "test-trust-secret")
 
     def test_rejects_overlapping_chunks_larger_than_each_chunk(self) -> None:
         with self.assertRaisesRegex(ValueError, "rag_chunk_overlap"):
@@ -166,6 +207,26 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_llm_thinking_level(self) -> None:
         with self.assertRaisesRegex(ValueError, "llm_thinking_level"):
             Settings(llm_thinking_level="extreme")
+
+    def test_rejects_invalid_memory_thresholds_and_missing_gateway_secret(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            Settings(
+                project_memory_candidate_threshold=0.9,
+                project_memory_auto_threshold=0.8,
+            )
+        with self.assertRaisesRegex(ValueError, "gateway_trust_secret"):
+            Settings(auth_mode="trusted_header")
+        with self.assertRaisesRegex(ValueError, "weights must sum to 1"):
+            Settings(
+                project_memory_relevance_weight=0.5,
+                project_memory_recency_weight=0.5,
+                project_memory_importance_weight=0.5,
+            )
+        with self.assertRaisesRegex(ValueError, "keep_recent_messages"):
+            Settings(
+                conversation_summary_trigger_messages=6,
+                conversation_summary_keep_recent_messages=6,
+            )
 
 
 if __name__ == "__main__":

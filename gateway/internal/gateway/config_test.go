@@ -19,6 +19,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if config.RequestsPerSecond != 0 {
 		t.Fatalf("RequestsPerSecond = %v, want disabled", config.RequestsPerSecond)
 	}
+	if config.AuthMode != "disabled" {
+		t.Fatalf("AuthMode = %q, want disabled", config.AuthMode)
+	}
 }
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
@@ -29,6 +32,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		"GATEWAY_REQUESTS_PER_SECOND":     "-1",
 		"GATEWAY_UPSTREAM_HEADER_TIMEOUT": "forever",
 		"GATEWAY_LOG_LEVEL":               "verbose",
+		"GATEWAY_AUTH_MODE":               "basic",
 	}
 	for name, value := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -42,5 +46,37 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("loadConfig error = %v, want error mentioning %s", err, name)
 			}
 		})
+	}
+}
+
+func TestLoadConfigAcceptsOIDCIdentityBoundary(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_AUTH_MODE":      "oidc",
+		"GATEWAY_OIDC_ISSUER":    "https://issuer.example",
+		"GATEWAY_OIDC_AUDIENCE":  "ai-agent-platform",
+		"GATEWAY_OIDC_JWKS_URL":  "https://issuer.example/.well-known/jwks.json",
+		"GATEWAY_TRUST_SECRET":    "test-trust-secret",
+	}
+	config, err := loadConfig(func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if config.AuthMode != "oidc" || config.OIDCIssuer != values["GATEWAY_OIDC_ISSUER"] {
+		t.Fatalf("OIDC config was not loaded: %+v", config)
+	}
+}
+
+func TestLoadConfigRequiresCompleteOIDCSettings(t *testing.T) {
+	_, err := loadConfig(func(key string) (string, bool) {
+		if key == "GATEWAY_AUTH_MODE" {
+			return "oidc", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_OIDC_JWKS_URL") {
+		t.Fatalf("loadConfig error = %v, want missing JWKS URL", err)
 	}
 }

@@ -6,6 +6,7 @@ from threading import Lock
 from uuid import uuid4
 
 from ai_agent_platform.domain import (
+    ConversationSummary,
     KnowledgeBaseRecord,
     Message,
     Session,
@@ -24,6 +25,7 @@ class InMemorySessionRepository:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._messages: dict[str, list[Message]] = defaultdict(list)
+        self._conversation_summaries: dict[str, ConversationSummary] = {}
         self._token_usage: dict[str, list[TokenUsageRecord]] = defaultdict(list)
         self._lock = Lock()
 
@@ -68,6 +70,30 @@ class InMemorySessionRepository:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
             return list(self._messages[session_id])
+
+    def get_conversation_summary(
+        self, session_id: str
+    ) -> ConversationSummary | None:
+        with self._lock:
+            if session_id not in self._sessions:
+                raise SessionNotFoundError(session_id)
+            return self._conversation_summaries.get(session_id)
+
+    def upsert_conversation_summary(
+        self,
+        summary: ConversationSummary,
+        *,
+        expected_version: int,
+    ) -> ConversationSummary | None:
+        with self._lock:
+            if summary.session_id not in self._sessions:
+                raise SessionNotFoundError(summary.session_id)
+            current = self._conversation_summaries.get(summary.session_id)
+            current_version = current.version if current is not None else 0
+            if current_version != expected_version:
+                return None
+            self._conversation_summaries[summary.session_id] = summary
+            return summary
 
     def add_token_usage(
         self,
@@ -117,6 +143,11 @@ class InMemoryWorkspaceRepository:
                 root_path=root_path,
                 created_at=existing.created_at if existing else now,
                 updated_at=now,
+                revision=(
+                    existing.revision + 1
+                    if existing is not None and existing.root_path != root_path
+                    else existing.revision if existing is not None else 1
+                ),
             )
             self._workspaces[workspace_id] = record
             return record

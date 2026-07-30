@@ -14,6 +14,7 @@ class WorkspaceUpsertRequest(BaseModel):
 class WorkspaceResponse(BaseModel):
     id: str
     root_path: str
+    revision: int
     created_at: datetime
     updated_at: datetime
 
@@ -22,6 +23,7 @@ class WorkspaceResponse(BaseModel):
         return cls(
             id=workspace.id,
             root_path=workspace.root_path,
+            revision=workspace.revision,
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
         )

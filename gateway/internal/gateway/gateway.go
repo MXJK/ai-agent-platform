@@ -25,6 +25,7 @@ type Handler struct {
 	readinessClient *http.Client
 	concurrency     chan struct{}
 	rateLimiter     *tokenBucket
+	authenticator   *oidcAuthenticator
 }
 
 func NewHandler(config Config, logger *slog.Logger) http.Handler {
@@ -81,12 +82,29 @@ func NewHandler(config Config, logger *slog.Logger) http.Handler {
 	if config.RequestsPerSecond > 0 {
 		handler.rateLimiter = newTokenBucket(config.RequestsPerSecond, config.RateLimitBurst)
 	}
+	if config.AuthMode == "oidc" {
+		handler.authenticator = newOIDCAuthenticator(config, nil)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
-	mux.Handle("/", handler.withRequestID(handler.withAccessLog(handler.withBodyLimit(handler.withRateLimit(handler.withConcurrency(proxy))))))
+	proxyHandler := http.Handler(proxy)
+	if handler.authenticator != nil {
+		proxyHandler = handler.authenticator.middleware(proxyHandler)
+	} else {
+		proxyHandler = stripUntrustedIdentityHeaders(proxyHandler)
+	}
+	mux.Handle("/", handler.withRequestID(handler.withAccessLog(handler.withBodyLimit(handler.withRateLimit(handler.withConcurrency(proxyHandler))))))
 	return mux
+}
+
+func stripUntrustedIdentityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		request.Header.Del("X-Authenticated-User")
+		request.Header.Del("X-Gateway-Auth")
+		next.ServeHTTP(response, request)
+	})
 }
 
 func NewServer(config Config, handler http.Handler) *http.Server {

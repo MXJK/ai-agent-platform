@@ -31,6 +31,7 @@ from ai_agent_platform.integrations import (
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
+from ai_agent_platform.project_memory.factory import create_project_memory_service
 from ai_agent_platform.repositories import (
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
@@ -46,6 +47,7 @@ from ai_agent_platform.services import (
     KnowledgeBaseService,
     SessionService,
     WorkspaceService,
+    create_conversation_compressor,
 )
 
 
@@ -84,6 +86,26 @@ def create_app(
     repository = _create_session_repository(settings)
     agent_runtime = GameAgentRuntime()
     llm_client = llm_client or LLMClient(settings)
+    workspace_service = WorkspaceService(
+        store=_create_workspace_store(settings),
+        allowed_roots=(
+            settings.workspace_allowed_roots
+            or (str(Path.cwd().resolve()),)
+        ),
+    )
+    project_memory_service = create_project_memory_service(
+        settings,
+        workspace_service=workspace_service,
+        llm_client=llm_client,
+        metrics=metrics,
+    )
+    project_memory_service.set_index_outbox_submitter(
+        lambda trigger_id: task_queue.submit(
+            "memory_index_outbox",
+            project_memory_service.process_index_outbox,
+            trigger_id=trigger_id,
+        )
+    )
     rag_service = rag_service or create_rag_service(
         settings,
         document_store=_create_document_store(settings),
@@ -117,25 +139,35 @@ def create_app(
             max_tool_calls=settings.agent_max_tool_calls,
             max_history_messages=settings.llm_max_context_messages,
             knowledge_context_provider=knowledge_base_service,
+            project_memory_provider=project_memory_service,
             max_rag_context_chars=settings.rag_max_prompt_chars,
         )
-    workspace_service = WorkspaceService(
-        store=_create_workspace_store(settings),
-        allowed_roots=(
-            settings.workspace_allowed_roots
-            or (str(Path.cwd().resolve()),)
-        ),
-    )
     session_service = SessionService(
         repository=repository,
         agent_runtime=agent_runtime,
+        compressor=create_conversation_compressor(
+            llm_provider=settings.llm_provider,
+            llm_client=llm_client,
+        ),
+        summary_enabled=settings.conversation_summary_enabled,
+        summary_trigger_messages=settings.conversation_summary_trigger_messages,
+        summary_keep_recent_messages=(
+            settings.conversation_summary_keep_recent_messages
+        ),
+        summary_max_chars=settings.conversation_summary_max_chars,
+        summary_max_source_chars=(
+            settings.conversation_summary_max_source_chars
+        ),
+        metrics=metrics,
     )
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
         session_service=session_service,
         workspace_service=workspace_service,
+        project_memory_service=project_memory_service,
         metrics=metrics,
         task_queue=task_queue,
+        max_context_messages=settings.llm_max_context_messages,
     )
 
     @asynccontextmanager
@@ -156,8 +188,10 @@ def create_app(
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
+    app.state.session_service = session_service
     app.state.workspace_service = workspace_service
     app.state.knowledge_base_service = knowledge_base_service
+    app.state.project_memory_service = project_memory_service
     app.state.task_queue = task_queue
     static_dir = Path(__file__).parent / "static"
 
@@ -168,8 +202,10 @@ def create_app(
             knowledge_base_service=knowledge_base_service,
             agent_run_service=agent_run_service,
             workspace_service=workspace_service,
+            project_memory_service=project_memory_service,
             settings=settings,
             metrics=metrics,
+            task_queue=task_queue,
         ),
         prefix=settings.api_prefix,
     )

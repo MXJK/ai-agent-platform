@@ -86,6 +86,30 @@ func TestProxyReplacesInvalidRequestID(t *testing.T) {
 	}
 }
 
+func TestProxyStripsClientSuppliedTrustedIdentityHeaders(t *testing.T) {
+	received := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		received <- request.Header.Clone()
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(newTestHandler(t, upstream.URL, func(config *Config) {}))
+	defer gateway.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, gateway.URL+"/resource", nil)
+	request.Header.Set("X-Authenticated-User", "mallory")
+	request.Header.Set("X-Gateway-Auth", "forged")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	headers := <-received
+	if headers.Get("X-Authenticated-User") != "" || headers.Get("X-Gateway-Auth") != "" {
+		t.Fatalf("trusted identity headers reached upstream: %v", headers)
+	}
+}
+
 func TestProxyFlushesSSEWithoutWaitingForCompletion(t *testing.T) {
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {

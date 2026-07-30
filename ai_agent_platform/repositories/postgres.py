@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.models import (
     ContextSource,
 )
 from ai_agent_platform.domain import (
+    ConversationSummary,
     KnowledgeBaseRecord,
     Message,
     Session,
@@ -120,6 +121,75 @@ class PostgresSessionRepository:
                 (session_id,),
             ).fetchall()
         return [_message_from_row(row) for row in rows]
+
+    def get_conversation_summary(
+        self, session_id: str
+    ) -> ConversationSummary | None:
+        self.get_session(session_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT session_id, content, summarized_message_count,
+                       through_message_id, version, source_chars,
+                       created_at, updated_at
+                FROM conversation_summaries
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            ).fetchone()
+        return _conversation_summary_from_row(row) if row is not None else None
+
+    def upsert_conversation_summary(
+        self,
+        summary: ConversationSummary,
+        *,
+        expected_version: int,
+    ) -> ConversationSummary | None:
+        self.get_session(summary.session_id)
+        with self._connect() as conn:
+            if expected_version == 0:
+                row = conn.execute(
+                    """
+                    INSERT INTO conversation_summaries (
+                        session_id, content, summarized_message_count,
+                        through_message_id, version, source_chars,
+                        created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id) DO NOTHING
+                    RETURNING session_id, content, summarized_message_count,
+                              through_message_id, version, source_chars,
+                              created_at, updated_at
+                    """,
+                    _conversation_summary_values(summary),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    UPDATE conversation_summaries
+                    SET content = %s,
+                        summarized_message_count = %s,
+                        through_message_id = %s,
+                        version = %s,
+                        source_chars = %s,
+                        updated_at = %s
+                    WHERE session_id = %s AND version = %s
+                    RETURNING session_id, content, summarized_message_count,
+                              through_message_id, version, source_chars,
+                              created_at, updated_at
+                    """,
+                    (
+                        summary.content,
+                        summary.summarized_message_count,
+                        summary.through_message_id,
+                        summary.version,
+                        summary.source_chars,
+                        summary.updated_at,
+                        summary.session_id,
+                        expected_version,
+                    ),
+                ).fetchone()
+        return _conversation_summary_from_row(row) if row is not None else None
 
     def add_token_usage(
         self,
@@ -721,9 +791,14 @@ class PostgresWorkspaceRepository:
                 INSERT INTO workspaces (id, root_path, created_at, updated_at)
                 VALUES (%s, %s, NOW(), NOW())
                 ON CONFLICT (id) DO UPDATE SET
+                    revision = CASE
+                        WHEN workspaces.root_path <> EXCLUDED.root_path
+                        THEN workspaces.revision + 1
+                        ELSE workspaces.revision
+                    END,
                     root_path = EXCLUDED.root_path,
                     updated_at = NOW()
-                RETURNING id, root_path, created_at, updated_at
+                RETURNING id, root_path, created_at, updated_at, revision
                 """,
                 (workspace_id, root_path),
             ).fetchone()
@@ -733,7 +808,7 @@ class PostgresWorkspaceRepository:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, root_path, created_at, updated_at
+                SELECT id, root_path, created_at, updated_at, revision
                 FROM workspaces
                 WHERE id = %s
                 """,
@@ -745,7 +820,7 @@ class PostgresWorkspaceRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, root_path, created_at, updated_at
+                SELECT id, root_path, created_at, updated_at, revision
                 FROM workspaces
                 ORDER BY id ASC
                 """
@@ -801,6 +876,36 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         role=str(row[2]),
         content=str(row[3]),
         created_at=row[4],
+    )
+
+
+def _conversation_summary_from_row(
+    row: tuple[Any, ...],
+) -> ConversationSummary:
+    return ConversationSummary(
+        session_id=str(row[0]),
+        content=str(row[1]),
+        summarized_message_count=int(row[2]),
+        through_message_id=str(row[3]),
+        version=int(row[4]),
+        source_chars=int(row[5]),
+        created_at=row[6],
+        updated_at=row[7],
+    )
+
+
+def _conversation_summary_values(
+    summary: ConversationSummary,
+) -> tuple[object, ...]:
+    return (
+        summary.session_id,
+        summary.content,
+        summary.summarized_message_count,
+        summary.through_message_id,
+        summary.version,
+        summary.source_chars,
+        summary.created_at,
+        summary.updated_at,
     )
 
 
@@ -891,6 +996,7 @@ def _workspace_from_row(row: tuple[Any, ...]) -> WorkspaceRecord:
         root_path=str(row[1]),
         created_at=row[2],
         updated_at=row[3],
+        revision=int(row[4]) if len(row) > 4 else 1,
     )
 
 
