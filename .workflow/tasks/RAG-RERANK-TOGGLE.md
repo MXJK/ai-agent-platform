@@ -94,4 +94,4 @@ Qdrant 客户端/服务端版本漂移也已消除。前端 search/ask 已增加
 handbook 改回只描述当前分支；未擅自 merge、提交或删除无关事实映射。
 
 当前改动已按用户要求从 `main` 移到新建的
-`codex/rag-rerank-toggle` 分支，仍保持未提交状态，且未合并其他分支。
+`codex/rag-rerank-toggle` 分支，且未合并其他分支。
