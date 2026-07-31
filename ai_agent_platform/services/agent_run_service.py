@@ -44,6 +44,8 @@ class AgentRunService:
         task_queue: TaskQueue | None = None,
         project_memory_service: ProjectMemoryService | None = None,
         max_context_messages: int = 12,
+        llm_provider: str = "agent",
+        llm_model: str = "aggregated",
     ) -> None:
         self._runtime = runtime
         self._session_service = session_service
@@ -56,6 +58,8 @@ class AgentRunService:
         )
         self._project_memory_service = project_memory_service
         self._max_context_messages = max_context_messages
+        self._llm_provider = llm_provider
+        self._llm_model = llm_model
 
     def submit_run(
         self,
@@ -262,6 +266,7 @@ class AgentRunService:
                 status=result.status,
                 started_at=started_at,
             )
+            self._record_token_usage(result)
             logger.info("agent run finished", extra={"status": result.status})
             self._record_assistant_message(
                 result,
@@ -321,6 +326,7 @@ class AgentRunService:
                 status=result.status,
                 started_at=started_at,
             )
+            self._record_token_usage(result)
             logger.info(
                 "agent run resume finished",
                 extra={"status": result.status},
@@ -332,6 +338,27 @@ class AgentRunService:
         self._metrics.increment("agent_run_executions_total")
         self._metrics.increment(f"agent_run_executions_{status}_total")
         self._metrics.observe_ms("agent_run_execution_duration_ms", duration_ms)
+
+    def _record_token_usage(self, result: AgentRunResult) -> None:
+        if result.metrics.total_tokens <= 0:
+            return
+        record_usage = getattr(
+            self._session_service,
+            "record_token_usage",
+            None,
+        )
+        if not callable(record_usage):
+            return
+        record_usage(
+            session_id=result.conversation_id,
+            workspace_id=result.workspace_id,
+            provider=self._llm_provider,
+            model=self._llm_model,
+            input_tokens=result.metrics.input_tokens,
+            output_tokens=result.metrics.output_tokens,
+            thoughts_tokens=result.metrics.thoughts_tokens,
+            record_id=f"usage_agent_{result.run_id}",
+        )
 
     def _record_assistant_message(
         self,

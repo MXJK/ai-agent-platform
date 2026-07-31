@@ -9,8 +9,10 @@ const state = {
   latestRunStatus: "",
   healthStatus: "checking",
   sessions: [],
+  sessionTokenUsage: {},
   requestLog: [],
   workspaces: [],
+  workspaceTokenUsage: {},
   workspaceDirectoryPath: null,
   workspaceDirectoryParentPath: null,
   knowledgeBases: [],
@@ -747,12 +749,26 @@ async function createSession() {
 async function listSessions(showRaw = true) {
   const body = await fetchJson("/sessions");
   state.sessions = body.sessions || [];
+  await loadSessionTokenUsage();
   renderSessions();
   renderOverview();
   if (showRaw) {
     setRaw(body);
   }
   return body;
+}
+
+async function loadSessionTokenUsage(sessionIds = state.sessions.map((item) => item.id)) {
+  const entries = await Promise.all(
+    sessionIds.map(async (sessionId) => [
+      sessionId,
+      await fetchJson(`/sessions/${encodeURIComponent(sessionId)}/token-usage`),
+    ]),
+  );
+  for (const [sessionId, usage] of entries) {
+    state.sessionTokenUsage[sessionId] = usage;
+  }
+  return entries;
 }
 
 function renderSessions() {
@@ -764,6 +780,7 @@ function renderSessions() {
     return;
   }
   for (const session of state.sessions) {
+    const usage = state.sessionTokenUsage[session.id];
     const item = document.createElement("button");
     item.type = "button";
     item.className = `session-item ${session.id === state.conversationId ? "active" : ""}`;
@@ -771,6 +788,11 @@ function renderSessions() {
     item.innerHTML = `
       <strong>${escapeHtml(session.id)}</strong>
       <span>${escapeHtml(session.user_id)} · ${escapeHtml(formatDate(session.created_at))}</span>
+      <span class="session-token-line">${
+        usage
+          ? `累计 ${escapeHtml(formatTokenCount(usage.total_tokens))} · 上下文 ≈ ${escapeHtml(formatTokenCount(usage.context?.estimated_tokens || 0))}`
+          : "Token 用量加载中"
+      }</span>
     `;
     list.appendChild(item);
   }
@@ -778,19 +800,21 @@ function renderSessions() {
 
 async function loadSession(showRaw = true) {
   const conversationId = await ensureSession();
-  const [session, summary, messages] = await Promise.all([
+  const [session, summary, messages, usage] = await Promise.all([
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
+    fetchJson(`/sessions/${encodeURIComponent(conversationId)}/token-usage`),
   ]);
+  state.sessionTokenUsage[conversationId] = usage;
   $("session-status").textContent = "会话已加载";
-  renderSessionSummary(summary);
+  renderSessionSummary(summary, usage);
   renderMessages(messages.messages || []);
   renderChatHistory(messages.messages || []);
   renderSessions();
   updateContextSummary();
   if (showRaw) {
-    setRaw({ session, summary, messages });
+    setRaw({ session, summary, messages, usage });
   }
   return session;
 }
@@ -798,9 +822,14 @@ async function loadSession(showRaw = true) {
 async function loadSessionSummary() {
   try {
     const conversationId = await ensureSession();
-    const body = await fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`);
-    renderSessionSummary(body);
-    setRaw(body);
+    const [summary, usage] = await Promise.all([
+      fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
+      fetchJson(`/sessions/${encodeURIComponent(conversationId)}/token-usage`),
+    ]);
+    state.sessionTokenUsage[conversationId] = usage;
+    renderSessionSummary(summary, usage);
+    renderSessions();
+    setRaw({ summary, usage });
   } catch (error) {
     showToast(humanizeError(error), "error");
   }
@@ -819,12 +848,50 @@ async function refreshMessages(showRaw = true, renderChat = true) {
   return body;
 }
 
-function renderSessionSummary(summary) {
+function renderSessionSummary(
+  summary,
+  usage = state.sessionTokenUsage[summary.session_id],
+) {
+  const workspaces = usage?.workspaces || [];
   $("session-summary").innerHTML = `
     <div class="summary-strip">
       <strong>${escapeHtml(summary.session_id)}</strong>
       <span>${escapeHtml(summary.message_count)} 条消息</span>
     </div>
+    ${
+      usage
+        ? `
+          <div class="token-metric-grid" aria-label="会话 Token 用量">
+            <div><span>累计总量</span><strong>${escapeHtml(formatTokenCount(usage.total_tokens))}</strong></div>
+            <div><span>输入</span><strong>${escapeHtml(formatTokenCount(usage.input_tokens))}</strong></div>
+            <div><span>输出</span><strong>${escapeHtml(formatTokenCount(usage.output_tokens))}</strong></div>
+            <div><span>思考</span><strong>${escapeHtml(formatTokenCount(usage.thoughts_tokens))}</strong></div>
+          </div>
+          <div class="context-token-card">
+            <div>
+              <span>当前会话上下文 · 估算</span>
+              <strong>≈ ${escapeHtml(formatTokenCount(usage.context?.estimated_tokens || 0))} tokens</strong>
+            </div>
+            <small>${escapeHtml(usage.context?.message_count || 0)} 条注入消息${
+              usage.context?.includes_summary ? " · 包含滚动摘要" : ""
+            } · 不含下一条用户输入、系统提示和工作区检索内容</small>
+          </div>
+          <div class="token-workspace-breakdown">
+            <span>Workspace 分布</span>
+            ${
+              workspaces.length
+                ? workspaces
+                    .map(
+                      (item) =>
+                        `<small><strong>${escapeHtml(item.workspace_id || "未归属")}</strong>${escapeHtml(formatTokenCount(item.total_tokens))} tokens</small>`,
+                    )
+                    .join("")
+                : "<small>尚无 Token 用量记录</small>"
+            }
+          </div>
+        `
+        : ""
+    }
     ${summary.last_message ? `<p class="context-note">最近：${escapeHtml(truncate(summary.last_message, 180))}</p>` : ""}
     ${
       summary.compressed_summary
@@ -1251,6 +1318,7 @@ async function streamChat() {
     modeInput.disabled = false;
     stopButton.classList.add("hidden");
     $("chat-output").removeAttribute("aria-busy");
+    await refreshTokenUsageData();
     input.focus();
   }
 }
@@ -1602,6 +1670,7 @@ async function pollRunUntilTerminal({ onProgress = null, preserveChat = false } 
   } catch (error) {
     showToast(`Agent 已结束，但共享会话刷新失败：${humanizeError(error)}`, "warning");
   }
+  await refreshTokenUsageData();
   if (!TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
     showToast("Agent 仍在后台运行，可稍后刷新状态", "warning");
   }
@@ -2473,6 +2542,71 @@ async function listWorkspaces() {
   select.value = state.workspaces.some((item) => item.id === selectedId)
     ? selectedId
     : "";
+  await loadWorkspaceTokenUsage();
+  renderWorkspaceTokenUsage();
+}
+
+async function loadWorkspaceTokenUsage(
+  workspaceIds = state.workspaces.map((item) => item.id),
+) {
+  const entries = await Promise.all(
+    workspaceIds.map(async (workspaceId) => [
+      workspaceId,
+      await fetchJson(
+        `/workspaces/${encodeURIComponent(workspaceId)}/token-usage`,
+      ),
+    ]),
+  );
+  for (const [workspaceId, usage] of entries) {
+    state.workspaceTokenUsage[workspaceId] = usage;
+  }
+  return entries;
+}
+
+function renderWorkspaceTokenUsage() {
+  const list = $("workspace-token-list");
+  if (!list) {
+    return;
+  }
+  list.innerHTML = "";
+  if (state.workspaces.length === 0) {
+    list.innerHTML = '<div class="empty-state">暂无已注册 Workspace。</div>';
+    return;
+  }
+  for (const workspace of state.workspaces) {
+    const usage = state.workspaceTokenUsage[workspace.id];
+    const item = document.createElement("article");
+    item.className = "workspace-token-card";
+    item.innerHTML = `
+      <div class="workspace-token-heading">
+        <div>
+          <strong>${escapeHtml(workspace.id)}</strong>
+          <small>${escapeHtml(workspace.root_path)}</small>
+        </div>
+        <span>${escapeHtml(formatTokenCount(usage?.total_tokens || 0))}</span>
+      </div>
+      <div class="workspace-token-metrics">
+        <small>输入 <strong>${escapeHtml(formatTokenCount(usage?.input_tokens || 0))}</strong></small>
+        <small>输出 <strong>${escapeHtml(formatTokenCount(usage?.output_tokens || 0))}</strong></small>
+        <small>思考 <strong>${escapeHtml(formatTokenCount(usage?.thoughts_tokens || 0))}</strong></small>
+        <small>会话 <strong>${escapeHtml(usage?.conversation_count || 0)}</strong></small>
+      </div>
+    `;
+    list.appendChild(item);
+  }
+}
+
+async function refreshTokenUsageData() {
+  const tasks = [];
+  if (state.sessions.length) {
+    tasks.push(loadSessionTokenUsage());
+  }
+  if (state.workspaces.length) {
+    tasks.push(loadWorkspaceTokenUsage());
+  }
+  await Promise.allSettled(tasks);
+  renderSessions();
+  renderWorkspaceTokenUsage();
 }
 
 function bindEvents() {
@@ -2679,7 +2813,11 @@ function bindEvents() {
   });
 
   $("refresh-overview-btn").addEventListener("click", async () => {
-    await Promise.allSettled([checkHealth(), listSessions(false)]);
+    await Promise.allSettled([
+      checkHealth(),
+      listSessions(false),
+      listWorkspaces(),
+    ]);
   });
   $("clear-log-btn").addEventListener("click", () => {
     state.requestLog = [];

@@ -11,13 +11,16 @@ from ai_agent_platform.schemas import (
     WorkspaceDirectoryBrowseResponse,
     WorkspaceDirectoryResponse,
     WorkspaceResponse,
+    WorkspaceTokenUsageResponse,
     WorkspacesResponse,
     WorkspaceUpsertRequest,
 )
 from ai_agent_platform.services import (
+    SessionService,
     WorkspaceNotFoundError,
     WorkspaceService,
     WorkspaceValidationError,
+    summarize_token_usage,
 )
 
 
@@ -25,6 +28,7 @@ def create_workspaces_router(
     workspace_service: WorkspaceService,
     *,
     memory_service: ProjectMemoryService | None = None,
+    session_service: SessionService | None = None,
     settings: Settings | None = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -138,6 +142,46 @@ def create_workspaces_router(
             except MemoryAccessDeniedError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         return WorkspaceResponse.from_domain(workspace)
+
+    @router.get(
+        "/workspaces/{workspace_id}/token-usage",
+        response_model=WorkspaceTokenUsageResponse,
+    )
+    def get_workspace_token_usage(
+        http_request: Request,
+        workspace_id: str = Path(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$",
+        ),
+    ) -> WorkspaceTokenUsageResponse:
+        try:
+            workspace_service.get(workspace_id)
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="workspace not found") from exc
+        if settings.auth_mode != "disabled" and memory_service is not None:
+            try:
+                memory_service.authorize(
+                    workspace_id=workspace_id,
+                    actor_user_id=request_user_id(http_request, settings),
+                )
+            except MemoryAccessDeniedError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+        records = (
+            session_service.list_workspace_token_usage(workspace_id)
+            if session_service is not None
+            else []
+        )
+        totals = summarize_token_usage(records)
+        return WorkspaceTokenUsageResponse(
+            workspace_id=workspace_id,
+            input_tokens=totals.input_tokens,
+            output_tokens=totals.output_tokens,
+            thoughts_tokens=totals.thoughts_tokens,
+            total_tokens=totals.total_tokens,
+            record_count=totals.record_count,
+            conversation_count=len({record.session_id for record in records}),
+        )
 
     return router
 

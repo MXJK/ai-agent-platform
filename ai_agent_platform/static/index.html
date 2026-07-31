@@ -542,6 +542,19 @@
             <article class="metric-card"><span>最近请求</span><strong id="metric-request">暂无</strong><small>状态码与耗时</small></article>
           </div>
 
+          <article class="surface token-usage-surface">
+            <div class="surface-heading">
+              <div>
+                <h2>Workspace Token 用量</h2>
+                <p>累计 Chat 与 Code Agent 的供应商 Usage；不含项目记忆提炼任务。</p>
+              </div>
+              <span class="meta-badge">累计</span>
+            </div>
+            <div id="workspace-token-list" class="workspace-token-grid">
+              <div class="empty-state">暂无 Workspace 用量</div>
+            </div>
+          </article>
+
           <article class="surface request-surface">
             <div class="surface-heading">
               <div><h2>请求日志</h2><p>仅保留当前浏览器会话中的最近 50 条记录。</p></div>

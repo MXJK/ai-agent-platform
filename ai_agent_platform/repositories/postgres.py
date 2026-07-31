@@ -198,16 +198,22 @@ class PostgresSessionRepository:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        *,
+        workspace_id: str | None = None,
+        thoughts_tokens: int = 0,
+        record_id: str | None = None,
     ) -> TokenUsageRecord:
         self.get_session(session_id)
         record = TokenUsageRecord(
-            id=f"usage_{uuid4().hex[:12]}",
+            id=record_id or f"usage_{uuid4().hex[:12]}",
             session_id=session_id,
+            workspace_id=workspace_id,
             provider=provider,
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
+            thoughts_tokens=thoughts_tokens,
+            total_tokens=input_tokens + output_tokens + thoughts_tokens,
             created_at=_now(),
         )
         with self._connect() as conn:
@@ -216,22 +222,35 @@ class PostgresSessionRepository:
                 INSERT INTO token_usage_records (
                     id,
                     session_id,
+                    workspace_id,
                     provider,
                     model,
                     input_tokens,
                     output_tokens,
+                    thoughts_tokens,
                     total_tokens,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    session_id = EXCLUDED.session_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    provider = EXCLUDED.provider,
+                    model = EXCLUDED.model,
+                    input_tokens = EXCLUDED.input_tokens,
+                    output_tokens = EXCLUDED.output_tokens,
+                    thoughts_tokens = EXCLUDED.thoughts_tokens,
+                    total_tokens = EXCLUDED.total_tokens
                 """,
                 (
                     record.id,
                     record.session_id,
+                    record.workspace_id,
                     record.provider,
                     record.model,
                     record.input_tokens,
                     record.output_tokens,
+                    record.thoughts_tokens,
                     record.total_tokens,
                     record.created_at,
                 ),
@@ -246,10 +265,12 @@ class PostgresSessionRepository:
                 SELECT
                     id,
                     session_id,
+                    workspace_id,
                     provider,
                     model,
                     input_tokens,
                     output_tokens,
+                    thoughts_tokens,
                     total_tokens,
                     created_at
                 FROM token_usage_records
@@ -257,6 +278,31 @@ class PostgresSessionRepository:
                 ORDER BY created_at ASC, id ASC
                 """,
                 (session_id,),
+            ).fetchall()
+        return [_token_usage_from_row(row) for row in rows]
+
+    def list_workspace_token_usage(
+        self, workspace_id: str
+    ) -> list[TokenUsageRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    session_id,
+                    workspace_id,
+                    provider,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    thoughts_tokens,
+                    total_tokens,
+                    created_at
+                FROM token_usage_records
+                WHERE workspace_id = %s
+                ORDER BY created_at ASC, id ASC
+                """,
+                (workspace_id,),
             ).fetchall()
         return [_token_usage_from_row(row) for row in rows]
 
@@ -913,12 +959,14 @@ def _token_usage_from_row(row: tuple[Any, ...]) -> TokenUsageRecord:
     return TokenUsageRecord(
         id=str(row[0]),
         session_id=str(row[1]),
-        provider=str(row[2]),
-        model=str(row[3]),
-        input_tokens=int(row[4]),
-        output_tokens=int(row[5]),
-        total_tokens=int(row[6]),
-        created_at=row[7],
+        workspace_id=str(row[2]) if row[2] is not None else None,
+        provider=str(row[3]),
+        model=str(row[4]),
+        input_tokens=int(row[5]),
+        output_tokens=int(row[6]),
+        thoughts_tokens=int(row[7]),
+        total_tokens=int(row[8]),
+        created_at=row[9],
     )
 
 

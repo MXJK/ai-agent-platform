@@ -53,6 +53,7 @@ def create_api_router(
         create_workspaces_router(
             workspace_service,
             memory_service=project_memory_service,
+            session_service=session_service,
             settings=settings,
         )
     )

@@ -7,14 +7,20 @@ from time import perf_counter
 from ai_agent_platform.agents.game_agent import GameAgentRuntime
 from ai_agent_platform.core import MetricsRegistry, TaskQueue, TaskQueueError
 from ai_agent_platform.domain import (
+    ConversationContextUsage,
     ConversationSummary,
     Message,
     Session,
     SessionSummary,
     TokenUsageRecord,
+    TokenUsageTotals,
 )
 from ai_agent_platform.services.conversation_compression import (
     ConversationCompressor,
+)
+from ai_agent_platform.token_counting import (
+    TOKEN_ESTIMATION_METHOD,
+    estimate_message_tokens,
 )
 
 
@@ -108,6 +114,7 @@ class SessionService:
         *,
         session_id: str,
         max_context_messages: int,
+        record_injection: bool = True,
     ) -> list[dict[str, str]]:
         messages = self._repository.list_messages(session_id=session_id)
         summary = self.get_conversation_summary(session_id)
@@ -130,7 +137,8 @@ class SessionService:
             }
         ]
         context.extend(_message_context(recent_messages))
-        self._metrics.increment("conversation_summaries_injected_total")
+        if record_injection:
+            self._metrics.increment("conversation_summaries_injected_total")
         return context
 
     def get_conversation_summary(
@@ -248,6 +256,10 @@ class SessionService:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        *,
+        workspace_id: str | None = None,
+        thoughts_tokens: int = 0,
+        record_id: str | None = None,
     ) -> TokenUsageRecord:
         return self._repository.add_token_usage(
             session_id=session_id,
@@ -255,10 +267,55 @@ class SessionService:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            workspace_id=workspace_id,
+            thoughts_tokens=thoughts_tokens,
+            record_id=record_id,
         )
 
     def list_token_usage(self, session_id: str) -> list[TokenUsageRecord]:
         return self._repository.list_token_usage(session_id=session_id)
+
+    def list_workspace_token_usage(
+        self, workspace_id: str
+    ) -> list[TokenUsageRecord]:
+        list_records = getattr(
+            self._repository,
+            "list_workspace_token_usage",
+            None,
+        )
+        if callable(list_records):
+            return list_records(workspace_id)
+        return [
+            record
+            for session in self.list_sessions()
+            for record in self.list_token_usage(session.id)
+            if record.workspace_id == workspace_id
+        ]
+
+    def get_context_token_usage(
+        self,
+        *,
+        session_id: str,
+        max_context_messages: int,
+    ) -> ConversationContextUsage:
+        context = self.build_agent_context(
+            session_id=session_id,
+            max_context_messages=max_context_messages,
+            record_injection=False,
+        )
+        return ConversationContextUsage(
+            estimated_tokens=estimate_message_tokens(context),
+            message_count=len(context),
+            max_context_messages=max_context_messages,
+            includes_summary=bool(
+                context
+                and context[0].get("role") == "system"
+                and context[0].get("content", "").startswith(
+                    "Earlier conversation summary"
+                )
+            ),
+            estimation_method=TOKEN_ESTIMATION_METHOD,
+        )
 
     def get_session_summary(self, session_id: str) -> SessionSummary:
         messages = self._repository.list_messages(session_id=session_id)
@@ -275,6 +332,18 @@ class SessionService:
             summary_version=compressed.version if compressed else 0,
             summary_updated_at=compressed.updated_at if compressed else None,
         )
+
+
+def summarize_token_usage(
+    records: list[TokenUsageRecord],
+) -> TokenUsageTotals:
+    return TokenUsageTotals(
+        input_tokens=sum(record.input_tokens for record in records),
+        output_tokens=sum(record.output_tokens for record in records),
+        thoughts_tokens=sum(record.thoughts_tokens for record in records),
+        total_tokens=sum(record.total_tokens for record in records),
+        record_count=len(records),
+    )
 
 
 def _message_context(messages: list[Message]) -> list[dict[str, str]]:

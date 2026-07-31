@@ -14,6 +14,7 @@ import httpx
 
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 LLMEventType = Literal["delta", "usage", "done"]
@@ -932,7 +933,7 @@ def _error_message(payload: dict[str, object]) -> str:
 
 
 def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
+    return max(1, estimate_text_tokens(text))
 
 
 def _join_message_text(messages: list[dict[str, str]]) -> str:

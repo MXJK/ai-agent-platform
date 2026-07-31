@@ -42,3 +42,13 @@ class WorkspaceDirectoryBrowseResponse(BaseModel):
     current_path: str | None
     parent_path: str | None
     directories: list[WorkspaceDirectoryResponse]
+
+
+class WorkspaceTokenUsageResponse(BaseModel):
+    workspace_id: str
+    input_tokens: int
+    output_tokens: int
+    thoughts_tokens: int
+    total_tokens: int
+    record_count: int
+    conversation_count: int

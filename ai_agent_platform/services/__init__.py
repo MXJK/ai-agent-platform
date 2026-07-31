@@ -5,7 +5,7 @@ from .knowledge_base_service import (
     KnowledgeBaseNotFoundError,
     KnowledgeBaseService,
 )
-from .session_service import SessionService
+from .session_service import SessionService, summarize_token_usage
 from .workspace_service import (
     WorkspaceNotFoundError,
     WorkspaceService,
@@ -25,6 +25,7 @@ __all__ = [
     "KnowledgeBaseNotFoundError",
     "KnowledgeBaseService",
     "SessionService",
+    "summarize_token_usage",
     "WorkspaceNotFoundError",
     "WorkspaceService",
     "ConversationCompressor",
