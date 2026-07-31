@@ -48,12 +48,32 @@ class ConversationSummary:
 class TokenUsageRecord:
     id: str
     session_id: str
+    workspace_id: Optional[str]
     provider: str
     model: str
     input_tokens: int
     output_tokens: int
+    thoughts_tokens: int
     total_tokens: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class TokenUsageTotals:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thoughts_tokens: int = 0
+    total_tokens: int = 0
+    record_count: int = 0
+
+
+@dataclass(frozen=True)
+class ConversationContextUsage:
+    estimated_tokens: int
+    message_count: int
+    max_context_messages: int
+    includes_summary: bool
+    estimation_method: str
 
 
 @dataclass(frozen=True)

@@ -182,6 +182,9 @@ def chat_stream_events(
             model=model,
             input_tokens=latest_input_tokens,
             output_tokens=latest_output_tokens,
+            workspace_id=request.workspace_id,
+            thoughts_tokens=latest_thoughts_tokens,
+            record_id=f"usage_{request_id}",
         )
         metrics.increment("llm_input_tokens_total", latest_input_tokens)
         metrics.increment("llm_output_tokens_total", latest_output_tokens)

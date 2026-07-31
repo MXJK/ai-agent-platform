@@ -4,7 +4,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from ai_agent_platform.domain import Session, TokenUsageRecord
+from ai_agent_platform.domain import (
+    ConversationContextUsage,
+    Session,
+    TokenUsageRecord,
+    TokenUsageTotals,
+)
 
 
 class CreateSessionRequest(BaseModel):
@@ -32,10 +37,12 @@ class SessionsResponse(BaseModel):
 class TokenUsageResponse(BaseModel):
     id: str
     session_id: str
+    workspace_id: str | None
     provider: str
     model: str
     input_tokens: int
     output_tokens: int
+    thoughts_tokens: int
     total_tokens: int
     created_at: datetime
 
@@ -44,9 +51,45 @@ class TokenUsageResponse(BaseModel):
         return cls(**usage.__dict__)
 
 
+class TokenUsageTotalsResponse(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    thoughts_tokens: int
+    total_tokens: int
+    record_count: int
+
+    @classmethod
+    def from_domain(
+        cls, totals: TokenUsageTotals
+    ) -> "TokenUsageTotalsResponse":
+        return cls(**totals.__dict__)
+
+
+class ContextTokenUsageResponse(BaseModel):
+    estimated_tokens: int
+    message_count: int
+    max_context_messages: int
+    includes_summary: bool
+    estimation_method: str
+
+    @classmethod
+    def from_domain(
+        cls, usage: ConversationContextUsage
+    ) -> "ContextTokenUsageResponse":
+        return cls(**usage.__dict__)
+
+
+class WorkspaceTokenBreakdownResponse(TokenUsageTotalsResponse):
+    workspace_id: str | None
+
+
 class TokenUsagesResponse(BaseModel):
     session_id: str
     input_tokens: int
     output_tokens: int
+    thoughts_tokens: int
     total_tokens: int
+    record_count: int
+    context: ContextTokenUsageResponse
+    workspaces: list[WorkspaceTokenBreakdownResponse]
     records: list[TokenUsageResponse]

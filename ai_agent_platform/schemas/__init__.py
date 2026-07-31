@@ -31,11 +31,14 @@ from .rag import (
     RetrievalExecutionResponse,
 )
 from .session import (
+    ContextTokenUsageResponse,
     CreateSessionRequest,
     SessionResponse,
     SessionsResponse,
     TokenUsageResponse,
     TokenUsagesResponse,
+    TokenUsageTotalsResponse,
+    WorkspaceTokenBreakdownResponse,
 )
 from .summary import SessionSummaryResponse
 from .workspace import (
@@ -44,6 +47,7 @@ from .workspace import (
     WorkspaceResponse,
     WorkspacesResponse,
     WorkspaceUpsertRequest,
+    WorkspaceTokenUsageResponse,
 )
 from .project_memory import (
     MemoryExtractionJobResponse,
@@ -71,6 +75,7 @@ __all__ = [
     "AgentTraceStepResponse",
     "ContextSourceResponse",
     "ChatStreamRequest",
+    "ContextTokenUsageResponse",
     "CreateSessionRequest",
     "DocumentIngestResponse",
     "IndexJobResponse",
@@ -97,11 +102,14 @@ __all__ = [
     "TimingMetricResponse",
     "TokenUsageResponse",
     "TokenUsagesResponse",
+    "TokenUsageTotalsResponse",
+    "WorkspaceTokenBreakdownResponse",
     "WorkspaceDirectoryBrowseResponse",
     "WorkspaceDirectoryResponse",
     "WorkspaceResponse",
     "WorkspacesResponse",
     "WorkspaceUpsertRequest",
+    "WorkspaceTokenUsageResponse",
     "MemoryExtractionJobResponse",
     "MemoryExtractionJobsResponse",
     "MemoryReindexResponse",

@@ -68,11 +68,54 @@ class SessionServiceTests(unittest.TestCase):
             model="demo-stream-model",
             input_tokens=10,
             output_tokens=20,
+            workspace_id="workspace_main",
+            thoughts_tokens=5,
+            record_id="usage_agent_run_1",
+        )
+        self.service.record_token_usage(
+            session_id=session.id,
+            provider="fake",
+            model="demo-stream-model",
+            input_tokens=12,
+            output_tokens=22,
+            workspace_id="workspace_main",
+            thoughts_tokens=6,
+            record_id="usage_agent_run_1",
         )
         usage_records = self.service.list_token_usage(session_id=session.id)
+        workspace_records = self.service.list_workspace_token_usage(
+            "workspace_main"
+        )
 
         self.assertEqual(len(usage_records), 1)
-        self.assertEqual(usage_records[0].total_tokens, 30)
+        self.assertEqual(usage_records[0].workspace_id, "workspace_main")
+        self.assertEqual(usage_records[0].thoughts_tokens, 6)
+        self.assertEqual(usage_records[0].total_tokens, 40)
+        self.assertEqual(workspace_records, usage_records)
+
+    def test_estimates_the_actual_bounded_conversation_context(self) -> None:
+        session = self.service.create_session(user_id="user_1")
+        for role, content in (
+            ("user", "第一条中文消息"),
+            ("assistant", "An English response"),
+            ("user", "最后一条消息"),
+        ):
+            self.service.add_message(
+                session_id=session.id,
+                role=role,
+                content=content,
+            )
+
+        usage = self.service.get_context_token_usage(
+            session_id=session.id,
+            max_context_messages=2,
+        )
+
+        self.assertGreater(usage.estimated_tokens, 0)
+        self.assertEqual(usage.message_count, 2)
+        self.assertEqual(usage.max_context_messages, 2)
+        self.assertFalse(usage.includes_summary)
+        self.assertEqual(usage.estimation_method, "unicode_heuristic_v1")
 
     def test_rolls_old_messages_into_persistent_bounded_summary(self) -> None:
         service = SessionService(

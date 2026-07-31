@@ -251,6 +251,26 @@ class ApiTests(unittest.TestCase):
                         for item in second_result["result"]["context_sources"]
                     )
                 )
+                conversation_usage = client.get(
+                    f"/api/v1/sessions/{session_id}/token-usage"
+                ).json()
+                workspace_usage = client.get(
+                    "/api/v1/workspaces/project/token-usage"
+                ).json()
+                self.assertEqual(conversation_usage["record_count"], 2)
+                self.assertGreater(
+                    conversation_usage["context"]["estimated_tokens"],
+                    0,
+                )
+                self.assertEqual(
+                    conversation_usage["workspaces"][0]["workspace_id"],
+                    "project",
+                )
+                self.assertEqual(
+                    workspace_usage["total_tokens"],
+                    conversation_usage["total_tokens"],
+                )
+                self.assertEqual(workspace_usage["conversation_count"], 1)
 
     def test_removed_repository_index_endpoints_return_404(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
@@ -276,6 +296,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="workspace-id-input"', response.text)
         self.assertIn('id="open-workspace-picker-btn"', response.text)
         self.assertIn('id="workspace-picker-dialog"', response.text)
+        self.assertIn('id="workspace-token-list"', response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
         self.assertIn("最终结果数", response.text)
@@ -302,6 +323,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("renderExecutionProcess", script_response.text)
         self.assertIn("traceToolNames", script_response.text)
         self.assertIn("renderResponseMetrics", script_response.text)
+        self.assertIn("loadSessionTokenUsage", script_response.text)
+        self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)
         self.assertIn("await onProgress", script_response.text)
         self.assertIn("workspace_id", script_response.text)
@@ -332,11 +355,16 @@ class ApiTests(unittest.TestCase):
                 "/api/v1/sessions",
                 json={"user_id": "user_1"},
             ).json()["id"]
+            client.put(
+                "/api/v1/workspaces/workspace_main",
+                json={"root_path": temp_dir},
+            )
             stream_response = client.post(
                 "/api/v1/chat/stream",
                 json={
                     "conversation_id": session_id,
                     "message": "解释一下SSE",
+                    "workspace_id": "workspace_main",
                 },
             )
 
@@ -368,11 +396,26 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(usage["session_id"], session_id)
             self.assertGreater(usage["input_tokens"], 0)
             self.assertGreater(usage["output_tokens"], 0)
+            self.assertEqual(usage["thoughts_tokens"], 0)
             self.assertEqual(
                 usage["total_tokens"],
                 usage["input_tokens"] + usage["output_tokens"],
             )
             self.assertEqual(len(usage["records"]), 1)
+            self.assertGreater(usage["context"]["estimated_tokens"], 0)
+            self.assertEqual(usage["context"]["message_count"], 2)
+            self.assertEqual(
+                usage["workspaces"][0]["workspace_id"],
+                "workspace_main",
+            )
+            workspace_usage = client.get(
+                "/api/v1/workspaces/workspace_main/token-usage"
+            ).json()
+            self.assertEqual(
+                workspace_usage["total_tokens"],
+                usage["total_tokens"],
+            )
+            self.assertEqual(workspace_usage["conversation_count"], 1)
 
     def test_chat_stream_reports_google_max_tokens_as_error(self) -> None:
         class TruncatedLLMClient:
@@ -432,6 +475,12 @@ class ApiTests(unittest.TestCase):
                 counters = client.get("/api/v1/metrics").json()["counters"]
                 self.assertEqual(counters["chat_streams_failed_total"], 1)
                 self.assertEqual(counters["llm_thoughts_tokens_total"], 1100)
+                usage = client.get(
+                    f"/api/v1/sessions/{session_id}/token-usage"
+                ).json()
+                self.assertEqual(usage["thoughts_tokens"], 1100)
+                self.assertEqual(usage["total_tokens"], 2012)
+                self.assertIsNone(usage["records"][0]["workspace_id"])
 
     def test_chat_stream_rejects_missing_session_and_oversized_message(self) -> None:
         with TemporaryDirectory() as temp_dir:

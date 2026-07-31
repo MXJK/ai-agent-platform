@@ -168,6 +168,8 @@ def create_app(
         metrics=metrics,
         task_queue=task_queue,
         max_context_messages=settings.llm_max_context_messages,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
     )
 
     @asynccontextmanager

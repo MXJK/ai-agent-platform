@@ -102,22 +102,40 @@ class InMemorySessionRepository:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        *,
+        workspace_id: str | None = None,
+        thoughts_tokens: int = 0,
+        record_id: str | None = None,
     ) -> TokenUsageRecord:
         with self._lock:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
 
+            existing = next(
+                (
+                    item
+                    for item in self._token_usage[session_id]
+                    if record_id is not None and item.id == record_id
+                ),
+                None,
+            )
             record = TokenUsageRecord(
-                id=f"usage_{uuid4().hex[:12]}",
+                id=record_id or f"usage_{uuid4().hex[:12]}",
                 session_id=session_id,
+                workspace_id=workspace_id,
                 provider=provider,
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                total_tokens=input_tokens + output_tokens,
-                created_at=_now(),
+                thoughts_tokens=thoughts_tokens,
+                total_tokens=input_tokens + output_tokens + thoughts_tokens,
+                created_at=existing.created_at if existing is not None else _now(),
             )
-            self._token_usage[session_id].append(record)
+            if existing is None:
+                self._token_usage[session_id].append(record)
+            else:
+                index = self._token_usage[session_id].index(existing)
+                self._token_usage[session_id][index] = record
             return record
 
     def list_token_usage(self, session_id: str) -> list[TokenUsageRecord]:
@@ -125,6 +143,17 @@ class InMemorySessionRepository:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
             return list(self._token_usage[session_id])
+
+    def list_workspace_token_usage(
+        self, workspace_id: str
+    ) -> list[TokenUsageRecord]:
+        with self._lock:
+            return [
+                record
+                for records in self._token_usage.values()
+                for record in records
+                if record.workspace_id == workspace_id
+            ]
 
 
 class InMemoryWorkspaceRepository:

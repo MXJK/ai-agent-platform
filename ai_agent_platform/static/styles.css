@@ -1860,6 +1860,11 @@ textarea:focus {
   font-size: 9px;
 }
 
+.session-item .session-token-line {
+  color: var(--brand-strong);
+  font-variant-numeric: tabular-nums;
+}
+
 .session-summary {
   margin-bottom: 13px;
 }
@@ -1881,6 +1886,173 @@ textarea:focus {
 
 .summary-strip span {
   color: var(--muted);
+}
+
+.token-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.token-metric-grid > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.token-metric-grid span,
+.token-metric-grid strong {
+  display: block;
+}
+
+.token-metric-grid span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.token-metric-grid strong {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+.context-token-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+  padding: 12px;
+  border: 1px solid rgba(130, 156, 255, 0.28);
+  border-radius: 10px;
+  background: var(--brand-pale);
+}
+
+.context-token-card > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.context-token-card span,
+.context-token-card small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.context-token-card strong {
+  color: var(--brand-strong);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.token-workspace-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.token-workspace-breakdown > span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.token-workspace-breakdown small {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.token-workspace-breakdown small strong {
+  color: var(--ink-soft);
+}
+
+.token-usage-surface {
+  margin-bottom: 16px;
+}
+
+.workspace-token-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.workspace-token-card {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-soft);
+}
+
+.workspace-token-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+}
+
+.workspace-token-heading strong,
+.workspace-token-heading small {
+  display: block;
+}
+
+.workspace-token-heading > div {
+  min-width: 0;
+}
+
+.workspace-token-heading > div > strong {
+  overflow: hidden;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-token-heading small {
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-token-heading > span {
+  color: var(--brand-strong);
+  font-size: 18px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-token-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 11px;
+}
+
+.workspace-token-metrics small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.workspace-token-metrics strong {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
 }
 
 .message-list {
@@ -2552,6 +2724,10 @@ body.inspector-hidden .inspector {
     grid-template-columns: 1fr;
   }
 
+  .workspace-token-grid {
+    grid-template-columns: 1fr;
+  }
+
   .composer-wrap {
     bottom: 79px;
   }
@@ -2666,6 +2842,10 @@ body.inspector-hidden .inspector {
   .path-columns,
   .metrics-grid {
     grid-template-columns: 1fr;
+  }
+
+  .token-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .metrics-grid {

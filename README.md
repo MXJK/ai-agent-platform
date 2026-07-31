@@ -57,6 +57,14 @@ output, thinking, and total tokens per response. Agent polling also merges live
 LangGraph checkpoint trace so fast runs still play completed stages in order
 before the final answer appears.
 
+Token usage is also persisted across both response modes. The sessions page
+shows cumulative input, output, thinking, and total tokens for every
+conversation plus the estimated size of the bounded conversation context that
+would be injected into the next request. The operations page aggregates
+explicitly attributed Chat and Agent usage for every registered workspace.
+Context size uses the documented local `unicode_heuristic_v1` estimate; provider
+usage remains the authoritative actual-request usage signal.
+
 The browser workspace also includes:
 
 - managed knowledge-base catalog, multi-file upload, hybrid search, answers,
@@ -202,6 +210,8 @@ curl -X PUT http://localhost:8000/api/v1/workspaces/project \
 
 curl http://localhost:8000/api/v1/workspaces
 curl http://localhost:8000/api/v1/workspaces/project
+curl http://localhost:8000/api/v1/workspaces/project/token-usage
+curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 ```
 
 There is intentionally no workspace deletion endpoint in v1. Updating a root
@@ -452,6 +462,13 @@ memory/workspace/revision/version identifiers and can be rebuilt.
 Revision `20260730_0010` adds persistent rolling conversation summaries with
 the summarized message boundary, source-size accounting, and optimistic
 versioning. Source messages remain in the session tables.
+
+Revision `20260730_0011` adds nullable workspace attribution and persisted
+thinking tokens to `token_usage_records`. Chat writes a stable request record;
+Agent upserts one stable record per run so worker redelivery and approval resume
+do not double count cumulative usage. Historical records without workspace
+attribution remain visible in session totals and are not guessed into a
+workspace.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "RAG-RERANK-TOGGLE"
-next_action: "审阅并合并 PR #9；首次启用 BAAI/bge-reranker-base 后验证中英文排序"
+active_task: "TOKEN-USAGE-DASHBOARD"
+next_action: "在目标环境执行 Alembic 0011，并用真实 provider 观察会话与 Workspace 聚合"
 blockers: []
 last_verified_commit: "496ba8f5a58ba36dea1720b0ebe39cac606ec536"
-updated_at: "2026-07-30T13:30:57+08:00"
+updated_at: "2026-07-30T14:29:02+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
