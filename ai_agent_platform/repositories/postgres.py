@@ -193,7 +193,7 @@ class PostgresSessionRepository:
 
     def add_token_usage(
         self,
-        session_id: str,
+        session_id: str | None,
         provider: str,
         model: str,
         input_tokens: int,
@@ -202,8 +202,15 @@ class PostgresSessionRepository:
         workspace_id: str | None = None,
         thoughts_tokens: int = 0,
         record_id: str | None = None,
+        operation: str = "chat",
+        resource_id: str | None = None,
+        requested_provider: str | None = None,
+        requested_model: str | None = None,
+        input_count_method: str = "provider_usage",
+        budget_decision: str = "allowed",
     ) -> TokenUsageRecord:
-        self.get_session(session_id)
+        if session_id is not None:
+            self.get_session(session_id)
         record = TokenUsageRecord(
             id=record_id or f"usage_{uuid4().hex[:12]}",
             session_id=session_id,
@@ -215,6 +222,12 @@ class PostgresSessionRepository:
             thoughts_tokens=thoughts_tokens,
             total_tokens=input_tokens + output_tokens + thoughts_tokens,
             created_at=_now(),
+            operation=operation,
+            resource_id=resource_id,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            input_count_method=input_count_method,
+            budget_decision=budget_decision,
         )
         with self._connect() as conn:
             conn.execute(
@@ -229,9 +242,18 @@ class PostgresSessionRepository:
                     output_tokens,
                     thoughts_tokens,
                     total_tokens,
+                    operation,
+                    resource_id,
+                    requested_provider,
+                    requested_model,
+                    input_count_method,
+                    budget_decision,
                     created_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     session_id = EXCLUDED.session_id,
                     workspace_id = EXCLUDED.workspace_id,
@@ -240,7 +262,13 @@ class PostgresSessionRepository:
                     input_tokens = EXCLUDED.input_tokens,
                     output_tokens = EXCLUDED.output_tokens,
                     thoughts_tokens = EXCLUDED.thoughts_tokens,
-                    total_tokens = EXCLUDED.total_tokens
+                    total_tokens = EXCLUDED.total_tokens,
+                    operation = EXCLUDED.operation,
+                    resource_id = EXCLUDED.resource_id,
+                    requested_provider = EXCLUDED.requested_provider,
+                    requested_model = EXCLUDED.requested_model,
+                    input_count_method = EXCLUDED.input_count_method,
+                    budget_decision = EXCLUDED.budget_decision
                 """,
                 (
                     record.id,
@@ -252,6 +280,12 @@ class PostgresSessionRepository:
                     record.output_tokens,
                     record.thoughts_tokens,
                     record.total_tokens,
+                    record.operation,
+                    record.resource_id,
+                    record.requested_provider,
+                    record.requested_model,
+                    record.input_count_method,
+                    record.budget_decision,
                     record.created_at,
                 ),
             )
@@ -272,6 +306,12 @@ class PostgresSessionRepository:
                     output_tokens,
                     thoughts_tokens,
                     total_tokens,
+                    operation,
+                    resource_id,
+                    requested_provider,
+                    requested_model,
+                    input_count_method,
+                    budget_decision,
                     created_at
                 FROM token_usage_records
                 WHERE session_id = %s
@@ -297,12 +337,45 @@ class PostgresSessionRepository:
                     output_tokens,
                     thoughts_tokens,
                     total_tokens,
+                    operation,
+                    resource_id,
+                    requested_provider,
+                    requested_model,
+                    input_count_method,
+                    budget_decision,
                     created_at
                 FROM token_usage_records
                 WHERE workspace_id = %s
                 ORDER BY created_at ASC, id ASC
                 """,
                 (workspace_id,),
+            ).fetchall()
+        return [_token_usage_from_row(row) for row in rows]
+
+    def list_all_token_usage(self) -> list[TokenUsageRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    session_id,
+                    workspace_id,
+                    provider,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    thoughts_tokens,
+                    total_tokens,
+                    operation,
+                    resource_id,
+                    requested_provider,
+                    requested_model,
+                    input_count_method,
+                    budget_decision,
+                    created_at
+                FROM token_usage_records
+                ORDER BY created_at ASC, id ASC
+                """
             ).fetchall()
         return [_token_usage_from_row(row) for row in rows]
 
@@ -958,7 +1031,7 @@ def _conversation_summary_values(
 def _token_usage_from_row(row: tuple[Any, ...]) -> TokenUsageRecord:
     return TokenUsageRecord(
         id=str(row[0]),
-        session_id=str(row[1]),
+        session_id=str(row[1]) if row[1] is not None else None,
         workspace_id=str(row[2]) if row[2] is not None else None,
         provider=str(row[3]),
         model=str(row[4]),
@@ -966,7 +1039,15 @@ def _token_usage_from_row(row: tuple[Any, ...]) -> TokenUsageRecord:
         output_tokens=int(row[6]),
         thoughts_tokens=int(row[7]),
         total_tokens=int(row[8]),
-        created_at=row[9],
+        operation=str(row[9]),
+        resource_id=str(row[10]) if row[10] is not None else None,
+        requested_provider=(
+            str(row[11]) if row[11] is not None else None
+        ),
+        requested_model=str(row[12]) if row[12] is not None else None,
+        input_count_method=str(row[13]),
+        budget_decision=str(row[14]),
+        created_at=row[15],
     )
 
 

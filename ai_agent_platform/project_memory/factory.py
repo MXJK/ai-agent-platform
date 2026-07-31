@@ -9,6 +9,7 @@ from ai_agent_platform.integrations.rag import (
     HashingEmbeddingProvider,
     OpenAIEmbeddingProvider,
 )
+from ai_agent_platform.integrations.rag.errors import RAGConfigurationError
 from ai_agent_platform.project_memory.extractor import LLMMemoryExtractor
 from ai_agent_platform.project_memory.service import ProjectMemoryService
 from ai_agent_platform.project_memory.vector import (
@@ -28,6 +29,7 @@ def create_project_memory_service(
     workspace_service: WorkspaceService,
     llm_client: LLMClient,
     metrics: MetricsRegistry,
+    usage_ledger=None,
 ) -> ProjectMemoryService:
     if settings.workspace_store == "postgres":
         repository = PostgresProjectMemoryRepository(
@@ -37,12 +39,25 @@ def create_project_memory_service(
         repository = InMemoryProjectMemoryRepository()
 
     if settings.embedding_provider == "openai":
-        embedding_provider = OpenAIEmbeddingProvider(settings)
+        embedding_provider = OpenAIEmbeddingProvider(
+            settings,
+            usage_ledger=usage_ledger,
+        )
     elif settings.embedding_provider == "gemini":
-        embedding_provider = GeminiEmbeddingProvider(settings)
+        embedding_provider = GeminiEmbeddingProvider(
+            settings,
+            usage_ledger=usage_ledger,
+        )
     else:
+        if not settings.is_model_allowed("local", settings.embedding_model):
+            raise RAGConfigurationError(
+                "embedding model is not allowlisted: "
+                f"local:{settings.embedding_model}"
+            )
         embedding_provider = HashingEmbeddingProvider(
-            dimensions=settings.local_embedding_dimensions
+            dimensions=settings.local_embedding_dimensions,
+            model=settings.embedding_model,
+            usage_ledger=usage_ledger,
         )
 
     if settings.rag_vector_store == "qdrant":

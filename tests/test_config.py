@@ -61,8 +61,22 @@ class SettingsTests(unittest.TestCase):
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
                 "LOG_LEVEL": "INFO",
                 "LOG_FORMAT": "text",
+                "LLM_PROVIDER": "fake",
+                "LLM_MODEL": "fake-chat-1",
+                "EMBEDDING_PROVIDER": "local",
+                "EMBEDDING_MODEL": "gemini-embedding-001",
                 "LLM_MAX_OUTPUT_TOKENS": "8192",
                 "LLM_THINKING_LEVEL": "medium",
+                "MODEL_PROVIDER_ALLOWLIST": "fake,local",
+                "MODEL_ALLOWLIST": (
+                    "fake:fake-chat-1,local:gemini-embedding-001,"
+                    "fake:fake-cheap"
+                ),
+                "SESSION_TOKEN_BUDGET": "50000",
+                "WORKSPACE_TOKEN_BUDGET": "250000",
+                "TOKEN_BUDGET_ACTION": "downgrade",
+                "TOKEN_BUDGET_FALLBACK_PROVIDER": "fake",
+                "TOKEN_BUDGET_FALLBACK_MODEL": "fake-cheap",
                 "SSE_HEARTBEAT_SECONDS": "4.5",
                 "CONVERSATION_SUMMARY_ENABLED": "true",
                 "CONVERSATION_SUMMARY_TRIGGER_MESSAGES": "16",
@@ -139,6 +153,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_format, "text")
         self.assertEqual(settings.llm_max_output_tokens, 8192)
         self.assertEqual(settings.llm_thinking_level, "medium")
+        self.assertEqual(settings.model_provider_allowlist, ("fake", "local"))
+        self.assertIn("fake:fake-cheap", settings.model_allowlist)
+        self.assertEqual(settings.session_token_budget, 50000)
+        self.assertEqual(settings.workspace_token_budget, 250000)
+        self.assertEqual(settings.token_budget_action, "downgrade")
+        self.assertEqual(settings.token_budget_fallback_provider, "fake")
+        self.assertEqual(settings.token_budget_fallback_model, "fake-cheap")
         self.assertEqual(settings.sse_heartbeat_seconds, 4.5)
         self.assertTrue(settings.conversation_summary_enabled)
         self.assertEqual(settings.conversation_summary_trigger_messages, 16)
@@ -243,6 +264,23 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_llm_thinking_level(self) -> None:
         with self.assertRaisesRegex(ValueError, "llm_thinking_level"):
             Settings(llm_thinking_level="extreme")
+
+    def test_rejects_unallowlisted_configured_models(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not allowlisted"):
+            Settings(
+                model_provider_allowlist=("fake", "local"),
+                model_allowlist=(
+                    "fake:different-model",
+                    "local:gemini-embedding-001",
+                ),
+            )
+
+    def test_downgrade_budget_requires_a_fallback_model(self) -> None:
+        with self.assertRaisesRegex(ValueError, "require a fallback"):
+            Settings(
+                session_token_budget=100,
+                token_budget_action="downgrade",
+            )
 
     def test_rejects_invalid_memory_thresholds_and_missing_gateway_secret(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not exceed"):

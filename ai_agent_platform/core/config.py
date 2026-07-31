@@ -34,6 +34,13 @@ class Settings:
     llm_max_context_messages: int = 12
     llm_max_output_tokens: int = 4096
     llm_thinking_level: str = "low"
+    model_provider_allowlist: tuple[str, ...] = ()
+    model_allowlist: tuple[str, ...] = ()
+    session_token_budget: int = 0
+    workspace_token_budget: int = 0
+    token_budget_action: str = "reject"
+    token_budget_fallback_provider: str | None = None
+    token_budget_fallback_model: str | None = None
     conversation_summary_enabled: bool = True
     conversation_summary_trigger_messages: int = 12
     conversation_summary_keep_recent_messages: int = 6
@@ -111,10 +118,75 @@ class Settings:
         )
         _require_choice("log_format", self.log_format, {"json", "text"})
         _require_choice(
+            "llm_provider",
+            self.llm_provider,
+            {"anthropic", "fake", "google", "openai"},
+        )
+        _require_choice(
+            "embedding_provider",
+            self.embedding_provider,
+            {"gemini", "local", "openai"},
+        )
+        _require_choice(
             "llm_thinking_level",
             self.llm_thinking_level,
             {"minimal", "low", "medium", "high"},
         )
+        _require_choice(
+            "token_budget_action",
+            self.token_budget_action,
+            {"downgrade", "reject"},
+        )
+        for name, value in (
+            ("session_token_budget", self.session_token_budget),
+            ("workspace_token_budget", self.workspace_token_budget),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be greater than or equal to 0")
+        if bool(self.token_budget_fallback_provider) != bool(
+            self.token_budget_fallback_model
+        ):
+            raise ValueError(
+                "token budget fallback provider and model must be configured together"
+            )
+        if self.token_budget_action == "downgrade" and (
+            self.session_token_budget > 0 or self.workspace_token_budget > 0
+        ):
+            if not self.token_budget_fallback_provider:
+                raise ValueError(
+                    "downgrade token budgets require a fallback provider and model"
+                )
+        if self.token_budget_fallback_provider is not None:
+            _require_choice(
+                "token_budget_fallback_provider",
+                self.token_budget_fallback_provider,
+                {"anthropic", "fake", "google", "openai"},
+            )
+        if any(not item.strip() for item in self.model_provider_allowlist):
+            raise ValueError("model_provider_allowlist must not contain blanks")
+        if any(
+            ":" not in item or not all(part.strip() for part in item.split(":", 1))
+            for item in self.model_allowlist
+        ):
+            raise ValueError(
+                "model_allowlist entries must use exact provider:model pairs"
+            )
+        configured_models = [
+            (self.llm_provider, self.llm_model),
+            (self.embedding_provider, self.embedding_model),
+        ]
+        if self.token_budget_fallback_provider and self.token_budget_fallback_model:
+            configured_models.append(
+                (
+                    self.token_budget_fallback_provider,
+                    self.token_budget_fallback_model,
+                )
+            )
+        for provider, model in configured_models:
+            if not self.is_model_allowed(provider, model):
+                raise ValueError(
+                    f"configured model is not allowlisted: {provider}:{model}"
+                )
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
@@ -338,6 +410,33 @@ class Settings:
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
+    def is_model_allowed(self, provider: str, model: str) -> bool:
+        providers = set(self.model_provider_allowlist) or {
+            self.llm_provider,
+            self.embedding_provider,
+            *(
+                [self.token_budget_fallback_provider]
+                if self.token_budget_fallback_provider
+                else []
+            ),
+        }
+        models = set(self.model_allowlist) or {
+            f"{self.llm_provider}:{self.llm_model}",
+            f"{self.embedding_provider}:{self.embedding_model}",
+            *(
+                [
+                    (
+                        f"{self.token_budget_fallback_provider}:"
+                        f"{self.token_budget_fallback_model}"
+                    )
+                ]
+                if self.token_budget_fallback_provider
+                and self.token_budget_fallback_model
+                else []
+            ),
+        }
+        return provider in providers and f"{provider}:{model}" in models
+
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv = _load_dotenv()
@@ -387,6 +486,41 @@ class Settings:
             ),
             llm_thinking_level=_env(
                 "LLM_THINKING_LEVEL", cls.llm_thinking_level, dotenv
+            ),
+            model_provider_allowlist=_csv_env(
+                "MODEL_PROVIDER_ALLOWLIST",
+                cls.model_provider_allowlist,
+                dotenv,
+            ),
+            model_allowlist=_csv_env(
+                "MODEL_ALLOWLIST",
+                cls.model_allowlist,
+                dotenv,
+            ),
+            session_token_budget=_int_env(
+                "SESSION_TOKEN_BUDGET",
+                cls.session_token_budget,
+                dotenv,
+            ),
+            workspace_token_budget=_int_env(
+                "WORKSPACE_TOKEN_BUDGET",
+                cls.workspace_token_budget,
+                dotenv,
+            ),
+            token_budget_action=_env(
+                "TOKEN_BUDGET_ACTION",
+                cls.token_budget_action,
+                dotenv,
+            ),
+            token_budget_fallback_provider=_env(
+                "TOKEN_BUDGET_FALLBACK_PROVIDER",
+                cls.token_budget_fallback_provider,
+                dotenv,
+            ),
+            token_budget_fallback_model=_env(
+                "TOKEN_BUDGET_FALLBACK_MODEL",
+                cls.token_budget_fallback_model,
+                dotenv,
             ),
             conversation_summary_enabled=_bool_env(
                 "CONVERSATION_SUMMARY_ENABLED",
@@ -713,6 +847,17 @@ def _paths_env(
         return default
     parsed = tuple(item.strip() for item in value.split(os.pathsep) if item.strip())
     return parsed or default
+
+
+def _csv_env(
+    name: str,
+    default: tuple[str, ...],
+    dotenv: dict[str, str],
+) -> tuple[str, ...]:
+    value = _env(name, None, dotenv)
+    if value is None:
+        return default
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def _load_dotenv(path: str = ".env") -> dict[str, str]:

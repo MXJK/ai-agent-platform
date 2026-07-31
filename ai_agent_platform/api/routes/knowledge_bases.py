@@ -8,6 +8,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from uuid import uuid4
 
 from ai_agent_platform.integrations import (
     LLMClient,
@@ -39,7 +40,12 @@ from ai_agent_platform.services import (
     KnowledgeBaseAlreadyExistsError,
     KnowledgeBaseNotFoundError,
     KnowledgeBaseService,
+    SessionService,
+    WorkspaceNotFoundError,
+    WorkspaceService,
 )
+from ai_agent_platform.repositories import SessionNotFoundError
+from ai_agent_platform.usage_ledger import model_usage_scope
 
 
 KNOWLEDGE_BASE_ID = Path(
@@ -53,6 +59,9 @@ MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 def create_knowledge_bases_router(
     knowledge_base_service: KnowledgeBaseService,
     llm_client: LLMClient,
+    *,
+    session_service: SessionService | None = None,
+    workspace_service: WorkspaceService | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -289,17 +298,28 @@ def create_knowledge_bases_router(
         knowledge_base_id: str = KNOWLEDGE_BASE_ID,
     ) -> RAGAskResponse:
         try:
-            answer = knowledge_base_service.answer_question(
-                knowledge_base_id=knowledge_base_id,
-                question=request.question,
-                llm_client=llm_client,
-                provider=request.provider,
-                model=request.model,
-                thinking_level=request.thinking_level,
-                limit=request.limit,
-                recall_limit=request.recall_limit,
-                rerank_enabled=request.rerank_enabled,
-            )
+            if request.conversation_id and session_service is not None:
+                session_service.get_session(request.conversation_id)
+            if request.workspace_id and workspace_service is not None:
+                workspace_service.get(request.workspace_id)
+            request_id = f"rag_ask_{uuid4().hex[:12]}"
+            with model_usage_scope(
+                session_id=request.conversation_id,
+                workspace_id=request.workspace_id,
+                operation="rag_ask",
+                resource_id=request_id,
+            ):
+                answer = knowledge_base_service.answer_question(
+                    knowledge_base_id=knowledge_base_id,
+                    question=request.question,
+                    llm_client=llm_client,
+                    provider=request.provider,
+                    model=request.model,
+                    thinking_level=request.thinking_level,
+                    limit=request.limit,
+                    recall_limit=request.recall_limit,
+                    rerank_enabled=request.rerank_enabled,
+                )
         except RAGRerankerUnavailableError as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -312,13 +332,34 @@ def create_knowledge_bases_router(
                 status_code=404,
                 detail="knowledge base not found",
             ) from exc
+        except SessionNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="conversation not found",
+            ) from exc
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="workspace not found",
+            ) from exc
         except (RAGConfigurationError, RAGProviderError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(exc),
             ) from exc
         except LLMProviderError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            status_code = (
+                429
+                if exc.code == "token_budget_exceeded"
+                else 400
+                if exc.code
+                in {"llm_model_not_allowed", "llm_provider_not_allowed"}
+                else 502
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
         return RAGAskResponse(
             knowledge_base_id=knowledge_base_id,
             answer=answer.answer,

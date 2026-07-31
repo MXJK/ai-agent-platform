@@ -1,4 +1,5 @@
 from pathlib import Path as FileSystemPath
+from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
@@ -12,6 +13,8 @@ from ai_agent_platform.schemas import (
     WorkspaceDirectoryResponse,
     WorkspaceResponse,
     WorkspaceTokenUsageResponse,
+    TokenBudgetStatusResponse,
+    TokenUsageOperationResponse,
     WorkspacesResponse,
     WorkspaceUpsertRequest,
 )
@@ -173,6 +176,17 @@ def create_workspaces_router(
             else []
         )
         totals = summarize_token_usage(records)
+        operation_records = defaultdict(list)
+        for record in records:
+            operation_records[record.operation].append(record)
+        budget = (
+            session_service.get_token_budget_status(
+                session_id=None,
+                workspace_id=workspace_id,
+            )
+            if session_service is not None
+            else None
+        )
         return WorkspaceTokenUsageResponse(
             workspace_id=workspace_id,
             input_tokens=totals.input_tokens,
@@ -180,7 +194,27 @@ def create_workspaces_router(
             thoughts_tokens=totals.thoughts_tokens,
             total_tokens=totals.total_tokens,
             record_count=totals.record_count,
-            conversation_count=len({record.session_id for record in records}),
+            conversation_count=len(
+                {
+                    record.session_id
+                    for record in records
+                    if record.session_id is not None
+                }
+            ),
+            operations=[
+                TokenUsageOperationResponse(
+                    operation=operation,
+                    **summarize_token_usage(
+                        operation_records[operation]
+                    ).__dict__,
+                )
+                for operation in sorted(operation_records)
+            ],
+            budget=(
+                TokenBudgetStatusResponse.from_domain(budget)
+                if budget is not None
+                else None
+            ),
         )
 
     return router

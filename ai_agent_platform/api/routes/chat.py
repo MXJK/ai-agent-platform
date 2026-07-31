@@ -18,7 +18,12 @@ from ai_agent_platform.core import (
     TaskQueueError,
     request_user_id,
 )
-from ai_agent_platform.integrations import LLMClient, LLMProviderError, LLMStreamEvent
+from ai_agent_platform.integrations import (
+    LLMClient,
+    LLMProviderError,
+    LLMRequestPlan,
+    LLMStreamEvent,
+)
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas import ChatStreamRequest
 from ai_agent_platform.services import SessionService
@@ -28,6 +33,7 @@ from ai_agent_platform.project_memory import (
     RetrievedMemory,
 )
 from ai_agent_platform.services import WorkspaceNotFoundError
+from ai_agent_platform.usage_ledger import model_usage_scope
 
 
 logger = logging.getLogger(__name__)
@@ -64,22 +70,62 @@ def create_chat_router(
         )
         if settings.auth_mode != "disabled" and actor_user_id != session.user_id:
             raise HTTPException(status_code=403, detail="conversation access denied")
-        retrieved_memories: list[RetrievedMemory] = []
-        if request.workspace_id and project_memory_service is not None:
-            try:
-                retrieved_memories = project_memory_service.retrieve(
-                    workspace_id=request.workspace_id,
-                    actor_user_id=actor_user_id,
-                    query=request.message,
-                )
-            except WorkspaceNotFoundError as exc:
-                raise HTTPException(
-                    status_code=404, detail="workspace not found"
-                ) from exc
-            except MemoryAccessDeniedError as exc:
-                raise HTTPException(status_code=403, detail=str(exc)) from exc
-
         request_id = f"chat_{uuid4().hex[:12]}"
+        try:
+            with model_usage_scope(
+                session_id=request.conversation_id,
+                workspace_id=request.workspace_id,
+                operation="chat",
+                resource_id=request_id,
+            ):
+                retrieved_memories: list[RetrievedMemory] = []
+                if request.workspace_id and project_memory_service is not None:
+                    retrieved_memories = project_memory_service.retrieve(
+                        workspace_id=request.workspace_id,
+                        actor_user_id=actor_user_id,
+                        query=request.message,
+                    )
+                prepared_messages = session_service.build_chat_context(
+                    session_id=request.conversation_id,
+                    user_message=request.message,
+                    max_context_messages=settings.llm_max_context_messages,
+                )
+                if retrieved_memories:
+                    prepared_messages.insert(
+                        0,
+                        {
+                            "role": "system",
+                            "content": _memory_system_context(
+                                retrieved_memories
+                            ),
+                        },
+                    )
+                request_plan = llm_client.prepare_chat_request(
+                    prepared_messages,
+                    provider=request.provider,
+                    model=request.model,
+                )
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail="workspace not found"
+            ) from exc
+        except MemoryAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except LLMProviderError as exc:
+            if exc.code == "token_budget_exceeded":
+                status_code = 429
+            elif exc.code in {
+                "llm_model_not_allowed",
+                "llm_provider_not_allowed",
+            }:
+                status_code = 400
+            else:
+                status_code = 502
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+
         return StreamingResponse(
             chat_stream_events(
                 request=request,
@@ -92,6 +138,8 @@ def create_chat_router(
                 task_queue=task_queue,
                 actor_user_id=actor_user_id,
                 retrieved_memories=retrieved_memories,
+                prepared_messages=prepared_messages,
+                request_plan=request_plan,
             ),
             media_type="text/event-stream",
             headers={
@@ -116,10 +164,20 @@ def chat_stream_events(
     task_queue: TaskQueue | None = None,
     actor_user_id: str = "demo_user",
     retrieved_memories: list[RetrievedMemory] | None = None,
+    prepared_messages: list[dict[str, str]] | None = None,
+    request_plan: LLMRequestPlan | None = None,
 ):
     started_at = perf_counter()
-    provider = request.provider or settings.llm_provider
-    model = request.model or settings.llm_model
+    provider = (
+        request_plan.provider
+        if request_plan is not None
+        else request.provider or settings.llm_provider
+    )
+    model = (
+        request_plan.model
+        if request_plan is not None
+        else request.model or settings.llm_model
+    )
     thinking_level = None
     if provider == "google" and model.startswith("gemini-3"):
         thinking_level = request.thinking_level or settings.llm_thinking_level
@@ -127,7 +185,6 @@ def chat_stream_events(
     latest_input_tokens = 0
     latest_output_tokens = 0
     latest_thoughts_tokens = 0
-    usage_recorded = False
     metrics.increment("chat_streams_started_total")
 
     logger.info(
@@ -137,6 +194,18 @@ def chat_stream_events(
             "conversation_id": request.conversation_id,
             "provider": provider,
             "model": model,
+            "requested_provider": (
+                request_plan.requested_provider if request_plan else provider
+            ),
+            "requested_model": (
+                request_plan.requested_model if request_plan else model
+            ),
+            "budget_decision": (
+                request_plan.budget_decision if request_plan else "allowed"
+            ),
+            "budget_reason": (
+                request_plan.budget_reason if request_plan else None
+            ),
             "thinking_level": thinking_level,
         },
     )
@@ -146,6 +215,18 @@ def chat_stream_events(
             "request_id": request_id,
             "provider": provider,
             "model": model,
+            "requested_provider": (
+                request_plan.requested_provider if request_plan else provider
+            ),
+            "requested_model": (
+                request_plan.requested_model if request_plan else model
+            ),
+            "budget_decision": (
+                request_plan.budget_decision if request_plan else "allowed"
+            ),
+            "budget_reason": (
+                request_plan.budget_reason if request_plan else None
+            ),
             "thinking_level": thinking_level,
         },
     )
@@ -170,41 +251,12 @@ def chat_stream_events(
             },
         )
 
-    def record_usage() -> None:
-        nonlocal usage_recorded
-        if usage_recorded or not (
-            latest_input_tokens or latest_output_tokens or latest_thoughts_tokens
-        ):
-            return
-        session_service.record_token_usage(
-            session_id=request.conversation_id,
-            provider=provider,
-            model=model,
-            input_tokens=latest_input_tokens,
-            output_tokens=latest_output_tokens,
-            workspace_id=request.workspace_id,
-            thoughts_tokens=latest_thoughts_tokens,
-            record_id=f"usage_{request_id}",
-        )
-        metrics.increment("llm_input_tokens_total", latest_input_tokens)
-        metrics.increment("llm_output_tokens_total", latest_output_tokens)
-        metrics.increment("llm_thoughts_tokens_total", latest_thoughts_tokens)
-        usage_recorded = True
-
     try:
-        messages = session_service.build_chat_context(
+        messages = prepared_messages or session_service.build_chat_context(
             session_id=request.conversation_id,
             user_message=request.message,
             max_context_messages=settings.llm_max_context_messages,
         )
-        if retrieved_memories:
-            messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": _memory_system_context(retrieved_memories),
-                },
-            )
         session_service.add_message(
             session_id=request.conversation_id,
             role="user",
@@ -215,6 +267,7 @@ def chat_stream_events(
             provider=request.provider,
             model=request.model,
             thinking_level=request.thinking_level,
+            request_plan=request_plan,
         )
         for event in stream_with_heartbeat(
             llm_events,
@@ -285,8 +338,12 @@ def chat_stream_events(
                     metrics.increment(
                         "project_memory_extraction_enqueue_failed_total"
                     )
-        record_usage()
-
+        _record_usage_metrics(
+            metrics,
+            input_tokens=latest_input_tokens,
+            output_tokens=latest_output_tokens,
+            thoughts_tokens=latest_thoughts_tokens,
+        )
         elapsed_ms = int((perf_counter() - started_at) * 1000)
         metrics.increment("chat_streams_completed_total")
         logger.info(
@@ -318,7 +375,12 @@ def chat_stream_events(
             },
         )
     except LLMProviderError as exc:
-        record_usage()
+        _record_usage_metrics(
+            metrics,
+            input_tokens=latest_input_tokens,
+            output_tokens=latest_output_tokens,
+            thoughts_tokens=latest_thoughts_tokens,
+        )
         metrics.increment("chat_streams_failed_total")
         metrics.increment("llm_provider_errors_total")
         logger.warning(
@@ -379,6 +441,18 @@ def chat_stream_events(
 
 def sse(event: str, data: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _record_usage_metrics(
+    metrics: MetricsRegistry,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    thoughts_tokens: int,
+) -> None:
+    metrics.increment("llm_input_tokens_total", input_tokens)
+    metrics.increment("llm_output_tokens_total", output_tokens)
+    metrics.increment("llm_thoughts_tokens_total", thoughts_tokens)
 
 
 def _memory_system_context(memories: list[RetrievedMemory]) -> str:

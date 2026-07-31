@@ -1,6 +1,7 @@
 from .llm import (
     LLMClient,
     LLMProviderError,
+    LLMRequestPlan,
     LLMResponse,
     LLMStreamEvent,
     LLMToolDecision,
@@ -45,6 +46,7 @@ from .tools import (
 __all__ = [
     "LLMClient",
     "LLMProviderError",
+    "LLMRequestPlan",
     "LLMResponse",
     "LLMStreamEvent",
     "LLMToolDecision",

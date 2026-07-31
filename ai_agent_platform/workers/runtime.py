@@ -29,6 +29,7 @@ from ai_agent_platform.services import (
     AgentRunService,
     KnowledgeBaseService,
     SessionService,
+    UsageLedgerService,
     WorkspaceService,
     create_conversation_compressor,
 )
@@ -75,7 +76,8 @@ def _create_worker_services() -> WorkerServices:
 
     metrics = MetricsRegistry()
     session_repository = _create_session_repository(settings)
-    llm_client = LLMClient(settings)
+    usage_ledger = UsageLedgerService(session_repository, settings)
+    llm_client = LLMClient(settings, usage_ledger=usage_ledger)
     workspace_service = WorkspaceService(
         store=_create_workspace_store(settings),
         allowed_roots=settings.workspace_allowed_roots,
@@ -96,6 +98,7 @@ def _create_worker_services() -> WorkerServices:
         workspace_service=workspace_service,
         llm_client=llm_client,
         metrics=metrics,
+        usage_ledger=usage_ledger,
     )
     project_memory_service.set_index_outbox_submitter(
         lambda trigger_id: worker_queue.submit(
@@ -107,6 +110,7 @@ def _create_worker_services() -> WorkerServices:
     rag_service = create_rag_service(
         settings,
         document_store=_create_document_store(settings),
+        usage_ledger=usage_ledger,
     )
     knowledge_base_service = KnowledgeBaseService(
         store=_create_knowledge_base_store(settings),
@@ -155,6 +159,7 @@ def _create_worker_services() -> WorkerServices:
             settings.conversation_summary_max_source_chars
         ),
         metrics=metrics,
+        usage_ledger=usage_ledger,
     )
     agent_run_service = AgentRunService(
         runtime=coding_runtime,

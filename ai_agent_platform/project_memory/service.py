@@ -31,6 +31,7 @@ from ai_agent_platform.project_memory.vector import (
     MemoryVectorStore,
     embed_memory,
 )
+from ai_agent_platform.usage_ledger import model_usage_scope
 
 
 class WorkspaceProvider(Protocol):
@@ -532,9 +533,14 @@ class ProjectMemoryService:
         dense: list[tuple[str, float, int]] = []
         lexical: list[tuple[str, float]] = []
         try:
-            query_embedding = self._embedding_provider.embed_texts(
-                [query], task_type="query"
-            )[0]
+            with model_usage_scope(
+                workspace_id=workspace_id,
+                operation="embedding",
+                resource_id=f"project_memory:{workspace_id}",
+            ):
+                query_embedding = self._embedding_provider.embed_texts(
+                    [query], task_type="query"
+                )[0]
             dense = self._vector_store.search(
                 workspace_id=workspace_id,
                 workspace_revision=workspace.revision,
@@ -845,10 +851,15 @@ class ProjectMemoryService:
                 ):
                     self._vector_store.delete(event.memory_id)
                 else:
-                    self._vector_store.upsert(
-                        memory,
-                        embed_memory(self._embedding_provider, memory),
-                    )
+                    with model_usage_scope(
+                        workspace_id=memory.workspace_id,
+                        operation="embedding",
+                        resource_id=memory.id,
+                    ):
+                        self._vector_store.upsert(
+                            memory,
+                            embed_memory(self._embedding_provider, memory),
+                        )
                 self._repository.mark_index_event(
                     event_id=event.id,
                     status="completed",

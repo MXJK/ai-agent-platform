@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -15,6 +15,10 @@ import httpx
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 from ai_agent_platform.token_counting import estimate_text_tokens
+from ai_agent_platform.usage_ledger import (
+    TokenBudgetExceededError,
+    current_model_usage_context,
+)
 
 
 LLMEventType = Literal["delta", "usage", "done"]
@@ -36,6 +40,20 @@ class LLMResponse:
     text: str
     model: str
     usage: LLMUsage | None = None
+
+
+@dataclass(frozen=True)
+class LLMRequestPlan:
+    requested_provider: str
+    requested_model: str
+    provider: str
+    model: str
+    input_tokens: int
+    max_output_tokens: int
+    input_count_method: str
+    budget_decision: str = "allowed"
+    budget_reason: str | None = None
+    usage_context: Any = None
 
 
 @dataclass(frozen=True)
@@ -106,8 +124,12 @@ class LLMProviderError(Exception):
 class LLMClient:
     """Streams text from Google, OpenAI, Anthropic, or a local fake provider."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_ledger=None) -> None:
         self._settings = settings
+        self._usage_ledger = usage_ledger
+
+    def set_usage_ledger(self, usage_ledger) -> None:
+        self._usage_ledger = usage_ledger
 
     @property
     def native_tool_calling_enabled(self) -> bool:
@@ -121,45 +143,63 @@ class LLMClient:
         provider: str | None = None,
         model: str | None = None,
     ) -> LLMToolDecision:
-        selected_provider = provider or self._settings.llm_provider
-        selected_model = model or self._settings.llm_model
+        requested_provider = provider or self._settings.llm_provider
+        requested_model = model or self._settings.llm_model
         aliases = _tool_aliases(tools)
+        plan = self._prepare_tool_request(
+            messages,
+            tools,
+            aliases,
+            provider=requested_provider,
+            model=requested_model,
+        )
         last_error: LLMProviderError | None = None
         for attempt in range(self._settings.llm_max_retries + 1):
             try:
-                if selected_provider == "openai":
+                if plan.provider == "openai":
                     decision = self._decide_openai_tools(
                         messages,
                         tools,
                         aliases,
-                        selected_model,
+                        plan.model,
+                        max_output_tokens=plan.max_output_tokens,
                     )
-                elif selected_provider == "anthropic":
+                elif plan.provider == "anthropic":
                     decision = self._decide_anthropic_tools(
                         messages,
                         tools,
                         aliases,
-                        selected_model,
+                        plan.model,
+                        max_output_tokens=plan.max_output_tokens,
                     )
-                elif selected_provider == "google":
+                elif plan.provider == "google":
                     decision = self._decide_google_tools(
                         messages,
                         tools,
                         aliases,
-                        selected_model,
+                        plan.model,
+                        max_output_tokens=plan.max_output_tokens,
                     )
-                elif selected_provider == "fake":
+                elif plan.provider == "fake":
                     decision = self._decide_fake_tools(
                         messages,
-                        selected_model,
+                        plan.model,
                     )
                 else:
                     raise LLMProviderError(
-                        f"unsupported llm provider: {selected_provider}"
+                        f"unsupported llm provider: {plan.provider}"
                     )
+                usage = decision.usage or LLMUsage(
+                    input_tokens=plan.input_tokens,
+                    output_tokens=0,
+                )
+                if usage.input_tokens <= 0 or plan.provider == "fake":
+                    usage = replace(usage, input_tokens=plan.input_tokens)
+                    decision = replace(decision, usage=usage)
+                self._record_request_usage(plan, usage)
                 accumulator = _LLM_USAGE_ACCUMULATOR.get()
-                if accumulator is not None and decision.usage is not None:
-                    accumulator.add(decision.usage)
+                if accumulator is not None:
+                    accumulator.add(usage)
                 return decision
             except LLMProviderError as exc:
                 last_error = exc
@@ -176,49 +216,165 @@ class LLMClient:
         provider: str | None = None,
         model: str | None = None,
         thinking_level: str | None = None,
+        request_plan: LLMRequestPlan | None = None,
     ) -> Iterable[LLMStreamEvent]:
-        selected_provider = provider or self._settings.llm_provider
-        selected_model = model or self._settings.llm_model
+        plan = request_plan or self.prepare_chat_request(
+            messages,
+            provider=provider,
+            model=model,
+        )
         stream_factory = self._stream_factory(
-            selected_provider,
-            selected_model,
+            plan.provider,
+            plan.model,
             thinking_level,
+            plan.max_output_tokens,
         )
 
         last_error: LLMProviderError | None = None
+        latest_usage: LLMUsage | None = None
+        usage_recorded = False
         for attempt in range(self._settings.llm_max_retries + 1):
             emitted = False
             try:
                 for event in stream_factory(messages):
                     emitted = True
+                    if event.type == "usage" and event.usage is not None:
+                        latest_usage = LLMUsage(
+                            input_tokens=(
+                                event.usage.input_tokens
+                                if event.usage.input_tokens > 0
+                                else plan.input_tokens
+                            ),
+                            output_tokens=event.usage.output_tokens,
+                            thoughts_tokens=event.usage.thoughts_tokens,
+                        )
+                        event = replace(event, usage=latest_usage)
+                    if event.type == "done" and not usage_recorded:
+                        latest_usage = latest_usage or LLMUsage(
+                            input_tokens=plan.input_tokens,
+                            output_tokens=0,
+                        )
+                        self._record_request_usage(plan, latest_usage)
+                        accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                        if accumulator is not None:
+                            accumulator.add(latest_usage)
+                        usage_recorded = True
                     yield event
+                if not usage_recorded:
+                    latest_usage = LLMUsage(
+                        input_tokens=(
+                            latest_usage.input_tokens
+                            if latest_usage is not None
+                            else plan.input_tokens
+                        ),
+                        output_tokens=(
+                            latest_usage.output_tokens
+                            if latest_usage is not None
+                            else 0
+                        ),
+                        thoughts_tokens=(
+                            latest_usage.thoughts_tokens
+                            if latest_usage is not None
+                            else 0
+                        ),
+                    )
+                    self._record_request_usage(plan, latest_usage)
+                    accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                    if accumulator is not None:
+                        accumulator.add(latest_usage)
+                    usage_recorded = True
                 return
             except LLMProviderError as exc:
                 last_error = exc
                 if emitted or not exc.retryable or attempt >= self._settings.llm_max_retries:
+                    if emitted and not usage_recorded:
+                        partial_usage = latest_usage or LLMUsage(
+                            input_tokens=plan.input_tokens,
+                            output_tokens=0,
+                        )
+                        self._record_request_usage(plan, partial_usage)
+                        accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                        if accumulator is not None:
+                            accumulator.add(partial_usage)
                     raise
                 time.sleep(min(0.2 * (2**attempt), 2.0))
 
         if last_error is not None:
             raise last_error
 
+    def prepare_chat_request(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> LLMRequestPlan:
+        requested_provider = provider or self._settings.llm_provider
+        requested_model = model or self._settings.llm_model
+        self._require_model_allowed(requested_provider, requested_model)
+        input_tokens, count_method = self._count_input_tokens(
+            messages,
+            provider=requested_provider,
+            model=requested_model,
+        )
+        plan = LLMRequestPlan(
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            provider=requested_provider,
+            model=requested_model,
+            input_tokens=input_tokens,
+            max_output_tokens=self._settings.llm_max_output_tokens,
+            input_count_method=count_method,
+            usage_context=current_model_usage_context(),
+        )
+        if self._usage_ledger is None:
+            return plan
+        try:
+            authorization = self._usage_ledger.authorize(
+                requested_provider=requested_provider,
+                requested_model=requested_model,
+                input_tokens=input_tokens,
+                max_output_tokens=self._settings.llm_max_output_tokens,
+                input_count_method=count_method,
+            )
+        except TokenBudgetExceededError as exc:
+            raise LLMProviderError(
+                str(exc),
+                code="token_budget_exceeded",
+            ) from exc
+        self._require_model_allowed(authorization.provider, authorization.model)
+        if authorization.budget_decision == "downgraded":
+            input_tokens, count_method = self._count_input_tokens(
+                messages,
+                provider=authorization.provider,
+                model=authorization.model,
+            )
+        return LLMRequestPlan(
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            provider=authorization.provider,
+            model=authorization.model,
+            input_tokens=input_tokens,
+            max_output_tokens=authorization.max_output_tokens,
+            input_count_method=count_method,
+            budget_decision=authorization.budget_decision,
+            budget_reason=authorization.budget_reason,
+            usage_context=current_model_usage_context(),
+        )
+
     def complete(self, prompt: str) -> LLMResponse:
         text_parts: list[str] = []
         latest_usage: LLMUsage | None = None
         messages = [{"role": "user", "content": prompt}]
-        try:
-            for event in self.stream_chat(messages):
-                if event.type == "delta":
-                    text_parts.append(event.text)
-                elif event.type == "usage" and event.usage is not None:
-                    latest_usage = event.usage
-        finally:
-            accumulator = _LLM_USAGE_ACCUMULATOR.get()
-            if accumulator is not None and latest_usage is not None:
-                accumulator.add(latest_usage)
+        plan = self.prepare_chat_request(messages)
+        for event in self.stream_chat(messages, request_plan=plan):
+            if event.type == "delta":
+                text_parts.append(event.text)
+            elif event.type == "usage" and event.usage is not None:
+                latest_usage = event.usage
         return LLMResponse(
             text="".join(text_parts),
-            model=self._settings.llm_model,
+            model=plan.model,
             usage=latest_usage,
         )
 
@@ -229,8 +385,10 @@ class LLMClient:
     ) -> LLMToolDecision:
         text = "fake model completed the native tool turn"
         usage = LLMUsage(
-            input_tokens=_estimate_tokens(_join_any_message_text(messages)),
-            output_tokens=_estimate_tokens(text),
+            input_tokens=_count_fake_text_tokens(
+                _join_any_message_text(messages)
+            ),
+            output_tokens=_count_fake_text_tokens(text),
         )
         return LLMToolDecision(
             text=text,
@@ -254,6 +412,8 @@ class LLMClient:
         tools: list[ToolSpec],
         aliases: dict[str, str],
         model: str,
+        *,
+        max_output_tokens: int,
     ) -> LLMToolDecision:
         if not self._settings.openai_api_key:
             raise LLMProviderError("OPENAI_API_KEY is not configured")
@@ -272,7 +432,7 @@ class LLMClient:
             ],
             "tool_choice": "auto",
             "parallel_tool_calls": True,
-            "max_output_tokens": self._settings.llm_max_output_tokens,
+            "max_output_tokens": max_output_tokens,
         }
         body = self._post_json(
             "https://api.openai.com/v1/responses",
@@ -322,6 +482,8 @@ class LLMClient:
         tools: list[ToolSpec],
         aliases: dict[str, str],
         model: str,
+        *,
+        max_output_tokens: int,
     ) -> LLMToolDecision:
         if not self._settings.anthropic_api_key:
             raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
@@ -343,7 +505,7 @@ class LLMClient:
                 for spec in tools
             ],
             "tool_choice": {"type": "auto"},
-            "max_tokens": self._settings.llm_max_output_tokens,
+            "max_tokens": max_output_tokens,
         }
         if system:
             payload["system"] = "\n\n".join(system)
@@ -390,6 +552,8 @@ class LLMClient:
         tools: list[ToolSpec],
         aliases: dict[str, str],
         model: str,
+        *,
+        max_output_tokens: int,
     ) -> LLMToolDecision:
         if not self._settings.google_api_key:
             raise LLMProviderError("GOOGLE_API_KEY is not configured")
@@ -412,7 +576,7 @@ class LLMClient:
             for spec in tools
         ]
         config_kwargs: dict[str, Any] = {
-            "max_output_tokens": self._settings.llm_max_output_tokens,
+            "max_output_tokens": max_output_tokens,
             "tools": [types.Tool(function_declarations=declarations)],
         }
         system_instruction = _google_system_instruction_any(messages)
@@ -484,6 +648,382 @@ class LLMClient:
             provider_items=provider_items,
         )
 
+    def _prepare_tool_request(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        *,
+        provider: str,
+        model: str,
+    ) -> LLMRequestPlan:
+        self._require_model_allowed(provider, model)
+        input_tokens, count_method = self._count_tool_input_tokens(
+            messages,
+            tools,
+            aliases,
+            provider=provider,
+            model=model,
+        )
+        if self._usage_ledger is None:
+            return LLMRequestPlan(
+                requested_provider=provider,
+                requested_model=model,
+                provider=provider,
+                model=model,
+                input_tokens=input_tokens,
+                max_output_tokens=self._settings.llm_max_output_tokens,
+                input_count_method=count_method,
+                usage_context=current_model_usage_context(),
+            )
+        try:
+            authorization = self._usage_ledger.authorize(
+                requested_provider=provider,
+                requested_model=model,
+                input_tokens=input_tokens,
+                max_output_tokens=self._settings.llm_max_output_tokens,
+                input_count_method=count_method,
+            )
+        except TokenBudgetExceededError as exc:
+            raise LLMProviderError(
+                str(exc),
+                code="token_budget_exceeded",
+            ) from exc
+        self._require_model_allowed(authorization.provider, authorization.model)
+        if authorization.budget_decision == "downgraded":
+            input_tokens, count_method = self._count_tool_input_tokens(
+                messages,
+                tools,
+                aliases,
+                provider=authorization.provider,
+                model=authorization.model,
+            )
+        return LLMRequestPlan(
+            requested_provider=provider,
+            requested_model=model,
+            provider=authorization.provider,
+            model=authorization.model,
+            input_tokens=input_tokens,
+            max_output_tokens=authorization.max_output_tokens,
+            input_count_method=count_method,
+            budget_decision=authorization.budget_decision,
+            budget_reason=authorization.budget_reason,
+            usage_context=current_model_usage_context(),
+        )
+
+    def _count_tool_input_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        *,
+        provider: str,
+        model: str,
+    ) -> tuple[int, str]:
+        reverse_aliases = {
+            registry_name: alias for alias, registry_name in aliases.items()
+        }
+        if provider == "fake":
+            serialized = _join_any_message_text(messages) + json.dumps(
+                [spec.input_schema for spec in tools],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            return _count_fake_text_tokens(serialized), "fake_lexical_tokenizer"
+        if provider == "openai":
+            if not self._settings.openai_api_key:
+                raise LLMProviderError("OPENAI_API_KEY is not configured")
+            payload = {
+                "model": model,
+                "input": _openai_tool_input(messages, reverse_aliases),
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": reverse_aliases[spec.name],
+                        "description": spec.description,
+                        "parameters": spec.input_schema,
+                    }
+                    for spec in tools
+                ],
+            }
+            body = self._post_json(
+                "https://api.openai.com/v1/responses/input_tokens",
+                headers={
+                    "Authorization": f"Bearer {self._settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload=payload,
+            )
+            count = body.get("input_tokens")
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "OpenAI token count response is missing input_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "openai_responses_input_tokens"
+        if provider == "anthropic":
+            if not self._settings.anthropic_api_key:
+                raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+            system = [
+                str(message.get("content") or "")
+                for message in messages
+                if message.get("role") == "system"
+            ]
+            payload: dict[str, Any] = {
+                "model": model,
+                "messages": _anthropic_tool_messages(
+                    messages,
+                    reverse_aliases,
+                ),
+                "tools": [
+                    {
+                        "name": reverse_aliases[spec.name],
+                        "description": spec.description,
+                        "input_schema": spec.input_schema,
+                    }
+                    for spec in tools
+                ],
+            }
+            if system:
+                payload["system"] = "\n\n".join(system)
+            body = self._post_json(
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                headers={
+                    "x-api-key": self._settings.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                payload=payload,
+            )
+            count = body.get("input_tokens")
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "Anthropic token count response is missing input_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "anthropic_messages_count_tokens"
+        if provider == "google":
+            if not self._settings.google_api_key:
+                raise LLMProviderError("GOOGLE_API_KEY is not configured")
+            try:
+                from google import genai
+                from google.genai import types
+            except ImportError as exc:
+                raise LLMProviderError(
+                    "google-genai is not installed; run pip install google-genai"
+                ) from exc
+            declarations = [
+                types.FunctionDeclaration(
+                    name=reverse_aliases[spec.name],
+                    description=spec.description,
+                    parameters_json_schema=spec.input_schema,
+                    response_json_schema=spec.output_schema,
+                )
+                for spec in tools
+            ]
+            config_kwargs: dict[str, Any] = {
+                "tools": [types.Tool(function_declarations=declarations)]
+            }
+            system_instruction = _google_system_instruction_any(messages)
+            if system_instruction:
+                config_kwargs["system_instruction"] = system_instruction
+            client = genai.Client(
+                api_key=self._settings.google_api_key,
+                http_options=types.HttpOptions(
+                    timeout=max(
+                        1,
+                        int(self._settings.llm_timeout_seconds * 1000),
+                    )
+                ),
+            )
+            try:
+                response = client.models.count_tokens(
+                    model=model,
+                    contents=_google_tool_contents(
+                        messages,
+                        types,
+                        reverse_aliases,
+                    ),
+                    config=types.CountTokensConfig(**config_kwargs),
+                )
+            except Exception as exc:
+                raise LLMProviderError(
+                    f"Gemini token count failed: {exc}",
+                    retryable=True,
+                    code="token_count_failed",
+                ) from exc
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    with suppress(Exception):
+                        close()
+            count = getattr(response, "total_tokens", None)
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "Gemini token count response is missing total_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "gemini_models_count_tokens"
+        raise LLMProviderError(
+            f"unsupported llm provider: {provider}",
+            code="llm_provider_not_allowed",
+        )
+
+    def _require_model_allowed(self, provider: str, model: str) -> None:
+        if not self._settings.is_model_allowed(provider, model):
+            code = (
+                "llm_provider_not_allowed"
+                if provider
+                not in (
+                    set(self._settings.model_provider_allowlist)
+                    or {
+                        self._settings.llm_provider,
+                        self._settings.embedding_provider,
+                        self._settings.token_budget_fallback_provider,
+                    }
+                )
+                else "llm_model_not_allowed"
+            )
+            raise LLMProviderError(
+                f"model selection is not allowlisted: {provider}:{model}",
+                code=code,
+            )
+
+    def _count_input_tokens(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        provider: str,
+        model: str,
+    ) -> tuple[int, str]:
+        if provider == "fake":
+            return _count_fake_message_tokens(messages), "fake_lexical_tokenizer"
+        if provider == "openai":
+            if not self._settings.openai_api_key:
+                raise LLMProviderError("OPENAI_API_KEY is not configured")
+            body = self._post_json(
+                "https://api.openai.com/v1/responses/input_tokens",
+                headers={
+                    "Authorization": f"Bearer {self._settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload={"model": model, "input": messages},
+            )
+            count = body.get("input_tokens")
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "OpenAI token count response is missing input_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "openai_responses_input_tokens"
+        if provider == "anthropic":
+            if not self._settings.anthropic_api_key:
+                raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+            system_messages = [
+                message["content"]
+                for message in messages
+                if message["role"] == "system"
+            ]
+            payload: dict[str, Any] = {
+                "model": model,
+                "messages": [
+                    message
+                    for message in messages
+                    if message["role"] in {"user", "assistant"}
+                ],
+            }
+            if system_messages:
+                payload["system"] = "\n\n".join(system_messages)
+            body = self._post_json(
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                headers={
+                    "x-api-key": self._settings.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                payload=payload,
+            )
+            count = body.get("input_tokens")
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "Anthropic token count response is missing input_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "anthropic_messages_count_tokens"
+        if provider == "google":
+            if not self._settings.google_api_key:
+                raise LLMProviderError("GOOGLE_API_KEY is not configured")
+            try:
+                from google import genai
+                from google.genai import types
+            except ImportError as exc:
+                raise LLMProviderError(
+                    "google-genai is not installed; run pip install google-genai"
+                ) from exc
+            system_instruction = _google_system_instruction(messages)
+            config = (
+                types.CountTokensConfig(system_instruction=system_instruction)
+                if system_instruction
+                else None
+            )
+            client = genai.Client(
+                api_key=self._settings.google_api_key,
+                http_options=types.HttpOptions(
+                    timeout=max(
+                        1,
+                        int(self._settings.llm_timeout_seconds * 1000),
+                    )
+                ),
+            )
+            try:
+                response = client.models.count_tokens(
+                    model=model,
+                    contents=_google_contents(messages, types),
+                    config=config,
+                )
+            except Exception as exc:
+                raise LLMProviderError(
+                    f"Gemini token count failed: {exc}",
+                    retryable=True,
+                    code="token_count_failed",
+                ) from exc
+            finally:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    with suppress(Exception):
+                        close()
+            count = getattr(response, "total_tokens", None)
+            if not isinstance(count, int):
+                raise LLMProviderError(
+                    "Gemini token count response is missing total_tokens",
+                    code="token_count_failed",
+                )
+            return max(0, count), "gemini_models_count_tokens"
+        raise LLMProviderError(
+            f"unsupported llm provider: {provider}",
+            code="llm_provider_not_allowed",
+        )
+
+    def _record_request_usage(
+        self,
+        plan: LLMRequestPlan,
+        usage: LLMUsage,
+    ) -> None:
+        if self._usage_ledger is None:
+            return
+        self._usage_ledger.record(
+            provider=plan.provider,
+            model=plan.model,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            thoughts_tokens=usage.thoughts_tokens,
+            requested_provider=plan.requested_provider,
+            requested_model=plan.requested_model,
+            input_count_method=plan.input_count_method,
+            budget_decision=plan.budget_decision,
+            context=plan.usage_context,
+        )
+
     def _post_json(
         self,
         url: str,
@@ -535,18 +1075,28 @@ class LLMClient:
         provider: str,
         model: str,
         thinking_level: str | None,
+        max_output_tokens: int,
     ):
         if provider == "fake":
             return lambda messages: self._stream_fake(messages, model)
         if provider == "openai":
-            return lambda messages: self._stream_openai(messages, model)
+            return lambda messages: self._stream_openai(
+                messages,
+                model,
+                max_output_tokens=max_output_tokens,
+            )
         if provider == "anthropic":
-            return lambda messages: self._stream_anthropic(messages, model)
+            return lambda messages: self._stream_anthropic(
+                messages,
+                model,
+                max_output_tokens=max_output_tokens,
+            )
         if provider == "google":
             return lambda messages: self._stream_google(
                 messages,
                 model,
                 thinking_level=thinking_level,
+                max_output_tokens=max_output_tokens,
             )
         raise LLMProviderError(f"unsupported llm provider: {provider}")
 
@@ -560,14 +1110,18 @@ class LLMClient:
         yield LLMStreamEvent(
             type="usage",
             usage=LLMUsage(
-                input_tokens=_estimate_tokens(_join_message_text(messages)),
-                output_tokens=_estimate_tokens(answer),
+                input_tokens=_count_fake_message_tokens(messages),
+                output_tokens=_count_fake_text_tokens(answer),
             ),
         )
         yield LLMStreamEvent(type="done")
 
     def _stream_openai(
-        self, messages: list[dict[str, str]], model: str
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        *,
+        max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
         if not self._settings.openai_api_key:
             raise LLMProviderError("OPENAI_API_KEY is not configured")
@@ -575,6 +1129,7 @@ class LLMClient:
         payload = {
             "model": model,
             "input": messages,
+            "max_output_tokens": max_output_tokens,
             "stream": True,
         }
         headers = {
@@ -589,7 +1144,11 @@ class LLMClient:
         )
 
     def _stream_anthropic(
-        self, messages: list[dict[str, str]], model: str
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        *,
+        max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
         if not self._settings.anthropic_api_key:
             raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
@@ -605,7 +1164,7 @@ class LLMClient:
         payload: dict[str, object] = {
             "model": model,
             "messages": chat_messages,
-            "max_tokens": self._settings.llm_max_output_tokens,
+            "max_tokens": max_output_tokens,
             "stream": True,
         }
         if system_messages:
@@ -629,6 +1188,7 @@ class LLMClient:
         model: str,
         *,
         thinking_level: str | None = None,
+        max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
         if not self._settings.google_api_key:
             raise LLMProviderError("GOOGLE_API_KEY is not configured")
@@ -643,7 +1203,7 @@ class LLMClient:
 
         system_instruction = _google_system_instruction(messages)
         config_kwargs: dict[str, object] = {
-            "max_output_tokens": self._settings.llm_max_output_tokens
+            "max_output_tokens": max_output_tokens
         }
         selected_thinking_level = thinking_level
         if selected_thinking_level is None and model.startswith("gemini-3"):
@@ -805,12 +1365,9 @@ def _parse_openai_event(
     elif event_type == "response.completed":
         response = payload.get("response")
         if isinstance(response, dict):
-            usage = response.get("usage")
-            if isinstance(usage, dict):
-                yield _usage_event(
-                    usage.get("input_tokens"),
-                    usage.get("output_tokens"),
-                )
+            usage = _usage_from_mapping(response.get("usage"))
+            if usage is not None:
+                yield LLMStreamEvent(type="usage", usage=usage)
         yield LLMStreamEvent(type="done")
     elif event_type == "error":
         raise LLMProviderError(_error_message(payload), retryable=False)
@@ -936,6 +1493,32 @@ def _estimate_tokens(text: str) -> int:
     return max(1, estimate_text_tokens(text))
 
 
+def _count_fake_message_tokens(messages: list[dict[str, str]]) -> int:
+    total = 2
+    for message in messages:
+        total += 4
+        for value in (message.get("role", ""), message.get("content", "")):
+            total += _count_fake_text_tokens(value)
+    return total
+
+
+def _count_fake_text_tokens(value: str) -> int:
+    total = 0
+    ascii_buffer: list[str] = []
+    for character in value:
+        if ord(character) < 128 and character.isalnum():
+            ascii_buffer.append(character)
+            continue
+        if ascii_buffer:
+            total += 1
+            ascii_buffer = []
+        if not character.isspace():
+            total += 1
+    if ascii_buffer:
+        total += 1
+    return total
+
+
 def _join_message_text(messages: list[dict[str, str]]) -> str:
     return "\n".join(message["content"] for message in messages)
 
@@ -994,10 +1577,12 @@ def _usage_from_mapping(value: Any) -> LLMUsage | None:
         return None
     output_details = value.get("output_tokens_details")
     output_details = output_details if isinstance(output_details, dict) else {}
+    output_tokens = int(value.get("output_tokens") or 0)
+    thoughts_tokens = int(output_details.get("reasoning_tokens") or 0)
     return LLMUsage(
         input_tokens=int(value.get("input_tokens") or 0),
-        output_tokens=int(value.get("output_tokens") or 0),
-        thoughts_tokens=int(output_details.get("reasoning_tokens") or 0),
+        output_tokens=max(0, output_tokens - thoughts_tokens),
+        thoughts_tokens=thoughts_tokens,
     )
 
 
