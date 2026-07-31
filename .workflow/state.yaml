@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "UNIFIED-LLM-GOVERNANCE"
-next_action: "实现模型 allowlist、真实 Token 计数、统一账本和会话/Workspace 预算"
+next_action: "Review and merge codex/unified-llm-usage-budget after CI passes"
 blockers: []
-last_verified_commit: "496ba8f5a58ba36dea1720b0ebe39cac606ec536"
-updated_at: "2026-07-31T11:11:37+08:00"
+last_verified_commit: "c9deff66fb07a8e0a3b4d370c1c91ef6246a9571"
+updated_at: "2026-07-31T12:06:03+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
