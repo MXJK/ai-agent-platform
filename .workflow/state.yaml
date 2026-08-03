@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "INTEGRATE-MODEL-ROUTER-USAGE"
-next_action: "解决整合冲突并验证模型路由与统一用量治理"
+next_action: "审阅并按需推送 codex/model-router-usage-integration"
 blockers: []
-last_verified_commit: "722f4d50cf06017d7d330a492dbf3423205081de"
-updated_at: "2026-08-03T16:00:00+08:00"
+last_verified_commit: "f5415465e29420d99daa2048341d7b14fa6cec72"
+updated_at: "2026-08-03T15:54:07+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
