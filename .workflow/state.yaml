@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "HARDEN-LOCAL-PERSONAL-BOUNDARIES"
-next_action: "按需运行 ./scripts/start.sh 启动 API 与 Worker"
+next_action: "推送 codex/harden-local-boundaries 并按需发起评审"
 blockers: []
-last_verified_commit: "496ba8f5a58ba36dea1720b0ebe39cac606ec536"
-updated_at: "2026-08-02T14:19:54+08:00"
+last_verified_commit: "722f4d50cf06017d7d330a492dbf3423205081de"
+updated_at: "2026-08-03T15:00:36+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
