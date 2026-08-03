@@ -46,10 +46,7 @@ class NativeProviderMappingTests(unittest.TestCase):
         )
         mcp_spec = _tool_spec("mcp.github.search_code")
 
-        with patch.object(
-            client,
-            "_post_json",
-            return_value={
+        response = {
                 "model": "test-openai",
                 "status": "completed",
                 "output": [
@@ -60,8 +57,14 @@ class NativeProviderMappingTests(unittest.TestCase):
                         "arguments": '{"path":"README.md"}',
                     }
                 ],
-            },
-        ) as post:
+            }
+
+        def fake_post(url, *, headers, payload):
+            if url.endswith("/input_tokens"):
+                return {"input_tokens": 8}
+            return response
+
+        with patch.object(client, "_post_json", side_effect=fake_post) as post:
             decision = client.decide_tools(
                 [{"role": "user", "content": "search GitHub"}],
                 [mcp_spec],
@@ -115,6 +118,8 @@ class NativeProviderMappingTests(unittest.TestCase):
         payloads: list[dict[str, object]] = []
 
         def fake_post(url, *, headers, payload):
+            if url.endswith("/input_tokens"):
+                return {"input_tokens": 10}
             payloads.append(payload)
             return responses.pop(0)
 
@@ -174,6 +179,8 @@ class NativeProviderMappingTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         def fake_post(url, *, headers, payload):
+            if url.endswith("/count_tokens"):
+                return {"input_tokens": 11}
             captured.update(payload)
             return {
                 "model": "test-claude",
@@ -234,6 +241,9 @@ class NativeProviderMappingTests(unittest.TestCase):
             def generate_content(self, **kwargs):
                 self.kwargs = kwargs
                 return response
+
+            def count_tokens(self, **kwargs):
+                return SimpleNamespace(total_tokens=9)
 
         fake_client = SimpleNamespace(
             models=FakeModels(),

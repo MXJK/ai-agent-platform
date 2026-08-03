@@ -334,6 +334,12 @@ class ModelRouteTrace:
     failures: list[RouteFailureTrace] = field(default_factory=list)
     final_provider: str | None = None
     final_model: str | None = None
+    budget_decision: str = "allowed"
+    budget_reason: str | None = None
+    budget_requested_provider: str | None = None
+    budget_requested_model: str | None = None
+    budget_actual_provider: str | None = None
+    budget_actual_model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -343,6 +349,14 @@ class ModelRouteTrace:
             "requested_model": self.requested_model,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "selection_reason": self.selection_reason,
+            "budget": {
+                "decision": self.budget_decision,
+                "reason": self.budget_reason,
+                "requested_provider": self.budget_requested_provider,
+                "requested_model": self.budget_requested_model,
+                "actual_provider": self.budget_actual_provider,
+                "actual_model": self.budget_actual_model,
+            },
             "failures": [failure.to_dict() for failure in self.failures],
             "final_model": (
                 {

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -77,6 +79,25 @@ class ScriptedFakeProvider:
             provider="fake",
             stop_reason="end_turn",
         )
+
+
+class RecordingUsageLedger:
+    def __init__(self) -> None:
+        self.authorizations: list[dict[str, object]] = []
+        self.records: list[dict[str, object]] = []
+
+    def authorize(self, **kwargs):
+        self.authorizations.append(dict(kwargs))
+        return SimpleNamespace(
+            provider=kwargs["requested_provider"],
+            model=kwargs["requested_model"],
+            max_output_tokens=kwargs["max_output_tokens"],
+            budget_decision="allowed",
+            budget_reason=None,
+        )
+
+    def record(self, **kwargs):
+        self.records.append(dict(kwargs))
 
 
 def _success_script(model: str = "model") -> _StreamScript:
@@ -200,7 +221,21 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         backup: ScriptedFakeProvider,
     ) -> LLMClient:
         return LLMClient(
-            Settings(llm_max_retries=0),
+            Settings(
+                llm_max_retries=0,
+                model_provider_allowlist=(
+                    "primary_fake",
+                    "backup_fake",
+                    "fake",
+                    "local",
+                ),
+                model_allowlist=(
+                    "primary_fake:primary-model",
+                    "backup_fake:backup-model",
+                    "fake:demo-stream-model",
+                    "local:gemini-embedding-001",
+                ),
+            ),
             model_router=self.router,
             provider_adapters={
                 "primary_fake": primary,
@@ -223,7 +258,13 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         )
         backup = ScriptedFakeProvider([_success_script("backup-model")])
 
-        events = list(self.client(primary, backup).stream_chat(_messages()))
+        client = self.client(primary, backup)
+        with patch.object(
+            client,
+            "_count_input_tokens",
+            wraps=client._count_input_tokens,
+        ) as count_tokens:
+            events = list(client.stream_chat(_messages()))
 
         self.assertEqual([event.type for event in events], ["route", "delta", "done"])
         route = events[0].route_trace or {}
@@ -234,6 +275,155 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         )
         self.assertEqual(primary.stream_calls, ["primary-model"])
         self.assertEqual(backup.stream_calls, ["backup-model"])
+        self.assertEqual(
+            [call.kwargs["provider"] for call in count_tokens.call_args_list],
+            ["primary_fake", "backup_fake"],
+        )
+
+    def test_unallowlisted_catalog_model_is_filtered_before_provider_call(self) -> None:
+        primary = ScriptedFakeProvider([_success_script("primary-model")])
+        backup = ScriptedFakeProvider([_success_script("backup-model")])
+        settings = Settings(
+            llm_max_retries=0,
+            model_provider_allowlist=("backup_fake", "fake", "local"),
+            model_allowlist=(
+                "backup_fake:backup-model",
+                "fake:demo-stream-model",
+                "local:gemini-embedding-001",
+            ),
+        )
+        client = LLMClient(
+            settings,
+            model_router=self.router,
+            provider_adapters={
+                "primary_fake": primary,
+                "backup_fake": backup,
+            },
+        )
+
+        events = list(client.stream_chat(_messages()))
+
+        self.assertEqual(events[0].provider, "backup_fake")
+        primary_trace = next(
+            item
+            for item in (events[0].route_trace or {})["candidates"]
+            if item["provider"] == "primary_fake"
+        )
+        self.assertIn("model_not_allowlisted", primary_trace["rejection_reasons"])
+        self.assertEqual(primary.stream_calls, [])
+
+    def test_fallback_authorizes_each_attempt_and_records_only_actual_usage(self) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[],
+                    error_after=LLMProviderError(
+                        "rate limited",
+                        retryable=True,
+                        code="rate_limit",
+                    ),
+                )
+            ]
+        )
+        backup = ScriptedFakeProvider([_success_script("backup-model")])
+        ledger = RecordingUsageLedger()
+        client = self.client(primary, backup)
+        client.set_usage_ledger(ledger)
+
+        list(client.stream_chat(_messages()))
+
+        self.assertEqual(
+            [item["requested_provider"] for item in ledger.authorizations],
+            ["primary_fake", "backup_fake"],
+        )
+        self.assertEqual(len(ledger.records), 1)
+        self.assertEqual(ledger.records[0]["provider"], "backup_fake")
+
+    def test_partial_failure_records_usage_once_without_backup_replay(self) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[LLMStreamEvent(type="delta", text="partial")],
+                    error_after=LLMProviderError(
+                        "stream disconnected",
+                        retryable=True,
+                        code="llm_transport_error",
+                    ),
+                )
+            ]
+        )
+        backup = ScriptedFakeProvider([_success_script("backup-model")])
+        ledger = RecordingUsageLedger()
+        client = self.client(primary, backup)
+        client.set_usage_ledger(ledger)
+
+        with self.assertRaises(LLMProviderError):
+            list(client.stream_chat(_messages()))
+
+        self.assertEqual(len(ledger.records), 1)
+        self.assertEqual(ledger.records[0]["provider"], "primary_fake")
+        self.assertEqual(backup.stream_calls, [])
+
+    def test_budget_downgrade_target_is_revalidated_for_capabilities(self) -> None:
+        primary_model = _model(
+            "google",
+            "primary-model",
+            quality=0.9,
+            cost=2.0,
+            latency=200,
+            structured=True,
+        )
+        fallback_model = _model(
+            "openai",
+            "cheap-model",
+            quality=0.2,
+            cost=0.1,
+            latency=500,
+            structured=False,
+        )
+        primary = ScriptedFakeProvider()
+        fallback = ScriptedFakeProvider()
+
+        class AlwaysDowngradeLedger:
+            def authorize(self, **kwargs):
+                return SimpleNamespace(
+                    provider="openai",
+                    model="cheap-model",
+                    max_output_tokens=kwargs["max_output_tokens"],
+                    budget_decision="downgraded",
+                    budget_reason="test budget exceeded",
+                )
+
+            def record(self, **kwargs):
+                raise AssertionError("ineligible fallback must not be called")
+
+        client = LLMClient(
+            Settings(
+                llm_provider="google",
+                llm_model="primary-model",
+                token_budget_fallback_provider="openai",
+                token_budget_fallback_model="cheap-model",
+                model_provider_allowlist=("google", "openai", "local"),
+                model_allowlist=(
+                    "google:primary-model",
+                    "openai:cheap-model",
+                    "local:gemini-embedding-001",
+                ),
+            ),
+            AlwaysDowngradeLedger(),
+            model_router=ModelRouter([primary_model, fallback_model]),
+            provider_adapters={"google": primary, "openai": fallback},
+        )
+
+        with self.assertRaises(LLMProviderError) as raised:
+            client.prepare_chat_request(
+                _messages(),
+                structured_output=True,
+            )
+
+        self.assertEqual(raised.exception.code, "budget_fallback_ineligible")
+        self.assertEqual(primary.stream_calls, [])
+        self.assertEqual(fallback.stream_calls, [])
 
     def test_chat_sse_exposes_complete_route_trace(self) -> None:
         primary = ScriptedFakeProvider(

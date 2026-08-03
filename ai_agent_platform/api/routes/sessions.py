@@ -14,6 +14,8 @@ from ai_agent_platform.schemas import (
     SessionsResponse,
     SessionSummaryResponse,
     TokenUsageResponse,
+    TokenBudgetStatusResponse,
+    TokenUsageOperationResponse,
     TokenUsagesResponse,
     WorkspaceTokenBreakdownResponse,
 )
@@ -129,8 +131,10 @@ def create_sessions_router(
             raise HTTPException(status_code=404, detail="session not found") from exc
         totals = summarize_token_usage(records)
         workspace_records = defaultdict(list)
+        operation_records = defaultdict(list)
         for record in records:
             workspace_records[record.workspace_id].append(record)
+            operation_records[record.operation].append(record)
         context = session_service.get_context_token_usage(
             session_id=session_id,
             max_context_messages=settings.llm_max_context_messages,
@@ -155,6 +159,26 @@ def create_sessions_router(
                     key=lambda item: (item is None, item or ""),
                 )
             ],
+            operations=[
+                TokenUsageOperationResponse(
+                    operation=operation,
+                    **summarize_token_usage(
+                        operation_records[operation]
+                    ).__dict__,
+                )
+                for operation in sorted(operation_records)
+            ],
+            budget=(
+                TokenBudgetStatusResponse.from_domain(budget)
+                if (
+                    budget := session_service.get_token_budget_status(
+                        session_id=session_id,
+                        workspace_id=None,
+                    )
+                )
+                is not None
+                else None
+            ),
             records=[
                 TokenUsageResponse.from_domain(record)
                 for record in records

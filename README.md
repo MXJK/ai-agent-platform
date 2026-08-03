@@ -61,13 +61,24 @@ output, thinking, and total tokens per response. Agent polling also merges live
 LangGraph checkpoint trace so fast runs still play completed stages in order
 before the final answer appears.
 
-Token usage is also persisted across both response modes. The sessions page
+All model use is persisted in one ledger. Chat, Agent model turns, semantic
+conversation compression, RAG Ask, and embedding calls carry an `operation`,
+resource, session/workspace attribution when available, requested/actual
+Provider/Model, input-count method, and budget decision. The sessions page
 shows cumulative input, output, thinking, and total tokens for every
-conversation plus the estimated size of the bounded conversation context that
-would be injected into the next request. The operations page aggregates
-explicitly attributed Chat and Agent usage for every registered workspace.
-Context size uses the documented local `unicode_heuristic_v1` estimate; provider
-usage remains the authoritative actual-request usage signal.
+conversation plus the estimated size of its currently bounded conversation
+context and the most recent final Prompt's provider-counted input tokens. The
+operations page shows the same totals, operation distribution, and budget
+status for every registered workspace.
+
+The context card remains a local `unicode_heuristic_v1` preview because it is
+not yet a provider request. Immediately before an actual LLM request, after
+history, memory, RAG citations, and tool schemas have been assembled, the final
+provider-shaped Prompt is counted with OpenAI Responses `input_tokens`,
+Anthropic Messages `count_tokens`, or Gemini `models.count_tokens`. Provider
+completion usage remains the authoritative actual-request value stored in the
+ledger; the preflight count is recorded as its audit method and is the fallback
+only when completion usage omits input tokens.
 
 The browser workspace also includes:
 
@@ -162,6 +173,53 @@ health snapshot, selection reason, failures, and final model. Events before the
 first non-empty text `delta` are buffered, so a 429, timeout, or transport failure
 can safely fall back across providers. After the first text delta, failures are
 returned with `partial_response=true` and never replayed on another model.
+## Model allowlist and Token budgets
+
+Provider selection and exact Provider/Model pairs are allowlisted before any
+count or generation request. Empty allowlist variables are secure by default:
+they derive a minimal allowlist containing only the configured primary LLM,
+embedding model, and optional budget fallback. To permit several explicit
+choices, configure both lists:
+
+```dotenv
+MODEL_PROVIDER_ALLOWLIST=openai,anthropic,gemini
+MODEL_ALLOWLIST=openai:gpt-5-mini,anthropic:claude-haiku-4-5,gemini:gemini-embedding-001
+```
+
+Session and workspace budgets count every ledger record attributed to that
+scope:
+
+```dotenv
+SESSION_TOKEN_BUDGET=100000
+WORKSPACE_TOKEN_BUDGET=1000000
+TOKEN_BUDGET_ACTION=reject
+```
+
+`0` disables a scope. With `reject`, a request that cannot leave at least one
+output token is rejected before the user message or model call is committed,
+and an allowed request's provider output limit is capped to the remaining hard
+budget. APIs return `429` with `code=token_budget_exceeded`. With `downgrade`,
+configure an allowlisted lower-cost pair:
+
+```dotenv
+TOKEN_BUDGET_ACTION=downgrade
+TOKEN_BUDGET_FALLBACK_PROVIDER=openai
+TOKEN_BUDGET_FALLBACK_MODEL=gpt-5-nano
+```
+
+Over-budget calls then continue on the fallback and expose
+`budget_decision=downgraded` plus requested and actual model metadata. This is a
+soft budget: fallback usage continues to accumulate. Budget preflight reads
+committed ledger rows; strict cross-process reservation is intentionally not
+claimed.
+
+Routing and governance form one pipeline: the router filters and ranks eligible,
+healthy catalog entries; immediately before each real count/generation attempt,
+the selected provider/model must pass the allowlist and token-budget preflight.
+Any budget downgrade target is sent back through catalog capability and health
+validation before it can replace the routed candidate. Cross-provider fallback
+repeats exact counting and authorization for the new candidate and remains
+limited to the pre-delta window.
 
 ## Code Agent flow
 
@@ -552,11 +610,15 @@ the summarized message boundary, source-size accounting, and optimistic
 versioning. Source messages remain in the session tables.
 
 Revision `20260730_0011` adds nullable workspace attribution and persisted
-thinking tokens to `token_usage_records`. Chat writes a stable request record;
-Agent upserts one stable record per run so worker redelivery and approval resume
-do not double count cumulative usage. Historical records without workspace
-attribution remain visible in session totals and are not guessed into a
-workspace.
+thinking tokens to `token_usage_records`.
+
+Revision `20260731_0012` turns `token_usage_records` into the unified model-use
+ledger: `session_id` becomes nullable for background/global work, and each row
+adds operation/resource, requested Provider/Model, exact input-count method,
+and budget decision metadata. Chat, every Agent model turn, semantic
+conversation compression, RAG Ask, and embeddings write individual rows.
+Historical rows are retained as `operation=chat`; existing missing workspace
+attribution is not guessed.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

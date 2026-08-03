@@ -1,11 +1,15 @@
 import unittest
 
 from ai_agent_platform.agents import GameAgentRuntime
+from ai_agent_platform.core import Settings
+from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.repositories import InMemorySessionRepository
 from ai_agent_platform.services import (
+    LLMConversationCompressor,
     RuleBasedConversationCompressor,
     SessionService,
 )
+from ai_agent_platform.usage_ledger import UsageLedgerService
 
 
 class SessionServiceTests(unittest.TestCase):
@@ -186,6 +190,43 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(api_summary.compressed_summary, second.content)
         self.assertEqual(api_summary.summarized_message_count, 6)
         self.assertEqual(api_summary.summary_version, 2)
+
+    def test_llm_conversation_compression_enters_usage_ledger(self) -> None:
+        repository = InMemorySessionRepository()
+        settings = Settings(llm_provider="fake", llm_model="fake-summary")
+        ledger = UsageLedgerService(repository, settings)
+        service = SessionService(
+            repository=repository,
+            agent_runtime=GameAgentRuntime(),
+            compressor=LLMConversationCompressor(
+                LLMClient(settings, usage_ledger=ledger)
+            ),
+            summary_enabled=True,
+            summary_trigger_messages=4,
+            summary_keep_recent_messages=2,
+            summary_max_chars=500,
+            summary_max_source_chars=2000,
+            usage_ledger=ledger,
+        )
+        session = service.create_session(user_id="user_1")
+        for index in range(4):
+            service.add_message(
+                session_id=session.id,
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"message {index}",
+            )
+
+        summary = service.compress_conversation(
+            session_id=session.id,
+            trigger_message_id="trigger_summary",
+        )
+
+        self.assertIsNotNone(summary)
+        records = ledger.list_session(session.id)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].operation, "conversation_compression")
+        self.assertEqual(records[0].resource_id, "trigger_summary")
+        self.assertGreater(records[0].total_tokens, 0)
 
 
 if __name__ == "__main__":

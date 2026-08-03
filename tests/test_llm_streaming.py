@@ -50,6 +50,10 @@ class _FakeModels:
             raise self.owner.error
         return iter(self.owner.chunks)
 
+    def count_tokens(self, **kwargs: object) -> object:
+        self.owner.count_kwargs = kwargs
+        return SimpleNamespace(total_tokens=12)
+
 
 class _FakeClient:
     chunks: list[object] = []
@@ -58,6 +62,7 @@ class _FakeClient:
 
     def __init__(self, **kwargs: object) -> None:
         self.client_kwargs = kwargs
+        self.count_kwargs: dict[str, object] = {}
         self.generate_kwargs: dict[str, object] = {}
         self.closed = False
         self.models = _FakeModels(self)
@@ -74,6 +79,7 @@ def _fake_google_modules() -> dict[str, ModuleType]:
     types_module.ThinkingLevel = _ThinkingLevel
     types_module.ThinkingConfig = _ValueObject
     types_module.GenerateContentConfig = _ValueObject
+    types_module.CountTokensConfig = _ValueObject
     types_module.HttpOptions = _ValueObject
 
     genai_module = ModuleType("google.genai")
@@ -152,7 +158,7 @@ class GoogleStreamingTests(unittest.TestCase):
         self.assertEqual(usage.thoughts_tokens, 5)
         self.assertEqual(usage.total_tokens, 24)
 
-        fake_client = _FakeClient.instances[0]
+        fake_client = _FakeClient.instances[-1]
         self.assertEqual(fake_client.client_kwargs["http_options"].timeout, 7500)
         config = fake_client.generate_kwargs["config"]
         self.assertEqual(config.max_output_tokens, 4096)
@@ -191,6 +197,7 @@ class GoogleStreamingTests(unittest.TestCase):
             iterator = self.client()._stream_google(
                 [{"role": "user", "content": "hello"}],
                 "gemini-3.5-flash",
+                max_output_tokens=4096,
             )
             with self.assertRaises(LLMProviderError) as raised:
                 next(iter(iterator))
@@ -224,6 +231,85 @@ class GoogleStreamingTests(unittest.TestCase):
             usage.total_tokens,
             usage.input_tokens + usage.output_tokens + usage.thoughts_tokens,
         )
+
+
+class OpenAIStreamingTests(unittest.TestCase):
+    def test_stream_payload_passes_configured_max_output_tokens(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="openai",
+                llm_model="gpt-test",
+                openai_api_key="test-key",
+                llm_max_output_tokens=777,
+            )
+        )
+        with patch.object(
+            client,
+            "_stream_http_sse",
+            return_value=iter([LLMStreamEvent(type="done")]),
+        ) as stream:
+            events = list(
+                client._stream_openai(
+                    [{"role": "user", "content": "hello"}],
+                    "gpt-test",
+                    max_output_tokens=777,
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(
+            stream.call_args.kwargs["payload"]["max_output_tokens"],
+            777,
+        )
+
+    def test_preflight_uses_openai_input_token_endpoint(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="openai",
+                llm_model="gpt-test",
+                openai_api_key="test-key",
+            )
+        )
+        messages = [
+            {"role": "system", "content": "system policy"},
+            {"role": "user", "content": "final prompt"},
+        ]
+        with patch.object(
+            client,
+            "_post_json",
+            return_value={"input_tokens": 123},
+        ) as post:
+            plan = client.prepare_chat_request(messages)
+
+        self.assertEqual(plan.input_tokens, 123)
+        self.assertEqual(
+            plan.input_count_method,
+            "openai_responses_input_tokens",
+        )
+        self.assertTrue(post.call_args.args[0].endswith("/responses/input_tokens"))
+        self.assertEqual(post.call_args.kwargs["payload"]["input"], messages)
+
+    def test_request_override_must_be_allowlisted(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="fake",
+                llm_model="fake-primary",
+                model_provider_allowlist=("fake", "local"),
+                model_allowlist=(
+                    "fake:fake-primary",
+                    "local:gemini-embedding-001",
+                ),
+            )
+        )
+
+        with self.assertRaises(LLMProviderError) as raised:
+            client.prepare_chat_request(
+                [{"role": "user", "content": "hello"}],
+                provider="openai",
+                model="gpt-not-approved",
+            )
+
+        self.assertEqual(raised.exception.code, "llm_provider_not_allowed")
 
 
 class HeartbeatTests(unittest.TestCase):

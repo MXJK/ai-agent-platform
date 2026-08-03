@@ -41,6 +41,11 @@ from ai_agent_platform.integrations.rag.models import (
     RetrievalExecution,
     VectorStore,
 )
+from ai_agent_platform.usage_ledger import (
+    UsageContext,
+    current_model_usage_context,
+    model_usage_scope,
+)
 
 
 SUPPORTED_TEXT_EXTENSIONS = {
@@ -455,8 +460,16 @@ class HashingEmbeddingProvider:
     real semantic retrieval quality.
     """
 
-    def __init__(self, *, dimensions: int = 128) -> None:
+    def __init__(
+        self,
+        *,
+        dimensions: int = 128,
+        model: str = "local-hashing",
+        usage_ledger=None,
+    ) -> None:
         self._dimensions = dimensions
+        self._model = model
+        self._usage_ledger = usage_ledger
 
     def embed_texts(
         self,
@@ -464,7 +477,17 @@ class HashingEmbeddingProvider:
         *,
         task_type: str = "document",
     ) -> list[list[float]]:
-        return [self._embed(text) for text in texts]
+        embeddings = [self._embed(text) for text in texts]
+        if self._usage_ledger is not None:
+            self._usage_ledger.record(
+                provider="local",
+                model=self._model,
+                input_tokens=sum(_embedding_text_tokens(text) for text in texts),
+                output_tokens=0,
+                input_count_method="local_lexical_tokenizer",
+                context=_embedding_usage_context(),
+            )
+        return embeddings
 
     def _embed(self, text: str) -> list[float]:
         vector = [0.0] * self._dimensions
@@ -485,10 +508,15 @@ class HashingEmbeddingProvider:
 
 
 class OpenAIEmbeddingProvider:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_ledger=None) -> None:
         self._api_key = settings.openai_api_key
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
+        self._usage_ledger = usage_ledger
+        if not settings.is_model_allowed("openai", self._model):
+            raise RAGConfigurationError(
+                f"embedding model is not allowlisted: openai:{self._model}"
+            )
 
     def embed_texts(
         self,
@@ -522,14 +550,34 @@ class OpenAIEmbeddingProvider:
         data = body.get("data")
         if not isinstance(data, list):
             raise RAGProviderError("embedding provider returned malformed data")
+        usage = body.get("usage")
+        if not isinstance(usage, dict) or not isinstance(
+            usage.get("prompt_tokens"),
+            int,
+        ):
+            raise RAGProviderError("embedding provider returned no token usage")
+        if self._usage_ledger is not None:
+            self._usage_ledger.record(
+                provider="openai",
+                model=self._model,
+                input_tokens=max(0, int(usage["prompt_tokens"])),
+                output_tokens=0,
+                input_count_method="openai_embedding_usage",
+                context=_embedding_usage_context(),
+            )
         return [item["embedding"] for item in data]
 
 
 class GeminiEmbeddingProvider:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_ledger=None) -> None:
         self._api_key = settings.google_api_key
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
+        self._usage_ledger = usage_ledger
+        if not settings.is_model_allowed("gemini", self._model):
+            raise RAGConfigurationError(
+                f"embedding model is not allowlisted: gemini:{self._model}"
+            )
 
     def embed_texts(
         self,
@@ -568,6 +616,25 @@ class GeminiEmbeddingProvider:
             model = f"models/{model}"
         timeout = httpx.Timeout(self._timeout_seconds)
         with httpx.Client(timeout=timeout) as client:
+            count_response = client.post(
+                (
+                    "https://generativelanguage.googleapis.com/v1beta/"
+                    f"{model}:countTokens"
+                ),
+                headers=headers,
+                json={"contents": [payload["content"]]},
+            )
+            if count_response.status_code >= 400:
+                raise RAGProviderError(
+                    "Gemini token count provider returned HTTP "
+                    f"{count_response.status_code}"
+                )
+            count_body = count_response.json()
+            input_tokens = count_body.get("totalTokens")
+            if not isinstance(input_tokens, int):
+                raise RAGProviderError(
+                    "Gemini token count provider returned malformed data"
+                )
             response = client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/{model}:embedContent",
                 headers=headers,
@@ -585,6 +652,15 @@ class GeminiEmbeddingProvider:
         values = embedding.get("values")
         if not isinstance(values, list):
             raise RAGProviderError("Gemini embedding provider returned no values")
+        if self._usage_ledger is not None:
+            self._usage_ledger.record(
+                provider="gemini",
+                model=self._model,
+                input_tokens=max(0, input_tokens),
+                output_tokens=0,
+                input_count_method="gemini_models_count_tokens",
+                context=_embedding_usage_context(),
+            )
         return [float(value) for value in values]
 
 
@@ -1210,10 +1286,14 @@ class RAGService:
                 chunk_count=len(chunks),
             )
             current_status = job.status
-            embeddings = self._embedding_provider.embed_texts(
-                [chunk.text for chunk in chunks],
-                task_type="document",
-            )
+            with model_usage_scope(
+                operation="embedding",
+                resource_id=knowledge_base_id,
+            ):
+                embeddings = self._embedding_provider.embed_texts(
+                    [chunk.text for chunk in chunks],
+                    task_type="document",
+                )
             _validate_embeddings(chunks, embeddings)
             replace_document = getattr(
                 self._vector_store,
@@ -1372,10 +1452,14 @@ class RAGService:
             raise RAGRerankerUnavailableError(
                 "reranker is not configured on this server"
             )
-        query_embedding = self._embedding_provider.embed_texts(
-            [query],
-            task_type="query",
-        )[0]
+        with model_usage_scope(
+            operation="embedding",
+            resource_id=knowledge_base_id,
+        ):
+            query_embedding = self._embedding_provider.embed_texts(
+                [query],
+                task_type="query",
+            )[0]
         candidate_limit = recall_limit or self._default_recall_limit
         candidate_limit = max(candidate_limit, limit)
         dense_candidates = self._vector_store.search(
@@ -1905,6 +1989,20 @@ def _lexical_tokens(text: str) -> list[str]:
             if part.lower() != raw_term
         )
     return tokens
+
+
+def _embedding_text_tokens(text: str) -> int:
+    return len(_tokenize(text))
+
+
+def _embedding_usage_context() -> UsageContext:
+    current = current_model_usage_context()
+    return UsageContext(
+        session_id=current.session_id,
+        workspace_id=current.workspace_id,
+        operation="embedding",
+        resource_id=current.resource_id,
+    )
 
 
 def _gemini_task_type(task_type: str) -> str:

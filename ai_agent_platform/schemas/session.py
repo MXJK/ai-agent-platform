@@ -10,6 +10,10 @@ from ai_agent_platform.domain import (
     TokenUsageRecord,
     TokenUsageTotals,
 )
+from ai_agent_platform.usage_ledger import (
+    TokenBudgetScopeStatus,
+    TokenBudgetStatus,
+)
 
 
 class CreateSessionRequest(BaseModel):
@@ -36,7 +40,7 @@ class SessionsResponse(BaseModel):
 
 class TokenUsageResponse(BaseModel):
     id: str
-    session_id: str
+    session_id: str | None
     workspace_id: str | None
     provider: str
     model: str
@@ -45,6 +49,12 @@ class TokenUsageResponse(BaseModel):
     thoughts_tokens: int
     total_tokens: int
     created_at: datetime
+    operation: str
+    resource_id: str | None
+    requested_provider: str | None
+    requested_model: str | None
+    input_count_method: str
+    budget_decision: str
 
     @classmethod
     def from_domain(cls, usage: TokenUsageRecord) -> "TokenUsageResponse":
@@ -83,6 +93,41 @@ class WorkspaceTokenBreakdownResponse(TokenUsageTotalsResponse):
     workspace_id: str | None
 
 
+class TokenUsageOperationResponse(TokenUsageTotalsResponse):
+    operation: str
+
+
+class TokenBudgetScopeResponse(BaseModel):
+    limit: int
+    used: int
+    remaining: int | None
+    exceeded: bool
+
+    @classmethod
+    def from_domain(
+        cls,
+        status: TokenBudgetScopeStatus,
+    ) -> "TokenBudgetScopeResponse":
+        return cls(**status.__dict__)
+
+
+class TokenBudgetStatusResponse(BaseModel):
+    action: str
+    session: TokenBudgetScopeResponse
+    workspace: TokenBudgetScopeResponse
+
+    @classmethod
+    def from_domain(
+        cls,
+        status: TokenBudgetStatus,
+    ) -> "TokenBudgetStatusResponse":
+        return cls(
+            action=status.action,
+            session=TokenBudgetScopeResponse.from_domain(status.session),
+            workspace=TokenBudgetScopeResponse.from_domain(status.workspace),
+        )
+
+
 class TokenUsagesResponse(BaseModel):
     session_id: str
     input_tokens: int
@@ -92,4 +137,6 @@ class TokenUsagesResponse(BaseModel):
     record_count: int
     context: ContextTokenUsageResponse
     workspaces: list[WorkspaceTokenBreakdownResponse]
+    operations: list[TokenUsageOperationResponse]
+    budget: TokenBudgetStatusResponse | None
     records: list[TokenUsageResponse]

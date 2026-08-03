@@ -47,7 +47,7 @@ class ConversationSummary:
 @dataclass(frozen=True)
 class TokenUsageRecord:
     id: str
-    session_id: str
+    session_id: Optional[str]
     workspace_id: Optional[str]
     provider: str
     model: str
@@ -56,6 +56,12 @@ class TokenUsageRecord:
     thoughts_tokens: int
     total_tokens: int
     created_at: datetime
+    operation: str = "chat"
+    resource_id: Optional[str] = None
+    requested_provider: Optional[str] = None
+    requested_model: Optional[str] = None
+    input_count_method: str = "provider_usage"
+    budget_decision: str = "allowed"
 
 
 @dataclass(frozen=True)

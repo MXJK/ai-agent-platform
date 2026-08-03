@@ -46,6 +46,7 @@ from ai_agent_platform.services import (
     AgentRunService,
     KnowledgeBaseService,
     SessionService,
+    UsageLedgerService,
     WorkspaceService,
     create_conversation_compressor,
 )
@@ -84,8 +85,12 @@ def create_app(
         )
 
     repository = _create_session_repository(settings)
+    usage_ledger = UsageLedgerService(repository, settings)
     agent_runtime = GameAgentRuntime()
     llm_client = llm_client or LLMClient(settings)
+    set_usage_ledger = getattr(llm_client, "set_usage_ledger", None)
+    if callable(set_usage_ledger):
+        set_usage_ledger(usage_ledger)
     workspace_service = WorkspaceService(
         store=_create_workspace_store(settings),
         allowed_roots=(
@@ -98,6 +103,7 @@ def create_app(
         workspace_service=workspace_service,
         llm_client=llm_client,
         metrics=metrics,
+        usage_ledger=usage_ledger,
     )
     project_memory_service.set_index_outbox_submitter(
         lambda trigger_id: task_queue.submit(
@@ -109,6 +115,7 @@ def create_app(
     rag_service = rag_service or create_rag_service(
         settings,
         document_store=_create_document_store(settings),
+        usage_ledger=usage_ledger,
     )
     knowledge_base_service = KnowledgeBaseService(
         store=_create_knowledge_base_store(settings),
@@ -164,6 +171,7 @@ def create_app(
             settings.conversation_summary_max_source_chars
         ),
         metrics=metrics,
+        usage_ledger=usage_ledger,
     )
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
@@ -197,6 +205,7 @@ def create_app(
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
     app.state.session_service = session_service
+    app.state.usage_ledger = usage_ledger
     app.state.workspace_service = workspace_service
     app.state.knowledge_base_service = knowledge_base_service
     app.state.project_memory_service = project_memory_service
