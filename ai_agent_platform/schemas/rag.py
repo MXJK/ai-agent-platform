@@ -155,6 +155,17 @@ class RAGAskRequest(BaseModel):
     provider: Optional[str] = Field(default=None, max_length=50)
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
     thinking_level: Optional[LLMThinkingLevel] = None
+    conversation_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
+    workspace_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
 
 
 class RerankerCapabilitiesResponse(BaseModel):

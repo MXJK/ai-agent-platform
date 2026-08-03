@@ -61,6 +61,11 @@ def create_api_router(
         create_project_memories_router(project_memory_service, settings)
     )
     router.include_router(
-        create_knowledge_bases_router(knowledge_base_service, llm_client)
+        create_knowledge_bases_router(
+            knowledge_base_service,
+            llm_client,
+            session_service=session_service,
+            workspace_service=workspace_service,
+        )
     )
     return router

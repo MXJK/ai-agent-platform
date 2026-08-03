@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import math
 import os
 from pathlib import Path
@@ -32,6 +33,21 @@ class Settings:
     llm_max_context_messages: int = 12
     llm_max_output_tokens: int = 4096
     llm_thinking_level: str = "low"
+    llm_model_catalog_json: str | None = None
+    llm_model_context_window_tokens: int = 128000
+    llm_routing_policy: str = "quality"
+    llm_circuit_failure_threshold: int = 3
+    llm_circuit_recovery_timeout_seconds: float = 30.0
+    llm_circuit_error_window_size: int = 20
+    llm_circuit_error_rate_min_requests: int = 5
+    llm_circuit_error_rate_threshold: float = 0.5
+    model_provider_allowlist: tuple[str, ...] = ()
+    model_allowlist: tuple[str, ...] = ()
+    session_token_budget: int = 0
+    workspace_token_budget: int = 0
+    token_budget_action: str = "reject"
+    token_budget_fallback_provider: str | None = None
+    token_budget_fallback_model: str | None = None
     conversation_summary_enabled: bool = True
     conversation_summary_trigger_messages: int = 12
     conversation_summary_keep_recent_messages: int = 6
@@ -129,10 +145,82 @@ class Settings:
         )
         _require_choice("log_format", self.log_format, {"json", "text"})
         _require_choice(
+            "llm_provider",
+            self.llm_provider,
+            {"anthropic", "fake", "google", "openai"},
+        )
+        _require_choice(
+            "embedding_provider",
+            self.embedding_provider,
+            {"gemini", "local", "openai"},
+        )
+        _require_choice(
             "llm_thinking_level",
             self.llm_thinking_level,
             {"minimal", "low", "medium", "high"},
         )
+        _require_choice(
+            "llm_routing_policy",
+            self.llm_routing_policy,
+            {"quality", "cost", "latency"},
+        )
+        if self.llm_model_catalog_json:
+            _validate_model_catalog_json(self.llm_model_catalog_json)
+        _require_choice(
+            "token_budget_action",
+            self.token_budget_action,
+            {"downgrade", "reject"},
+        )
+        for name, value in (
+            ("session_token_budget", self.session_token_budget),
+            ("workspace_token_budget", self.workspace_token_budget),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be greater than or equal to 0")
+        if bool(self.token_budget_fallback_provider) != bool(
+            self.token_budget_fallback_model
+        ):
+            raise ValueError(
+                "token budget fallback provider and model must be configured together"
+            )
+        if self.token_budget_action == "downgrade" and (
+            self.session_token_budget > 0 or self.workspace_token_budget > 0
+        ):
+            if not self.token_budget_fallback_provider:
+                raise ValueError(
+                    "downgrade token budgets require a fallback provider and model"
+                )
+        if self.token_budget_fallback_provider is not None:
+            _require_choice(
+                "token_budget_fallback_provider",
+                self.token_budget_fallback_provider,
+                {"anthropic", "fake", "google", "openai"},
+            )
+        if any(not item.strip() for item in self.model_provider_allowlist):
+            raise ValueError("model_provider_allowlist must not contain blanks")
+        if any(
+            ":" not in item or not all(part.strip() for part in item.split(":", 1))
+            for item in self.model_allowlist
+        ):
+            raise ValueError(
+                "model_allowlist entries must use exact provider:model pairs"
+            )
+        configured_models = [
+            (self.llm_provider, self.llm_model),
+            (self.embedding_provider, self.embedding_model),
+        ]
+        if self.token_budget_fallback_provider and self.token_budget_fallback_model:
+            configured_models.append(
+                (
+                    self.token_budget_fallback_provider,
+                    self.token_budget_fallback_model,
+                )
+            )
+        for provider, model in configured_models:
+            if not self.is_model_allowed(provider, model):
+                raise ValueError(
+                    f"configured model is not allowlisted: {provider}:{model}"
+                )
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
@@ -194,6 +282,26 @@ class Settings:
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
             ("llm_max_output_tokens", self.llm_max_output_tokens),
+            (
+                "llm_model_context_window_tokens",
+                self.llm_model_context_window_tokens,
+            ),
+            (
+                "llm_circuit_failure_threshold",
+                self.llm_circuit_failure_threshold,
+            ),
+            (
+                "llm_circuit_recovery_timeout_seconds",
+                self.llm_circuit_recovery_timeout_seconds,
+            ),
+            (
+                "llm_circuit_error_window_size",
+                self.llm_circuit_error_window_size,
+            ),
+            (
+                "llm_circuit_error_rate_min_requests",
+                self.llm_circuit_error_rate_min_requests,
+            ),
             (
                 "conversation_summary_trigger_messages",
                 self.conversation_summary_trigger_messages,
@@ -278,6 +386,18 @@ class Settings:
             _require_positive(name, value)
         if self.llm_max_retries < 0:
             raise ValueError("llm_max_retries must be greater than or equal to 0")
+        if (
+            self.llm_circuit_error_rate_min_requests
+            > self.llm_circuit_error_window_size
+        ):
+            raise ValueError(
+                "llm_circuit_error_rate_min_requests must not exceed "
+                "llm_circuit_error_window_size"
+            )
+        if not 0.0 <= self.llm_circuit_error_rate_threshold <= 1.0:
+            raise ValueError(
+                "llm_circuit_error_rate_threshold must be between 0 and 1"
+            )
         if self.rag_chunk_overlap < 0:
             raise ValueError("rag_chunk_overlap must be greater than or equal to 0")
         if self.rag_chunk_overlap >= self.rag_chunk_size:
@@ -373,6 +493,33 @@ class Settings:
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
+    def is_model_allowed(self, provider: str, model: str) -> bool:
+        providers = set(self.model_provider_allowlist) or {
+            self.llm_provider,
+            self.embedding_provider,
+            *(
+                [self.token_budget_fallback_provider]
+                if self.token_budget_fallback_provider
+                else []
+            ),
+        }
+        models = set(self.model_allowlist) or {
+            f"{self.llm_provider}:{self.llm_model}",
+            f"{self.embedding_provider}:{self.embedding_model}",
+            *(
+                [
+                    (
+                        f"{self.token_budget_fallback_provider}:"
+                        f"{self.token_budget_fallback_model}"
+                    )
+                ]
+                if self.token_budget_fallback_provider
+                and self.token_budget_fallback_model
+                else []
+            ),
+        }
+        return provider in providers and f"{provider}:{model}" in models
+
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv = _load_dotenv()
@@ -383,6 +530,42 @@ class Settings:
             log_format=_env("LOG_FORMAT", cls.log_format, dotenv),
             llm_provider=_env("LLM_PROVIDER", cls.llm_provider, dotenv),
             llm_model=_env("LLM_MODEL", cls.llm_model, dotenv),
+            llm_model_catalog_json=(
+                _env("LLM_MODEL_CATALOG_JSON", None, dotenv) or None
+            ),
+            llm_model_context_window_tokens=_int_env(
+                "LLM_MODEL_CONTEXT_WINDOW_TOKENS",
+                cls.llm_model_context_window_tokens,
+                dotenv,
+            ),
+            llm_routing_policy=_env(
+                "LLM_ROUTING_POLICY", cls.llm_routing_policy, dotenv
+            ),
+            llm_circuit_failure_threshold=_int_env(
+                "LLM_CIRCUIT_FAILURE_THRESHOLD",
+                cls.llm_circuit_failure_threshold,
+                dotenv,
+            ),
+            llm_circuit_recovery_timeout_seconds=_float_env(
+                "LLM_CIRCUIT_RECOVERY_TIMEOUT_SECONDS",
+                cls.llm_circuit_recovery_timeout_seconds,
+                dotenv,
+            ),
+            llm_circuit_error_window_size=_int_env(
+                "LLM_CIRCUIT_ERROR_WINDOW_SIZE",
+                cls.llm_circuit_error_window_size,
+                dotenv,
+            ),
+            llm_circuit_error_rate_min_requests=_int_env(
+                "LLM_CIRCUIT_ERROR_RATE_MIN_REQUESTS",
+                cls.llm_circuit_error_rate_min_requests,
+                dotenv,
+            ),
+            llm_circuit_error_rate_threshold=_float_env(
+                "LLM_CIRCUIT_ERROR_RATE_THRESHOLD",
+                cls.llm_circuit_error_rate_threshold,
+                dotenv,
+            ),
             openai_api_key=_env("OPENAI_API_KEY", None, dotenv),
             anthropic_api_key=_env("ANTHROPIC_API_KEY", None, dotenv),
             google_api_key=_env(
@@ -422,6 +605,41 @@ class Settings:
             ),
             llm_thinking_level=_env(
                 "LLM_THINKING_LEVEL", cls.llm_thinking_level, dotenv
+            ),
+            model_provider_allowlist=_csv_env(
+                "MODEL_PROVIDER_ALLOWLIST",
+                cls.model_provider_allowlist,
+                dotenv,
+            ),
+            model_allowlist=_csv_env(
+                "MODEL_ALLOWLIST",
+                cls.model_allowlist,
+                dotenv,
+            ),
+            session_token_budget=_int_env(
+                "SESSION_TOKEN_BUDGET",
+                cls.session_token_budget,
+                dotenv,
+            ),
+            workspace_token_budget=_int_env(
+                "WORKSPACE_TOKEN_BUDGET",
+                cls.workspace_token_budget,
+                dotenv,
+            ),
+            token_budget_action=_env(
+                "TOKEN_BUDGET_ACTION",
+                cls.token_budget_action,
+                dotenv,
+            ),
+            token_budget_fallback_provider=_env(
+                "TOKEN_BUDGET_FALLBACK_PROVIDER",
+                cls.token_budget_fallback_provider,
+                dotenv,
+            ),
+            token_budget_fallback_model=_env(
+                "TOKEN_BUDGET_FALLBACK_MODEL",
+                cls.token_budget_fallback_model,
+                dotenv,
             ),
             conversation_summary_enabled=_bool_env(
                 "CONVERSATION_SUMMARY_ENABLED",
@@ -727,6 +945,19 @@ def _require_positive(name: str, value: float | int) -> None:
         raise ValueError(f"{name} must be greater than 0")
 
 
+def _validate_model_catalog_json(value: str) -> None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("llm_model_catalog_json must be valid JSON") from exc
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError(
+            "llm_model_catalog_json must be a non-empty JSON array"
+        )
+    if not all(isinstance(item, dict) for item in parsed):
+        raise ValueError("each model catalog entry must be an object")
+
+
 def _env(name: str, default: str | None, dotenv: dict[str, str]) -> str | None:
     return os.getenv(name, dotenv.get(name, default))
 
@@ -773,8 +1004,7 @@ def _csv_env(
     value = _env(name, None, dotenv)
     if value is None:
         return default
-    parsed = tuple(item.strip() for item in value.split(",") if item.strip())
-    return parsed or default
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 def _load_dotenv(path: str = ".env") -> dict[str, str]:

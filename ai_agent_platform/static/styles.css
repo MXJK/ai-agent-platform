@@ -1952,6 +1952,46 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.context-token-card > small strong {
+  font-size: inherit;
+}
+
+.token-budget-card {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.token-budget-card > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.token-budget-card span,
+.token-budget-card small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.token-budget-card strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-budget-card.is-exceeded,
+.workspace-budget-line.is-exceeded {
+  border-color: rgba(255, 122, 122, 0.45);
+  background: rgba(255, 122, 122, 0.08);
+}
+
+.token-operation-breakdown,
 .token-workspace-breakdown {
   display: flex;
   flex-wrap: wrap;
@@ -1960,11 +2000,13 @@ textarea:focus {
   margin-top: 9px;
 }
 
+.token-operation-breakdown > span,
 .token-workspace-breakdown > span {
   color: var(--muted);
   font-size: 9px;
 }
 
+.token-operation-breakdown small,
 .token-workspace-breakdown small {
   display: inline-flex;
   align-items: center;
@@ -1976,6 +2018,7 @@ textarea:focus {
   font-size: 8px;
 }
 
+.token-operation-breakdown small strong,
 .token-workspace-breakdown small strong {
   color: var(--ink-soft);
 }
@@ -2053,6 +2096,23 @@ textarea:focus {
 .workspace-token-metrics strong {
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
+}
+
+.workspace-budget-line {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.workspace-budget-line small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-list {

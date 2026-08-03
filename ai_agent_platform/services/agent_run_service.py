@@ -20,6 +20,7 @@ from ai_agent_platform.core import (
 )
 from ai_agent_platform.services.session_service import SessionService
 from ai_agent_platform.services.workspace_service import WorkspaceService
+from ai_agent_platform.usage_ledger import model_usage_scope
 from ai_agent_platform.project_memory.service import ProjectMemoryService
 
 
@@ -245,16 +246,22 @@ class AgentRunService:
         ):
             logger.info("agent run started")
             try:
-                result = self._runtime.run(
-                    run_id=run_id,
-                    conversation_id=conversation_id,
-                    user_input=message,
-                    history=history,
+                with model_usage_scope(
+                    session_id=conversation_id,
                     workspace_id=record.workspace_id,
-                    workspace_root=record.workspace_root,
-                    focus_files=focus_files,
-                    actor_user_id=actor_user_id,
-                )
+                    operation="agent",
+                    resource_id=run_id,
+                ):
+                    result = self._runtime.run(
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        user_input=message,
+                        history=history,
+                        workspace_id=record.workspace_id,
+                        workspace_root=record.workspace_root,
+                        focus_files=focus_files,
+                        actor_user_id=actor_user_id,
+                    )
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -266,7 +273,6 @@ class AgentRunService:
                 status=result.status,
                 started_at=started_at,
             )
-            self._record_token_usage(result)
             logger.info("agent run finished", extra={"status": result.status})
             self._record_assistant_message(
                 result,
@@ -310,11 +316,17 @@ class AgentRunService:
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
-                result = self._runtime.resume(
-                    run_id=run_id,
-                    approved=approved,
-                    feedback=feedback,
-                )
+                with model_usage_scope(
+                    session_id=record.conversation_id,
+                    workspace_id=record.workspace_id,
+                    operation="agent",
+                    resource_id=run_id,
+                ):
+                    result = self._runtime.resume(
+                        run_id=run_id,
+                        approved=approved,
+                        feedback=feedback,
+                    )
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -326,7 +338,6 @@ class AgentRunService:
                 status=result.status,
                 started_at=started_at,
             )
-            self._record_token_usage(result)
             logger.info(
                 "agent run resume finished",
                 extra={"status": result.status},
@@ -338,27 +349,6 @@ class AgentRunService:
         self._metrics.increment("agent_run_executions_total")
         self._metrics.increment(f"agent_run_executions_{status}_total")
         self._metrics.observe_ms("agent_run_execution_duration_ms", duration_ms)
-
-    def _record_token_usage(self, result: AgentRunResult) -> None:
-        if result.metrics.total_tokens <= 0:
-            return
-        record_usage = getattr(
-            self._session_service,
-            "record_token_usage",
-            None,
-        )
-        if not callable(record_usage):
-            return
-        record_usage(
-            session_id=result.conversation_id,
-            workspace_id=result.workspace_id,
-            provider=self._llm_provider,
-            model=self._llm_model,
-            input_tokens=result.metrics.input_tokens,
-            output_tokens=result.metrics.output_tokens,
-            thoughts_tokens=result.metrics.thoughts_tokens,
-            record_id=f"usage_agent_{result.run_id}",
-        )
 
     def _record_assistant_message(
         self,

@@ -5,6 +5,10 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from ai_agent_platform.domain import WorkspaceRecord
+from ai_agent_platform.schemas.session import (
+    TokenBudgetStatusResponse,
+    TokenUsageOperationResponse,
+)
 
 
 class WorkspaceUpsertRequest(BaseModel):
@@ -52,3 +56,5 @@ class WorkspaceTokenUsageResponse(BaseModel):
     total_tokens: int
     record_count: int
     conversation_count: int
+    operations: list[TokenUsageOperationResponse]
+    budget: TokenBudgetStatusResponse | None

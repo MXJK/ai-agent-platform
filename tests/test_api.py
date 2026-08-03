@@ -9,12 +9,14 @@ from fastapi.testclient import TestClient
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import (
     LLMProviderError,
+    LLMRequestPlan,
     LLMStreamEvent,
     LLMUsage,
     _google_usage,
 )
 from ai_agent_platform.main import create_app
 from ai_agent_platform.schemas.chat import ChatStreamRequest
+from ai_agent_platform.usage_ledger import current_model_usage_context
 
 
 def wait_for_run(client: TestClient, run_id: str) -> dict:
@@ -257,7 +259,15 @@ class ApiTests(unittest.TestCase):
                 workspace_usage = client.get(
                     "/api/v1/workspaces/project/token-usage"
                 ).json()
-                self.assertEqual(conversation_usage["record_count"], 2)
+                self.assertGreaterEqual(conversation_usage["record_count"], 2)
+                self.assertEqual(
+                    sum(
+                        item["record_count"]
+                        for item in conversation_usage["operations"]
+                        if item["operation"] == "agent"
+                    ),
+                    conversation_usage["record_count"],
+                )
                 self.assertGreater(
                     conversation_usage["context"]["estimated_tokens"],
                     0,
@@ -417,18 +427,157 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual(workspace_usage["conversation_count"], 1)
 
+    def test_chat_rejects_before_persisting_when_session_budget_is_exhausted(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                llm_model="fake-primary",
+                session_token_budget=8,
+                token_budget_action="reject",
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "user_1"},
+                ).json()["id"]
+
+                response = client.post(
+                    "/api/v1/chat/stream",
+                    json={
+                        "conversation_id": session_id,
+                        "message": "hello",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 429)
+                self.assertEqual(
+                    response.json()["detail"]["code"],
+                    "token_budget_exceeded",
+                )
+                messages = client.get(
+                    f"/api/v1/sessions/{session_id}/messages"
+                ).json()["messages"]
+                self.assertEqual(messages, [])
+
+    def test_chat_downgrades_to_allowlisted_cheap_model_over_budget(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                llm_model="fake-expensive",
+                session_token_budget=8,
+                token_budget_action="downgrade",
+                token_budget_fallback_provider="fake",
+                token_budget_fallback_model="fake-cheap",
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "user_1"},
+                ).json()["id"]
+
+                response = client.post(
+                    "/api/v1/chat/stream",
+                    json={
+                        "conversation_id": session_id,
+                        "message": "hello",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('"model": "fake-cheap"', response.text)
+                self.assertIn('"requested_model": "fake-expensive"', response.text)
+                self.assertIn('"budget_decision": "downgraded"', response.text)
+                usage = client.get(
+                    f"/api/v1/sessions/{session_id}/token-usage"
+                ).json()
+                self.assertEqual(usage["records"][0]["model"], "fake-cheap")
+                self.assertEqual(
+                    usage["records"][0]["requested_model"],
+                    "fake-expensive",
+                )
+                self.assertEqual(
+                    usage["records"][0]["budget_decision"],
+                    "downgraded",
+                )
+
+    def test_chat_enforces_workspace_budget_and_exposes_status(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                llm_model="fake-primary",
+                workspace_token_budget=8,
+                token_budget_action="reject",
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "user_1"},
+                ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/workspace_main",
+                    json={"root_path": temp_dir},
+                )
+
+                response = client.post(
+                    "/api/v1/chat/stream",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "workspace_main",
+                        "message": "hello",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 429)
+                status = client.get(
+                    "/api/v1/workspaces/workspace_main/token-usage"
+                ).json()
+                self.assertEqual(status["budget"]["workspace"]["limit"], 8)
+                self.assertEqual(status["budget"]["workspace"]["used"], 0)
+                self.assertEqual(status["budget"]["workspace"]["remaining"], 8)
+
     def test_chat_stream_reports_google_max_tokens_as_error(self) -> None:
         class TruncatedLLMClient:
+            def set_usage_ledger(self, usage_ledger):
+                self.usage_ledger = usage_ledger
+
+            def prepare_chat_request(self, messages, **kwargs):
+                return LLMRequestPlan(
+                    requested_provider="google",
+                    requested_model="gemini-3.5-flash",
+                    provider="google",
+                    model="gemini-3.5-flash",
+                    input_tokens=12,
+                    max_output_tokens=2048,
+                    input_count_method="test_exact_count",
+                    usage_context=current_model_usage_context(),
+                )
+
             def stream_chat(self, messages, **kwargs):
                 self.thinking_level = kwargs.get("thinking_level")
                 yield LLMStreamEvent(type="delta", text="partial answer")
+                usage = LLMUsage(
+                    input_tokens=12,
+                    output_tokens=900,
+                    thoughts_tokens=1100,
+                )
+                plan = kwargs["request_plan"]
+                self.usage_ledger.record(
+                    provider=plan.provider,
+                    model=plan.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    thoughts_tokens=usage.thoughts_tokens,
+                    input_count_method=plan.input_count_method,
+                    context=plan.usage_context,
+                )
                 yield LLMStreamEvent(
                     type="usage",
-                    usage=LLMUsage(
-                        input_tokens=12,
-                        output_tokens=900,
-                        thoughts_tokens=1100,
-                    ),
+                    usage=usage,
                 )
                 raise LLMProviderError(
                     "Gemini reached the configured output token limit",
@@ -514,6 +663,10 @@ class ApiTests(unittest.TestCase):
 
     def test_independent_knowledge_base_still_ingests_searches_and_answers(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session_id = client.post(
+                "/api/v1/sessions",
+                json={"user_id": "user_1"},
+            ).json()["id"]
             created = client.post(
                 "/api/v1/knowledge-bases",
                 json={
@@ -553,11 +706,28 @@ class ApiTests(unittest.TestCase):
             self.assertFalse(search.json()["retrieval"]["rerank_applied"])
             answer = client.post(
                 "/api/v1/knowledge-bases/docs/ask",
-                json={"question": "What enables offline testing?", "limit": 3},
+                json={
+                    "question": "What enables offline testing?",
+                    "conversation_id": session_id,
+                    "limit": 3,
+                },
             )
             self.assertEqual(answer.status_code, 200)
             self.assertGreaterEqual(len(answer.json()["citations"]), 1)
             self.assertFalse(answer.json()["retrieval"]["rerank_applied"])
+            operations = {
+                record.operation
+                for record in client.app.state.usage_ledger.list_all()
+            }
+            self.assertIn("embedding", operations)
+            self.assertIn("rag_ask", operations)
+            session_operations = {
+                item["operation"]
+                for item in client.get(
+                    f"/api/v1/sessions/{session_id}/token-usage"
+                ).json()["operations"]
+            }
+            self.assertEqual(session_operations, {"embedding", "rag_ask"})
 
     def test_knowledge_base_catalog_crud_and_cascade_delete(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:

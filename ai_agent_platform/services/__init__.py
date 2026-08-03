@@ -6,6 +6,16 @@ from .knowledge_base_service import (
     KnowledgeBaseService,
 )
 from .session_service import SessionService, summarize_token_usage
+from ai_agent_platform.usage_ledger import (
+    TokenBudgetExceededError,
+    TokenBudgetScopeStatus,
+    TokenBudgetStatus,
+    UsageAuthorization,
+    UsageContext,
+    UsageLedgerService,
+    current_model_usage_context,
+    model_usage_scope,
+)
 from .workspace_service import (
     WorkspaceNotFoundError,
     WorkspaceService,
@@ -26,6 +36,14 @@ __all__ = [
     "KnowledgeBaseService",
     "SessionService",
     "summarize_token_usage",
+    "TokenBudgetExceededError",
+    "TokenBudgetScopeStatus",
+    "TokenBudgetStatus",
+    "UsageAuthorization",
+    "UsageContext",
+    "UsageLedgerService",
+    "current_model_usage_context",
+    "model_usage_scope",
     "WorkspaceNotFoundError",
     "WorkspaceService",
     "ConversationCompressor",

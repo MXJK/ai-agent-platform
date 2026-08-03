@@ -26,7 +26,7 @@ class InMemorySessionRepository:
         self._sessions: dict[str, Session] = {}
         self._messages: dict[str, list[Message]] = defaultdict(list)
         self._conversation_summaries: dict[str, ConversationSummary] = {}
-        self._token_usage: dict[str, list[TokenUsageRecord]] = defaultdict(list)
+        self._token_usage: dict[str, TokenUsageRecord] = {}
         self._lock = Lock()
 
     def create_session(self, user_id: str) -> Session:
@@ -97,7 +97,7 @@ class InMemorySessionRepository:
 
     def add_token_usage(
         self,
-        session_id: str,
+        session_id: str | None,
         provider: str,
         model: str,
         input_tokens: int,
@@ -106,21 +106,21 @@ class InMemorySessionRepository:
         workspace_id: str | None = None,
         thoughts_tokens: int = 0,
         record_id: str | None = None,
+        operation: str = "chat",
+        resource_id: str | None = None,
+        requested_provider: str | None = None,
+        requested_model: str | None = None,
+        input_count_method: str = "provider_usage",
+        budget_decision: str = "allowed",
     ) -> TokenUsageRecord:
         with self._lock:
-            if session_id not in self._sessions:
+            if session_id is not None and session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
 
-            existing = next(
-                (
-                    item
-                    for item in self._token_usage[session_id]
-                    if record_id is not None and item.id == record_id
-                ),
-                None,
-            )
+            usage_id = record_id or f"usage_{uuid4().hex[:12]}"
+            existing = self._token_usage.get(usage_id)
             record = TokenUsageRecord(
-                id=record_id or f"usage_{uuid4().hex[:12]}",
+                id=usage_id,
                 session_id=session_id,
                 workspace_id=workspace_id,
                 provider=provider,
@@ -130,19 +130,28 @@ class InMemorySessionRepository:
                 thoughts_tokens=thoughts_tokens,
                 total_tokens=input_tokens + output_tokens + thoughts_tokens,
                 created_at=existing.created_at if existing is not None else _now(),
+                operation=operation,
+                resource_id=resource_id,
+                requested_provider=requested_provider,
+                requested_model=requested_model,
+                input_count_method=input_count_method,
+                budget_decision=budget_decision,
             )
-            if existing is None:
-                self._token_usage[session_id].append(record)
-            else:
-                index = self._token_usage[session_id].index(existing)
-                self._token_usage[session_id][index] = record
+            self._token_usage[usage_id] = record
             return record
 
     def list_token_usage(self, session_id: str) -> list[TokenUsageRecord]:
         with self._lock:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
-            return list(self._token_usage[session_id])
+            return sorted(
+                (
+                    record
+                    for record in self._token_usage.values()
+                    if record.session_id == session_id
+                ),
+                key=lambda record: (record.created_at, record.id),
+            )
 
     def list_workspace_token_usage(
         self, workspace_id: str
@@ -150,10 +159,16 @@ class InMemorySessionRepository:
         with self._lock:
             return [
                 record
-                for records in self._token_usage.values()
-                for record in records
+                for record in self._token_usage.values()
                 if record.workspace_id == workspace_id
             ]
+
+    def list_all_token_usage(self) -> list[TokenUsageRecord]:
+        with self._lock:
+            return sorted(
+                self._token_usage.values(),
+                key=lambda record: (record.created_at, record.id),
+            )
 
 
 class InMemoryWorkspaceRepository:

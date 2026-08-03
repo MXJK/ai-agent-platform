@@ -853,6 +853,11 @@ function renderSessionSummary(
   usage = state.sessionTokenUsage[summary.session_id],
 ) {
   const workspaces = usage?.workspaces || [];
+  const operations = usage?.operations || [];
+  const sessionBudget = usage?.budget?.session;
+  const latestPromptRecord = [...(usage?.records || [])]
+    .reverse()
+    .find((record) => record.operation !== "embedding");
   $("session-summary").innerHTML = `
     <div class="summary-strip">
       <strong>${escapeHtml(summary.session_id)}</strong>
@@ -875,6 +880,39 @@ function renderSessionSummary(
             <small>${escapeHtml(usage.context?.message_count || 0)} 条注入消息${
               usage.context?.includes_summary ? " · 包含滚动摘要" : ""
             } · 不含下一条用户输入、系统提示和工作区检索内容</small>
+            <small>${
+              latestPromptRecord
+                ? `最近最终 Prompt <strong>${escapeHtml(formatTokenCount(latestPromptRecord.input_tokens))}</strong> tokens · ${escapeHtml(formatInputCountMethod(latestPromptRecord.input_count_method))}`
+                : "尚无已发送的最终 Prompt"
+            }</small>
+          </div>
+          <div class="token-budget-card ${sessionBudget?.exceeded ? "is-exceeded" : ""}">
+            <div>
+              <span>会话 Token 预算 · ${escapeHtml(usage.budget?.action || "reject")}</span>
+              <strong>${
+                sessionBudget?.limit
+                  ? `${escapeHtml(formatTokenCount(sessionBudget.used))} / ${escapeHtml(formatTokenCount(sessionBudget.limit))}`
+                  : "未启用"
+              }</strong>
+            </div>
+            <small>${
+              sessionBudget?.remaining == null
+                ? "设置 SESSION_TOKEN_BUDGET 后启用"
+                : `剩余 ${escapeHtml(formatTokenCount(sessionBudget.remaining))} tokens`
+            }</small>
+          </div>
+          <div class="token-operation-breakdown">
+            <span>调用类型</span>
+            ${
+              operations.length
+                ? operations
+                    .map(
+                      (item) =>
+                        `<small><strong>${escapeHtml(formatUsageOperation(item.operation))}</strong>${escapeHtml(formatTokenCount(item.total_tokens))}</small>`,
+                    )
+                    .join("")
+                : "<small>暂无调用记录</small>"
+            }
           </div>
           <div class="token-workspace-breakdown">
             <span>Workspace 分布</span>
@@ -1200,12 +1238,43 @@ async function streamChat() {
         }
         if (eventName === "meta") {
           const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
+          const budget =
+            data.budget_decision === "downgraded" ? " · 已按预算降级" : "";
+          const routeLabel = data.routing_pending
+            ? `${data.routing_policy || "quality"} 路由${budget}`
+            : `${data.provider} · ${data.model}${thinking}${budget}`;
+          setChatStatus(routeLabel, "running");
           chatTrace.push({
             step: 1,
             node: "model_request",
-            summary: `已请求 ${data.provider} / ${data.model}${thinking}。`,
-            output: {},
+            summary: data.routing_pending
+              ? `正在按 ${data.routing_policy || "quality"} 策略筛选模型。`
+              : `已请求 ${data.provider} / ${data.model}${thinking}。`,
+            output: data,
+          });
+          renderExecutionProcess(assistantContent, {
+            trace: chatTrace,
+            status: "running",
+            elapsedMs: performance.now() - startedAt,
+          });
+        } else if (eventName === "route") {
+          const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
+          const failures = data.route_trace?.failures?.length || 0;
+          const budget =
+            data.budget_decision === "downgraded" ? " · 已按预算降级" : "";
+          setChatStatus(
+            `${data.provider} · ${data.model}${thinking}${budget}`,
+            "running",
+          );
+          chatTrace.push({
+            step: chatTrace.length + 1,
+            node: "model_route",
+            summary: data.budget_decision === "downgraded"
+              ? `预算治理已降级并选择 ${data.provider} / ${data.model}。`
+              : failures
+              ? `已回退并选择 ${data.provider} / ${data.model}（${failures} 次前置失败）。`
+              : `已选择 ${data.provider} / ${data.model}。`,
+            output: data.route_trace || {},
           });
           renderExecutionProcess(assistantContent, {
             trace: chatTrace,
@@ -1925,11 +1994,20 @@ async function askRag() {
   $("rag-status").textContent = rerankEnabled ? "正在精排并生成…" : "正在生成…";
   prepareRagOutput("正在检索相关内容并组织回答…");
   try {
+    const conversationId = await ensureSession();
+    const workspaceId = activeWorkspaceId();
+    const attributedWorkspaceId = state.workspaces.some(
+      (workspace) => workspace.id === workspaceId,
+    )
+      ? workspaceId
+      : null;
     const body = await fetchJson(`/knowledge-bases/${encodeURIComponent(kbId)}/ask`, {
       method: "POST",
       signal: request.controller.signal,
       body: JSON.stringify({
         question,
+        conversation_id: conversationId,
+        workspace_id: attributedWorkspaceId,
         limit: numberValue("rag-limit-input", 5),
         recall_limit: numberValue("rag-recall-limit-input", 20),
         rerank_enabled: rerankEnabled,
@@ -2575,6 +2653,13 @@ function renderWorkspaceTokenUsage() {
   }
   for (const workspace of state.workspaces) {
     const usage = state.workspaceTokenUsage[workspace.id];
+    const workspaceBudget = usage?.budget?.workspace;
+    const operationSummary = (usage?.operations || [])
+      .map(
+        (item) =>
+          `${formatUsageOperation(item.operation)} ${formatTokenCount(item.total_tokens)}`,
+      )
+      .join(" · ");
     const item = document.createElement("article");
     item.className = "workspace-token-card";
     item.innerHTML = `
@@ -2591,9 +2676,40 @@ function renderWorkspaceTokenUsage() {
         <small>思考 <strong>${escapeHtml(formatTokenCount(usage?.thoughts_tokens || 0))}</strong></small>
         <small>会话 <strong>${escapeHtml(usage?.conversation_count || 0)}</strong></small>
       </div>
+      <div class="workspace-budget-line ${workspaceBudget?.exceeded ? "is-exceeded" : ""}">
+        <small>预算 ${
+          workspaceBudget?.limit
+            ? `${escapeHtml(formatTokenCount(workspaceBudget.used))} / ${escapeHtml(formatTokenCount(workspaceBudget.limit))}`
+            : "未启用"
+        } · ${escapeHtml(usage?.budget?.action || "reject")}</small>
+        ${operationSummary ? `<small>${escapeHtml(operationSummary)}</small>` : ""}
+      </div>
     `;
     list.appendChild(item);
   }
+}
+
+function formatUsageOperation(operation) {
+  const labels = {
+    agent: "Agent",
+    chat: "Chat",
+    conversation_compression: "对话压缩",
+    embedding: "Embedding",
+    llm: "后台 LLM",
+    rag_ask: "RAG Ask",
+  };
+  return labels[operation] || operation || "未知";
+}
+
+function formatInputCountMethod(method) {
+  const labels = {
+    anthropic_messages_count_tokens: "Anthropic 精确计数",
+    fake_lexical_tokenizer: "本地确定性计数",
+    gemini_models_count_tokens: "Gemini 精确计数",
+    openai_responses_input_tokens: "OpenAI 精确计数",
+    provider_usage: "Provider Usage",
+  };
+  return labels[method] || method || "未知计数方式";
 }
 
 async function refreshTokenUsageData() {

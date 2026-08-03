@@ -18,6 +18,11 @@ from ai_agent_platform.domain import (
 from ai_agent_platform.services.conversation_compression import (
     ConversationCompressor,
 )
+from ai_agent_platform.usage_ledger import (
+    TokenBudgetStatus,
+    UsageLedgerService,
+    model_usage_scope,
+)
 from ai_agent_platform.token_counting import (
     TOKEN_ESTIMATION_METHOD,
     estimate_message_tokens,
@@ -38,6 +43,7 @@ class SessionService:
         summary_max_chars: int = 2000,
         summary_max_source_chars: int = 12000,
         metrics: MetricsRegistry | None = None,
+        usage_ledger: UsageLedgerService | None = None,
     ) -> None:
         self._repository = repository
         self._agent_runtime = agent_runtime
@@ -48,6 +54,7 @@ class SessionService:
         self._summary_max_chars = summary_max_chars
         self._summary_max_source_chars = summary_max_source_chars
         self._metrics = metrics or MetricsRegistry()
+        self._usage_ledger = usage_ledger
 
     @property
     def summary_enabled(self) -> bool:
@@ -179,7 +186,6 @@ class SessionService:
         session_id: str,
         trigger_message_id: str | None = None,
     ) -> ConversationSummary | None:
-        del trigger_message_id
         if not self.summary_enabled:
             return None
         started = perf_counter()
@@ -206,11 +212,21 @@ class SessionService:
 
         compressor = self._compressor
         assert compressor is not None
-        content = compressor.compress(
-            previous_summary=current.content if current is not None else None,
-            messages=source_messages,
-            max_chars=self._summary_max_chars,
-        ).strip()
+        workspace_id = self._latest_workspace_id(session_id)
+        with model_usage_scope(
+            session_id=session_id,
+            workspace_id=workspace_id,
+            operation="conversation_compression",
+            resource_id=(
+                trigger_message_id
+                or f"{session_id}:summary:{(current.version if current else 0) + 1}"
+            ),
+        ):
+            content = compressor.compress(
+                previous_summary=current.content if current is not None else None,
+                messages=source_messages,
+                max_chars=self._summary_max_chars,
+            ).strip()
         if not content:
             self._metrics.increment("conversation_summary_empty_total")
             return current
@@ -251,7 +267,7 @@ class SessionService:
 
     def record_token_usage(
         self,
-        session_id: str,
+        session_id: str | None,
         provider: str,
         model: str,
         input_tokens: int,
@@ -260,7 +276,34 @@ class SessionService:
         workspace_id: str | None = None,
         thoughts_tokens: int = 0,
         record_id: str | None = None,
+        operation: str = "chat",
+        resource_id: str | None = None,
+        requested_provider: str | None = None,
+        requested_model: str | None = None,
+        input_count_method: str = "provider_usage",
+        budget_decision: str = "allowed",
     ) -> TokenUsageRecord:
+        if self._usage_ledger is not None:
+            from ai_agent_platform.usage_ledger import UsageContext
+
+            return self._usage_ledger.record(
+                provider=provider,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thoughts_tokens=thoughts_tokens,
+                requested_provider=requested_provider,
+                requested_model=requested_model,
+                input_count_method=input_count_method,
+                budget_decision=budget_decision,
+                record_id=record_id,
+                context=UsageContext(
+                    session_id=session_id,
+                    workspace_id=workspace_id,
+                    operation=operation,
+                    resource_id=resource_id,
+                ),
+            )
         return self._repository.add_token_usage(
             session_id=session_id,
             provider=provider,
@@ -270,6 +313,12 @@ class SessionService:
             workspace_id=workspace_id,
             thoughts_tokens=thoughts_tokens,
             record_id=record_id,
+            operation=operation,
+            resource_id=resource_id,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            input_count_method=input_count_method,
+            budget_decision=budget_decision,
         )
 
     def list_token_usage(self, session_id: str) -> list[TokenUsageRecord]:
@@ -291,6 +340,37 @@ class SessionService:
             for record in self.list_token_usage(session.id)
             if record.workspace_id == workspace_id
         ]
+
+    def list_all_token_usage(self) -> list[TokenUsageRecord]:
+        if self._usage_ledger is not None:
+            return self._usage_ledger.list_all()
+        list_records = getattr(self._repository, "list_all_token_usage", None)
+        if callable(list_records):
+            return list_records()
+        return [
+            record
+            for session in self.list_sessions()
+            for record in self.list_token_usage(session.id)
+        ]
+
+    def get_token_budget_status(
+        self,
+        *,
+        session_id: str | None,
+        workspace_id: str | None,
+    ) -> TokenBudgetStatus | None:
+        if self._usage_ledger is None:
+            return None
+        return self._usage_ledger.get_budget_status(
+            session_id=session_id,
+            workspace_id=workspace_id,
+        )
+
+    def _latest_workspace_id(self, session_id: str) -> str | None:
+        for record in reversed(self.list_token_usage(session_id)):
+            if record.workspace_id is not None:
+                return record.workspace_id
+        return None
 
     def get_context_token_usage(
         self,
