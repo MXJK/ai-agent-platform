@@ -31,9 +31,15 @@ require_file() {
 
 validate_runtime_config() {
   "${PYTHON}" - <<'PY'
-from ai_agent_platform.core import Settings
+import os
+
+from ai_agent_platform.core import Settings, validate_bind_host
 
 settings = Settings.from_env()
+validate_bind_host(
+    host=os.getenv("APP_HOST", "127.0.0.1"),
+    auth_mode=settings.auth_mode,
+)
 expected = {
     "session_repository": "postgres",
     "agent_run_store": "postgres",
@@ -58,6 +64,33 @@ if invalid:
 
 print("持久化运行配置检查通过。")
 PY
+}
+
+load_postgres_compose_env() {
+  local exports
+  exports="$("${PYTHON}" - <<'PY'
+import shlex
+from urllib.parse import unquote, urlparse
+
+from ai_agent_platform.core import Settings
+
+database_url = Settings.from_env().database_url
+parsed = urlparse(database_url)
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit("DATABASE_URL 必须使用 postgres 或 postgresql scheme。")
+if not parsed.username or parsed.password is None or not parsed.path.strip("/"):
+    raise SystemExit("DATABASE_URL 必须包含 PostgreSQL 用户、密码和数据库名。")
+
+values = {
+    "POSTGRES_DB": unquote(parsed.path.strip("/")),
+    "POSTGRES_USER": unquote(parsed.username),
+    "POSTGRES_PASSWORD": unquote(parsed.password),
+}
+for name, value in values.items():
+    print(f"export {name}={shlex.quote(value)}")
+PY
+)"
+  eval "${exports}"
 }
 
 wait_for_services() {
@@ -132,8 +165,9 @@ require_file "${PYTHON}"
 require_file "${ALEMBIC}"
 require_file "${CELERY}"
 docker compose version >/dev/null
-docker compose config --quiet
 validate_runtime_config
+load_postgres_compose_env
+docker compose config --quiet
 
 if [[ "${1:-}" == "--check" ]]; then
   echo "启动脚本检查通过。"

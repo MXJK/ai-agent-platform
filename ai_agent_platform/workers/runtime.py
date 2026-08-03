@@ -118,7 +118,12 @@ def _create_worker_services() -> WorkerServices:
         sandbox_mode=settings.sandbox_mode,
         sandbox_docker_image=settings.sandbox_docker_image,
         sandbox_command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+        sandbox_command_output_max_chars=(
+            settings.sandbox_command_output_max_chars
+        ),
         sandbox_workspace_parent=settings.sandbox_workspace_parent,
+        sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
+        sandbox_allowed_commands=settings.sandbox_allowed_commands,
     )
     checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
     coding_runtime = CodingAgentRuntime(
@@ -166,6 +171,7 @@ def _create_worker_services() -> WorkerServices:
         max_context_messages=settings.llm_max_context_messages,
     )
     close_callbacks = [provider.close for provider in mcp_providers]
+    close_callbacks.append(tool_registry.close)
     close_callbacks.append(worker_queue.close)
     if close_checkpointer is not None:
         close_callbacks.append(close_checkpointer)

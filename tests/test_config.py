@@ -2,13 +2,14 @@ import os
 import unittest
 from unittest.mock import patch
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import Settings, validate_bind_host
 
 
 class SettingsTests(unittest.TestCase):
     def test_default_embedding_provider_is_local_for_offline_development(self) -> None:
         settings = Settings()
 
+        self.assertNotIn("@", settings.database_url)
         self.assertEqual(settings.embedding_provider, "local")
         self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
         self.assertEqual(
@@ -75,7 +76,10 @@ class SettingsTests(unittest.TestCase):
                 "SANDBOX_MODE": "docker",
                 "SANDBOX_DOCKER_IMAGE": "python:3.12-slim",
                 "SANDBOX_COMMAND_TIMEOUT_SECONDS": "7.5",
+                "SANDBOX_COMMAND_OUTPUT_MAX_CHARS": "9000",
                 "SANDBOX_WORKSPACE_PARENT": "/tmp/agent-workspaces",
+                "SANDBOX_WORKSPACE_TTL_SECONDS": "600",
+                "SANDBOX_ALLOWED_COMMANDS": "python,pytest,node",
                 "PROJECT_MEMORY_ENABLED": "true",
                 "PROJECT_MEMORY_MODE": "review",
                 "PROJECT_MEMORY_CANDIDATE_THRESHOLD": "0.65",
@@ -151,7 +155,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sandbox_mode, "docker")
         self.assertEqual(settings.sandbox_docker_image, "python:3.12-slim")
         self.assertEqual(settings.sandbox_command_timeout_seconds, 7.5)
+        self.assertEqual(settings.sandbox_command_output_max_chars, 9000)
         self.assertEqual(settings.sandbox_workspace_parent, "/tmp/agent-workspaces")
+        self.assertEqual(settings.sandbox_workspace_ttl_seconds, 600)
+        self.assertEqual(
+            settings.sandbox_allowed_commands,
+            ("python", "pytest", "node"),
+        )
         self.assertTrue(settings.project_memory_enabled)
         self.assertEqual(settings.project_memory_mode, "review")
         self.assertEqual(settings.project_memory_candidate_threshold, 0.65)
@@ -258,6 +268,22 @@ class SettingsTests(unittest.TestCase):
                 project_memory_recency_weight=0.5,
                 project_memory_importance_weight=0.5,
             )
+
+    def test_disabled_auth_requires_loopback_bind_host(self) -> None:
+        for host in ("localhost", "127.0.0.1", "127.12.0.4", "::1", "[::1]"):
+            validate_bind_host(host=host, auth_mode="disabled")
+
+        for host in ("0.0.0.0", "::", "192.168.1.10", "devbox.local"):
+            with self.assertRaisesRegex(ValueError, "loopback"):
+                validate_bind_host(host=host, auth_mode="disabled")
+
+        validate_bind_host(host="0.0.0.0", auth_mode="trusted_header")
+
+    def test_rejects_invalid_sandbox_command_allowlist(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            Settings(sandbox_allowed_commands=())
+        with self.assertRaisesRegex(ValueError, "basenames"):
+            Settings(sandbox_allowed_commands=("/usr/bin/python",))
         with self.assertRaisesRegex(ValueError, "keep_recent_messages"):
             Settings(
                 conversation_summary_trigger_messages=6,

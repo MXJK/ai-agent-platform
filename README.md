@@ -19,6 +19,8 @@ Python 3.10 or newer is required by the Google Gen AI SDK:
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cp -n .env.example .env
+# Replace the sample PostgreSQL password in both POSTGRES_PASSWORD and
+# DATABASE_URL with the same random local-only value.
 ./scripts/start.sh
 ```
 
@@ -33,12 +35,14 @@ Useful startup options:
 ```bash
 ./scripts/start.sh --check  # Validate dependencies/configuration without writes.
 APP_RELOAD=0 ./scripts/start.sh
-APP_HOST=0.0.0.0 APP_PORT=8000 ./scripts/start.sh
+APP_PORT=8001 ./scripts/start.sh
 ```
 
 The web UI is available at `http://127.0.0.1:8000`. It is served directly by
 FastAPI and requires no separate frontend build. The example configuration uses
 the fake LLM and local embedding provider, which require no API key.
+When `AUTH_MODE=disabled`, the startup script rejects non-loopback `APP_HOST`
+values instead of relying on an operator warning.
 
 The shared composer offers:
 
@@ -249,6 +253,27 @@ returned.
 The tools reject absolute or traversal paths, escaping symlinks, binary or
 oversized files, dependency/build directories, real `.env` files, private keys,
 and common credential files.
+
+### Sandbox boundary
+
+Change runs copy regular, non-sensitive workspace files into a per-run
+directory. Real `.env` files, credentials, private keys, symbolic links,
+unreadable paths, sockets, FIFOs, and other special files are skipped and
+reported in `copy_warnings`. Completed, failed, or rejected runs remove their
+Sandbox; startup also prunes directories older than
+`SANDBOX_WORKSPACE_TTL_SECONDS`.
+
+`SANDBOX_MODE=local` is intended only for repositories owned and trusted by the
+local user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
+a minimal environment, fixed maximum timeout, bounded output capture, and
+process-group termination. Shell wrappers such as `sh -c` and `bash -c` are
+rejected. An allowlisted interpreter can still execute arbitrary trusted
+repository code, so local mode is not an adversarial host boundary.
+
+Docker mode additionally uses no network, a read-only container root, the
+calling non-root UID/GID, dropped Linux capabilities, `no-new-privileges`, a
+PID limit, CPU/memory limits, and a bounded tmpfs. Only the copied `/workspace`
+mount remains writable.
 
 ## Project memory
 
@@ -513,6 +538,12 @@ docker compose up -d postgres adminer qdrant redis
 .venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
 
+The Compose ports for Gateway, PostgreSQL, Qdrant, Redis, and Adminer are bound
+to `127.0.0.1`. PostgreSQL credentials come from `.env`; `scripts/start.sh`
+derives the Compose variables from `DATABASE_URL`, while direct
+`docker compose` usage requires the matching `POSTGRES_DB`, `POSTGRES_USER`,
+and `POSTGRES_PASSWORD` entries shown in `.env.example`.
+
 ### Browse PostgreSQL with Adminer
 
 The Compose stack includes an Adminer web interface bound to the local machine
@@ -523,9 +554,9 @@ only. After starting `postgres` and `adminer`, open
 | --- | --- |
 | System | PostgreSQL |
 | Server | `postgres` |
-| Username | `ai_agent` |
-| Password | `ai_agent_password` |
-| Database | `ai_agent_platform` |
+| Username | the local `POSTGRES_USER` value |
+| Password | the local `POSTGRES_PASSWORD` value |
+| Database | the local `POSTGRES_DB` value |
 
 The server name must be `postgres`, not `localhost`, because Adminer connects to
 PostgreSQL over the internal Compose network. The local-only port binding is

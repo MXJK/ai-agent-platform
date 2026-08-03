@@ -241,6 +241,12 @@ class CodingAgentRuntime:
                     + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
                 )
             )
+            self._cleanup_run_workspace(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+            )
             raise
         return self._finish_invocation(
             config=config,
@@ -313,6 +319,12 @@ class CodingAgentRuntime:
             ],
         )
         self._run_store.save(failed_record)
+        self._cleanup_run_workspace(
+            run_id=record.run_id,
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            workspace_root=record.workspace_root,
+        )
         return failed_record
 
     def resume(
@@ -357,6 +369,12 @@ class CodingAgentRuntime:
                     errors=_snapshot_errors(snapshot)
                     + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
                 )
+            )
+            self._cleanup_run_workspace(
+                run_id=record.run_id,
+                conversation_id=record.conversation_id,
+                workspace_id=record.workspace_id,
+                workspace_root=record.workspace_root,
             )
             raise
         return self._finish_invocation(
@@ -443,7 +461,31 @@ class CodingAgentRuntime:
                 pending_approval=pending,
             )
         )
+        if status == "completed":
+            self._cleanup_run_workspace(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+            )
         return result
+
+    def _cleanup_run_workspace(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        workspace_root: str,
+    ) -> None:
+        self._tools.cleanup_context(
+            ToolExecutionContext(
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+                run_id=run_id,
+            )
+        )
 
     def _save_record(
         self,

@@ -8,6 +8,7 @@ accepted in that mode.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 
 from fastapi import HTTPException, Request
 
@@ -39,4 +40,23 @@ def request_user_id(
     return user_id
 
 
-__all__ = ["request_user_id"]
+def validate_bind_host(*, host: str, auth_mode: str) -> None:
+    """Fail closed when unauthenticated local mode would listen off-machine."""
+    if auth_mode != "disabled":
+        return
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "AUTH_MODE=disabled requires APP_HOST to be a loopback address"
+        ) from exc
+    if not address.is_loopback:
+        raise ValueError(
+            "AUTH_MODE=disabled requires APP_HOST to be a loopback address"
+        )
+
+
+__all__ = ["request_user_id", "validate_bind_host"]

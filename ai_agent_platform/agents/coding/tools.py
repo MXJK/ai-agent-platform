@@ -17,7 +17,10 @@ def create_coding_tool_registry(
     sandbox_mode: str = "local",
     sandbox_docker_image: str = "python:3.11-slim",
     sandbox_command_timeout_seconds: float = 30.0,
+    sandbox_command_output_max_chars: int = 12000,
     sandbox_workspace_parent: str | None = None,
+    sandbox_workspace_ttl_seconds: float = 86400.0,
+    sandbox_allowed_commands: tuple[str, ...] | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     register_repository_tools(registry)
@@ -26,7 +29,10 @@ def create_coding_tool_registry(
         mode=sandbox_mode,
         docker_image=sandbox_docker_image,
         command_timeout_seconds=sandbox_command_timeout_seconds,
+        command_output_max_chars=sandbox_command_output_max_chars,
         workspace_parent=sandbox_workspace_parent,
+        workspace_ttl_seconds=sandbox_workspace_ttl_seconds,
+        allowed_commands=sandbox_allowed_commands,
     )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
