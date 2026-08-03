@@ -141,8 +141,12 @@ class GoogleStreamingTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual([event.type for event in events], ["delta", "usage", "done"])
-        usage = events[1].usage
+        self.assertEqual(
+            [event.type for event in events],
+            ["route", "delta", "usage", "done"],
+        )
+        self.assertEqual(events[0].provider, "google")
+        usage = events[2].usage
         self.assertIsNotNone(usage)
         assert usage is not None
         self.assertEqual(usage.thoughts_tokens, 5)
@@ -167,6 +171,9 @@ class GoogleStreamingTests(unittest.TestCase):
                     [{"role": "user", "content": "long answer"}]
                 )
             )
+            route_event = next(iterator)
+            self.assertEqual(route_event.type, "route")
+            self.assertEqual(route_event.model, "gemini-3.5-flash")
             self.assertEqual(next(iterator).type, "delta")
             usage_event = next(iterator)
             self.assertEqual(usage_event.type, "usage")

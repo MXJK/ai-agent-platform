@@ -100,6 +100,69 @@ heartbeats while the provider is idle, report thinking tokens separately, and
 return an explicit `max_output_tokens` error instead of a normal completion
 when Gemini finishes with `MAX_TOKENS`.
 
+## Model routing
+
+`LLMClient` now delegates model choice to an independent `ModelRouter`. Every
+request is processed in this order:
+
+```text
+request requirements
+→ capability filter (tool calling, structured output, context window)
+→ quality / cost / latency ranking
+→ provider health and circuit-breaker filter
+→ selected model + route trace
+→ provider call; pre-delta failure may try the next cross-provider candidate
+```
+
+The model table is supplied through `LLM_MODEL_CATALOG_JSON`. Without it, the
+application derives one conservative entry from `LLM_PROVIDER`, `LLM_MODEL`,
+and `LLM_MODEL_CONTEXT_WINDOW_TOKENS`, preserving single-model local startup.
+A deployment that wants actual routing must configure at least two entries.
+This abbreviated example is formatted for readability; `.env` values must keep
+the JSON array on one line:
+
+```json
+[
+  {
+    "provider": "google",
+    "model": "your-quality-model",
+    "capabilities": {"tool_calling": true, "structured_output": true},
+    "context_window_tokens": 200000,
+    "input_cost_per_million": 2.0,
+    "output_cost_per_million": 8.0,
+    "quality_score": 0.92,
+    "latency_ms": 900,
+    "enabled": true
+  },
+  {
+    "provider": "openai",
+    "model": "your-low-latency-model",
+    "capabilities": {"tool_calling": true, "structured_output": true},
+    "context_window_tokens": 128000,
+    "input_cost_per_million": 0.4,
+    "output_cost_per_million": 1.6,
+    "quality_score": 0.76,
+    "latency_ms": 220,
+    "enabled": true
+  }
+]
+```
+
+Prices, quality scores, and latency estimates are operator-maintained routing
+inputs, not live provider facts. `quality` maximizes configured quality,
+`cost` minimizes estimated input/output cost, and `latency` minimizes configured
+latency; deterministic tie-breakers keep tests reproducible. Explicit request
+`provider`/`model` values remain hard filters and must match the catalog.
+
+Provider health is process-local. A bounded recent-outcome window and consecutive
+failure count open the circuit; after the recovery timeout, the provider becomes
+`half_open` and a successful probe closes it. Chat emits a `route` SSE event and
+shows a `model_route` Trace node containing every candidate, rejection reasons,
+health snapshot, selection reason, failures, and final model. Events before the
+first non-empty text `delta` are buffered, so a 429, timeout, or transport failure
+can safely fall back across providers. After the first text delta, failures are
+returned with `partial_response=true` and never replayed on another model.
+
 ## Code Agent flow
 
 The LangGraph chain starts with:

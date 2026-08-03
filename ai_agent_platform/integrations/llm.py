@@ -2,22 +2,31 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
 import time
-from typing import Any, Iterable, Iterator, Literal
+from typing import Any, Iterable, Iterator, Literal, Mapping, Protocol, cast
 from uuid import uuid4
 
 import httpx
 
 from ai_agent_platform.core import Settings
+from ai_agent_platform.integrations.model_router import (
+    ModelConfig,
+    ModelRouteTrace,
+    ModelRouter,
+    ProviderHealthManager,
+    RoutingPolicy,
+    RoutingRequirements,
+    load_model_catalog,
+)
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 from ai_agent_platform.token_counting import estimate_text_tokens
 
 
-LLMEventType = Literal["delta", "usage", "done"]
+LLMEventType = Literal["route", "delta", "usage", "done"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,8 @@ class LLMResponse:
     text: str
     model: str
     usage: LLMUsage | None = None
+    provider: str | None = None
+    route_trace: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class LLMToolDecision:
     stop_reason: str
     usage: LLMUsage | None = None
     provider_items: list[dict[str, Any]] | None = None
+    route_trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -86,6 +98,9 @@ class LLMStreamEvent:
     type: LLMEventType
     text: str = ""
     usage: LLMUsage | None = None
+    provider: str | None = None
+    model: str | None = None
+    route_trace: dict[str, Any] | None = None
 
 
 class LLMProviderError(Exception):
@@ -96,22 +111,84 @@ class LLMProviderError(Exception):
         retryable: bool = False,
         code: str = "llm_provider_error",
         finish_reason: str | None = None,
+        route_trace: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.code = code
         self.finish_reason = finish_reason
+        self.route_trace = route_trace
+
+
+class LLMProviderAdapter(Protocol):
+    """Optional provider boundary used by deterministic tests and extensions."""
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        thinking_level: str | None,
+    ) -> Iterable[LLMStreamEvent]: ...
+
+    def decide_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        *,
+        model: str,
+    ) -> LLMToolDecision: ...
 
 
 class LLMClient:
     """Streams text from Google, OpenAI, Anthropic, or a local fake provider."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        model_router: ModelRouter | None = None,
+        provider_adapters: Mapping[str, LLMProviderAdapter] | None = None,
+    ) -> None:
         self._settings = settings
+        self._provider_adapters = dict(provider_adapters or {})
+        self._model_router = model_router or ModelRouter(
+            load_model_catalog(
+                settings.llm_model_catalog_json,
+                default_provider=settings.llm_provider,
+                default_model=settings.llm_model,
+                default_context_window_tokens=(
+                    settings.llm_model_context_window_tokens
+                ),
+            ),
+            default_policy=cast(RoutingPolicy, settings.llm_routing_policy),
+            health=ProviderHealthManager(
+                failure_threshold=settings.llm_circuit_failure_threshold,
+                recovery_timeout_seconds=(
+                    settings.llm_circuit_recovery_timeout_seconds
+                ),
+                error_window_size=settings.llm_circuit_error_window_size,
+                error_rate_min_requests=(
+                    settings.llm_circuit_error_rate_min_requests
+                ),
+                error_rate_threshold=(
+                    settings.llm_circuit_error_rate_threshold
+                ),
+            ),
+        )
+
+    @property
+    def model_router(self) -> ModelRouter:
+        return self._model_router
 
     @property
     def native_tool_calling_enabled(self) -> bool:
-        return self._settings.llm_provider != "fake"
+        return any(
+            model.enabled
+            and model.capabilities.tool_calling
+            and model.provider != "fake"
+            for model in self._model_router.models
+        )
 
     def decide_tools(
         self,
@@ -120,53 +197,74 @@ class LLMClient:
         *,
         provider: str | None = None,
         model: str | None = None,
+        routing_policy: RoutingPolicy | None = None,
+        structured_output: bool = False,
+        min_context_tokens: int = 0,
     ) -> LLMToolDecision:
-        selected_provider = provider or self._settings.llm_provider
-        selected_model = model or self._settings.llm_model
+        estimated_input_tokens = _estimate_tokens(_join_any_message_text(messages))
+        plan = self._model_router.route(
+            RoutingRequirements(
+                tool_calling=True,
+                structured_output=structured_output,
+                min_context_tokens=max(
+                    min_context_tokens,
+                    estimated_input_tokens + self._settings.llm_max_output_tokens,
+                ),
+                estimated_input_tokens=estimated_input_tokens,
+                expected_output_tokens=self._settings.llm_max_output_tokens,
+            ),
+            policy=routing_policy,
+            provider=provider,
+            model=model,
+        )
+        if not plan.candidates:
+            raise LLMProviderError(
+                "no healthy model satisfies the routing requirements",
+                code="no_eligible_model",
+                route_trace=plan.trace.to_dict(),
+            )
+
         aliases = _tool_aliases(tools)
         last_error: LLMProviderError | None = None
-        for attempt in range(self._settings.llm_max_retries + 1):
-            try:
-                if selected_provider == "openai":
-                    decision = self._decide_openai_tools(
+        for candidate in plan.candidates:
+            candidate_error: LLMProviderError | None = None
+            for attempt in range(self._settings.llm_max_retries + 1):
+                try:
+                    decision = self._decide_tools_once(
+                        candidate,
                         messages,
                         tools,
                         aliases,
-                        selected_model,
                     )
-                elif selected_provider == "anthropic":
-                    decision = self._decide_anthropic_tools(
-                        messages,
-                        tools,
-                        aliases,
-                        selected_model,
+                    self._model_router.record_success(plan.trace, candidate)
+                    accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                    if accumulator is not None and decision.usage is not None:
+                        accumulator.add(decision.usage)
+                    return replace(
+                        decision,
+                        route_trace=plan.trace.to_dict(),
                     )
-                elif selected_provider == "google":
-                    decision = self._decide_google_tools(
-                        messages,
-                        tools,
-                        aliases,
-                        selected_model,
-                    )
-                elif selected_provider == "fake":
-                    decision = self._decide_fake_tools(
-                        messages,
-                        selected_model,
-                    )
-                else:
-                    raise LLMProviderError(
-                        f"unsupported llm provider: {selected_provider}"
-                    )
-                accumulator = _LLM_USAGE_ACCUMULATOR.get()
-                if accumulator is not None and decision.usage is not None:
-                    accumulator.add(decision.usage)
-                return decision
-            except LLMProviderError as exc:
-                last_error = exc
-                if not exc.retryable or attempt >= self._settings.llm_max_retries:
-                    raise
-                time.sleep(min(0.2 * (2**attempt), 2.0))
+                except LLMProviderError as exc:
+                    candidate_error = exc
+                    if (
+                        not exc.retryable
+                        or attempt >= self._settings.llm_max_retries
+                    ):
+                        break
+                    time.sleep(min(0.2 * (2**attempt), 2.0))
+            assert candidate_error is not None
+            last_error = candidate_error
+            self._model_router.record_failure(
+                plan.trace,
+                candidate,
+                code=candidate_error.code,
+                message=str(candidate_error),
+                retryable=candidate_error.retryable,
+                after_stream_start=False,
+            )
+
         assert last_error is not None
+        last_error.route_trace = plan.trace.to_dict()
         raise last_error
 
     def stream_chat(
@@ -176,39 +274,130 @@ class LLMClient:
         provider: str | None = None,
         model: str | None = None,
         thinking_level: str | None = None,
+        routing_policy: RoutingPolicy | None = None,
+        structured_output: bool = False,
+        min_context_tokens: int = 0,
     ) -> Iterable[LLMStreamEvent]:
-        selected_provider = provider or self._settings.llm_provider
-        selected_model = model or self._settings.llm_model
-        stream_factory = self._stream_factory(
-            selected_provider,
-            selected_model,
-            thinking_level,
+        estimated_input_tokens = _estimate_tokens(_join_message_text(messages))
+        plan = self._model_router.route(
+            RoutingRequirements(
+                structured_output=structured_output,
+                min_context_tokens=max(
+                    min_context_tokens,
+                    estimated_input_tokens + self._settings.llm_max_output_tokens,
+                ),
+                estimated_input_tokens=estimated_input_tokens,
+                expected_output_tokens=self._settings.llm_max_output_tokens,
+            ),
+            policy=routing_policy,
+            provider=provider,
+            model=model,
         )
+        if not plan.candidates:
+            raise LLMProviderError(
+                "no healthy model satisfies the routing requirements",
+                code="no_eligible_model",
+                route_trace=plan.trace.to_dict(),
+            )
 
         last_error: LLMProviderError | None = None
-        for attempt in range(self._settings.llm_max_retries + 1):
-            emitted = False
-            try:
-                for event in stream_factory(messages):
-                    emitted = True
-                    yield event
-                return
-            except LLMProviderError as exc:
-                last_error = exc
-                if emitted or not exc.retryable or attempt >= self._settings.llm_max_retries:
-                    raise
-                time.sleep(min(0.2 * (2**attempt), 2.0))
+        for candidate in plan.candidates:
+            candidate_error: LLMProviderError | None = None
+            for attempt in range(self._settings.llm_max_retries + 1):
+                pending_events: list[LLMStreamEvent] = []
+                stream_started = False
+                try:
+                    stream_factory = self._stream_factory(
+                        candidate.provider,
+                        candidate.model,
+                        thinking_level,
+                    )
+                    for raw_event in stream_factory(messages):
+                        if raw_event.type == "route":
+                            continue
+                        event = LLMStreamEvent(
+                            type=raw_event.type,
+                            text=raw_event.text,
+                            usage=raw_event.usage,
+                            provider=candidate.provider,
+                            model=candidate.model,
+                        )
+                        is_done = event.type == "done"
+                        if is_done:
+                            self._model_router.record_success(
+                                plan.trace,
+                                candidate,
+                            )
+                        if event.type == "delta" and event.text and not stream_started:
+                            stream_started = True
+                            self._model_router.mark_selected(plan.trace, candidate)
+                            yield self._route_event(plan.trace, candidate)
+                            yield from pending_events
+                            pending_events.clear()
+                        if stream_started:
+                            yield event
+                        else:
+                            pending_events.append(event)
+                        if is_done:
+                            if not stream_started:
+                                yield self._route_event(plan.trace, candidate)
+                                yield from pending_events
+                            return
+
+                    self._model_router.record_success(plan.trace, candidate)
+                    if not stream_started:
+                        yield self._route_event(plan.trace, candidate)
+                        yield from pending_events
+                    return
+                except LLMProviderError as exc:
+                    candidate_error = exc
+                    if stream_started:
+                        self._model_router.record_failure(
+                            plan.trace,
+                            candidate,
+                            code=exc.code,
+                            message=str(exc),
+                            retryable=exc.retryable,
+                            after_stream_start=True,
+                        )
+                        exc.route_trace = plan.trace.to_dict()
+                        raise
+                    if (
+                        not exc.retryable
+                        or attempt >= self._settings.llm_max_retries
+                    ):
+                        break
+                    time.sleep(min(0.2 * (2**attempt), 2.0))
+
+            assert candidate_error is not None
+            last_error = candidate_error
+            self._model_router.record_failure(
+                plan.trace,
+                candidate,
+                code=candidate_error.code,
+                message=str(candidate_error),
+                retryable=candidate_error.retryable,
+                after_stream_start=False,
+            )
 
         if last_error is not None:
+            last_error.route_trace = plan.trace.to_dict()
             raise last_error
 
     def complete(self, prompt: str) -> LLMResponse:
         text_parts: list[str] = []
         latest_usage: LLMUsage | None = None
+        selected_provider = self._settings.llm_provider
+        selected_model = self._settings.llm_model
+        route_trace: dict[str, Any] | None = None
         messages = [{"role": "user", "content": prompt}]
         try:
             for event in self.stream_chat(messages):
-                if event.type == "delta":
+                if event.type == "route":
+                    selected_provider = event.provider or selected_provider
+                    selected_model = event.model or selected_model
+                    route_trace = event.route_trace
+                elif event.type == "delta":
                     text_parts.append(event.text)
                 elif event.type == "usage" and event.usage is not None:
                     latest_usage = event.usage
@@ -218,8 +407,60 @@ class LLMClient:
                 accumulator.add(latest_usage)
         return LLMResponse(
             text="".join(text_parts),
-            model=self._settings.llm_model,
+            model=selected_model,
             usage=latest_usage,
+            provider=selected_provider,
+            route_trace=route_trace,
+        )
+
+    def _decide_tools_once(
+        self,
+        candidate: ModelConfig,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+    ) -> LLMToolDecision:
+        adapter = self._provider_adapters.get(candidate.provider)
+        if adapter is not None:
+            return adapter.decide_tools(messages, tools, model=candidate.model)
+        if candidate.provider == "openai":
+            return self._decide_openai_tools(
+                messages,
+                tools,
+                aliases,
+                candidate.model,
+            )
+        if candidate.provider == "anthropic":
+            return self._decide_anthropic_tools(
+                messages,
+                tools,
+                aliases,
+                candidate.model,
+            )
+        if candidate.provider == "google":
+            return self._decide_google_tools(
+                messages,
+                tools,
+                aliases,
+                candidate.model,
+            )
+        if candidate.provider == "fake":
+            return self._decide_fake_tools(messages, candidate.model)
+        raise LLMProviderError(
+            f"unsupported llm provider: {candidate.provider}",
+            code="unsupported_llm_provider",
+        )
+
+    @staticmethod
+    def _route_event(
+        trace: ModelRouteTrace,
+        candidate: ModelConfig,
+    ) -> LLMStreamEvent:
+        return LLMStreamEvent(
+            type="route",
+            provider=candidate.provider,
+            model=candidate.model,
+            route_trace=trace.to_dict(),
         )
 
     def _decide_fake_tools(
@@ -536,6 +777,13 @@ class LLMClient:
         model: str,
         thinking_level: str | None,
     ):
+        adapter = self._provider_adapters.get(provider)
+        if adapter is not None:
+            return lambda messages: adapter.stream_chat(
+                messages,
+                model=model,
+                thinking_level=thinking_level,
+            )
         if provider == "fake":
             return lambda messages: self._stream_fake(messages, model)
         if provider == "openai":

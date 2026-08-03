@@ -120,6 +120,8 @@ def chat_stream_events(
     started_at = perf_counter()
     provider = request.provider or settings.llm_provider
     model = request.model or settings.llm_model
+    routing_policy = request.routing_policy or settings.llm_routing_policy
+    route_trace: dict[str, object] | None = None
     thinking_level = None
     if provider == "google" and model.startswith("gemini-3"):
         thinking_level = request.thinking_level or settings.llm_thinking_level
@@ -138,6 +140,7 @@ def chat_stream_events(
             "provider": provider,
             "model": model,
             "thinking_level": thinking_level,
+            "routing_policy": routing_policy,
         },
     )
     yield sse(
@@ -147,6 +150,10 @@ def chat_stream_events(
             "provider": provider,
             "model": model,
             "thinking_level": thinking_level,
+            "requested_provider": request.provider,
+            "requested_model": request.model,
+            "routing_policy": routing_policy,
+            "routing_pending": True,
         },
     )
     retrieved_memories = retrieved_memories or []
@@ -215,6 +222,9 @@ def chat_stream_events(
             provider=request.provider,
             model=request.model,
             thinking_level=request.thinking_level,
+            routing_policy=request.routing_policy,
+            structured_output=request.requires_structured_output,
+            min_context_tokens=request.min_context_tokens or 0,
         )
         for event in stream_with_heartbeat(
             llm_events,
@@ -224,7 +234,43 @@ def chat_stream_events(
                 metrics.increment("chat_stream_heartbeats_total")
                 yield sse_heartbeat()
                 continue
-            if event.type == "delta":
+            if event.type == "route":
+                provider = event.provider or provider
+                model = event.model or model
+                thinking_level = None
+                if provider == "google" and model.startswith("gemini-3"):
+                    thinking_level = (
+                        request.thinking_level or settings.llm_thinking_level
+                    )
+                route_trace = event.route_trace
+                failures = (
+                    route_trace.get("failures", []) if route_trace else []
+                )
+                metrics.increment("llm_routes_total")
+                if failures:
+                    metrics.increment("llm_route_fallbacks_total")
+                logger.info(
+                    "llm model routed",
+                    extra={
+                        "request_id": request_id,
+                        "conversation_id": request.conversation_id,
+                        "provider": provider,
+                        "model": model,
+                        "routing_policy": routing_policy,
+                        "route_trace": route_trace,
+                    },
+                )
+                yield sse(
+                    "route",
+                    {
+                        "request_id": request_id,
+                        "provider": provider,
+                        "model": model,
+                        "thinking_level": thinking_level,
+                        "route_trace": route_trace or {},
+                    },
+                )
+            elif event.type == "delta":
                 answer_parts.append(event.text)
                 yield sse("delta", {"text": event.text})
             elif event.type == "usage" and event.usage is not None:
@@ -318,6 +364,12 @@ def chat_stream_events(
             },
         )
     except LLMProviderError as exc:
+        if exc.route_trace is not None:
+            route_trace = exc.route_trace
+            final_model = route_trace.get("final_model")
+            if isinstance(final_model, dict):
+                provider = str(final_model.get("provider") or provider)
+                model = str(final_model.get("model") or model)
         record_usage()
         metrics.increment("chat_streams_failed_total")
         metrics.increment("llm_provider_errors_total")
@@ -331,6 +383,7 @@ def chat_stream_events(
                 "retryable": exc.retryable,
                 "code": exc.code,
                 "finish_reason": exc.finish_reason,
+                "route_trace": route_trace,
             },
         )
         yield sse(
@@ -342,6 +395,7 @@ def chat_stream_events(
                 "retryable": exc.retryable,
                 "finish_reason": exc.finish_reason,
                 "partial_response": bool(answer_parts),
+                "route_trace": route_trace,
                 "input_tokens": latest_input_tokens,
                 "output_tokens": latest_output_tokens,
                 "thoughts_tokens": latest_thoughts_tokens,

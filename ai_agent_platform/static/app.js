@@ -1200,12 +1200,34 @@ async function streamChat() {
         }
         if (eventName === "meta") {
           const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
+          const routeLabel = data.routing_pending
+            ? `${data.routing_policy || "quality"} 路由`
+            : `${data.provider} · ${data.model}${thinking}`;
+          setChatStatus(routeLabel, "running");
           chatTrace.push({
             step: 1,
             node: "model_request",
-            summary: `已请求 ${data.provider} / ${data.model}${thinking}。`,
-            output: {},
+            summary: data.routing_pending
+              ? `正在按 ${data.routing_policy || "quality"} 策略筛选模型。`
+              : `已请求 ${data.provider} / ${data.model}${thinking}。`,
+            output: data,
+          });
+          renderExecutionProcess(assistantContent, {
+            trace: chatTrace,
+            status: "running",
+            elapsedMs: performance.now() - startedAt,
+          });
+        } else if (eventName === "route") {
+          const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
+          const failures = data.route_trace?.failures?.length || 0;
+          setChatStatus(`${data.provider} · ${data.model}${thinking}`, "running");
+          chatTrace.push({
+            step: chatTrace.length + 1,
+            node: "model_route",
+            summary: failures
+              ? `已回退并选择 ${data.provider} / ${data.model}（${failures} 次前置失败）。`
+              : `已选择 ${data.provider} / ${data.model}。`,
+            output: data.route_trace || {},
           });
           renderExecutionProcess(assistantContent, {
             trace: chatTrace,

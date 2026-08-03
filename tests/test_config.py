@@ -21,9 +21,16 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.workspace_allowed_roots)
 
     def test_blank_allowed_roots_falls_back_to_startup_directory(self) -> None:
-        with patch.dict(os.environ, {"WORKSPACE_ALLOWED_ROOTS": ""}):
+        with patch.dict(
+            os.environ,
+            {
+                "WORKSPACE_ALLOWED_ROOTS": "",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+        ):
             settings = Settings.from_env()
         self.assertEqual(len(settings.workspace_allowed_roots), 1)
+        self.assertIsNone(settings.llm_model_catalog_json)
 
     def test_reads_database_and_qdrant_settings_from_environment(self) -> None:
         with patch.dict(
@@ -64,6 +71,17 @@ class SettingsTests(unittest.TestCase):
                 "LOG_FORMAT": "text",
                 "LLM_MAX_OUTPUT_TOKENS": "8192",
                 "LLM_THINKING_LEVEL": "medium",
+                "LLM_MODEL_CATALOG_JSON": (
+                    '[{"provider":"fake","model":"fast-fake",'
+                    '"context_window_tokens":64000}]'
+                ),
+                "LLM_MODEL_CONTEXT_WINDOW_TOKENS": "96000",
+                "LLM_ROUTING_POLICY": "cost",
+                "LLM_CIRCUIT_FAILURE_THRESHOLD": "4",
+                "LLM_CIRCUIT_RECOVERY_TIMEOUT_SECONDS": "45",
+                "LLM_CIRCUIT_ERROR_WINDOW_SIZE": "12",
+                "LLM_CIRCUIT_ERROR_RATE_MIN_REQUESTS": "6",
+                "LLM_CIRCUIT_ERROR_RATE_THRESHOLD": "0.6",
                 "SSE_HEARTBEAT_SECONDS": "4.5",
                 "CONVERSATION_SUMMARY_ENABLED": "true",
                 "CONVERSATION_SUMMARY_TRIGGER_MESSAGES": "16",
@@ -143,6 +161,14 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_format, "text")
         self.assertEqual(settings.llm_max_output_tokens, 8192)
         self.assertEqual(settings.llm_thinking_level, "medium")
+        self.assertIn("fast-fake", settings.llm_model_catalog_json or "")
+        self.assertEqual(settings.llm_model_context_window_tokens, 96000)
+        self.assertEqual(settings.llm_routing_policy, "cost")
+        self.assertEqual(settings.llm_circuit_failure_threshold, 4)
+        self.assertEqual(settings.llm_circuit_recovery_timeout_seconds, 45)
+        self.assertEqual(settings.llm_circuit_error_window_size, 12)
+        self.assertEqual(settings.llm_circuit_error_rate_min_requests, 6)
+        self.assertEqual(settings.llm_circuit_error_rate_threshold, 0.6)
         self.assertEqual(settings.sse_heartbeat_seconds, 4.5)
         self.assertTrue(settings.conversation_summary_enabled)
         self.assertEqual(settings.conversation_summary_trigger_messages, 16)
@@ -253,6 +279,21 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_llm_thinking_level(self) -> None:
         with self.assertRaisesRegex(ValueError, "llm_thinking_level"):
             Settings(llm_thinking_level="extreme")
+
+    def test_rejects_invalid_model_routing_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "llm_routing_policy"):
+            Settings(llm_routing_policy="random")
+        with self.assertRaisesRegex(ValueError, "valid JSON"):
+            Settings(llm_model_catalog_json="not-json")
+        with self.assertRaisesRegex(ValueError, "non-empty JSON array"):
+            Settings(llm_model_catalog_json="[]")
+        with self.assertRaisesRegex(ValueError, "must not exceed"):
+            Settings(
+                llm_circuit_error_window_size=4,
+                llm_circuit_error_rate_min_requests=5,
+            )
+        with self.assertRaisesRegex(ValueError, "between 0 and 1"):
+            Settings(llm_circuit_error_rate_threshold=1.1)
 
     def test_rejects_invalid_memory_thresholds_and_missing_gateway_secret(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not exceed"):
