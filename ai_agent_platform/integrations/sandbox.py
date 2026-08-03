@@ -4,12 +4,17 @@ from dataclasses import dataclass
 from pathlib import Path
 import difflib
 import os
+import selectors
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import tempfile
 from threading import Lock
+import time
 from typing import Any
+from uuid import uuid4
 
 from ai_agent_platform.integrations.tools import ToolExecutionContext
 
@@ -21,6 +26,8 @@ DEFAULT_SANDBOX_IGNORES = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    ".sandbox-home",
+    ".sandbox-tmp",
     ".tox",
     ".venv",
     "__pycache__",
@@ -30,14 +37,66 @@ DEFAULT_SANDBOX_IGNORES = {
     "venv",
 }
 
-DEFAULT_DENIED_COMMANDS = {
-    "docker",
-    "kubectl",
-    "rm",
-    "scp",
-    "ssh",
-    "sudo",
+SENSITIVE_SANDBOX_FILENAMES = {
+    ".env",
+    ".envrc",
+    ".git-credentials",
+    ".env.local",
+    ".env.production",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "secrets.json",
+    "service-account.json",
+    "service_account.json",
 }
+SENSITIVE_SANDBOX_DIRNAMES = {
+    ".aws",
+    ".azure",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".ssh",
+}
+SENSITIVE_SANDBOX_SUFFIXES = {".key", ".p12", ".pfx", ".pem"}
+SAFE_ENV_TEMPLATES = {".env.example", ".env.sample", ".env.template"}
+DEFAULT_ALLOWED_COMMANDS = {
+    "alembic",
+    "cargo",
+    "git",
+    "go",
+    "mypy",
+    "node",
+    "npm",
+    "npx",
+    "poetry",
+    "pytest",
+    "python",
+    "python3",
+    "ruff",
+    "rustc",
+    "tox",
+    "uv",
+}
+SHELL_WRAPPER_COMMANDS = {
+    "bash",
+    "csh",
+    "dash",
+    "fish",
+    "ksh",
+    "powershell",
+    "pwsh",
+    "sh",
+    "tcsh",
+    "zsh",
+}
+SANDBOX_DIRECTORY_PREFIX = "agent-sandbox-"
 
 
 @dataclass(frozen=True)
@@ -46,6 +105,16 @@ class SandboxWorkspace:
     path: Path
     source_root: Path
     baseline: dict[str, bytes]
+    copy_warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BoundedProcessResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    output_truncated: bool
+    timed_out: bool
 
 
 class SandboxRuntime:
@@ -57,22 +126,42 @@ class SandboxRuntime:
         mode: str = "local",
         docker_image: str = "python:3.11-slim",
         command_timeout_seconds: float = 30.0,
+        command_output_max_chars: int = 12000,
         workspace_parent: Path | str | None = None,
-        denied_commands: set[str] | None = None,
+        workspace_ttl_seconds: float = 86400.0,
+        allowed_commands: set[str] | tuple[str, ...] | None = None,
     ) -> None:
         if mode not in {"local", "docker"}:
             raise ValueError("sandbox mode must be local or docker")
         self._mode = mode
         self._docker_image = docker_image
         self._command_timeout_seconds = command_timeout_seconds
+        self._command_output_max_chars = command_output_max_chars
+        self._workspace_ttl_seconds = workspace_ttl_seconds
         self._workspace_parent = (
             Path(workspace_parent).expanduser().resolve()
             if workspace_parent is not None
-            else None
+            else Path(tempfile.gettempdir()).resolve()
         )
-        self._denied_commands = denied_commands or DEFAULT_DENIED_COMMANDS
+        self._allowed_commands = {
+            item.strip()
+            for item in (allowed_commands or DEFAULT_ALLOWED_COMMANDS)
+            if item.strip()
+        }
+        if command_timeout_seconds <= 0:
+            raise ValueError("sandbox command timeout must be positive")
+        if command_output_max_chars <= 0:
+            raise ValueError("sandbox command output limit must be positive")
+        if workspace_ttl_seconds <= 0:
+            raise ValueError("sandbox workspace TTL must be positive")
+        if not self._allowed_commands:
+            raise ValueError("sandbox allowed commands must not be empty")
+        if any(Path(item).name != item for item in self._allowed_commands):
+            raise ValueError("sandbox allowed commands must be executable basenames")
         self._workspaces: dict[str, SandboxWorkspace] = {}
         self._lock = Lock()
+        self._workspace_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.prune_stale_workspaces()
 
     @property
     def mode(self) -> str:
@@ -89,6 +178,7 @@ class SandboxRuntime:
             "workspace": str(workspace.path),
             "root": str(workspace.source_root),
             "changed_files": self.changed_files(context=context),
+            "copy_warnings": list(workspace.copy_warnings),
         }
 
     def write_file(
@@ -146,13 +236,14 @@ class SandboxRuntime:
     ) -> dict[str, Any]:
         workspace = self._workspace_for(context)
         args = _command_args(command)
-        _validate_command(args, denied_commands=self._denied_commands)
+        _validate_command(args, allowed_commands=self._allowed_commands)
         working_dir = _resolve_inside(workspace.path, cwd)
         if not working_dir.exists() or not working_dir.is_dir():
             raise ValueError(f"cwd is not an existing directory: {cwd}")
         timeout = timeout_seconds or self._command_timeout_seconds
         if timeout <= 0:
             raise ValueError("timeout_seconds must be positive")
+        timeout = min(timeout, self._command_timeout_seconds)
 
         if self._mode == "docker":
             result = self._run_docker_command(
@@ -162,23 +253,32 @@ class SandboxRuntime:
                 timeout=timeout,
             )
         else:
-            result = subprocess.run(
+            result = _run_bounded_process(
                 args,
                 cwd=working_dir,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
-                check=False,
+                output_max_chars=self._command_output_max_chars,
+                env=_local_sandbox_environment(workspace),
             )
-        return {
+        output = {
             "mode": self._mode,
             "command": args,
             "cwd": _relative_to(working_dir, workspace.path),
             "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+            "output_truncated": result.output_truncated,
             "workspace": str(workspace.path),
         }
+        if result.output_truncated:
+            output["truncated_output_preview"] = _combined_output_preview(
+                result.stdout,
+                result.stderr,
+                max_chars=self._command_output_max_chars,
+            )
+        else:
+            output["stdout"] = result.stdout
+            output["stderr"] = result.stderr
+        return output
 
     def diff(
         self,
@@ -206,25 +306,83 @@ class SandboxRuntime:
         paths = sorted(set(workspace.baseline) | set(current))
         return [path for path in paths if workspace.baseline.get(path) != current.get(path)]
 
+    def cleanup(
+        self,
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> bool:
+        key = _workspace_key(context)
+        with self._lock:
+            workspace = self._workspaces.pop(key, None)
+        if workspace is None:
+            return False
+        _remove_sandbox_directory(workspace.path, parent=self._workspace_parent)
+        return True
+
+    def cleanup_all(self) -> None:
+        with self._lock:
+            workspaces = list(self._workspaces.values())
+            self._workspaces.clear()
+        for workspace in workspaces:
+            _remove_sandbox_directory(workspace.path, parent=self._workspace_parent)
+
+    def prune_stale_workspaces(self) -> int:
+        cutoff = time.time() - self._workspace_ttl_seconds
+        removed = 0
+        try:
+            candidates = list(self._workspace_parent.iterdir())
+        except OSError:
+            return 0
+        for candidate in candidates:
+            if (
+                not candidate.name.startswith(SANDBOX_DIRECTORY_PREFIX)
+                or candidate.is_symlink()
+                or not candidate.is_dir()
+            ):
+                continue
+            try:
+                stale = candidate.stat().st_mtime < cutoff
+            except OSError:
+                continue
+            if not stale:
+                continue
+            try:
+                _remove_sandbox_directory(
+                    candidate,
+                    parent=self._workspace_parent,
+                )
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
     def _workspace_for(self, context: ToolExecutionContext | None) -> SandboxWorkspace:
         key = _workspace_key(context)
         source_root = _source_root(context)
+        if (
+            self._workspace_parent == source_root
+            or source_root in self._workspace_parent.parents
+        ):
+            raise ValueError(
+                "sandbox workspace parent must not be inside the source workspace"
+            )
         with self._lock:
             existing = self._workspaces.get(key)
             if existing is not None:
                 return existing
             workspace_path = Path(
                 tempfile.mkdtemp(
-                    prefix=f"agent-sandbox-{_safe_key(key)}-",
-                    dir=str(self._workspace_parent) if self._workspace_parent else None,
+                    prefix=f"{SANDBOX_DIRECTORY_PREFIX}{_safe_key(key)}-",
+                    dir=str(self._workspace_parent),
                 )
             )
-            _copy_source_tree(source_root, workspace_path)
+            copy_warnings = _copy_source_tree(source_root, workspace_path)
             workspace = SandboxWorkspace(
                 key=key,
                 path=workspace_path,
                 source_root=source_root,
                 baseline=_snapshot_files(workspace_path),
+                copy_warnings=tuple(copy_warnings),
             )
             self._workspaces[key] = workspace
             return workspace
@@ -236,19 +394,41 @@ class SandboxRuntime:
         working_dir: Path,
         workspace: SandboxWorkspace,
         timeout: float,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> BoundedProcessResult:
         relative_cwd = _relative_to(working_dir, workspace.path)
         container_cwd = "/workspace" if relative_cwd == "." else f"/workspace/{relative_cwd}"
+        container_name = (
+            f"{workspace.path.name[:45]}-cmd-{uuid4().hex[:8]}"
+        )
         docker_command = [
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--network",
             "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "128",
             "--cpus",
             "2",
             "--memory",
             "1g",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "TMPDIR=/tmp",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
             "-v",
             f"{workspace.path}:/workspace:rw",
             "-w",
@@ -256,13 +436,16 @@ class SandboxRuntime:
             self._docker_image,
             *args,
         ]
-        return subprocess.run(
+        result = _run_bounded_process(
             docker_command,
-            capture_output=True,
-            text=True,
+            cwd=workspace.path,
             timeout=timeout,
-            check=False,
+            output_max_chars=self._command_output_max_chars,
+            env=_docker_client_environment(),
         )
+        if result.timed_out:
+            _remove_timed_out_container(container_name)
+        return result
 
 
 def _workspace_key(context: ToolExecutionContext | None) -> str:
@@ -288,23 +471,78 @@ def _safe_key(value: str) -> str:
     return safe.strip("-")[:48] or "default"
 
 
-def _copy_source_tree(source: Path, destination: Path) -> None:
+def _copy_source_tree(source: Path, destination: Path) -> list[str]:
     if not source.exists() or not source.is_dir():
         raise ValueError("sandbox root_path must be an existing directory")
-    for item in source.iterdir():
-        if item.name in DEFAULT_SANDBOX_IGNORES:
-            continue
-        target = destination / item.name
-        if item.is_dir():
-            shutil.copytree(
-                item,
-                target,
-                ignore=lambda _, names: [
-                    name for name in names if name in DEFAULT_SANDBOX_IGNORES
-                ],
-            )
-        elif item.is_file():
-            shutil.copy2(item, target)
+    warnings: list[str] = []
+    for item in sorted(source.iterdir(), key=lambda path: path.name):
+        _copy_source_item(
+            item,
+            destination / item.name,
+            relative_path=Path(item.name),
+            warnings=warnings,
+        )
+    return warnings
+
+
+def _copy_source_item(
+    source: Path,
+    destination: Path,
+    *,
+    relative_path: Path,
+    warnings: list[str],
+) -> None:
+    relative = relative_path.as_posix()
+    try:
+        if source.is_symlink():
+            _append_copy_warning(warnings, f"skipped symbolic link: {relative}")
+            return
+        if source.name in DEFAULT_SANDBOX_IGNORES:
+            return
+        if _is_sensitive_sandbox_path(source):
+            _append_copy_warning(warnings, f"skipped sensitive file: {relative}")
+            return
+        mode = source.stat(follow_symlinks=False).st_mode
+        if stat.S_ISDIR(mode):
+            destination.mkdir(mode=0o700)
+            for child in sorted(source.iterdir(), key=lambda path: path.name):
+                _copy_source_item(
+                    child,
+                    destination / child.name,
+                    relative_path=relative_path / child.name,
+                    warnings=warnings,
+                )
+            return
+        if stat.S_ISREG(mode):
+            shutil.copy2(source, destination, follow_symlinks=False)
+            if destination.is_symlink():
+                destination.unlink(missing_ok=True)
+                _append_copy_warning(
+                    warnings,
+                    f"skipped path changed to symbolic link: {relative}",
+                )
+            return
+        _append_copy_warning(warnings, f"skipped special file: {relative}")
+    except OSError:
+        _append_copy_warning(warnings, f"skipped unreadable path: {relative}")
+
+
+def _append_copy_warning(warnings: list[str], warning: str) -> None:
+    if len(warnings) < 100:
+        warnings.append(warning)
+
+
+def _is_sensitive_sandbox_path(path: Path) -> bool:
+    lowered = path.name.lower()
+    return (
+        lowered in SENSITIVE_SANDBOX_DIRNAMES
+        or lowered in SENSITIVE_SANDBOX_FILENAMES
+        or path.suffix.lower() in SENSITIVE_SANDBOX_SUFFIXES
+        or (
+            lowered.startswith(".env.")
+            and lowered not in SAFE_ENV_TEMPLATES
+        )
+    )
 
 
 def _snapshot_files(root: Path) -> dict[str, bytes]:
@@ -361,14 +599,190 @@ def _command_args(command: str | list[str]) -> list[str]:
     return [str(item) for item in command]
 
 
-def _validate_command(args: list[str], *, denied_commands: set[str]) -> None:
+def _validate_command(args: list[str], *, allowed_commands: set[str]) -> None:
     if not args:
         raise ValueError("command must not be empty")
     command_name = Path(args[0]).name
-    if command_name in denied_commands:
-        raise ValueError(f"command is not allowed in sandbox: {command_name}")
+    if command_name in SHELL_WRAPPER_COMMANDS:
+        raise ValueError(f"shell wrappers are not allowed in sandbox: {command_name}")
+    if not _is_allowed_command(command_name, allowed_commands):
+        raise ValueError(
+            f"command is not in the sandbox allowlist: {command_name}"
+        )
     if any("\x00" in arg for arg in args):
         raise ValueError("command arguments must not contain null bytes")
+
+
+def _is_allowed_command(command_name: str, allowed_commands: set[str]) -> bool:
+    if command_name in allowed_commands:
+        return True
+    return (
+        "python3" in allowed_commands
+        and command_name.startswith("python3.")
+        and command_name.removeprefix("python3.").replace(".", "").isdigit()
+    )
+
+
+def _run_bounded_process(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    output_max_chars: int,
+    env: dict[str, str],
+) -> BoundedProcessResult:
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=True,
+    )
+    if process.stdout is None or process.stderr is None:
+        _terminate_process_group(process)
+        raise RuntimeError("sandbox command output pipes are unavailable")
+
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    captured = 0
+    output_truncated = False
+    timed_out = False
+    deadline = time.monotonic() + timeout
+
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and not timed_out:
+                timed_out = True
+                _terminate_process_group(process)
+            select_timeout = (
+                0.05 if timed_out else min(0.1, max(0.0, remaining))
+            )
+            events = selector.select(timeout=select_timeout)
+            if not events:
+                if process.poll() is not None:
+                    continue
+                if timed_out:
+                    _terminate_process_group(process)
+                continue
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                remaining_capacity = max(0, output_max_chars - captured)
+                if remaining_capacity:
+                    selected = chunk[:remaining_capacity]
+                    chunks[str(key.data)].append(selected)
+                    captured += len(selected)
+                if len(chunk) > remaining_capacity:
+                    output_truncated = True
+        if process.poll() is None:
+            _terminate_process_group(process)
+        returncode = process.wait(timeout=1)
+    finally:
+        selector.close()
+        for stream in (process.stdout, process.stderr):
+            if not stream.closed:
+                stream.close()
+
+    return BoundedProcessResult(
+        returncode=124 if timed_out else returncode,
+        stdout=b"".join(chunks["stdout"]).decode("utf-8", errors="replace"),
+        stderr=b"".join(chunks["stderr"]).decode("utf-8", errors="replace"),
+        output_truncated=output_truncated,
+        timed_out=timed_out,
+    )
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _local_sandbox_environment(workspace: SandboxWorkspace) -> dict[str, str]:
+    sandbox_home = workspace.path / ".sandbox-home"
+    sandbox_temp = workspace.path / ".sandbox-tmp"
+    sandbox_home.mkdir(mode=0o700, exist_ok=True)
+    sandbox_temp.mkdir(mode=0o700, exist_ok=True)
+    environment = {
+        "CI": "1",
+        "HOME": str(sandbox_home),
+        "NO_COLOR": "1",
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "TEMP": str(sandbox_temp),
+        "TMP": str(sandbox_temp),
+        "TMPDIR": str(sandbox_temp),
+    }
+    for name in ("LANG", "LC_ALL"):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _docker_client_environment() -> dict[str, str]:
+    environment = {
+        "HOME": os.environ.get("HOME", tempfile.gettempdir()),
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    }
+    for name in ("DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_HOST", "LANG", "LC_ALL"):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _combined_output_preview(stdout: str, stderr: str, *, max_chars: int) -> str:
+    parts = []
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append(f"[stderr]\n{stderr}")
+    return "\n".join(parts)[:max_chars]
+
+
+def _remove_timed_out_container(container_name: str) -> None:
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_docker_client_environment(),
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
+def _remove_sandbox_directory(path: Path, *, parent: Path) -> None:
+    resolved_parent = parent.resolve()
+    resolved = path.resolve()
+    if (
+        resolved == resolved_parent
+        or resolved_parent not in resolved.parents
+        or not resolved.name.startswith(SANDBOX_DIRECTORY_PREFIX)
+    ):
+        raise ValueError(f"refusing to remove non-sandbox directory: {path}")
+    shutil.rmtree(resolved)
 
 
 def _validate_patch_paths(patch: str) -> None:

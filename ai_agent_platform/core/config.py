@@ -17,9 +17,7 @@ class Settings:
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     google_api_key: str | None = None
-    database_url: str = (
-        "postgresql://ai_agent:ai_agent_password@localhost:5432/ai_agent_platform"
-    )
+    database_url: str = "postgresql://localhost:5432/ai_agent_platform"
     session_repository: str = "memory"
     agent_run_store: str = "memory"
     document_store: str = "memory"
@@ -90,7 +88,27 @@ class Settings:
     sandbox_mode: str = "local"
     sandbox_docker_image: str = "python:3.11-slim"
     sandbox_command_timeout_seconds: float = 30.0
+    sandbox_command_output_max_chars: int = 12000
     sandbox_workspace_parent: str | None = None
+    sandbox_workspace_ttl_seconds: float = 86400.0
+    sandbox_allowed_commands: tuple[str, ...] = (
+        "alembic",
+        "cargo",
+        "git",
+        "go",
+        "mypy",
+        "node",
+        "npm",
+        "npx",
+        "poetry",
+        "pytest",
+        "python",
+        "python3",
+        "ruff",
+        "rustc",
+        "tox",
+        "uv",
+    )
     agent_max_exploration_rounds: int = 4
     agent_max_read_tools_per_round: int = 6
     agent_max_context_files: int = 12
@@ -156,6 +174,15 @@ class Settings:
             {"disabled", "trusted_header"},
         )
         _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
+        if not self.sandbox_allowed_commands:
+            raise ValueError("sandbox_allowed_commands must not be empty")
+        if any(
+            not item.strip() or Path(item).name != item
+            for item in self.sandbox_allowed_commands
+        ):
+            raise ValueError(
+                "sandbox_allowed_commands must contain executable basenames"
+            )
         _require_choice(
             "task_queue_backend",
             self.task_queue_backend,
@@ -228,6 +255,14 @@ class Settings:
             (
                 "sandbox_command_timeout_seconds",
                 self.sandbox_command_timeout_seconds,
+            ),
+            (
+                "sandbox_command_output_max_chars",
+                self.sandbox_command_output_max_chars,
+            ),
+            (
+                "sandbox_workspace_ttl_seconds",
+                self.sandbox_workspace_ttl_seconds,
             ),
             ("agent_max_exploration_rounds", self.agent_max_exploration_rounds),
             (
@@ -600,7 +635,22 @@ class Settings:
                 cls.sandbox_command_timeout_seconds,
                 dotenv,
             ),
+            sandbox_command_output_max_chars=_int_env(
+                "SANDBOX_COMMAND_OUTPUT_MAX_CHARS",
+                cls.sandbox_command_output_max_chars,
+                dotenv,
+            ),
             sandbox_workspace_parent=_env("SANDBOX_WORKSPACE_PARENT", None, dotenv),
+            sandbox_workspace_ttl_seconds=_float_env(
+                "SANDBOX_WORKSPACE_TTL_SECONDS",
+                cls.sandbox_workspace_ttl_seconds,
+                dotenv,
+            ),
+            sandbox_allowed_commands=_csv_env(
+                "SANDBOX_ALLOWED_COMMANDS",
+                cls.sandbox_allowed_commands,
+                dotenv,
+            ),
             agent_max_exploration_rounds=_int_env(
                 "AGENT_MAX_EXPLORATION_ROUNDS",
                 cls.agent_max_exploration_rounds,
@@ -712,6 +762,18 @@ def _paths_env(
     if value is None:
         return default
     parsed = tuple(item.strip() for item in value.split(os.pathsep) if item.strip())
+    return parsed or default
+
+
+def _csv_env(
+    name: str,
+    default: tuple[str, ...],
+    dotenv: dict[str, str],
+) -> tuple[str, ...]:
+    value = _env(name, None, dotenv)
+    if value is None:
+        return default
+    parsed = tuple(item.strip() for item in value.split(",") if item.strip())
     return parsed or default
 
 

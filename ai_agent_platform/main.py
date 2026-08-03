@@ -120,7 +120,12 @@ def create_app(
         sandbox_mode=settings.sandbox_mode,
         sandbox_docker_image=settings.sandbox_docker_image,
         sandbox_command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+        sandbox_command_output_max_chars=(
+            settings.sandbox_command_output_max_chars
+        ),
         sandbox_workspace_parent=settings.sandbox_workspace_parent,
+        sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
+        sandbox_allowed_commands=settings.sandbox_allowed_commands,
     )
     close_checkpointer = None
     if coding_agent_runtime is None:
@@ -179,6 +184,7 @@ def create_app(
         finally:
             app.state.agent_run_service.close()
             app.state.task_queue.close()
+            app.state.tool_registry.close()
             if close_checkpointer is not None:
                 close_checkpointer()
             for provider in app.state.mcp_providers:

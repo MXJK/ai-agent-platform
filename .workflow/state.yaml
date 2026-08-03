@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "TOKEN-USAGE-DASHBOARD"
-next_action: "在目标环境执行 Alembic 0011，并用真实 provider 观察会话与 Workspace 聚合"
+active_task: "HARDEN-LOCAL-PERSONAL-BOUNDARIES"
+next_action: "按需运行 ./scripts/start.sh 启动 API 与 Worker"
 blockers: []
 last_verified_commit: "496ba8f5a58ba36dea1720b0ebe39cac606ec536"
-updated_at: "2026-07-30T14:29:02+08:00"
+updated_at: "2026-08-02T14:19:54+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

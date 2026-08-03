@@ -1,17 +1,24 @@
+import os
 from pathlib import Path
 import shlex
 from tempfile import TemporaryDirectory
 import sys
+import time
 import unittest
+from unittest.mock import patch
 
 from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
+from ai_agent_platform.integrations.sandbox import (
+    BoundedProcessResult,
+    SandboxRuntime,
+)
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 
 
 class SandboxToolTests(unittest.TestCase):
     def test_sandbox_tool_specs_mark_writes_and_commands_for_approval(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            registry = create_coding_tool_registry()
+            registry = self._registry()
             specs = {spec.name: spec for spec in registry.list_specs()}
 
         self.assertEqual(specs["sandbox.write_file"].permission_level, "write_safe")
@@ -28,7 +35,7 @@ class SandboxToolTests(unittest.TestCase):
             root = Path(temp_dir)
             source_file = root / "app.py"
             source_file.write_text("print('old')\n", encoding="utf-8")
-            registry = create_coding_tool_registry()
+            registry = self._registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
                 workspace_id="workspace_main",
@@ -80,7 +87,7 @@ class SandboxToolTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("print('safe')\n", encoding="utf-8")
-            registry = create_coding_tool_registry()
+            registry = self._registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
                 workspace_id="workspace_main",
@@ -109,14 +116,14 @@ class SandboxToolTests(unittest.TestCase):
                 context=context,
             )
             self.assertFalse(command_result.ok)
-            self.assertIn("not allowed", command_result.error)
+            self.assertIn("allowlist", command_result.error)
 
     def test_sandbox_apply_patch_updates_workspace_only(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_file = root / "app.py"
             source_file.write_text("value = 'old'\n", encoding="utf-8")
-            registry = create_coding_tool_registry()
+            registry = self._registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
                 workspace_id="workspace_main",
@@ -151,7 +158,7 @@ class SandboxToolTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("value = 1\n", encoding="utf-8")
-            registry = create_coding_tool_registry()
+            registry = self._registry()
             context = ToolExecutionContext(
                 conversation_id="sess_1",
                 workspace_id="workspace_main",
@@ -176,6 +183,220 @@ class SandboxToolTests(unittest.TestCase):
             self.assertEqual(result.result["exit_code"], 0)
             self.assertNotIn("stdout", result.result)
             self.assertIn("truncated_output_preview", result.result)
+
+    def test_copy_skips_sensitive_symlink_and_special_files_with_warnings(self) -> None:
+        with (
+            TemporaryDirectory() as source_dir,
+            TemporaryDirectory() as outside_dir,
+            TemporaryDirectory() as sandbox_parent,
+        ):
+            root = Path(source_dir)
+            outside = Path(outside_dir) / "outside.txt"
+            outside.write_text("outside", encoding="utf-8")
+            (root / ".env").write_text("SECRET=value\n", encoding="utf-8")
+            (root / ".env.example").write_text("SAFE=example\n", encoding="utf-8")
+            (root / "credentials.json").write_text("{}", encoding="utf-8")
+            (root / "private.pem").write_text("private", encoding="utf-8")
+            (root / ".ssh").mkdir()
+            (root / ".ssh" / "config").write_text("Host *\n", encoding="utf-8")
+            (root / "escape-link").symlink_to(outside)
+            os.mkfifo(root / "named-pipe")
+            registry = self._registry(
+                sandbox_workspace_parent=sandbox_parent,
+            )
+            context = _context(root, run_id="run_copy_boundary")
+
+            status = registry.execute(
+                ToolCall(name="sandbox.workspace_status", arguments={}),
+                context=context,
+            )
+
+            self.assertTrue(status.ok)
+            workspace = Path(status.result["workspace"])
+            self.assertFalse((workspace / ".env").exists())
+            self.assertTrue((workspace / ".env.example").exists())
+            self.assertFalse((workspace / "credentials.json").exists())
+            self.assertFalse((workspace / "private.pem").exists())
+            self.assertFalse((workspace / ".ssh").exists())
+            self.assertFalse((workspace / "escape-link").exists())
+            self.assertFalse((workspace / "named-pipe").exists())
+            warnings = status.result["copy_warnings"]
+            self.assertTrue(any("sensitive file" in item for item in warnings))
+            self.assertTrue(any("symbolic link" in item for item in warnings))
+            self.assertTrue(any("special file" in item for item in warnings))
+
+            self.assertEqual(registry.cleanup_context(context), [])
+            self.assertFalse(workspace.exists())
+
+    def test_local_command_rejects_shell_wrapper_and_strips_secret_environment(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            registry = self._registry()
+            context = _context(root, run_id="run_command_policy")
+
+            shell_result = registry.execute(
+                ToolCall(
+                    name="sandbox.run_command",
+                    arguments={"command": "sh -c 'echo unsafe'"},
+                ),
+                context=context,
+            )
+            with patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "must-not-reach-sandbox"},
+            ):
+                env_result = registry.execute(
+                    ToolCall(
+                        name="sandbox.run_command",
+                        arguments={
+                            "command": _python_command(
+                                "import os; print(os.getenv('OPENAI_API_KEY', 'missing'))"
+                            )
+                        },
+                    ),
+                    context=context,
+                )
+
+            self.assertFalse(shell_result.ok)
+            self.assertIn("shell wrappers", shell_result.error)
+            self.assertTrue(env_result.ok)
+            self.assertEqual(env_result.result["stdout"], "missing\n")
+
+    def test_local_command_timeout_kills_process_group(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = self._registry(
+                sandbox_command_timeout_seconds=0.2,
+            )
+            context = _context(root, run_id="run_timeout")
+            script = (
+                "import pathlib,subprocess,sys,time;"
+                "subprocess.Popen([sys.executable,'-c',"
+                "\"import pathlib,time;time.sleep(0.7);"
+                "pathlib.Path('escaped.txt').write_text('bad')\"]);"
+                "time.sleep(5)"
+            )
+            started = time.monotonic()
+
+            result = registry.execute(
+                ToolCall(
+                    name="sandbox.run_command",
+                    arguments={
+                        "command": _python_command(script),
+                        "timeout_seconds": 10,
+                    },
+                ),
+                context=context,
+            )
+            elapsed = time.monotonic() - started
+            workspace = Path(result.result["workspace"])
+            time.sleep(0.8)
+
+            self.assertTrue(result.ok)
+            self.assertTrue(result.result["timed_out"])
+            self.assertEqual(result.result["exit_code"], 124)
+            self.assertLess(elapsed, 2)
+            self.assertFalse((workspace / "escaped.txt").exists())
+
+    def test_runtime_prunes_only_stale_sandbox_directories(self) -> None:
+        with TemporaryDirectory() as sandbox_parent:
+            parent = Path(sandbox_parent)
+            stale = parent / "agent-sandbox-stale-example"
+            fresh = parent / "agent-sandbox-fresh-example"
+            unrelated = parent / "unrelated"
+            for path in (stale, fresh, unrelated):
+                path.mkdir()
+            old = time.time() - 10
+            os.utime(stale, (old, old))
+
+            runtime = SandboxRuntime(
+                workspace_parent=parent,
+                workspace_ttl_seconds=1,
+            )
+
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
+            self.assertTrue(unrelated.exists())
+            runtime.cleanup_all()
+
+    def test_sandbox_parent_cannot_be_inside_source_workspace(self) -> None:
+        with TemporaryDirectory() as source_dir:
+            root = Path(source_dir)
+            sandbox_parent = root / ".sandboxes"
+            runtime = SandboxRuntime(workspace_parent=sandbox_parent)
+
+            with self.assertRaisesRegex(ValueError, "must not be inside"):
+                runtime.workspace_status(
+                    context=_context(root, run_id="run_recursive_parent")
+                )
+
+    def test_docker_mode_applies_hardening_flags(self) -> None:
+        with (
+            TemporaryDirectory() as source_dir,
+            TemporaryDirectory() as sandbox_parent,
+        ):
+            root = Path(source_dir)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            registry = self._registry(
+                sandbox_mode="docker",
+                sandbox_workspace_parent=sandbox_parent,
+            )
+            context = _context(root, run_id="run_docker_flags")
+            completed = BoundedProcessResult(
+                returncode=0,
+                stdout="ok\n",
+                stderr="",
+                output_truncated=False,
+                timed_out=False,
+            )
+
+            with patch(
+                "ai_agent_platform.integrations.sandbox._run_bounded_process",
+                return_value=completed,
+            ) as run_process:
+                result = registry.execute(
+                    ToolCall(
+                        name="sandbox.run_command",
+                        arguments={"command": "python app.py"},
+                    ),
+                    context=context,
+                )
+
+            self.assertTrue(result.ok)
+            docker_command = run_process.call_args.args[0]
+            for expected in (
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "128",
+                "--user",
+                "--tmpfs",
+            ):
+                self.assertIn(expected, docker_command)
+
+    def _registry(self, **kwargs):
+        registry = create_coding_tool_registry(**kwargs)
+        self.addCleanup(registry.close)
+        return registry
+
+
+def _context(root: Path, *, run_id: str) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        conversation_id="sess_1",
+        workspace_id="workspace_main",
+        workspace_root=str(root),
+        run_id=run_id,
+    )
+
+
+def _python_command(script: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
 
 if __name__ == "__main__":

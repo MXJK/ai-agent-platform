@@ -107,6 +107,14 @@ class AgentChangeLoopTests(unittest.TestCase):
             self.assertEqual(result.change_summary.changed_files, ["app.py"])
             self.assertTrue(result.change_summary.validation_passed)
             self.assertEqual(source_file.read_text(encoding="utf-8"), "value = 'old'\n")
+            sandbox_path = Path(
+                next(
+                    item["result"]["workspace"]
+                    for item in result.tool_results
+                    if item["name"] == "sandbox.write_file" and item["ok"]
+                )
+            )
+            self.assertFalse(sandbox_path.exists())
             self.assertEqual(
                 [artifact["type"] for artifact in result.artifacts],
                 ["test_report", "code_diff"],

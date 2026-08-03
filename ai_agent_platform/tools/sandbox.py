@@ -69,14 +69,24 @@ def register_sandbox_tools(
     mode: str = "local",
     docker_image: str = "python:3.11-slim",
     command_timeout_seconds: float = 30.0,
+    command_output_max_chars: int = 12000,
     workspace_parent: str | None = None,
+    workspace_ttl_seconds: float = 86400.0,
+    allowed_commands: tuple[str, ...] | None = None,
 ) -> SandboxRuntime:
     runtime = SandboxRuntime(
         mode=mode,
         docker_image=docker_image,
         command_timeout_seconds=command_timeout_seconds,
+        command_output_max_chars=command_output_max_chars,
         workspace_parent=workspace_parent,
+        workspace_ttl_seconds=workspace_ttl_seconds,
+        allowed_commands=allowed_commands,
     )
+    registry.register_context_cleanup(
+        lambda context: runtime.cleanup(context=context)
+    )
+    registry.register_close(runtime.cleanup_all)
     toolkit = SandboxToolKit(runtime)
     registry.register(
         "sandbox.workspace_status",
@@ -143,10 +153,11 @@ def register_sandbox_tools(
         permission_level="write_safe",
         requires_approval=True,
         risk_summary=(
-            "Runs a command in an isolated sandbox workspace. Docker mode uses "
-            "a no-network container with CPU and memory limits."
+            "Runs an allowlisted command with a fixed timeout and bounded output. "
+            "Docker mode adds a no-network, non-root, read-only container boundary."
         ),
         max_output_chars=20000,
+        timeout_seconds=command_timeout_seconds + 5,
     )
     registry.register(
         "sandbox.git_diff",

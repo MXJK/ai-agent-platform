@@ -124,6 +124,10 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Callable[..., Any]] = {}
         self._specs: dict[str, ToolSpec] = {}
+        self._context_cleanup_callbacks: list[
+            Callable[[ToolExecutionContext], Any]
+        ] = []
+        self._close_callbacks: list[Callable[[], Any]] = []
         self._idempotency_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._idempotency_guards: dict[tuple[str, str], Lock] = {}
         self._idempotency_lock = Lock()
@@ -194,6 +198,33 @@ class ToolRegistry:
 
     def get_spec(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
+
+    def register_context_cleanup(
+        self,
+        callback: Callable[[ToolExecutionContext], Any],
+    ) -> None:
+        self._context_cleanup_callbacks.append(callback)
+
+    def register_close(self, callback: Callable[[], Any]) -> None:
+        self._close_callbacks.append(callback)
+
+    def cleanup_context(self, context: ToolExecutionContext) -> list[str]:
+        errors: list[str] = []
+        for callback in reversed(self._context_cleanup_callbacks):
+            try:
+                callback(context)
+            except Exception as exc:
+                errors.append(str(exc))
+        return errors
+
+    def close(self) -> list[str]:
+        errors: list[str] = []
+        for callback in reversed(self._close_callbacks):
+            try:
+                callback()
+            except Exception as exc:
+                errors.append(str(exc))
+        return errors
 
     def call(self, tool_call: ToolCall) -> Any:
         try:
@@ -353,6 +384,9 @@ class ToolRegistry:
             return failed
 
         duration_ms = int((perf_counter() - started_at) * 1000)
+        declared_output_truncated = bool(
+            isinstance(result, dict) and result.get("output_truncated")
+        )
         result, output_truncated = _truncate_output(
             result,
             max_chars=spec.max_output_chars,
@@ -368,7 +402,9 @@ class ToolRegistry:
             duration_ms=duration_ms,
             risk_summary=spec.risk_summary,
             arguments_summary=arguments_summary,
-            output_truncated=output_truncated,
+            output_truncated=(
+                declared_output_truncated or output_truncated
+            ),
             attempts=attempts,
         )
         self._store_result(cache_key, fingerprint, completed)
