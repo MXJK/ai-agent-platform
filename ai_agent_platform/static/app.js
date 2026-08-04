@@ -38,6 +38,11 @@ const state = {
     models: [],
     routing_policies: ["smart", "quality", "cost", "latency"],
   },
+  modelDiscovery: {
+    provider: "",
+    models: [],
+    loading: false,
+  },
   modelPreference: {
     mode: "auto",
     routing_policy: "smart",
@@ -859,13 +864,13 @@ function registeredModel(modelId) {
 }
 
 function modelLatency(model) {
-  const observed = model.telemetry?.total_latency_p50_ms;
-  if (observed != null && Number.isFinite(Number(observed))) {
-    return { milliseconds: Math.max(0, Math.round(Number(observed))), source: "实测 P50" };
-  }
-  const configured = model.configured_latency_ms;
-  if (configured != null && Number.isFinite(Number(configured))) {
-    return { milliseconds: Math.max(0, Math.round(Number(configured))), source: "预估" };
+  const routing = model.routing_metadata || {};
+  const value = routing.routing_latency_ms;
+  if (value != null && Number.isFinite(Number(value))) {
+    return {
+      milliseconds: Math.max(0, Math.round(Number(value))),
+      source: routing.latency_source === "observed_p50" ? "实测 P50" : "冷启动先验",
+    };
   }
   return { milliseconds: null, source: "暂无数据" };
 }
@@ -1159,6 +1164,10 @@ async function handleProviderAction(button) {
       showToast(`${provider} 连接成功 · ${formatDuration(result.elapsed_ms)}`);
     }
     await loadModelRegistry();
+    if (action === "save") {
+      $("registered-model-provider-input").value = provider;
+      await discoverProviderModels(provider, { showToast: false });
+    }
   } catch (error) {
     showToast(humanizeError(error), "error");
   } finally {
@@ -1167,84 +1176,125 @@ async function handleProviderAction(button) {
   }
 }
 
-function registeredModelPayload() {
+function modelTierLabel(value) {
   return {
-    provider: $("registered-model-provider-input").value,
-    model: $("registered-model-name-input").value.trim(),
-    display_name: $("registered-model-display-input").value.trim(),
-    context_window_tokens: numberValue("registered-model-context-input", 128000),
-    tool_calling: $("registered-model-tools-input").checked,
-    structured_output: $("registered-model-structured-input").checked,
-    input_cost_per_million: Number($("registered-model-input-cost-input").value || 0),
-    output_cost_per_million: Number($("registered-model-output-cost-input").value || 0),
-    quality_score: Number($("registered-model-quality-input").value || 0.5),
-    configured_latency_ms: numberValue("registered-model-latency-input", 1000),
-    enabled: $("registered-model-enabled-input").checked,
-    auto_eligible: $("registered-model-auto-input").checked,
-  };
+    advanced: "高质量",
+    balanced: "均衡",
+    efficient: "高效",
+    high: "高成本",
+    standard: "标准成本",
+    low: "低成本",
+  }[value] || value || "后端默认";
+}
+
+function selectedDiscoveredModel() {
+  const modelId = $("discovered-model-select").value;
+  return state.modelDiscovery.models.find((item) => item.model === modelId) || null;
+}
+
+function renderDiscoveredModels() {
+  const select = $("discovered-model-select");
+  const summary = $("discovered-model-summary");
+  const models = state.modelDiscovery.models || [];
+  const selectable = models.filter((item) => !item.already_registered);
+  select.disabled = state.modelDiscovery.loading || !selectable.length;
+  select.innerHTML = state.modelDiscovery.loading
+    ? '<option value="">正在发现模型…</option>'
+    : models.length
+      ? models.map((item) => `<option value="${escapeHtml(item.model)}" ${item.already_registered ? "disabled" : ""}>${escapeHtml(item.display_name)} · ${escapeHtml(item.model)}${item.already_registered ? " · 已注册" : ""}</option>`).join("")
+      : '<option value="">暂无已发现模型，可使用下方手动兜底</option>';
+  if (selectable.length) select.value = selectable[0].model;
+  const selected = selectedDiscoveredModel();
+  if (!selected) {
+    summary.textContent = state.modelDiscovery.loading
+      ? "正在读取 Provider 当前账号的模型目录…"
+      : "后端会自动维护显示名称、能力、上下文和路由参数。";
+    return;
+  }
+  const capabilities = [
+    selected.capabilities?.tool_calling ? "工具调用" : null,
+    selected.capabilities?.structured_output ? "结构化输出" : null,
+  ].filter(Boolean).join("、") || "基础文本生成";
+  summary.innerHTML = `<strong>${escapeHtml(selected.display_name)}</strong><span>${Number(selected.context_window_tokens).toLocaleString()} ctx · ${escapeHtml(capabilities)} · ${escapeHtml(modelTierLabel(selected.quality_tier))} · ${escapeHtml(modelTierLabel(selected.cost_tier))}</span><small>Provider 元数据 + 后端路由画像；延迟将在真实请求后自动学习。</small>`;
+}
+
+async function discoverProviderModels(
+  provider = $("registered-model-provider-input").value,
+  { showToast: shouldToast = true } = {},
+) {
+  state.modelDiscovery = { provider, models: [], loading: true };
+  renderDiscoveredModels();
+  try {
+    const result = await fetchJson(
+      `/model-registry/connections/${encodeURIComponent(provider)}/available-models`,
+    );
+    state.modelDiscovery = { provider, models: result.models || [], loading: false };
+    renderDiscoveredModels();
+    if (shouldToast) showToast(`已发现 ${result.models?.length || 0} 个可用模型`);
+    return result;
+  } catch (error) {
+    state.modelDiscovery = { provider, models: [], loading: false };
+    renderDiscoveredModels();
+    throw error;
+  }
 }
 
 function resetRegisteredModelForm() {
-  $("registered-model-id-input").value = "";
-  $("registered-model-name-input").value = "";
-  $("registered-model-display-input").value = "";
-  $("registered-model-context-input").value = "128000";
-  $("registered-model-quality-input").value = "0.7";
-  $("registered-model-latency-input").value = "1000";
-  $("registered-model-input-cost-input").value = "0";
-  $("registered-model-output-cost-input").value = "0";
-  $("registered-model-tools-input").checked = true;
-  $("registered-model-structured-input").checked = true;
+  $("manual-model-id-input").value = "";
   $("registered-model-enabled-input").checked = true;
   $("registered-model-auto-input").checked = true;
-  $("model-form-title").textContent = "添加模型";
-  $("save-registered-model-btn").textContent = "添加模型";
-}
-
-function editRegisteredModel(modelId) {
-  const model = registeredModel(modelId);
-  if (!model) return;
-  $("registered-model-id-input").value = model.id;
-  $("registered-model-provider-input").value = model.provider;
-  $("registered-model-name-input").value = model.model;
-  $("registered-model-display-input").value = model.display_name;
-  $("registered-model-context-input").value = model.context_window_tokens;
-  $("registered-model-quality-input").value = model.quality_score;
-  $("registered-model-latency-input").value = model.configured_latency_ms;
-  $("registered-model-input-cost-input").value = model.input_cost_per_million;
-  $("registered-model-output-cost-input").value = model.output_cost_per_million;
-  $("registered-model-tools-input").checked = model.capabilities?.tool_calling === true;
-  $("registered-model-structured-input").checked = model.capabilities?.structured_output === true;
-  $("registered-model-enabled-input").checked = model.enabled;
-  $("registered-model-auto-input").checked = model.auto_eligible;
-  $("model-form-title").textContent = "编辑模型";
-  $("save-registered-model-btn").textContent = "保存修改";
-  $("registered-model-name-input").focus();
 }
 
 async function saveRegisteredModel() {
-  const modelId = $("registered-model-id-input").value;
-  const payload = registeredModelPayload();
-  if (!payload.model || !payload.display_name) {
-    showToast("请填写模型 ID 和显示名称", "warning");
+  const provider = $("registered-model-provider-input").value;
+  const manualModel = $("manual-model-id-input").value.trim();
+  const discovered = selectedDiscoveredModel();
+  const model = manualModel || (discovered?.already_registered ? "" : discovered?.model || "");
+  if (!model) {
+    showToast("请先发现并选择模型，或填写模型 ID", "warning");
     return;
   }
+  const payload = {
+    provider,
+    model,
+    enabled: $("registered-model-enabled-input").checked,
+    auto_eligible: $("registered-model-auto-input").checked,
+  };
   const button = $("save-registered-model-btn");
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
   try {
-    await fetchJson(
-      modelId ? `/model-registry/models/${encodeURIComponent(modelId)}` : "/model-registry/models",
-      { method: modelId ? "PUT" : "POST", body: JSON.stringify(payload) },
-    );
+    await fetchJson("/model-registry/models", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
     resetRegisteredModelForm();
     await loadModelRegistry();
-    showToast(modelId ? "模型已更新" : "模型已注册");
+    await discoverProviderModels(provider, { showToast: false });
+    showToast("模型已注册，路由元数据由后端维护");
   } catch (error) {
     showToast(humanizeError(error), "error");
   } finally {
     button.disabled = false;
     button.removeAttribute("aria-busy");
+  }
+}
+
+async function updateRegisteredModel(modelId, changes) {
+  const model = registeredModel(modelId);
+  if (!model) return;
+  try {
+    await fetchJson(`/model-registry/models/${encodeURIComponent(modelId)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: changes.enabled ?? model.enabled,
+        auto_eligible: changes.auto_eligible ?? model.auto_eligible,
+      }),
+    });
+    await loadModelRegistry();
+    showToast("模型状态已更新");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
   }
 }
 
@@ -1270,9 +1320,10 @@ function renderRegisteredModels() {
   }
   list.innerHTML = models.map((model) => {
     const telemetry = model.telemetry || {};
-    const latency = telemetry.total_latency_p50_ms == null
-      ? `预估 ${formatDuration(model.configured_latency_ms)}`
-      : `P50 ${formatDuration(telemetry.total_latency_p50_ms)} · P95 ${formatDuration(telemetry.total_latency_p95_ms)}`;
+    const routing = model.routing_metadata || {};
+    const latency = routing.latency_source === "observed_p50"
+      ? `实测 P50 ${formatDuration(routing.routing_latency_ms)} · P95 ${formatDuration(telemetry.total_latency_p95_ms)}`
+      : `冷启动先验 ${formatDuration(routing.routing_latency_ms || model.configured_latency_ms)}`;
     return `
       <article class="registered-model-card" data-model-id="${escapeHtml(model.id)}">
         <div class="registered-model-heading">
@@ -1280,8 +1331,8 @@ function renderRegisteredModels() {
           <span class="status-pill ${modelStatusClass(model.status)}"><span class="status-dot"></span>${escapeHtml(modelStatusLabel(model.status))}</span>
         </div>
         <div class="model-stat-row"><span>${escapeHtml(latency)}</span><span>成功 ${telemetry.success_rate == null ? "—" : `${Math.round(telemetry.success_rate * 100)}%`}</span><span>${model.context_window_tokens.toLocaleString()} ctx</span></div>
-        <p>${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
-        <div class="button-row"><button class="button ghost" type="button" data-model-action="edit">编辑</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
+        <p>${escapeHtml(modelTierLabel(routing.quality_tier))} · ${escapeHtml(modelTierLabel(routing.cost_tier))} · ${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
+        <div class="button-row"><button class="button ghost" type="button" data-model-action="toggle-enabled">${model.enabled ? "停用" : "启用"}</button><button class="button ghost" type="button" data-model-action="toggle-auto">${model.auto_eligible ? "仅手动" : "加入自动"}</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
       </article>`;
   }).join("");
 }
@@ -3845,13 +3896,37 @@ function bindEvents() {
     const button = event.target.closest("[data-provider-action]");
     if (button) handleProviderAction(button);
   });
-  $("reset-model-form-btn").addEventListener("click", resetRegisteredModelForm);
+  $("discover-provider-models-btn").addEventListener("click", () => {
+    discoverProviderModels()
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("registered-model-provider-input").addEventListener("change", (event) => {
+    resetRegisteredModelForm();
+    const connection = state.modelRegistry.connections.find(
+      (item) => item.provider === event.target.value,
+    );
+    if (connection?.credential_configured && connection.enabled) {
+      discoverProviderModels(event.target.value, { showToast: false })
+        .catch((error) => showToast(humanizeError(error), "error"));
+    } else {
+      state.modelDiscovery = { provider: event.target.value, models: [], loading: false };
+      renderDiscoveredModels();
+    }
+  });
+  $("discovered-model-select").addEventListener("change", renderDiscoveredModels);
   $("save-registered-model-btn").addEventListener("click", saveRegisteredModel);
   $("registered-model-list").addEventListener("click", (event) => {
     const card = event.target.closest("[data-model-id]");
     const action = event.target.closest("[data-model-action]")?.dataset.modelAction;
     if (!card || !action) return;
-    if (action === "edit") editRegisteredModel(card.dataset.modelId);
+    if (action === "toggle-enabled") {
+      const model = registeredModel(card.dataset.modelId);
+      if (model) updateRegisteredModel(model.id, { enabled: !model.enabled });
+    }
+    if (action === "toggle-auto") {
+      const model = registeredModel(card.dataset.modelId);
+      if (model) updateRegisteredModel(model.id, { auto_eligible: !model.auto_eligible });
+    }
     if (action === "delete") deleteRegisteredModel(card.dataset.modelId);
   });
 

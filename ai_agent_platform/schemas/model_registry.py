@@ -29,19 +29,33 @@ class ProviderConnectionResponse(BaseModel):
     updated_at: datetime
 
 
-class RegisteredModelUpsertRequest(BaseModel):
+class RegisteredModelCreateRequest(BaseModel):
     provider: ProviderName
     model: str = Field(min_length=1, max_length=128)
-    display_name: str = Field(min_length=1, max_length=128)
-    context_window_tokens: int = Field(ge=1, le=10_000_000)
-    tool_calling: bool = True
-    structured_output: bool = True
-    input_cost_per_million: float = Field(default=0, ge=0)
-    output_cost_per_million: float = Field(default=0, ge=0)
-    quality_score: float = Field(default=0.5, ge=0, le=1)
-    configured_latency_ms: int = Field(default=1000, ge=1, le=600_000)
     enabled: bool = True
     auto_eligible: bool = True
+
+
+class RegisteredModelUpdateRequest(BaseModel):
+    enabled: bool
+    auto_eligible: bool
+
+
+class DiscoveredModelResponse(BaseModel):
+    provider: str
+    model: str
+    display_name: str
+    context_window_tokens: int
+    capabilities: dict[str, bool]
+    quality_tier: str
+    cost_tier: str
+    metadata_source: str
+    already_registered: bool
+
+
+class ModelDiscoveryResponse(BaseModel):
+    provider: str
+    models: list[DiscoveredModelResponse]
 
 
 class RegisteredModelResponse(BaseModel):
@@ -55,6 +69,7 @@ class RegisteredModelResponse(BaseModel):
     output_cost_per_million: float
     quality_score: float
     configured_latency_ms: int
+    routing_metadata: dict[str, Any]
     enabled: bool
     auto_eligible: bool
     status: str

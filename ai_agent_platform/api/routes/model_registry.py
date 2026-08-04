@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from ai_agent_platform.core import Settings
 from ai_agent_platform.model_registry import (
     ModelConnectionTestError,
+    ModelDiscoveryError,
     ModelRegistryConflictError,
     ModelRegistryNotFoundError,
     ModelRegistryService,
@@ -12,12 +13,14 @@ from ai_agent_platform.model_registry import (
 )
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.schemas.model_registry import (
+    ModelDiscoveryResponse,
     ModelConnectionTestResponse,
     ModelRegistryResponse,
     ProviderConnectionResponse,
     ProviderConnectionUpsertRequest,
     RegisteredModelResponse,
-    RegisteredModelUpsertRequest,
+    RegisteredModelCreateRequest,
+    RegisteredModelUpdateRequest,
     SessionModelPreferenceRequest,
     SessionModelPreferenceResponse,
 )
@@ -83,15 +86,31 @@ def create_model_registry_router(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return ModelConnectionTestResponse.model_validate(value)
 
+    @router.get(
+        "/model-registry/connections/{provider}/available-models",
+        response_model=ModelDiscoveryResponse,
+    )
+    def discover_models(provider: str) -> ModelDiscoveryResponse:
+        _require_local_admin(settings)
+        try:
+            value = model_registry.discover_models(provider)
+        except ModelRegistryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="provider connection not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ModelDiscoveryError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return ModelDiscoveryResponse.model_validate(value)
+
     @router.post(
         "/model-registry/models",
         response_model=RegisteredModelResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_model(request: RegisteredModelUpsertRequest) -> RegisteredModelResponse:
+    def create_model(request: RegisteredModelCreateRequest) -> RegisteredModelResponse:
         _require_local_admin(settings)
         try:
-            value = model_registry.create_model(**request.model_dump())
+            value = model_registry.register_model(**request.model_dump())
         except ModelRegistryNotFoundError as exc:
             raise HTTPException(status_code=404, detail="provider connection not found") from exc
         except ModelRegistryConflictError as exc:
@@ -106,7 +125,7 @@ def create_model_registry_router(
     )
     def update_model(
         model_id: str,
-        request: RegisteredModelUpsertRequest,
+        request: RegisteredModelUpdateRequest,
     ) -> RegisteredModelResponse:
         _require_local_admin(settings)
         try:

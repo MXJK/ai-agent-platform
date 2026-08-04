@@ -19,8 +19,10 @@ from ai_agent_platform.integrations.llm import _parse_deepseek_event
 from ai_agent_platform.integrations.tools import ToolSpec
 from ai_agent_platform.main import create_app
 from ai_agent_platform.model_registry import (
+    DiscoveredModel,
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
+    ModelDiscoveryError,
     ModelRegistryService,
     ModelSelection,
     PostgresModelRegistryRepository,
@@ -217,6 +219,87 @@ class ModelRegistryServiceTests(unittest.TestCase):
 
 
 class ModelRegistryApiTests(unittest.TestCase):
+    @patch(
+        "ai_agent_platform.model_registry.discovery.ProviderModelDiscovery.discover",
+        side_effect=ModelDiscoveryError("provider rate-limited model discovery"),
+    )
+    def test_provider_discovery_returns_sanitized_upstream_error(self, discover) -> None:
+        settings = Settings(
+            llm_provider="fake",
+            llm_model="demo-stream-model",
+            embedding_provider="local",
+            model_secret_backend="memory",
+        )
+        with TestClient(create_app(settings=settings)) as client:
+            client.put(
+                "/api/v1/model-registry/connections/openai",
+                json={
+                    "display_name": "OpenAI",
+                    "api_key": "sk-never-return-this",
+                    "enabled": True,
+                },
+            )
+            response = client.get(
+                "/api/v1/model-registry/connections/openai/available-models"
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["detail"], "provider rate-limited model discovery"
+        )
+        self.assertNotIn("sk-never-return-this", response.text)
+        discover.assert_called_once()
+
+    @patch(
+        "ai_agent_platform.model_registry.discovery.ProviderModelDiscovery.discover",
+        return_value=(
+            DiscoveredModel(
+                model="gpt-5-mini",
+                display_name="GPT-5 Mini",
+                context_window_tokens=400_000,
+                tool_calling=True,
+                structured_output=True,
+            ),
+        ),
+    )
+    def test_provider_discovery_supports_simplified_registration(self, discover) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                llm_model="demo-stream-model",
+                embedding_provider="local",
+                model_secret_backend="memory",
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                client.put(
+                    "/api/v1/model-registry/connections/openai",
+                    json={
+                        "display_name": "OpenAI",
+                        "api_key": "sk-never-return-this",
+                        "enabled": True,
+                    },
+                )
+                catalog = client.get(
+                    "/api/v1/model-registry/connections/openai/available-models"
+                )
+                created = client.post(
+                    "/api/v1/model-registry/models",
+                    json={
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "enabled": True,
+                        "auto_eligible": True,
+                    },
+                )
+
+        self.assertEqual(catalog.status_code, 200)
+        self.assertEqual(catalog.json()["models"][0]["model"], "gpt-5-mini")
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["display_name"], "GPT-5 Mini")
+        self.assertEqual(created.json()["context_window_tokens"], 400_000)
+        discover.assert_called_once_with("openai", "sk-never-return-this")
+
     def test_frontend_registration_and_session_preference_are_persisted(self) -> None:
         with TemporaryDirectory() as temp_dir:
             settings = Settings(
@@ -271,6 +354,11 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertIn('id="model-picker-trigger"', frontend)
         self.assertIn('id="model-picker-menu"', frontend)
         self.assertIn('data-view-panel="models"', frontend)
+        self.assertIn('id="discovered-model-select"', frontend)
+        self.assertIn('id="manual-model-id-input"', frontend)
+        self.assertNotIn('id="registered-model-quality-input"', frontend)
+        self.assertNotIn('id="registered-model-latency-input"', frontend)
+        self.assertIn("available-models", frontend_js)
         self.assertIn("if (milliseconds <= 1000)", frontend_js)
         self.assertIn("if (milliseconds <= 3000)", frontend_js)
         self.assertIn("manual-model-mode", frontend_js)

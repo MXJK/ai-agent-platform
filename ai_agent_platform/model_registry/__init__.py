@@ -6,6 +6,13 @@ from .models import (
     RegisteredModel,
     SessionModelPreference,
 )
+from .discovery import (
+    DiscoveredModel,
+    ModelDiscovery,
+    ModelDiscoveryError,
+    ProviderModelDiscovery,
+)
+from .profiles import ModelRegistrationProfile, build_registration_profile
 from .repository import (
     InMemoryModelRegistryRepository,
     ModelRegistryRepository,
@@ -31,6 +38,9 @@ __all__ = [
     "InMemorySecretStore",
     "KeyringSecretStore",
     "ModelConnectionTestError",
+    "ModelDiscovery",
+    "ModelDiscoveryError",
+    "ModelRegistrationProfile",
     "ModelRegistryConflictError",
     "ModelRegistryNotFoundError",
     "ModelRegistryRepository",
@@ -39,9 +49,12 @@ __all__ = [
     "ModelSelection",
     "PostgresModelRegistryRepository",
     "ProviderConnection",
+    "ProviderModelDiscovery",
     "RegisteredModel",
+    "DiscoveredModel",
     "SecretStoreError",
     "SessionModelPreference",
     "current_model_selection",
     "model_selection_scope",
+    "build_registration_profile",
 ]

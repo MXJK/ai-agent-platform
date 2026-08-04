@@ -1655,6 +1655,53 @@ textarea:focus {
   gap: 10px;
 }
 
+.model-registration-flow {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(0, 1.3fr);
+  gap: 14px;
+}
+
+#discover-provider-models-btn {
+  white-space: nowrap;
+}
+
+.model-discovery-summary {
+  display: grid;
+  gap: 4px;
+  min-height: 78px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  color: var(--ink-soft);
+}
+
+.model-discovery-summary strong {
+  color: var(--ink);
+}
+
+.model-discovery-summary small,
+.model-manual-fallback p {
+  color: var(--muted);
+}
+
+.model-manual-fallback {
+  margin-top: 14px;
+}
+
+.model-manual-fallback label {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (max-width: 700px) {
+  .model-registration-flow {
+    grid-template-columns: 1fr;
+  }
+}
+
 .registered-model-heading {
   align-items: flex-start;
 }

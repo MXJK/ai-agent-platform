@@ -542,11 +542,10 @@
           <div class="content-grid model-registry-grid">
             <article class="surface">
               <div class="surface-heading">
-                <div><span class="step-kicker">02 · 注册</span><h2 id="model-form-title">添加模型</h2></div>
-                <button id="reset-model-form-btn" class="text-button" type="button">清空</button>
+                <div><span class="step-kicker">02 · 注册</span><h2>选择模型</h2><p>保存 Provider 后发现当前 API Key 可用的文本生成模型。</p></div>
+                <button id="discover-provider-models-btn" class="text-button" type="button">重新发现</button>
               </div>
-              <input id="registered-model-id-input" type="hidden" />
-              <div class="field-grid">
+              <div class="model-registration-flow">
                 <label for="registered-model-provider-input">Provider
                   <select id="registered-model-provider-input">
                     <option value="openai">OpenAI</option>
@@ -555,23 +554,27 @@
                     <option value="google">Google</option>
                   </select>
                 </label>
-                <label for="registered-model-name-input">模型 ID<input id="registered-model-name-input" maxlength="128" placeholder="例如 gpt-5-mini" /></label>
-                <label for="registered-model-display-input">显示名称<input id="registered-model-display-input" maxlength="128" placeholder="例如 GPT-5 Mini" /></label>
-                <label for="registered-model-context-input">上下文窗口<input id="registered-model-context-input" type="number" min="1" max="10000000" value="128000" /></label>
-                <label for="registered-model-quality-input">质量分（0–1）<input id="registered-model-quality-input" type="number" min="0" max="1" step="0.01" value="0.7" /></label>
-                <label for="registered-model-latency-input">预估延迟 ms<input id="registered-model-latency-input" type="number" min="1" max="600000" value="1000" /></label>
-                <label for="registered-model-input-cost-input">输入价 / 百万 Token<input id="registered-model-input-cost-input" type="number" min="0" step="0.001" value="0" /></label>
-                <label for="registered-model-output-cost-input">输出价 / 百万 Token<input id="registered-model-output-cost-input" type="number" min="0" step="0.001" value="0" /></label>
+                <label for="discovered-model-select">可用模型
+                  <select id="discovered-model-select" disabled>
+                    <option value="">请先保存 Provider 配置</option>
+                  </select>
+                </label>
               </div>
+              <div id="discovered-model-summary" class="model-discovery-summary" aria-live="polite">后端会自动维护显示名称、能力、上下文和路由参数。</div>
+              <details class="advanced-options model-manual-fallback">
+                <summary>列表中没有目标模型？手动填写模型 ID</summary>
+                <label for="manual-model-id-input">模型 ID
+                  <input id="manual-model-id-input" maxlength="128" placeholder="例如 gpt-5-mini" />
+                </label>
+                <p>手动兜底同样使用后端画像，不需要填写质量、价格或延迟。</p>
+              </details>
               <div class="model-option-row">
-                <label class="check-field"><input id="registered-model-tools-input" type="checkbox" checked /> 工具调用</label>
-                <label class="check-field"><input id="registered-model-structured-input" type="checkbox" checked /> 结构化输出</label>
                 <label class="check-field"><input id="registered-model-enabled-input" type="checkbox" checked /> 启用</label>
                 <label class="check-field"><input id="registered-model-auto-input" type="checkbox" checked /> 允许自动选择</label>
               </div>
               <div class="surface-actions">
-                <p>价格和质量分只用于本地自动路由计算。</p>
-                <button id="save-registered-model-btn" class="button primary" type="button">添加模型</button>
+                <p>冷启动使用后端先验；产生真实请求后，路由自动采用实测延迟。</p>
+                <button id="save-registered-model-btn" class="button primary" type="button">注册所选模型</button>
               </div>
             </article>
 

@@ -14,12 +14,15 @@ from .chat import ChatStreamRequest
 from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
 from .model_registry import (
+    DiscoveredModelResponse,
     ModelConnectionTestResponse,
+    ModelDiscoveryResponse,
     ModelRegistryResponse,
     ProviderConnectionResponse,
     ProviderConnectionUpsertRequest,
+    RegisteredModelCreateRequest,
     RegisteredModelResponse,
-    RegisteredModelUpsertRequest,
+    RegisteredModelUpdateRequest,
     SessionModelPreferenceRequest,
     SessionModelPreferenceResponse,
 )
@@ -105,12 +108,15 @@ __all__ = [
     "HealthResponse",
     "MessageResponse",
     "MessagesResponse",
+    "DiscoveredModelResponse",
     "ModelConnectionTestResponse",
+    "ModelDiscoveryResponse",
     "ModelRegistryResponse",
     "ProviderConnectionResponse",
     "ProviderConnectionUpsertRequest",
+    "RegisteredModelCreateRequest",
     "RegisteredModelResponse",
-    "RegisteredModelUpsertRequest",
+    "RegisteredModelUpdateRequest",
     "SessionModelPreferenceRequest",
     "SessionModelPreferenceResponse",
     "MetricsResponse",

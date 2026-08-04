@@ -23,6 +23,13 @@ from .models import (
     RegisteredModel,
     SessionModelPreference,
 )
+from .discovery import (
+    DiscoveredModel,
+    ModelDiscovery,
+    ModelDiscoveryError,
+    ProviderModelDiscovery,
+)
+from .profiles import build_registration_profile
 from .repository import ModelRegistryRepository
 from .secrets import SecretStore, SecretStoreError
 from .selection import ModelSelection
@@ -52,6 +59,7 @@ class ModelRegistryService:
         *,
         initial_models: Iterable[ModelConfig],
         environment_secret_refs: dict[str, str] | None = None,
+        model_discovery: ModelDiscovery | None = None,
     ) -> None:
         self._repository = repository
         self._secret_store = secret_store
@@ -59,6 +67,8 @@ class ModelRegistryService:
         self._router: ModelRouter | None = None
         self._catalog_changed: Callable[[tuple[ModelConfig, ...]], None] | None = None
         self._test_connection: Callable[[str, str], dict[str, Any]] | None = None
+        self._model_discovery = model_discovery or ProviderModelDiscovery()
+        self._discovered_models: dict[str, dict[str, DiscoveredModel]] = {}
         self._stats_lock = Lock()
         self._bootstrap(tuple(initial_models))
 
@@ -134,9 +144,74 @@ class ModelRegistryService:
         if connection is None:
             raise ModelRegistryNotFoundError(provider)
         self._repository.delete_connection(provider)
+        self._discovered_models.pop(provider, None)
         if connection.secret_ref and connection.secret_ref.startswith("keyring:"):
             self._secret_store.delete(connection.secret_ref)
         self._notify_catalog_changed()
+
+    def discover_models(self, provider: str) -> dict[str, Any]:
+        provider = provider.strip().lower()
+        connection = self._repository.get_connection(provider)
+        if connection is None:
+            raise ModelRegistryNotFoundError(provider)
+        if not connection.enabled:
+            raise ValueError("provider connection is disabled")
+        try:
+            api_key = self.credential_for_provider(provider)
+        except SecretStoreError as exc:
+            raise ModelDiscoveryError("configured API key could not be read") from exc
+        if not api_key:
+            raise ValueError("API key is not configured")
+        discovered = self._model_discovery.discover(provider, api_key)
+        self._discovered_models[provider] = {item.model: item for item in discovered}
+        registered = {
+            item.model
+            for item in self._repository.list_models()
+            if item.provider == provider
+        }
+        return {
+            "provider": provider,
+            "models": [
+                self._discovered_model_view(
+                    provider,
+                    item,
+                    already_registered=item.model in registered,
+                )
+                for item in discovered
+            ],
+        }
+
+    def register_model(
+        self,
+        *,
+        provider: str,
+        model: str,
+        enabled: bool = True,
+        auto_eligible: bool = True,
+    ) -> dict[str, Any]:
+        provider = provider.strip().lower()
+        model = model.strip()
+        connection = self._repository.get_connection(provider)
+        if connection is None:
+            raise ModelRegistryNotFoundError(provider)
+        if not model:
+            raise ValueError("model ID must not be blank")
+        discovered = self._discovered_models.get(provider, {}).get(model)
+        profile = build_registration_profile(provider, model, discovered)
+        return self.create_model(
+            provider=profile.provider,
+            model=profile.model,
+            display_name=profile.display_name,
+            context_window_tokens=profile.context_window_tokens,
+            tool_calling=profile.tool_calling,
+            structured_output=profile.structured_output,
+            input_cost_per_million=profile.input_cost_per_million,
+            output_cost_per_million=profile.output_cost_per_million,
+            quality_score=profile.quality_score,
+            configured_latency_ms=profile.configured_latency_ms,
+            enabled=enabled,
+            auto_eligible=auto_eligible,
+        )
 
     def create_model(self, **values: Any) -> dict[str, Any]:
         provider = str(values["provider"]).strip().lower()
@@ -318,6 +393,12 @@ class ModelRegistryService:
         configs = []
         for model in self._repository.list_models():
             connection = connections.get(model.provider)
+            stats = self._repository.get_runtime_stats(model.id)
+            observed_latency = (
+                _percentile(stats.total_latency_samples_ms, 0.50)
+                if stats is not None and stats.success_count > 0
+                else None
+            )
             configs.append(
                 ModelConfig(
                     provider=model.provider,
@@ -330,7 +411,7 @@ class ModelRegistryService:
                     input_cost_per_million=model.input_cost_per_million,
                     output_cost_per_million=model.output_cost_per_million,
                     quality_score=model.quality_score,
-                    latency_ms=model.configured_latency_ms,
+                    latency_ms=observed_latency or model.configured_latency_ms,
                     enabled=bool(connection and connection.enabled and model.enabled),
                     auto_eligible=model.auto_eligible,
                 )
@@ -370,6 +451,7 @@ class ModelRegistryService:
                     updated_at=now,
                 )
             )
+        self._notify_catalog_changed()
 
     def record_failure(
         self,
@@ -520,6 +602,12 @@ class ModelRegistryService:
             else None
         )
         connection = self._repository.get_connection(model.provider)
+        observed_latency = (
+            _percentile(stats.total_latency_samples_ms, 0.50)
+            if stats.success_count > 0
+            else None
+        )
+        profile = build_registration_profile(model.provider, model.model)
         credential_configured = False
         if connection is not None:
             credential_configured, _ = self._credential_status(connection)
@@ -549,6 +637,16 @@ class ModelRegistryService:
             "output_cost_per_million": model.output_cost_per_million,
             "quality_score": model.quality_score,
             "configured_latency_ms": model.configured_latency_ms,
+            "routing_metadata": {
+                "quality_tier": profile.quality_tier,
+                "cost_tier": profile.cost_tier,
+                "metadata_source": profile.metadata_source,
+                "routing_latency_ms": observed_latency
+                or model.configured_latency_ms,
+                "latency_source": (
+                    "observed_p50" if observed_latency is not None else "backend_prior"
+                ),
+            },
             "enabled": model.enabled,
             "auto_eligible": model.auto_eligible,
             "status": status,
@@ -576,6 +674,29 @@ class ModelRegistryService:
             },
             "created_at": model.created_at,
             "updated_at": model.updated_at,
+        }
+
+    def _discovered_model_view(
+        self,
+        provider: str,
+        discovered: DiscoveredModel,
+        *,
+        already_registered: bool,
+    ) -> dict[str, Any]:
+        profile = build_registration_profile(provider, discovered.model, discovered)
+        return {
+            "provider": provider,
+            "model": profile.model,
+            "display_name": profile.display_name,
+            "context_window_tokens": profile.context_window_tokens,
+            "capabilities": {
+                "tool_calling": profile.tool_calling,
+                "structured_output": profile.structured_output,
+            },
+            "quality_tier": profile.quality_tier,
+            "cost_tier": profile.cost_tier,
+            "metadata_source": profile.metadata_source,
+            "already_registered": already_registered,
         }
 
     def _credential_status(

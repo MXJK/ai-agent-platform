@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "RIGHT-INSPECTOR-RECENT-SESSIONS"
-next_action: "Review the pushed branch on GitHub and decide whether to merge it"
+active_task: "AUTO-DISCOVER-MODELS"
+next_action: "Review the simplified model registration flow with a configured Provider API key"
 blockers: []
 last_verified_commit: "f5415465e29420d99daa2048341d7b14fa6cec72"
-updated_at: "2026-08-04T14:49:51+08:00"
+updated_at: "2026-08-04T16:24:44+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
