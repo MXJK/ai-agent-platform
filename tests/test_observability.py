@@ -78,6 +78,8 @@ class RequestObservabilityTests(unittest.TestCase):
             metrics_response = client.get("/api/v1/metrics")
 
         self.assertEqual(health_response.headers["x-request-id"], "req_from_client")
+        self.assertEqual(health_response.json()["session_storage"], "memory")
+        self.assertFalse(health_response.json()["persistent_sessions"])
         self.assertRegex(
             invalid_id_response.headers["x-request-id"],
             r"^req_[a-f0-9]{16}$",

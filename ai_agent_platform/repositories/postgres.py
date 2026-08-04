@@ -19,6 +19,7 @@ from ai_agent_platform.domain import (
     Message,
     Session,
     TokenUsageRecord,
+    UserPreferences,
     WorkspaceRecord,
 )
 from ai_agent_platform.integrations.rag import (
@@ -28,7 +29,10 @@ from ai_agent_platform.integrations.rag import (
     RetrievedDocument,
 )
 from ai_agent_platform.integrations.tools import ToolCall
-from ai_agent_platform.repositories.memory import SessionNotFoundError
+from ai_agent_platform.repositories.memory import (
+    SessionArchivedError,
+    SessionNotFoundError,
+)
 
 
 class PostgresDependencyError(RuntimeError):
@@ -42,40 +46,109 @@ class PostgresSessionRepository:
         self._database_url = database_url
         _require_psycopg()
 
-    def create_session(self, user_id: str) -> Session:
+    def create_session(
+        self,
+        user_id: str,
+        preferences: UserPreferences | None = None,
+    ) -> Session:
+        now = _now()
         session = Session(
             id=f"sess_{uuid4().hex[:12]}",
             user_id=user_id,
-            created_at=_now(),
+            created_at=now,
+            updated_at=now,
+            workspace_id=(
+                preferences.default_workspace_id if preferences else None
+            ),
+            provider=preferences.default_provider if preferences else None,
+            model=preferences.default_model if preferences else None,
+            thinking_level=(
+                preferences.default_thinking_level if preferences else None
+            ),
+            composer_mode=(
+                preferences.default_composer_mode if preferences else "chat"
+            ),
         )
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (id, user_id, created_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO sessions (
+                    id, user_id, created_at, title, title_source, updated_at,
+                    archived_at, workspace_id, provider, model,
+                    thinking_level, composer_mode
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (session.id, session.user_id, session.created_at),
+                _session_values(session),
             )
         return session
 
-    def list_sessions(self) -> list[Session]:
+    def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        query: str | None = None,
+        archived: bool | None = None,
+        limit: int | None = None,
+        before: tuple[datetime, str] | None = None,
+    ) -> list[Session]:
+        conditions: list[str] = [
+            "EXISTS (SELECT 1 FROM messages history_messages "
+            "WHERE history_messages.session_id = sessions.id)"
+        ]
+        params: list[Any] = []
+        if user_id is not None:
+            conditions.append("sessions.user_id = %s")
+            params.append(user_id)
+        if archived is True:
+            conditions.append("sessions.archived_at IS NOT NULL")
+        elif archived is False:
+            conditions.append("sessions.archived_at IS NULL")
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            conditions.append(
+                """
+                (
+                    sessions.title ILIKE %s ESCAPE '\\'
+                    OR EXISTS (
+                        SELECT 1
+                        FROM messages searched_messages
+                        WHERE searched_messages.session_id = sessions.id
+                          AND searched_messages.content ILIKE %s ESCAPE '\\'
+                    )
+                )
+                """
+            )
+            pattern = f"%{_escape_like(normalized_query)}%"
+            params.extend((pattern, pattern))
+        if before is not None:
+            conditions.append("(sessions.updated_at, sessions.id) < (%s, %s)")
+            params.extend(before)
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT %s"
+            params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
-                """
-                SELECT id, user_id, created_at
+                f"""
+                SELECT {_session_select_columns()}
                 FROM sessions
-                ORDER BY created_at ASC
-                """
+                {where_sql}
+                ORDER BY sessions.updated_at DESC, sessions.id DESC
+                {limit_sql}
+                """,
+                tuple(params),
             ).fetchall()
         return [_session_from_row(row) for row in rows]
 
     def get_session(self, session_id: str) -> Session:
         with self._connect() as conn:
             row = conn.execute(
-                """
-                SELECT id, user_id, created_at
+                f"""
+                SELECT {_session_select_columns()}
                 FROM sessions
-                WHERE id = %s
+                WHERE sessions.id = %s
                 """,
                 (session_id,),
             ).fetchone()
@@ -83,16 +156,115 @@ class PostgresSessionRepository:
             raise SessionNotFoundError(session_id)
         return _session_from_row(row)
 
+    def save_session(
+        self,
+        session: Session,
+        *,
+        preferences: UserPreferences | None = None,
+    ) -> Session:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE sessions
+                SET title = %s,
+                    title_source = %s,
+                    updated_at = %s,
+                    archived_at = %s,
+                    workspace_id = %s,
+                    provider = %s,
+                    model = %s,
+                    thinking_level = %s,
+                    composer_mode = %s
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    session.title,
+                    session.title_source,
+                    session.updated_at or session.created_at,
+                    session.archived_at,
+                    session.workspace_id,
+                    session.provider,
+                    session.model,
+                    session.thinking_level,
+                    session.composer_mode,
+                    session.id,
+                ),
+            ).fetchone()
+            if row is None:
+                raise SessionNotFoundError(session.id)
+            if preferences is not None:
+                self._save_user_preferences(conn, preferences)
+        return session
+
+    def get_user_preferences(self, user_id: str) -> UserPreferences | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, default_provider, default_model,
+                       default_thinking_level, default_workspace_id,
+                       default_composer_mode, last_active_session_id, updated_at
+                FROM user_preferences
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            ).fetchone()
+        return _user_preferences_from_row(row) if row is not None else None
+
+    def save_user_preferences(
+        self, preferences: UserPreferences
+    ) -> UserPreferences:
+        with self._connect() as conn:
+            self._save_user_preferences(conn, preferences)
+        return preferences
+
+    def _save_user_preferences(self, conn, preferences: UserPreferences) -> None:
+        conn.execute(
+            """
+            INSERT INTO user_preferences (
+                user_id, default_provider, default_model,
+                default_thinking_level, default_workspace_id,
+                default_composer_mode, last_active_session_id, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET
+                default_provider = EXCLUDED.default_provider,
+                default_model = EXCLUDED.default_model,
+                default_thinking_level = EXCLUDED.default_thinking_level,
+                default_workspace_id = EXCLUDED.default_workspace_id,
+                default_composer_mode = EXCLUDED.default_composer_mode,
+                last_active_session_id = EXCLUDED.last_active_session_id,
+                updated_at = EXCLUDED.updated_at
+            """,
+            _user_preferences_values(preferences),
+        )
+
     def add_message(self, session_id: str, role: str, content: str) -> Message:
-        self.get_session(session_id)
+        now = _now()
         message = Message(
             id=f"msg_{uuid4().hex[:12]}",
             session_id=session_id,
             role=role,
             content=content,
-            created_at=_now(),
+            created_at=now,
         )
         with self._connect() as conn:
+            session_row = conn.execute(
+                """
+                SELECT id, user_id, created_at, title, title_source, updated_at,
+                       archived_at, workspace_id, provider, model,
+                       thinking_level, composer_mode
+                FROM sessions
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (session_id,),
+            ).fetchone()
+            if session_row is None:
+                raise SessionNotFoundError(session_id)
+            session = _session_from_row(session_row)
+            if session.archived_at is not None:
+                raise SessionArchivedError(session_id)
             conn.execute(
                 """
                 INSERT INTO messages (id, session_id, role, content, created_at)
@@ -105,6 +277,21 @@ class PostgresSessionRepository:
                     message.content,
                     message.created_at,
                 ),
+            )
+            title = session.title
+            title_source = session.title_source
+            if role == "user" and title_source == "default":
+                title = _derive_session_title(content)
+                title_source = "auto"
+            conn.execute(
+                """
+                UPDATE sessions
+                SET title = %s,
+                    title_source = %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (title, title_source, now, session_id),
             )
         return message
 
@@ -985,7 +1172,109 @@ def _qdrant_point_id(chunk_id: str) -> str:
 
 
 def _session_from_row(row: tuple[Any, ...]) -> Session:
-    return Session(id=str(row[0]), user_id=str(row[1]), created_at=row[2])
+    if len(row) == 3:
+        return Session(
+            id=str(row[0]),
+            user_id=str(row[1]),
+            created_at=row[2],
+            updated_at=row[2],
+        )
+    return Session(
+        id=str(row[0]),
+        user_id=str(row[1]),
+        created_at=row[2],
+        title=str(row[3]),
+        title_source=str(row[4]),
+        updated_at=row[5],
+        archived_at=row[6],
+        workspace_id=str(row[7]) if row[7] is not None else None,
+        provider=str(row[8]) if row[8] is not None else None,
+        model=str(row[9]) if row[9] is not None else None,
+        thinking_level=str(row[10]) if row[10] is not None else None,
+        composer_mode=str(row[11]),
+        message_count=int(row[12]) if len(row) > 12 and row[12] is not None else 0,
+        last_message_preview=(
+            str(row[13]) if len(row) > 13 and row[13] is not None else None
+        ),
+    )
+
+
+def _session_select_columns() -> str:
+    return """
+        sessions.id,
+        sessions.user_id,
+        sessions.created_at,
+        sessions.title,
+        sessions.title_source,
+        sessions.updated_at,
+        sessions.archived_at,
+        sessions.workspace_id,
+        sessions.provider,
+        sessions.model,
+        sessions.thinking_level,
+        sessions.composer_mode,
+        (SELECT COUNT(*) FROM messages counted_messages
+         WHERE counted_messages.session_id = sessions.id) AS message_count,
+        (SELECT LEFT(REGEXP_REPLACE(preview_messages.content, '\\s+', ' ', 'g'), 120)
+         FROM messages preview_messages
+         WHERE preview_messages.session_id = sessions.id
+         ORDER BY preview_messages.created_at DESC, preview_messages.id DESC
+         LIMIT 1) AS last_message_preview
+    """
+
+
+def _session_values(session: Session) -> tuple[Any, ...]:
+    return (
+        session.id,
+        session.user_id,
+        session.created_at,
+        session.title,
+        session.title_source,
+        session.updated_at or session.created_at,
+        session.archived_at,
+        session.workspace_id,
+        session.provider,
+        session.model,
+        session.thinking_level,
+        session.composer_mode,
+    )
+
+
+def _user_preferences_from_row(row: tuple[Any, ...]) -> UserPreferences:
+    return UserPreferences(
+        user_id=str(row[0]),
+        default_provider=str(row[1]) if row[1] is not None else None,
+        default_model=str(row[2]) if row[2] is not None else None,
+        default_thinking_level=(str(row[3]) if row[3] is not None else None),
+        default_workspace_id=str(row[4]) if row[4] is not None else None,
+        default_composer_mode=str(row[5]),
+        last_active_session_id=str(row[6]) if row[6] is not None else None,
+        updated_at=row[7],
+    )
+
+
+def _user_preferences_values(
+    preferences: UserPreferences,
+) -> tuple[Any, ...]:
+    return (
+        preferences.user_id,
+        preferences.default_provider,
+        preferences.default_model,
+        preferences.default_thinking_level,
+        preferences.default_workspace_id,
+        preferences.default_composer_mode,
+        preferences.last_active_session_id,
+        preferences.updated_at or _now(),
+    )
+
+
+def _derive_session_title(content: str) -> str:
+    normalized = " ".join(content.split()).strip()
+    return normalized[:48] or "新会话"
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _message_from_row(row: tuple[Any, ...]) -> Message:

@@ -22,6 +22,7 @@ from ai_agent_platform.main import (
     _create_knowledge_base_store,
     _create_langgraph_checkpointer,
     _create_mcp_providers,
+    _create_model_registry,
     _create_session_repository,
     _create_workspace_store,
 )
@@ -78,6 +79,7 @@ def _create_worker_services() -> WorkerServices:
     session_repository = _create_session_repository(settings)
     usage_ledger = UsageLedgerService(session_repository, settings)
     llm_client = LLMClient(settings, usage_ledger=usage_ledger)
+    model_registry = _create_model_registry(settings, llm_client)
     workspace_service = WorkspaceService(
         store=_create_workspace_store(settings),
         allowed_roots=settings.workspace_allowed_roots,
@@ -165,6 +167,9 @@ def _create_worker_services() -> WorkerServices:
         ),
         metrics=metrics,
         usage_ledger=usage_ledger,
+        default_provider=settings.llm_provider,
+        default_model=settings.llm_model,
+        default_thinking_level=settings.llm_thinking_level,
     )
     agent_run_service = AgentRunService(
         runtime=coding_runtime,
@@ -174,6 +179,9 @@ def _create_worker_services() -> WorkerServices:
         task_queue=worker_queue,
         project_memory_service=project_memory_service,
         max_context_messages=settings.llm_max_context_messages,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
+        model_registry=model_registry,
     )
     close_callbacks = [provider.close for provider in mcp_providers]
     close_callbacks.append(tool_registry.close)

@@ -46,6 +46,7 @@ from ai_agent_platform.services import (
 )
 from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.usage_ledger import model_usage_scope
+from ai_agent_platform.model_registry import ModelRegistryService, model_selection_scope
 
 
 KNOWLEDGE_BASE_ID = Path(
@@ -62,6 +63,7 @@ def create_knowledge_bases_router(
     *,
     session_service: SessionService | None = None,
     workspace_service: WorkspaceService | None = None,
+    model_registry: ModelRegistryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -303,12 +305,17 @@ def create_knowledge_bases_router(
             if request.workspace_id and workspace_service is not None:
                 workspace_service.get(request.workspace_id)
             request_id = f"rag_ask_{uuid4().hex[:12]}"
+            selection = (
+                model_registry.selection_for_session(request.conversation_id)
+                if model_registry is not None and request.conversation_id
+                else None
+            )
             with model_usage_scope(
                 session_id=request.conversation_id,
                 workspace_id=request.workspace_id,
                 operation="rag_ask",
                 resource_id=request_id,
-            ):
+            ), model_selection_scope(selection):
                 answer = knowledge_base_service.answer_question(
                     knowledge_base_id=knowledge_base_id,
                     question=request.question,

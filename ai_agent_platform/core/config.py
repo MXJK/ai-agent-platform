@@ -16,6 +16,7 @@ class Settings:
     llm_provider: str = "fake"
     llm_model: str = "demo-stream-model"
     openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
     anthropic_api_key: str | None = None
     google_api_key: str | None = None
     database_url: str = "postgresql://localhost:5432/ai_agent_platform"
@@ -35,12 +36,14 @@ class Settings:
     llm_thinking_level: str = "low"
     llm_model_catalog_json: str | None = None
     llm_model_context_window_tokens: int = 128000
-    llm_routing_policy: str = "quality"
+    llm_routing_policy: str = "smart"
     llm_circuit_failure_threshold: int = 3
     llm_circuit_recovery_timeout_seconds: float = 30.0
     llm_circuit_error_window_size: int = 20
     llm_circuit_error_rate_min_requests: int = 5
     llm_circuit_error_rate_threshold: float = 0.5
+    model_registry_store: str = "memory"
+    model_secret_backend: str = "keyring"
     model_provider_allowlist: tuple[str, ...] = ()
     model_allowlist: tuple[str, ...] = ()
     session_token_budget: int = 0
@@ -147,7 +150,7 @@ class Settings:
         _require_choice(
             "llm_provider",
             self.llm_provider,
-            {"anthropic", "fake", "google", "openai"},
+            {"anthropic", "deepseek", "fake", "google", "openai"},
         )
         _require_choice(
             "embedding_provider",
@@ -162,7 +165,7 @@ class Settings:
         _require_choice(
             "llm_routing_policy",
             self.llm_routing_policy,
-            {"quality", "cost", "latency"},
+            {"smart", "quality", "cost", "latency"},
         )
         if self.llm_model_catalog_json:
             _validate_model_catalog_json(self.llm_model_catalog_json)
@@ -194,7 +197,7 @@ class Settings:
             _require_choice(
                 "token_budget_fallback_provider",
                 self.token_budget_fallback_provider,
-                {"anthropic", "fake", "google", "openai"},
+                {"anthropic", "deepseek", "fake", "google", "openai"},
             )
         if any(not item.strip() for item in self.model_provider_allowlist):
             raise ValueError("model_provider_allowlist must not contain blanks")
@@ -228,6 +231,16 @@ class Settings:
             ("workspace_store", self.workspace_store),
         ):
             _require_choice(name, value, {"memory", "postgres"})
+        _require_choice(
+            "model_registry_store",
+            self.model_registry_store,
+            {"memory", "postgres"},
+        )
+        _require_choice(
+            "model_secret_backend",
+            self.model_secret_backend,
+            {"keyring", "memory"},
+        )
         _require_choice(
             "langgraph_checkpointer",
             self.langgraph_checkpointer,
@@ -566,7 +579,16 @@ class Settings:
                 cls.llm_circuit_error_rate_threshold,
                 dotenv,
             ),
+            model_registry_store=_env(
+                "MODEL_REGISTRY_STORE",
+                _env("SESSION_REPOSITORY", cls.model_registry_store, dotenv),
+                dotenv,
+            ),
+            model_secret_backend=_env(
+                "MODEL_SECRET_BACKEND", cls.model_secret_backend, dotenv
+            ),
             openai_api_key=_env("OPENAI_API_KEY", None, dotenv),
+            deepseek_api_key=_env("DEEPSEEK_API_KEY", None, dotenv),
             anthropic_api_key=_env("ANTHROPIC_API_KEY", None, dotenv),
             google_api_key=_env(
                 "GOOGLE_API_KEY",

@@ -3,7 +3,10 @@ import unittest
 from ai_agent_platform.agents import GameAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import LLMClient
-from ai_agent_platform.repositories import InMemorySessionRepository
+from ai_agent_platform.repositories import (
+    InMemorySessionRepository,
+    SessionArchivedError,
+)
 from ai_agent_platform.services import (
     LLMConversationCompressor,
     RuleBasedConversationCompressor,
@@ -14,9 +17,132 @@ from ai_agent_platform.usage_ledger import UsageLedgerService
 
 class SessionServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.repository = InMemorySessionRepository()
         self.service = SessionService(
+            repository=self.repository,
+            agent_runtime=GameAgentRuntime(),
+        )
+
+    def test_copies_defaults_and_can_save_session_configuration_as_default(self) -> None:
+        service = SessionService(
             repository=InMemorySessionRepository(),
             agent_runtime=GameAgentRuntime(),
+            default_provider="fake",
+            default_model="server-default",
+            default_thinking_level="low",
+        )
+
+        first = service.create_session(user_id="user_defaults")
+        updated = service.update_session(
+            session_id=first.id,
+            actor_user_id="user_defaults",
+            provider="google",
+            model="gemini-3-pro",
+            thinking_level="high",
+            composer_mode="agent",
+            save_configuration_as_default=True,
+        )
+        second = service.create_session(user_id="user_defaults")
+
+        self.assertEqual(first.provider, "fake")
+        self.assertEqual(first.model, "server-default")
+        self.assertEqual(updated.composer_mode, "agent")
+        self.assertEqual(second.provider, "google")
+        self.assertEqual(second.model, "gemini-3-pro")
+        self.assertEqual(second.thinking_level, "high")
+        self.assertEqual(second.composer_mode, "agent")
+
+    def test_generates_deterministic_title_and_protects_manual_rename(self) -> None:
+        session = self.service.create_session(user_id="user_title")
+        source = "  A title   with\nwhitespace " + ("x" * 80)
+
+        self.service.add_message(
+            session_id=session.id,
+            role="user",
+            content=source,
+        )
+        generated = self.service.get_session(session.id)
+        self.assertEqual(generated.title, " ".join(source.split())[:48])
+        self.assertEqual(generated.title_source, "auto")
+
+        self.service.update_session(
+            session_id=session.id,
+            actor_user_id="user_title",
+            title="手工标题",
+        )
+        self.service.add_message(
+            session_id=session.id,
+            role="user",
+            content="this must not replace the title",
+        )
+        renamed = self.service.get_session(session.id)
+        self.assertEqual(renamed.title, "手工标题")
+        self.assertEqual(renamed.title_source, "manual")
+
+    def test_search_cursor_and_archive_contract(self) -> None:
+        first = self.service.create_session(user_id="user_list")
+        self.service.add_message(first.id, "user", "alpha body")
+        second = self.service.create_session(user_id="user_list")
+        self.service.add_message(second.id, "user", "beta body")
+
+        page, cursor = self.service.list_sessions_page(
+            user_id="user_list",
+            limit=1,
+        )
+        self.assertEqual([item.id for item in page], [second.id])
+        self.assertIsNotNone(cursor)
+        next_page, next_cursor = self.service.list_sessions_page(
+            user_id="user_list",
+            limit=1,
+            cursor=cursor,
+        )
+        self.assertEqual([item.id for item in next_page], [first.id])
+        self.assertIsNone(next_cursor)
+
+        matches, _ = self.service.list_sessions_page(
+            user_id="user_list",
+            query="ALPHA",
+        )
+        self.assertEqual([item.id for item in matches], [first.id])
+
+        self.service.update_session(
+            session_id=second.id,
+            actor_user_id="user_list",
+            archived=True,
+        )
+        archived, _ = self.service.list_sessions_page(
+            user_id="user_list",
+            archived=True,
+        )
+        self.assertEqual([item.id for item in archived], [second.id])
+        with self.assertRaises(SessionArchivedError):
+            self.service.add_message(second.id, "user", "blocked")
+
+    def test_empty_session_stays_out_of_history_until_first_message(self) -> None:
+        previous = self.service.create_session(user_id="user_empty")
+        self.service.add_message(previous.id, "user", "kept conversation")
+        empty = self.service.create_session(user_id="user_empty")
+
+        active, cursor = self.service.list_sessions_page(user_id="user_empty")
+        self.assertEqual([item.id for item in active], [previous.id])
+        self.assertIsNone(cursor)
+        self.assertEqual(
+            self.service.get_user_preferences("user_empty").last_active_session_id,
+            previous.id,
+        )
+        with self.assertRaisesRegex(ValueError, "empty conversation"):
+            self.service.activate_session(
+                user_id="user_empty",
+                session_id=empty.id,
+            )
+
+        self.service.add_message(empty.id, "user", "now it is history")
+
+        active, _ = self.service.list_sessions_page(user_id="user_empty")
+        self.assertEqual([item.id for item in active], [empty.id, previous.id])
+        self.assertEqual(
+            self.service.get_user_preferences("user_empty").last_active_session_id,
+            empty.id,
         )
 
     def test_creates_session_and_records_user_message(self) -> None:

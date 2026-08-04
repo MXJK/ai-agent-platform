@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
 from ai_agent_platform.agents.coding.models import ContextSource
+from ai_agent_platform.schemas.chat import (
+    LLMProviderName,
+    LLMRoutingPolicy,
+    LLMThinkingLevel,
+)
 
 
 class AgentRunRequest(BaseModel):
@@ -13,12 +18,17 @@ class AgentRunRequest(BaseModel):
 
     conversation_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=8000)
-    workspace_id: str = Field(
+    workspace_id: Optional[str] = Field(
+        default=None,
         min_length=1,
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     )
     focus_files: list[str] = Field(default_factory=list, max_length=20)
+    provider: Optional[LLMProviderName] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    thinking_level: Optional[LLMThinkingLevel] = None
+    routing_policy: Optional[LLMRoutingPolicy] = None
 
 
 class AgentRunResumeRequest(BaseModel):

@@ -32,6 +32,13 @@ from ai_agent_platform.integrations import (
     create_rag_service,
 )
 from ai_agent_platform.project_memory.factory import create_project_memory_service
+from ai_agent_platform.model_registry import (
+    InMemoryModelRegistryRepository,
+    InMemorySecretStore,
+    KeyringSecretStore,
+    ModelRegistryService,
+    PostgresModelRegistryRepository,
+)
 from ai_agent_platform.repositories import (
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
@@ -91,6 +98,7 @@ def create_app(
     set_usage_ledger = getattr(llm_client, "set_usage_ledger", None)
     if callable(set_usage_ledger):
         set_usage_ledger(usage_ledger)
+    model_registry = _create_model_registry(settings, llm_client)
     workspace_service = WorkspaceService(
         store=_create_workspace_store(settings),
         allowed_roots=(
@@ -172,6 +180,9 @@ def create_app(
         ),
         metrics=metrics,
         usage_ledger=usage_ledger,
+        default_provider=settings.llm_provider,
+        default_model=settings.llm_model,
+        default_thinking_level=settings.llm_thinking_level,
     )
     agent_run_service = AgentRunService(
         runtime=coding_agent_runtime,
@@ -183,6 +194,7 @@ def create_app(
         max_context_messages=settings.llm_max_context_messages,
         llm_provider=settings.llm_provider,
         llm_model=settings.llm_model,
+        model_registry=model_registry,
     )
 
     @asynccontextmanager
@@ -210,6 +222,7 @@ def create_app(
     app.state.knowledge_base_service = knowledge_base_service
     app.state.project_memory_service = project_memory_service
     app.state.task_queue = task_queue
+    app.state.model_registry = model_registry
     static_dir = Path(__file__).parent / "static"
 
     app.include_router(
@@ -223,6 +236,7 @@ def create_app(
             settings=settings,
             metrics=metrics,
             task_queue=task_queue,
+            model_registry=model_registry,
         ),
         prefix=settings.api_prefix,
     )
@@ -288,6 +302,60 @@ def _create_workspace_store(settings: Settings):
     raise ValueError(
         f"unsupported workspace store: {settings.workspace_store}"
     )
+
+
+def _create_model_registry(
+    settings: Settings,
+    llm_client: LLMClient,
+) -> ModelRegistryService:
+    if settings.model_registry_store == "memory":
+        repository = InMemoryModelRegistryRepository()
+    elif settings.model_registry_store == "postgres":
+        repository = PostgresModelRegistryRepository(
+            database_url=settings.database_url
+        )
+    else:
+        raise ValueError(
+            f"unsupported model registry store: {settings.model_registry_store}"
+        )
+    secret_store = (
+        InMemorySecretStore()
+        if settings.model_secret_backend == "memory"
+        else KeyringSecretStore(service_name=settings.app_name)
+    )
+    runtime_router = getattr(llm_client, "model_router", None)
+    initial_models = (
+        runtime_router.models
+        if runtime_router is not None
+        else LLMClient(settings).model_router.models
+    )
+    registry = ModelRegistryService(
+        repository,
+        secret_store,
+        initial_models=initial_models,
+        environment_secret_refs={
+            "openai": "env:OPENAI_API_KEY",
+            "deepseek": "env:DEEPSEEK_API_KEY",
+            "anthropic": "env:ANTHROPIC_API_KEY",
+            "google": "env:GOOGLE_API_KEY",
+        },
+    )
+    set_model_registry = getattr(llm_client, "set_model_registry", None)
+    if callable(set_model_registry):
+        set_model_registry(registry)
+    replace_model_catalog = getattr(llm_client, "replace_model_catalog", None)
+    test_connection = getattr(llm_client, "test_connection", None)
+    if (
+        runtime_router is not None
+        and callable(replace_model_catalog)
+        and callable(test_connection)
+    ):
+        registry.bind_runtime(
+            router=runtime_router,
+            catalog_changed=replace_model_catalog,
+            test_connection=test_connection,
+        )
+    return registry
 
 
 def _create_langgraph_checkpointer(settings: Settings):

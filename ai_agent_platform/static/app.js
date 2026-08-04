@@ -8,7 +8,14 @@ const state = {
   latestRunId: "",
   latestRunStatus: "",
   healthStatus: "checking",
+  sessionStorageMode: "unknown",
   sessions: [],
+  recentSessions: [],
+  sessionsNextCursor: null,
+  sessionsArchived: false,
+  sessionsQuery: "",
+  currentSession: null,
+  preferences: null,
   sessionTokenUsage: {},
   requestLog: [],
   workspaces: [],
@@ -26,6 +33,17 @@ const state = {
   },
   projectMemories: [],
   selectedMemoryId: "",
+  modelRegistry: {
+    connections: [],
+    models: [],
+    routing_policies: ["smart", "quality", "cost", "latency"],
+  },
+  modelPreference: {
+    mode: "auto",
+    routing_policy: "smart",
+    preferred_model_id: null,
+    fallback_enabled: true,
+  },
   currentView: "chat",
   composerMode: "chat",
   chatController: null,
@@ -137,12 +155,8 @@ function numberValue(id, fallback) {
 }
 
 function optionalModelFields() {
-  const provider = $("provider-input").value.trim();
-  const model = $("model-input").value.trim();
   const thinkingLevel = $("thinking-level-input").value.trim();
   return {
-    ...(provider ? { provider } : {}),
-    ...(model ? { model } : {}),
     ...(thinkingLevel ? { thinking_level: thinkingLevel } : {}),
   };
 }
@@ -446,9 +460,9 @@ function saveUiPreferences() {
       UI_STORAGE_KEY,
       JSON.stringify({
         view: state.currentView,
-        composerMode: state.composerMode,
         inspectorHidden: document.body.classList.contains("inspector-hidden"),
         rerankEnabled: state.rerankEnabled,
+        userId: $("user-id-input")?.value.trim() || "demo_user",
       }),
     );
   } catch {
@@ -484,13 +498,19 @@ function switchView(viewName, updateHash = true) {
   if (viewName === "memory") {
     refreshProjectMemory();
   }
+  if (viewName === "models") {
+    loadModelRegistry().catch((error) => showToast(humanizeError(error), "error"));
+  }
 }
 
 function setInspectorVisible(visible) {
   const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
-  $("toggle-inspector-btn").setAttribute("aria-label", visible ? "隐藏运行详情" : "显示运行详情");
+  $("toggle-inspector-btn").setAttribute(
+    "aria-label",
+    visible ? "隐藏会话与运行详情" : "显示会话与运行详情",
+  );
   panel.setAttribute("aria-hidden", String(!visible));
   panel.inert = !visible;
   panel.hidden = !visible;
@@ -530,25 +550,87 @@ function closeWorkspacePicker() {
 
 function updateContextSummary() {
   const userId = $("user-id-input").value.trim() || "demo_user";
-  const provider = $("provider-input").value.trim();
-  const model = $("model-input").value.trim();
   const thinkingLevel = $("thinking-level-input").value.trim();
   const workspaceId = $("workspace-id-input").value.trim() || "workspace_main";
-  const modelLabel = `${model || provider || "默认配置"}${thinkingLevel ? ` · ${thinkingLevel}` : ""}`;
+  const modelLabel = `${currentModelSelectionLabel()}${thinkingLevel ? ` · ${thinkingLevel}` : ""}`;
 
   $("context-user").textContent = userId;
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceId;
   $("composer-context").textContent = modelLabel;
   $("agent-workspace-badge").textContent = workspaceId;
-  $("header-session-id").textContent = state.conversationId || "尚未创建";
+  $("header-session-id").textContent = state.currentSession?.title
+    || state.conversationId
+    || "尚未创建";
 }
 
-function saveSettings() {
-  state.conversationId = $("conversation-id-input").value.trim();
+function configurationFromInputs() {
+  return {
+    provider: $("provider-input").value.trim() || null,
+    model: $("model-input").value.trim() || null,
+    thinking_level: $("thinking-level-input").value.trim() || null,
+    workspace_id: $("workspace-id-input").value.trim() || null,
+    composer_mode: state.composerMode,
+  };
+}
+
+function applyConfigurationToInputs(source, defaults = false) {
+  const value = (name) => source?.[defaults ? `default_${name}` : name] ?? "";
+  $("provider-input").value = value("provider");
+  $("model-input").value = value("model");
+  $("thinking-level-input").value = value("thinking_level");
+  $("workspace-id-input").value = value("workspace_id");
+  const workspace = state.workspaces.find((item) => item.id === value("workspace_id"));
+  if (workspace) {
+    $("workspace-select").value = workspace.id;
+    $("workspace-root-input").value = workspace.root_path;
+  }
+  updateComposerMode(value("composer_mode") || "chat");
   updateContextSummary();
-  closeSettings();
-  showToast("工作区设置已更新");
+}
+
+async function saveSettings() {
+  const button = $("save-settings-btn");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  saveUiPreferences();
+  try {
+    const configuration = configurationFromInputs();
+    if (state.currentSession) {
+      state.currentSession = await fetchJson(
+        `/sessions/${encodeURIComponent(state.currentSession.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            configuration,
+            save_configuration_as_default: true,
+          }),
+        },
+      );
+      state.preferences = await fetchJson("/users/me/preferences");
+      replaceSessionInLists(state.currentSession);
+    } else {
+      state.preferences = await fetchJson("/users/me/preferences", {
+        method: "PATCH",
+        body: JSON.stringify({
+          default_provider: configuration.provider,
+          default_model: configuration.model,
+          default_thinking_level: configuration.thinking_level,
+          default_workspace_id: configuration.workspace_id,
+          default_composer_mode: configuration.composer_mode,
+        }),
+      });
+    }
+    updateContextSummary();
+    updateComposerAvailability();
+    closeSettings();
+    showToast(state.currentSession ? "当前会话和默认设置已保存" : "默认设置已保存");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
 }
 
 function updateComposerMode(mode = $("composer-mode-input").value) {
@@ -564,7 +646,47 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("send-chat-btn").innerHTML = isAgent
     ? `交给 Agent ${iconMarkup("arrow-right")}`
     : `发送 ${iconMarkup("arrow-up")}`;
-  saveUiPreferences();
+  updateComposerAvailability();
+}
+
+async function persistComposerMode(mode) {
+  updateComposerMode(mode);
+  try {
+    if (state.currentSession) {
+      state.currentSession = await fetchJson(
+        `/sessions/${encodeURIComponent(state.currentSession.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            configuration: { composer_mode: state.composerMode },
+            save_configuration_as_default: true,
+          }),
+        },
+      );
+      replaceSessionInLists(state.currentSession);
+    } else {
+      state.preferences = await fetchJson("/users/me/preferences", {
+        method: "PATCH",
+        body: JSON.stringify({ default_composer_mode: state.composerMode }),
+      });
+    }
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+function updateComposerAvailability() {
+  const archived = Boolean(state.currentSession?.archived_at);
+  const streaming = Boolean(state.chatController);
+  $("archived-session-notice").hidden = !archived;
+  $("chat-message-input").disabled = archived;
+  $("composer-mode-input").disabled = archived || streaming;
+  $("send-chat-btn").disabled = archived || streaming;
+  $("run-agent-btn").disabled = archived;
+  if (archived) {
+    setChatStatus("已归档 · 恢复后可继续", "warning");
+  }
+  renderSessionModelControls();
 }
 
 function setChatStatus(label, status = "neutral") {
@@ -685,8 +807,12 @@ async function checkHealth() {
   try {
     const body = await fetchJson("/health");
     state.healthStatus = body.status;
-    pill.className = "status-pill ok";
-    pill.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>服务正常</span>';
+    state.sessionStorageMode = body.session_storage || "unknown";
+    const persistent = body.persistent_sessions !== false;
+    pill.className = `status-pill ${persistent ? "ok" : "warning"}`;
+    pill.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${
+      persistent ? "服务正常" : "临时模式 · 重启会丢失"
+    }</span>`;
     setRaw(body);
   } catch (error) {
     state.healthStatus = "offline";
@@ -697,12 +823,480 @@ async function checkHealth() {
   }
 }
 
+const MODEL_PROVIDERS = [
+  ["openai", "OpenAI"],
+  ["deepseek", "DeepSeek"],
+  ["anthropic", "Anthropic"],
+  ["google", "Google"],
+];
+
+const ROUTING_POLICY_LABELS = {
+  smart: "智能 · 按任务难度",
+  quality: "质量优先",
+  cost: "成本优先",
+  latency: "速度优先",
+};
+
+function modelStatusLabel(status) {
+  return {
+    available: "可用",
+    degraded: "不稳定",
+    unavailable: "不可用",
+    disabled: "已停用",
+    unknown: "待观测",
+  }[status] || status || "待观测";
+}
+
+function modelStatusClass(status) {
+  if (status === "available") return "ok";
+  if (status === "degraded" || status === "unknown") return "warning";
+  if (status === "unavailable") return "error";
+  return "neutral";
+}
+
+function registeredModel(modelId) {
+  return state.modelRegistry.models.find((item) => item.id === modelId) || null;
+}
+
+function modelLatency(model) {
+  const observed = model.telemetry?.total_latency_p50_ms;
+  if (observed != null && Number.isFinite(Number(observed))) {
+    return { milliseconds: Math.max(0, Math.round(Number(observed))), source: "实测 P50" };
+  }
+  const configured = model.configured_latency_ms;
+  if (configured != null && Number.isFinite(Number(configured))) {
+    return { milliseconds: Math.max(0, Math.round(Number(configured))), source: "预估" };
+  }
+  return { milliseconds: null, source: "暂无数据" };
+}
+
+function latencyTier(milliseconds) {
+  if (milliseconds == null) return { key: "unknown", label: "待观测", symbol: "⚪" };
+  if (milliseconds <= 1000) return { key: "fast", label: "快", symbol: "🟢" };
+  if (milliseconds <= 3000) return { key: "moderate", label: "一般", symbol: "🟡" };
+  return { key: "slow", label: "慢", symbol: "🔴" };
+}
+
+function formatLatencyMs(milliseconds) {
+  return milliseconds == null
+    ? "— ms"
+    : `${new Intl.NumberFormat("zh-CN").format(milliseconds)} ms`;
+}
+
+function modelsByLatency(models) {
+  return [...models].sort((left, right) => {
+    if (left.enabled !== right.enabled) return left.enabled ? -1 : 1;
+    const leftLatency = modelLatency(left).milliseconds ?? Number.POSITIVE_INFINITY;
+    const rightLatency = modelLatency(right).milliseconds ?? Number.POSITIVE_INFINITY;
+    return leftLatency - rightLatency
+      || left.display_name.localeCompare(right.display_name, "zh-CN");
+  });
+}
+
+function currentModelSelectionLabel() {
+  const preference = state.modelPreference;
+  if (preference.mode === "manual") {
+    const model = registeredModel(preference.preferred_model_id);
+    if (!model) return "手动模型未配置";
+    const latency = modelLatency(model);
+    return `${model.display_name} · ${formatLatencyMs(latency.milliseconds)} · ${modelStatusLabel(model.status)}`;
+  }
+  return `自动 · ${ROUTING_POLICY_LABELS[preference.routing_policy] || preference.routing_policy}`;
+}
+
+function modelOptionLabel(model) {
+  const latency = modelLatency(model);
+  const tier = latencyTier(latency.milliseconds);
+  return `${tier.symbol} ${model.display_name} · ${model.provider} · ${formatLatencyMs(latency.milliseconds)} · ${latency.source}`;
+}
+
+function modelPickerOptionMarkup(model, selectedId) {
+  const latency = modelLatency(model);
+  const tier = latencyTier(latency.milliseconds);
+  const selected = model.id === selectedId;
+  return `
+    <button
+      class="model-picker-option${selected ? " selected" : ""}"
+      type="button"
+      role="option"
+      aria-selected="${selected}"
+      aria-disabled="${!model.enabled}"
+      data-model-option="${escapeHtml(model.id)}"
+      ${model.enabled ? "" : "disabled"}
+    >
+      <span class="latency-dot ${tier.key}" aria-label="延迟${escapeHtml(tier.label)}"></span>
+      <span class="model-picker-copy">
+        <strong>${escapeHtml(model.display_name)}</strong>
+        <small>${escapeHtml(model.provider)} · ${escapeHtml(model.model)}</small>
+      </span>
+      <span class="model-picker-metric">
+        <strong>${escapeHtml(formatLatencyMs(latency.milliseconds))}</strong>
+        <small>${escapeHtml(latency.source)} · ${escapeHtml(modelStatusLabel(model.status))}</small>
+      </span>
+      <span class="model-picker-check" aria-hidden="true">✓</span>
+    </button>`;
+}
+
+function renderManualModelPicker(models, selectedId, disabled) {
+  const trigger = $("model-picker-trigger");
+  const menu = $("model-picker-menu");
+  const selected = registeredModel(selectedId);
+  trigger.hidden = false;
+  trigger.disabled = disabled || !models.length;
+  trigger.setAttribute("aria-expanded", "false");
+  menu.hidden = true;
+  $("model-picker-options").innerHTML = models.length
+    ? models.map((model) => modelPickerOptionMarkup(model, selectedId)).join("")
+    : '<div class="model-picker-empty">请先在模型管理中注册并启用模型</div>';
+
+  if (!selected) {
+    $("model-picker-trigger-content").innerHTML = `
+      <span class="latency-dot unknown"></span>
+      <span class="model-picker-copy"><strong>选择首选模型</strong><small>暂无可用模型</small></span>`;
+    return;
+  }
+  const latency = modelLatency(selected);
+  const tier = latencyTier(latency.milliseconds);
+  $("model-picker-trigger-content").innerHTML = `
+    <span class="latency-dot ${tier.key}"></span>
+    <span class="model-picker-copy">
+      <strong>${escapeHtml(selected.display_name)}</strong>
+      <small>${escapeHtml(selected.provider)} · ${escapeHtml(modelStatusLabel(selected.status))}</small>
+    </span>
+    <span class="model-picker-metric">
+      <strong>${escapeHtml(formatLatencyMs(latency.milliseconds))}</strong>
+      <small>${escapeHtml(latency.source)}</small>
+    </span>`;
+}
+
+function closeModelPicker({ restoreFocus = false } = {}) {
+  const trigger = $("model-picker-trigger");
+  $("model-picker-menu").hidden = true;
+  trigger.setAttribute("aria-expanded", "false");
+  if (restoreFocus) trigger.focus();
+}
+
+function toggleModelPicker() {
+  const trigger = $("model-picker-trigger");
+  if (trigger.disabled) return;
+  const menu = $("model-picker-menu");
+  const opening = menu.hidden;
+  menu.hidden = !opening;
+  trigger.setAttribute("aria-expanded", String(opening));
+  if (opening) {
+    menu.querySelector('[aria-selected="true"]')?.focus();
+  }
+}
+
+function renderSessionModelControls() {
+  const preference = state.modelPreference;
+  const automatic = preference.mode !== "manual";
+  const select = $("session-model-select");
+  const disabled = !state.conversationId || Boolean(state.currentSession?.archived_at);
+  const choiceControl = select.closest(".model-choice-control");
+  choiceControl.classList.toggle("manual", !automatic);
+  choiceControl.closest(".composer-mode-bar")?.classList.toggle(
+    "manual-model-mode",
+    !automatic,
+  );
+  $("auto-model-toggle").checked = automatic;
+  $("session-model-label").textContent = automatic ? "路由策略" : "首选模型";
+  $("model-fallback-control").hidden = automatic;
+  $("model-fallback-toggle").checked = preference.fallback_enabled !== false;
+  if (automatic) {
+    closeModelPicker();
+    $("model-picker-trigger").hidden = true;
+    select.hidden = false;
+    select.innerHTML = (state.modelRegistry.routing_policies || Object.keys(ROUTING_POLICY_LABELS))
+      .map((policy) => `<option value="${escapeHtml(policy)}">${escapeHtml(ROUTING_POLICY_LABELS[policy] || policy)}</option>`)
+      .join("");
+    select.value = preference.routing_policy || "smart";
+    $("provider-input").value = "";
+    $("model-input").value = "";
+  } else {
+    const models = modelsByLatency(state.modelRegistry.models);
+    const selectableModels = models.filter((item) => item.enabled);
+    select.hidden = true;
+    select.innerHTML = models.length
+      ? models.map((model) => `<option value="${escapeHtml(model.id)}" ${model.enabled ? "" : "disabled"}>${escapeHtml(modelOptionLabel(model))}</option>`).join("")
+      : '<option value="">请先在模型管理中注册模型</option>';
+    const selectedId = preference.preferred_model_id || selectableModels[0]?.id || "";
+    select.value = selectedId;
+    if (selectedId && !preference.preferred_model_id) {
+      preference.preferred_model_id = selectedId;
+    }
+    const selected = registeredModel(selectedId);
+    $("provider-input").value = selected?.provider || "";
+    $("model-input").value = selected?.model || "";
+    renderManualModelPicker(models, selectedId, disabled);
+  }
+  $("auto-model-toggle").disabled = disabled;
+  select.disabled = disabled;
+  $("model-fallback-toggle").disabled = disabled;
+  updateContextSummary();
+}
+
+async function loadModelRegistry(showRaw = false) {
+  const body = await fetchJson("/model-registry");
+  state.modelRegistry = body;
+  renderProviderConnections();
+  renderRegisteredModels();
+  renderSessionModelControls();
+  if (showRaw) setRaw(body);
+  return body;
+}
+
+async function loadModelPreference(sessionId = state.conversationId) {
+  if (!sessionId) {
+    renderSessionModelControls();
+    return state.modelPreference;
+  }
+  const preference = await fetchJson(
+    `/sessions/${encodeURIComponent(sessionId)}/model-preference`,
+  );
+  if (
+    preference.mode === "auto"
+    && state.currentSession?.provider
+    && state.currentSession?.model
+  ) {
+    const legacy = state.modelRegistry.models.find(
+      (item) => item.provider === state.currentSession.provider
+        && item.model === state.currentSession.model,
+    );
+    if (legacy) {
+      preference.mode = "manual";
+      preference.preferred_model_id = legacy.id;
+      preference.fallback_enabled = true;
+    }
+  }
+  state.modelPreference = preference;
+  renderSessionModelControls();
+  return preference;
+}
+
+async function saveModelPreference() {
+  const conversationId = await ensureSession();
+  const automatic = $("auto-model-toggle").checked;
+  const payload = automatic
+    ? {
+        mode: "auto",
+        routing_policy: $("session-model-select").value || "smart",
+        preferred_model_id: null,
+        fallback_enabled: true,
+      }
+    : {
+        mode: "manual",
+        routing_policy: state.modelPreference.routing_policy || "smart",
+        preferred_model_id: $("session-model-select").value || null,
+        fallback_enabled: $("model-fallback-toggle").checked,
+      };
+  if (!automatic && !payload.preferred_model_id) {
+    showToast("请先在模型管理中注册并启用一个模型", "warning");
+    throw new Error("manual mode requires a registered model");
+  }
+  state.modelPreference = await fetchJson(
+    `/sessions/${encodeURIComponent(conversationId)}/model-preference`,
+    { method: "PUT", body: JSON.stringify(payload) },
+  );
+  const selected = registeredModel(state.modelPreference.preferred_model_id);
+  if (state.currentSession) {
+    state.currentSession.provider = selected?.provider || null;
+    state.currentSession.model = selected?.model || null;
+  }
+  renderSessionModelControls();
+  showToast(automatic ? "已启用自动选模" : `首选模型已切换为 ${selected?.display_name || "手动模型"}`);
+}
+
+function renderProviderConnections() {
+  const grid = $("provider-connection-grid");
+  grid.innerHTML = MODEL_PROVIDERS.map(([provider, displayName]) => {
+    const connection = state.modelRegistry.connections.find((item) => item.provider === provider);
+    const status = connection?.status || "unavailable";
+    const configured = connection?.credential_configured === true;
+    return `
+      <article class="provider-card" data-provider="${provider}">
+        <div class="provider-card-heading">
+          <div><strong>${displayName}</strong><small>${provider}</small></div>
+          <span class="status-pill ${modelStatusClass(status)}"><span class="status-dot"></span>${escapeHtml(modelStatusLabel(status))}</span>
+        </div>
+        <label>API Key
+          <input data-provider-key type="password" autocomplete="new-password" placeholder="${configured ? "已安全保存；输入新值可替换" : "输入 API Key"}" />
+        </label>
+        <label class="check-field"><input data-provider-enabled type="checkbox" ${connection?.enabled !== false ? "checked" : ""} /> 启用连接</label>
+        <div class="button-row">
+          <button class="button secondary" type="button" data-provider-action="save">${configured ? "更新配置" : "保存配置"}</button>
+          <button class="button ghost" type="button" data-provider-action="test" ${connection ? "" : "disabled"}>测试连接</button>
+        </div>
+        <p>${configured ? "凭证已配置" : "尚未配置凭证"} · ${connection?.model_count || 0} 个模型</p>
+      </article>`;
+  }).join("");
+}
+
+async function handleProviderAction(button) {
+  const card = button.closest("[data-provider]");
+  const provider = card.dataset.provider;
+  const action = button.dataset.providerAction;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    if (action === "save") {
+      const apiKey = card.querySelector("[data-provider-key]").value.trim();
+      const displayName = MODEL_PROVIDERS.find(([id]) => id === provider)?.[1] || provider;
+      await fetchJson(`/model-registry/connections/${encodeURIComponent(provider)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          display_name: displayName,
+          ...(apiKey ? { api_key: apiKey } : {}),
+          enabled: card.querySelector("[data-provider-enabled]").checked,
+        }),
+      });
+      showToast(`${displayName} 配置已保存`);
+    } else {
+      const result = await fetchJson(
+        `/model-registry/connections/${encodeURIComponent(provider)}/test`,
+        { method: "POST" },
+      );
+      showToast(`${provider} 连接成功 · ${formatDuration(result.elapsed_ms)}`);
+    }
+    await loadModelRegistry();
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function registeredModelPayload() {
+  return {
+    provider: $("registered-model-provider-input").value,
+    model: $("registered-model-name-input").value.trim(),
+    display_name: $("registered-model-display-input").value.trim(),
+    context_window_tokens: numberValue("registered-model-context-input", 128000),
+    tool_calling: $("registered-model-tools-input").checked,
+    structured_output: $("registered-model-structured-input").checked,
+    input_cost_per_million: Number($("registered-model-input-cost-input").value || 0),
+    output_cost_per_million: Number($("registered-model-output-cost-input").value || 0),
+    quality_score: Number($("registered-model-quality-input").value || 0.5),
+    configured_latency_ms: numberValue("registered-model-latency-input", 1000),
+    enabled: $("registered-model-enabled-input").checked,
+    auto_eligible: $("registered-model-auto-input").checked,
+  };
+}
+
+function resetRegisteredModelForm() {
+  $("registered-model-id-input").value = "";
+  $("registered-model-name-input").value = "";
+  $("registered-model-display-input").value = "";
+  $("registered-model-context-input").value = "128000";
+  $("registered-model-quality-input").value = "0.7";
+  $("registered-model-latency-input").value = "1000";
+  $("registered-model-input-cost-input").value = "0";
+  $("registered-model-output-cost-input").value = "0";
+  $("registered-model-tools-input").checked = true;
+  $("registered-model-structured-input").checked = true;
+  $("registered-model-enabled-input").checked = true;
+  $("registered-model-auto-input").checked = true;
+  $("model-form-title").textContent = "添加模型";
+  $("save-registered-model-btn").textContent = "添加模型";
+}
+
+function editRegisteredModel(modelId) {
+  const model = registeredModel(modelId);
+  if (!model) return;
+  $("registered-model-id-input").value = model.id;
+  $("registered-model-provider-input").value = model.provider;
+  $("registered-model-name-input").value = model.model;
+  $("registered-model-display-input").value = model.display_name;
+  $("registered-model-context-input").value = model.context_window_tokens;
+  $("registered-model-quality-input").value = model.quality_score;
+  $("registered-model-latency-input").value = model.configured_latency_ms;
+  $("registered-model-input-cost-input").value = model.input_cost_per_million;
+  $("registered-model-output-cost-input").value = model.output_cost_per_million;
+  $("registered-model-tools-input").checked = model.capabilities?.tool_calling === true;
+  $("registered-model-structured-input").checked = model.capabilities?.structured_output === true;
+  $("registered-model-enabled-input").checked = model.enabled;
+  $("registered-model-auto-input").checked = model.auto_eligible;
+  $("model-form-title").textContent = "编辑模型";
+  $("save-registered-model-btn").textContent = "保存修改";
+  $("registered-model-name-input").focus();
+}
+
+async function saveRegisteredModel() {
+  const modelId = $("registered-model-id-input").value;
+  const payload = registeredModelPayload();
+  if (!payload.model || !payload.display_name) {
+    showToast("请填写模型 ID 和显示名称", "warning");
+    return;
+  }
+  const button = $("save-registered-model-btn");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    await fetchJson(
+      modelId ? `/model-registry/models/${encodeURIComponent(modelId)}` : "/model-registry/models",
+      { method: modelId ? "PUT" : "POST", body: JSON.stringify(payload) },
+    );
+    resetRegisteredModelForm();
+    await loadModelRegistry();
+    showToast(modelId ? "模型已更新" : "模型已注册");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
+}
+
+async function deleteRegisteredModel(modelId) {
+  const model = registeredModel(modelId);
+  if (!model || !window.confirm(`确认删除模型“${model.display_name}”？`)) return;
+  try {
+    await fetchJson(`/model-registry/models/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+    await loadModelRegistry();
+    showToast("模型已删除");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+function renderRegisteredModels() {
+  const list = $("registered-model-list");
+  const models = state.modelRegistry.models || [];
+  $("registered-model-count").textContent = String(models.length);
+  if (!models.length) {
+    list.innerHTML = '<div class="empty-state">保存 Provider 后，在左侧注册第一个模型。</div>';
+    return;
+  }
+  list.innerHTML = models.map((model) => {
+    const telemetry = model.telemetry || {};
+    const latency = telemetry.total_latency_p50_ms == null
+      ? `预估 ${formatDuration(model.configured_latency_ms)}`
+      : `P50 ${formatDuration(telemetry.total_latency_p50_ms)} · P95 ${formatDuration(telemetry.total_latency_p95_ms)}`;
+    return `
+      <article class="registered-model-card" data-model-id="${escapeHtml(model.id)}">
+        <div class="registered-model-heading">
+          <div><strong>${escapeHtml(model.display_name)}</strong><small>${escapeHtml(model.provider)} · ${escapeHtml(model.model)}</small></div>
+          <span class="status-pill ${modelStatusClass(model.status)}"><span class="status-dot"></span>${escapeHtml(modelStatusLabel(model.status))}</span>
+        </div>
+        <div class="model-stat-row"><span>${escapeHtml(latency)}</span><span>成功 ${telemetry.success_rate == null ? "—" : `${Math.round(telemetry.success_rate * 100)}%`}</span><span>${model.context_window_tokens.toLocaleString()} ctx</span></div>
+        <p>${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
+        <div class="button-row"><button class="button ghost" type="button" data-model-action="edit">编辑</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
+      </article>`;
+  }).join("");
+}
+
 async function ensureSession() {
-  const existing = $("conversation-id-input").value.trim();
-  if (existing) {
-    state.conversationId = existing;
-    updateContextSummary();
-    return existing;
+  if (state.currentSession?.archived_at) {
+    throw new Error("已归档会话必须恢复后才能继续");
+  }
+  if (state.currentSession?.id) {
+    return state.currentSession.id;
+  }
+  const requested = $("conversation-id-input").value.trim();
+  if (requested) {
+    const session = await loadSession(false, requested);
+    return session.id;
   }
   return createSession();
 }
@@ -730,13 +1324,22 @@ async function createSession() {
       method: "POST",
       body: JSON.stringify({ user_id: $("user-id-input").value.trim() || "demo_user" }),
     });
+    state.currentSession = body;
     state.conversationId = body.id;
     $("conversation-id-input").value = body.id;
     $("session-status").textContent = "会话已就绪";
     resetChatView();
+    applyConfigurationToInputs(body);
+    await loadModelPreference(body.id);
+    updateSessionUrl(body.id);
+    updateComposerAvailability();
     updateContextSummary();
     setRaw(body);
-    await listSessions(false);
+    await Promise.allSettled([
+      listSessions(false, { archived: false, query: "" }),
+      loadPreferences(),
+    ]);
+    switchView("chat");
     showToast("新会话已创建");
     return body.id;
   } catch (error) {
@@ -746,15 +1349,53 @@ async function createSession() {
   }
 }
 
-async function listSessions(showRaw = true) {
-  const body = await fetchJson("/sessions");
-  state.sessions = body.sessions || [];
-  await loadSessionTokenUsage();
+async function loadPreferences() {
+  state.preferences = await fetchJson("/users/me/preferences");
+  if (!state.currentSession) {
+    applyConfigurationToInputs(state.preferences, true);
+  }
+  return state.preferences;
+}
+
+async function listSessions(showRaw = true, options = {}) {
+  const append = options.append === true;
+  const archived = options.archived ?? state.sessionsArchived;
+  const query = options.query ?? state.sessionsQuery;
+  const params = new URLSearchParams({
+    archived: String(archived),
+    limit: "30",
+  });
+  if (query) {
+    params.set("q", query);
+  }
+  if (append && state.sessionsNextCursor) {
+    params.set("cursor", state.sessionsNextCursor);
+  }
+  const body = await fetchJson(`/sessions?${params}`);
+  state.sessionsArchived = archived;
+  state.sessionsQuery = query;
+  state.sessions = append
+    ? [...state.sessions, ...(body.sessions || [])]
+    : body.sessions || [];
+  state.sessionsNextCursor = body.next_cursor || null;
+  if (!archived && !query && !append) {
+    state.recentSessions = state.sessions.slice(0, 12);
+  }
+  $("session-search-input").value = query;
+  $("session-state-filter").value = archived ? "archived" : "active";
   renderSessions();
+  renderRecentSessions();
   renderOverview();
   if (showRaw) {
     setRaw(body);
   }
+  return body;
+}
+
+async function refreshRecentSessions() {
+  const body = await fetchJson("/sessions?archived=false&limit=12");
+  state.recentSessions = body.sessions || [];
+  renderRecentSessions();
   return body;
 }
 
@@ -774,49 +1415,198 @@ async function loadSessionTokenUsage(sessionIds = state.sessions.map((item) => i
 function renderSessions() {
   const list = $("sessions-list");
   $("sessions-count").textContent = String(state.sessions.length);
+  $("load-more-sessions-btn").hidden = !state.sessionsNextCursor;
   list.innerHTML = "";
   if (state.sessions.length === 0) {
     list.innerHTML = '<div class="empty-state">暂无会话，创建一个会话开始工作。</div>';
     return;
   }
   for (const session of state.sessions) {
-    const usage = state.sessionTokenUsage[session.id];
-    const item = document.createElement("button");
-    item.type = "button";
+    const item = document.createElement("article");
     item.className = `session-item ${session.id === state.conversationId ? "active" : ""}`;
     item.dataset.sessionId = session.id;
     item.innerHTML = `
-      <strong>${escapeHtml(session.id)}</strong>
-      <span>${escapeHtml(session.user_id)} · ${escapeHtml(formatDate(session.created_at))}</span>
-      <span class="session-token-line">${
-        usage
-          ? `累计 ${escapeHtml(formatTokenCount(usage.total_tokens))} · 上下文 ≈ ${escapeHtml(formatTokenCount(usage.context?.estimated_tokens || 0))}`
-          : "Token 用量加载中"
-      }</span>
+      <button class="session-open" type="button" data-session-action="open">
+        <strong>${escapeHtml(session.title || "新会话")}</strong>
+        <span>${escapeHtml(formatDate(session.updated_at))} · ${escapeHtml(session.message_count)} 条消息</span>
+        <span class="session-message-preview">${escapeHtml(session.last_message_preview || "暂无消息")}</span>
+      </button>
+      <div class="session-actions">
+        <button class="text-button" type="button" data-session-action="rename">重命名</button>
+        <button class="text-button" type="button" data-session-action="${session.archived_at ? "restore" : "archive"}">${session.archived_at ? "恢复" : "归档"}</button>
+      </div>
     `;
     list.appendChild(item);
   }
 }
 
-async function loadSession(showRaw = true) {
-  const conversationId = await ensureSession();
+function recentSessionGroup(value) {
+  const updated = new Date(value);
+  const today = new Date();
+  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startUpdated = new Date(updated.getFullYear(), updated.getMonth(), updated.getDate());
+  const days = Math.floor((startToday - startUpdated) / 86400000);
+  if (days <= 0) {
+    return "今天";
+  }
+  return days < 7 ? "过去 7 天" : "更早";
+}
+
+function renderRecentSessions() {
+  const list = $("recent-sessions-list");
+  list.innerHTML = "";
+  if (!state.recentSessions.length) {
+    list.innerHTML = '<div class="empty-state compact">暂无会话</div>';
+    return;
+  }
+  const groups = new Map();
+  for (const session of state.recentSessions) {
+    const label = recentSessionGroup(session.updated_at);
+    groups.set(label, [...(groups.get(label) || []), session]);
+  }
+  for (const [label, sessions] of groups) {
+    const section = document.createElement("section");
+    section.className = "recent-session-group";
+    section.innerHTML = `<h3>${escapeHtml(label)}</h3>`;
+    for (const session of sessions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `recent-session-item ${session.id === state.conversationId ? "active" : ""}`;
+      button.dataset.sessionId = session.id;
+      button.innerHTML = `
+        <strong>${escapeHtml(session.title || "新会话")}</strong>
+        <small>${escapeHtml(formatDate(session.updated_at))}</small>
+      `;
+      section.appendChild(button);
+    }
+    list.appendChild(section);
+  }
+}
+
+function updateSessionUrl(sessionId) {
+  const url = new URL(window.location.href);
+  if (sessionId) {
+    url.searchParams.set("session", sessionId);
+  } else {
+    url.searchParams.delete("session");
+  }
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function replaceSessionInLists(session) {
+  state.sessions = state.sessions.map((item) => item.id === session.id ? session : item);
+  state.recentSessions = state.recentSessions.map((item) => item.id === session.id ? session : item);
+  renderSessions();
+  renderRecentSessions();
+}
+
+function canSwitchSession() {
+  if (!state.chatController) {
+    return true;
+  }
+  showToast("请先完成或停止当前流式回答，再切换会话", "warning");
+  return false;
+}
+
+async function loadSession(showRaw = true, requestedSessionId = null, options = {}) {
+  if (!canSwitchSession()) {
+    return null;
+  }
+  const conversationId = requestedSessionId
+    || $("conversation-id-input").value.trim()
+    || state.conversationId;
+  if (!conversationId) {
+    throw new Error("请输入要加载的会话 ID");
+  }
   const [session, summary, messages, usage] = await Promise.all([
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/token-usage`),
   ]);
+  if (options.requireActive && (session.archived_at || session.message_count === 0)) {
+    throw new Error(session.archived_at ? "会话已归档" : "空会话不参与启动恢复");
+  }
+  if (!session.archived_at && session.message_count > 0) {
+    state.preferences = await fetchJson("/users/me/preferences", {
+      method: "PATCH",
+      body: JSON.stringify({ last_active_session_id: session.id }),
+    });
+  }
+  state.currentSession = session;
+  state.conversationId = session.id;
+  $("conversation-id-input").value = session.id;
   state.sessionTokenUsage[conversationId] = usage;
-  $("session-status").textContent = "会话已加载";
+  $("session-status").textContent = session.archived_at ? "正在查看已归档会话" : "会话已加载";
   renderSessionSummary(summary, usage);
   renderMessages(messages.messages || []);
   renderChatHistory(messages.messages || []);
+  applyConfigurationToInputs(session);
+  await loadModelPreference(session.id);
+  updateSessionUrl(session.id);
+  updateComposerAvailability();
+  replaceSessionInLists(session);
   renderSessions();
   updateContextSummary();
+  if (options.navigate !== false) {
+    switchView("chat");
+  }
   if (showRaw) {
     setRaw({ session, summary, messages, usage });
   }
   return session;
+}
+
+async function updateSessionMetadata(sessionId, payload) {
+  const session = await fetchJson(`/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  if (state.currentSession?.id === session.id) {
+    state.currentSession = session;
+    applyConfigurationToInputs(session);
+    updateComposerAvailability();
+  }
+  replaceSessionInLists(session);
+  await Promise.allSettled([
+    listSessions(false),
+    refreshRecentSessions(),
+  ]);
+  return session;
+}
+
+async function refreshCurrentSessionMetadata() {
+  if (!state.currentSession?.id) {
+    return null;
+  }
+  const session = await fetchJson(
+    `/sessions/${encodeURIComponent(state.currentSession.id)}`,
+  );
+  state.currentSession = session;
+  replaceSessionInLists(session);
+  updateContextSummary();
+  return session;
+}
+
+async function handleSessionAction(sessionId, action) {
+  if (action === "open") {
+    await loadSession(true, sessionId);
+    return;
+  }
+  if (action === "rename") {
+    const existing = [...state.sessions, ...state.recentSessions]
+      .find((item) => item.id === sessionId);
+    const title = window.prompt("输入新的会话标题", existing?.title || "");
+    if (title === null || !title.trim()) {
+      return;
+    }
+    await updateSessionMetadata(sessionId, { title: title.trim() });
+    showToast("会话已重命名");
+    return;
+  }
+  const archived = action === "archive";
+  await updateSessionMetadata(sessionId, { archived });
+  showToast(archived ? "会话已归档" : "会话已恢复");
 }
 
 async function loadSessionSummary() {
@@ -995,6 +1785,10 @@ async function addMessage() {
     renderMessages(body.messages || []);
     setRaw(body);
     await loadSessionSummary();
+    await Promise.allSettled([
+      refreshCurrentSessionMetadata(),
+      refreshRecentSessions(),
+    ]);
     showToast("测试消息已添加");
   } catch (error) {
     showToast(humanizeError(error), "error");
@@ -1179,6 +1973,7 @@ async function runAgentFromComposer() {
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
+    updateComposerAvailability();
   }
 }
 
@@ -1224,7 +2019,9 @@ async function streamChat() {
     const payload = {
       conversation_id: conversationId,
       message,
-      workspace_id: $("workspace-id-input").value.trim() || "workspace_main",
+      ...($("workspace-id-input").value.trim()
+        ? { workspace_id: $("workspace-id-input").value.trim() }
+        : {}),
       ...optionalModelFields(),
     };
     const events = [];
@@ -1341,6 +2138,10 @@ async function streamChat() {
       assistantContent.innerHTML = "<p>模型没有返回文本内容。</p>";
     }
     await refreshMessages(false, false);
+    await Promise.allSettled([
+      refreshCurrentSessionMetadata(),
+      refreshRecentSessions(),
+    ]);
   } catch (error) {
     if (error.name === "AbortError") {
       if (assistantContent) {
@@ -1388,7 +2189,10 @@ async function streamChat() {
     stopButton.classList.add("hidden");
     $("chat-output").removeAttribute("aria-busy");
     await refreshTokenUsageData();
-    input.focus();
+    updateComposerAvailability();
+    if (!input.disabled) {
+      input.focus();
+    }
   }
 }
 
@@ -1516,7 +2320,10 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     const payload = {
       conversation_id: conversationId,
       message,
-      workspace_id: $("workspace-id-input").value.trim() || "workspace_main",
+      ...($("workspace-id-input").value.trim()
+        ? { workspace_id: $("workspace-id-input").value.trim() }
+        : {}),
+      ...optionalModelFields(),
       focus_files: csvValues($("focus-files-input").value),
     };
     const body = await fetchJson("/agent/runs", {
@@ -1532,6 +2339,10 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
       onProgress,
       preserveChat: Boolean(onProgress),
     });
+    await Promise.allSettled([
+      refreshCurrentSessionMetadata(),
+      refreshRecentSessions(),
+    ]);
     return finalBody || body;
   } catch (error) {
     setAgentStatus("failed");
@@ -1543,6 +2354,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     button.disabled = false;
     button.removeAttribute("aria-busy");
     $("agent-answer").removeAttribute("aria-busy");
+    updateComposerAvailability();
   }
 }
 
@@ -2714,14 +3526,13 @@ function formatInputCountMethod(method) {
 
 async function refreshTokenUsageData() {
   const tasks = [];
-  if (state.sessions.length) {
-    tasks.push(loadSessionTokenUsage());
+  if (state.conversationId) {
+    tasks.push(loadSessionTokenUsage([state.conversationId]));
   }
   if (state.workspaces.length) {
     tasks.push(loadWorkspaceTokenUsage());
   }
   await Promise.allSettled(tasks);
-  renderSessions();
   renderWorkspaceTokenUsage();
 }
 
@@ -2783,8 +3594,17 @@ function bindEvents() {
   $("trace-tab").addEventListener("click", () => selectInspectorTab("trace"));
   $("raw-tab").addEventListener("click", () => selectInspectorTab("raw"));
 
-  $("create-session-btn").addEventListener("click", createSession);
-  $("sessions-create-btn").addEventListener("click", createSession);
+  const createNewSession = () => {
+    if (canSwitchSession()) {
+      createSession().catch(() => {});
+    }
+  };
+  $("create-session-btn").addEventListener("click", createNewSession);
+  $("sessions-create-btn").addEventListener("click", createNewSession);
+  $("view-all-sessions-btn").addEventListener("click", () => {
+    switchView("sessions");
+    listSessions(false).catch((error) => showToast(humanizeError(error), "error"));
+  });
   $("load-session-btn").addEventListener("click", async () => {
     try {
       await loadSession();
@@ -2801,6 +3621,24 @@ function bindEvents() {
       showToast(humanizeError(error), "error");
     }
   });
+  $("session-filter-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await listSessions(true, {
+        archived: $("session-state-filter").value === "archived",
+        query: $("session-search-input").value.trim(),
+      });
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
+  $("load-more-sessions-btn").addEventListener("click", async () => {
+    try {
+      await listSessions(true, { append: true });
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
   $("summary-session-btn").addEventListener("click", loadSessionSummary);
   $("refresh-messages-btn").addEventListener("click", async () => {
     try {
@@ -2812,13 +3650,35 @@ function bindEvents() {
   $("add-message-btn").addEventListener("click", addMessage);
   $("sessions-list").addEventListener("click", async (event) => {
     const row = event.target.closest("[data-session-id]");
-    if (!row) {
+    const action = event.target.closest("[data-session-action]")?.dataset.sessionAction;
+    if (!row || !action || !canSwitchSession()) {
       return;
     }
-    state.conversationId = row.dataset.sessionId;
-    $("conversation-id-input").value = state.conversationId;
     try {
-      await loadSession();
+      await handleSessionAction(row.dataset.sessionId, action);
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
+  $("recent-sessions-list").addEventListener("click", async (event) => {
+    const row = event.target.closest("[data-session-id]");
+    if (!row || !canSwitchSession()) {
+      return;
+    }
+    try {
+      await loadSession(true, row.dataset.sessionId);
+    } catch (error) {
+      showToast(humanizeError(error), "error");
+    }
+  });
+  $("restore-current-session-btn").addEventListener("click", async () => {
+    if (!state.currentSession) {
+      return;
+    }
+    try {
+      await updateSessionMetadata(state.currentSession.id, { archived: false });
+      await loadSession(true, state.currentSession.id);
+      showToast("会话已恢复，可以继续对话");
     } catch (error) {
       showToast(humanizeError(error), "error");
     }
@@ -2827,7 +3687,55 @@ function bindEvents() {
   $("send-chat-btn").addEventListener("click", submitComposerMessage);
   $("stop-chat-btn").addEventListener("click", stopChat);
   $("composer-mode-input").addEventListener("change", (event) => {
-    updateComposerMode(event.target.value);
+    persistComposerMode(event.target.value);
+  });
+  $("auto-model-toggle").addEventListener("change", async (event) => {
+    state.modelPreference.mode = event.target.checked ? "auto" : "manual";
+    renderSessionModelControls();
+    try {
+      await saveModelPreference();
+    } catch {
+      await loadModelPreference().catch(() => {});
+    }
+  });
+  $("session-model-select").addEventListener("change", () => {
+    saveModelPreference().catch(() => loadModelPreference().catch(() => {}));
+  });
+  $("model-picker-trigger").addEventListener("click", toggleModelPicker);
+  $("model-picker-trigger").addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if ($("model-picker-menu").hidden) toggleModelPicker();
+      $("model-picker-menu").querySelector('[role="option"]')?.focus();
+    }
+  });
+  $("model-picker-menu").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-model-option]");
+    if (!option) return;
+    state.modelPreference.preferred_model_id = option.dataset.modelOption;
+    $("session-model-select").value = option.dataset.modelOption;
+    renderSessionModelControls();
+    saveModelPreference().catch(() => loadModelPreference().catch(() => {}));
+  });
+  $("model-picker-menu").addEventListener("keydown", (event) => {
+    const options = [...$("model-picker-menu").querySelectorAll('[role="option"]')];
+    const current = options.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModelPicker({ restoreFocus: true });
+    } else if (event.key === "ArrowDown" && options.length) {
+      event.preventDefault();
+      options[(current + 1) % options.length].focus();
+    } else if (event.key === "ArrowUp" && options.length) {
+      event.preventDefault();
+      options[(current - 1 + options.length) % options.length].focus();
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".model-choice-control")) closeModelPicker();
+  });
+  $("model-fallback-toggle").addEventListener("change", () => {
+    saveModelPreference().catch(() => loadModelPreference().catch(() => {}));
   });
   $("chat-message-input").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -2928,6 +3836,25 @@ function bindEvents() {
     }
   });
 
+  $("refresh-model-registry-btn").addEventListener("click", () => {
+    loadModelRegistry(true)
+      .then(() => showToast("模型状态已刷新"))
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("provider-connection-grid").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-provider-action]");
+    if (button) handleProviderAction(button);
+  });
+  $("reset-model-form-btn").addEventListener("click", resetRegisteredModelForm);
+  $("save-registered-model-btn").addEventListener("click", saveRegisteredModel);
+  $("registered-model-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-model-id]");
+    const action = event.target.closest("[data-model-action]")?.dataset.modelAction;
+    if (!card || !action) return;
+    if (action === "edit") editRegisteredModel(card.dataset.modelId);
+    if (action === "delete") deleteRegisteredModel(card.dataset.modelId);
+  });
+
   $("refresh-overview-btn").addEventListener("click", async () => {
     await Promise.allSettled([
       checkHealth(),
@@ -2947,7 +3874,6 @@ function bindEvents() {
   });
 
   $("conversation-id-input").addEventListener("input", (event) => {
-    state.conversationId = event.target.value.trim();
     updateContextSummary();
   });
   ["user-id-input", "provider-input", "model-input", "thinking-level-input", "workspace-id-input", "workspace-root-input"].forEach((id) => {
@@ -2963,9 +3889,46 @@ function bindEvents() {
   });
 }
 
+async function restoreInitialSession() {
+  const requestedSessionId = new URL(window.location.href).searchParams.get("session");
+  if (requestedSessionId) {
+    try {
+      await loadSession(false, requestedSessionId);
+      return;
+    } catch (error) {
+      showToast(`URL 中的会话无法加载：${humanizeError(error)}`, "warning");
+    }
+  }
+
+  const candidates = [
+    state.preferences?.last_active_session_id,
+    state.recentSessions[0]?.id,
+  ].filter(Boolean);
+  for (const sessionId of [...new Set(candidates)]) {
+    try {
+      await loadSession(false, sessionId, { requireActive: true });
+      return;
+    } catch {
+      // Continue through the deterministic recovery order.
+    }
+  }
+
+  state.currentSession = null;
+  state.conversationId = "";
+  $("conversation-id-input").value = "";
+  updateSessionUrl("");
+  if (state.preferences) {
+    applyConfigurationToInputs(state.preferences, true);
+  }
+  resetChatView();
+  updateComposerAvailability();
+  updateContextSummary();
+}
+
 async function init() {
-  bindEvents();
   const preferences = loadUiPreferences();
+  $("user-id-input").value = preferences.userId || "demo_user";
+  bindEvents();
   const requestedView = location.hash.replace("#", "");
   const preferredView = document.querySelector(`[data-view-panel="${preferences.view}"]`)
     ? preferences.view
@@ -2973,7 +3936,7 @@ async function init() {
   const initialView = document.querySelector(`[data-view-panel="${requestedView}"]`)
     ? requestedView
     : preferredView;
-  state.composerMode = preferences.composerMode === "agent" ? "agent" : "chat";
+  state.composerMode = "chat";
   state.rerankEnabled = preferences.rerankEnabled === true;
   renderRerankControl();
   updateComposerMode(state.composerMode);
@@ -2983,15 +3946,19 @@ async function init() {
   setTrace([]);
   renderRequestLog();
   renderSessions();
+  renderRecentSessions();
   renderOverview();
   updateContextSummary();
   await Promise.allSettled([
     checkHealth(),
     listSessions(false),
+    loadPreferences(),
+    loadModelRegistry(),
     listWorkspaces(),
     listKnowledgeBases(),
     loadRagCapabilities(),
   ]);
+  await restoreInitialSession();
 }
 
 init();

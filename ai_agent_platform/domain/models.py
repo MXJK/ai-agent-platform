@@ -10,6 +10,29 @@ class Session:
     id: str
     user_id: str
     created_at: datetime
+    title: str = "新会话"
+    title_source: str = "default"
+    updated_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None
+    workspace_id: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    thinking_level: Optional[str] = None
+    composer_mode: str = "chat"
+    message_count: int = 0
+    last_message_preview: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class UserPreferences:
+    user_id: str
+    default_provider: Optional[str] = None
+    default_model: Optional[str] = None
+    default_thinking_level: Optional[str] = None
+    default_workspace_id: Optional[str] = None
+    default_composer_mode: str = "chat"
+    last_active_session_id: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)

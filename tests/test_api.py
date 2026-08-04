@@ -307,6 +307,16 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="open-workspace-picker-btn"', response.text)
         self.assertIn('id="workspace-picker-dialog"', response.text)
         self.assertIn('id="workspace-token-list"', response.text)
+        self.assertIn('id="recent-sessions-list"', response.text)
+        self.assertIn('class="inspector-recent"', response.text)
+        self.assertIn('aria-label="会话与运行详情"', response.text)
+        self.assertLess(
+            response.text.index('id="inspector-panel"'),
+            response.text.index('id="recent-sessions-list"'),
+        )
+        self.assertNotIn('class="recent-sessions"', response.text)
+        self.assertIn('id="session-search-input"', response.text)
+        self.assertIn('id="archived-session-notice"', response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
         self.assertIn("最终结果数", response.text)
@@ -318,6 +328,11 @@ class ApiTests(unittest.TestCase):
             2,
         )
         self.assertIn("new AbortController()", script_response.text)
+        self.assertIn('fetchJson("/users/me/preferences"', script_response.text)
+        self.assertIn("restoreInitialSession", script_response.text)
+        self.assertIn("空会话不参与启动恢复", script_response.text)
+        self.assertIn("session.message_count > 0", script_response.text)
+        self.assertIn("隐藏会话与运行详情", script_response.text)
         self.assertIn("setRagRequestBusy", script_response.text)
         self.assertIn("isCurrentRagRequest", script_response.text)
         self.assertIn('signal: request.controller.signal', script_response.text)
@@ -328,6 +343,16 @@ class ApiTests(unittest.TestCase):
         self.assertIn("thinking_level", script_response.text)
         self.assertIn("submitComposerMessage", script_response.text)
         self.assertIn("runAgentFromComposer", script_response.text)
+        self.assertIn(".inspector-recent", stylesheet_response.text)
+        self.assertIn("height: clamp(148px, 32vh, 260px)", stylesheet_response.text)
+        self.assertIn(
+            "grid-template-rows: auto auto minmax(0, 1fr) auto",
+            stylesheet_response.text,
+        )
+        self.assertIn(
+            "height: calc(100vh - var(--topbar-height) - 64px",
+            stylesheet_response.text,
+        )
         self.assertNotIn('switchView("agent");', script_response.text)
         self.assertIn("onSubmitted", script_response.text)
         self.assertIn("renderExecutionProcess", script_response.text)
@@ -1001,6 +1026,144 @@ class ApiTests(unittest.TestCase):
             response = client.get("/api/v1/agent/runs/run_missing")
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.json()["detail"], "agent run not found")
+
+    def test_persistent_session_preferences_listing_and_archive_lifecycle(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            with self._client(root) as client:
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                ).raise_for_status()
+                preferences = client.get(
+                    "/api/v1/users/me/preferences",
+                    headers={"X-User-ID": "session_user"},
+                ).json()
+                self.assertEqual(preferences["default_provider"], "fake")
+                self.assertEqual(preferences["default_model"], "demo-stream-model")
+
+                first = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "session_user"},
+                ).json()
+                client.post(
+                    f"/api/v1/sessions/{first['id']}/messages",
+                    json={"role": "user", "content": "  Alpha   durable\nconversation  "},
+                ).raise_for_status()
+                second = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "session_user"},
+                ).json()
+
+                listed = client.get(
+                    "/api/v1/sessions",
+                    params={"limit": 30},
+                    headers={"X-User-ID": "session_user"},
+                ).json()
+                self.assertEqual(
+                    [item["id"] for item in listed["sessions"]],
+                    [first["id"]],
+                )
+                self.assertIsNone(listed["next_cursor"])
+                self.assertEqual(
+                    client.get(
+                        "/api/v1/users/me/preferences",
+                        headers={"X-User-ID": "session_user"},
+                    ).json()["last_active_session_id"],
+                    first["id"],
+                )
+                empty_activation = client.patch(
+                    "/api/v1/users/me/preferences",
+                    json={"last_active_session_id": second["id"]},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertEqual(empty_activation.status_code, 409)
+                client.post(
+                    f"/api/v1/sessions/{second['id']}/messages",
+                    json={"role": "user", "content": "Beta conversation"},
+                    headers={"X-User-ID": "session_user"},
+                ).raise_for_status()
+                paged = client.get(
+                    "/api/v1/sessions",
+                    params={"limit": 1},
+                    headers={"X-User-ID": "session_user"},
+                ).json()
+                self.assertEqual(paged["sessions"][0]["id"], second["id"])
+                self.assertIsNotNone(paged["next_cursor"])
+                searched = client.get(
+                    "/api/v1/sessions",
+                    params={"q": "DURABLE"},
+                    headers={"X-User-ID": "session_user"},
+                ).json()["sessions"]
+                self.assertEqual([item["id"] for item in searched], [first["id"]])
+                self.assertEqual(searched[0]["title"], "Alpha durable conversation")
+                self.assertEqual(searched[0]["message_count"], 1)
+                self.assertEqual(
+                    searched[0]["last_message_preview"],
+                    "Alpha durable conversation",
+                )
+
+                configured = client.patch(
+                    f"/api/v1/sessions/{first['id']}",
+                    json={
+                        "configuration": {
+                            "provider": "fake",
+                            "model": "demo-stream-model",
+                            "thinking_level": "medium",
+                            "workspace_id": "project",
+                            "composer_mode": "agent",
+                        },
+                        "save_configuration_as_default": True,
+                    },
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertEqual(configured.status_code, 200)
+                saved_preferences = client.get(
+                    "/api/v1/users/me/preferences",
+                    headers={"X-User-ID": "session_user"},
+                ).json()
+                self.assertEqual(saved_preferences["default_workspace_id"], "project")
+                self.assertEqual(saved_preferences["default_composer_mode"], "agent")
+
+                archived = client.patch(
+                    f"/api/v1/sessions/{first['id']}",
+                    json={"archived": True},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertIsNotNone(archived.json()["archived_at"])
+                blocked_message = client.post(
+                    f"/api/v1/sessions/{first['id']}/messages",
+                    json={"role": "user", "content": "blocked"},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertEqual(blocked_message.status_code, 409)
+                blocked_chat = client.post(
+                    "/api/v1/chat/stream",
+                    json={"conversation_id": first["id"], "message": "blocked"},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertEqual(blocked_chat.status_code, 409)
+                archived_list = client.get(
+                    "/api/v1/sessions",
+                    params={"archived": True},
+                    headers={"X-User-ID": "session_user"},
+                ).json()["sessions"]
+                self.assertEqual([item["id"] for item in archived_list], [first["id"]])
+
+                restored = client.patch(
+                    f"/api/v1/sessions/{first['id']}",
+                    json={"archived": False},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertIsNone(restored.json()["archived_at"])
+                continued = client.post(
+                    f"/api/v1/sessions/{first['id']}/messages",
+                    json={"role": "user", "content": "continued"},
+                    headers={"X-User-ID": "session_user"},
+                )
+                self.assertEqual(continued.status_code, 201)
 
     def test_google_usage_metadata_is_normalized(self) -> None:
         class UsageMetadata:

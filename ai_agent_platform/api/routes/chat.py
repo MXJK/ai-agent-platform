@@ -24,7 +24,7 @@ from ai_agent_platform.integrations import (
     LLMRequestPlan,
     LLMStreamEvent,
 )
-from ai_agent_platform.repositories import SessionNotFoundError
+from ai_agent_platform.repositories import SessionArchivedError, SessionNotFoundError
 from ai_agent_platform.schemas import ChatStreamRequest
 from ai_agent_platform.services import SessionService
 from ai_agent_platform.project_memory import (
@@ -34,6 +34,11 @@ from ai_agent_platform.project_memory import (
 )
 from ai_agent_platform.services import WorkspaceNotFoundError
 from ai_agent_platform.usage_ledger import model_usage_scope
+from ai_agent_platform.model_registry import (
+    ModelRegistryService,
+    ModelSelection,
+    model_selection_scope,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,7 @@ def create_chat_router(
     metrics: MetricsRegistry,
     project_memory_service: ProjectMemoryService | None = None,
     task_queue: TaskQueue | None = None,
+    model_registry: ModelRegistryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -54,6 +60,8 @@ def create_chat_router(
         request: ChatStreamRequest,
         http_request: Request,
     ) -> StreamingResponse:
+        requested_provider = request.provider
+        requested_model = request.model
         if len(request.message) > settings.llm_max_input_chars:
             raise HTTPException(
                 status_code=413,
@@ -70,14 +78,53 @@ def create_chat_router(
         )
         if settings.auth_mode != "disabled" and actor_user_id != session.user_id:
             raise HTTPException(status_code=403, detail="conversation access denied")
+        try:
+            execution_config = session_service.resolve_execution_config(
+                session_id=request.conversation_id,
+                provider=request.provider,
+                model=request.model,
+                thinking_level=request.thinking_level,
+                workspace_id=request.workspace_id,
+            )
+        except SessionArchivedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="archived conversation must be restored before continuing",
+            ) from exc
+        request = request.model_copy(update=execution_config)
         request_id = f"chat_{uuid4().hex[:12]}"
+        selection = (
+            model_registry.selection_for_session(request.conversation_id)
+            if model_registry is not None
+            else None
+        )
+        if model_registry is not None and (
+            requested_provider
+            or requested_model
+            or (
+                selection is not None
+                and selection.mode != "manual"
+                and (request.provider or request.model)
+            )
+        ):
+            selection = ModelSelection(
+                mode="manual",
+                routing_policy=request.routing_policy
+                or (selection.routing_policy if selection else "smart"),
+                preferred_provider=request.provider or settings.llm_provider,
+                preferred_model=request.model or settings.llm_model,
+                thinking_level=request.thinking_level,
+                fallback_enabled=True,
+            )
+        if model_registry is not None:
+            request = request.model_copy(update={"provider": None, "model": None})
         try:
             with model_usage_scope(
                 session_id=request.conversation_id,
                 workspace_id=request.workspace_id,
                 operation="chat",
                 resource_id=request_id,
-            ):
+            ), model_selection_scope(selection):
                 retrieved_memories: list[RetrievedMemory] = []
                 if request.workspace_id and project_memory_service is not None:
                     retrieved_memories = project_memory_service.retrieve(
@@ -181,7 +228,11 @@ def chat_stream_events(
         if request_plan is not None
         else request.model or settings.llm_model
     )
-    routing_policy = request.routing_policy or settings.llm_routing_policy
+    routing_policy = (
+        request_plan.route_trace.policy
+        if request_plan is not None and request_plan.route_trace is not None
+        else request.routing_policy or settings.llm_routing_policy
+    )
     route_trace: dict[str, object] | None = (
         request_plan.route_trace.to_dict()
         if request_plan is not None and request_plan.route_trace is not None

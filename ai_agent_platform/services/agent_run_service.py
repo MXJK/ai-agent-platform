@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from time import perf_counter
 from typing import Optional
 
@@ -17,6 +18,11 @@ from ai_agent_platform.core import (
     TaskQueue,
     TaskQueueError,
     log_context,
+)
+from ai_agent_platform.model_registry import (
+    ModelRegistryService,
+    ModelSelection,
+    model_selection_scope,
 )
 from ai_agent_platform.services.session_service import SessionService
 from ai_agent_platform.services.workspace_service import WorkspaceService
@@ -47,6 +53,7 @@ class AgentRunService:
         max_context_messages: int = 12,
         llm_provider: str = "agent",
         llm_model: str = "aggregated",
+        model_registry: ModelRegistryService | None = None,
     ) -> None:
         self._runtime = runtime
         self._session_service = session_service
@@ -61,16 +68,72 @@ class AgentRunService:
         self._max_context_messages = max_context_messages
         self._llm_provider = llm_provider
         self._llm_model = llm_model
+        self._model_registry = model_registry
+        self._run_model_selections: dict[str, ModelSelection] = {}
 
     def submit_run(
         self,
         *,
         conversation_id: str,
         message: str,
-        workspace_id: str,
+        workspace_id: str | None,
         focus_files: Optional[list[str]] = None,
         actor_user_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        routing_policy: str | None = None,
     ) -> AgentRunRecord:
+        resolve_execution_config = getattr(
+            self._session_service,
+            "resolve_execution_config",
+            None,
+        )
+        execution_config = (
+            resolve_execution_config(
+                session_id=conversation_id,
+                provider=provider,
+                model=model,
+                thinking_level=thinking_level,
+                workspace_id=workspace_id,
+            )
+            if callable(resolve_execution_config)
+            else {
+                "provider": provider,
+                "model": model,
+                "thinking_level": thinking_level,
+                "workspace_id": workspace_id,
+            }
+        )
+        workspace_id = execution_config["workspace_id"]
+        if not workspace_id:
+            raise ValueError("workspace_id is required for Agent runs")
+        registry_selection = (
+            self._model_registry.selection_for_session(conversation_id)
+            if self._model_registry is not None
+            and provider is None
+            and model is None
+            else None
+        )
+        registry_preference = registry_selection is not None and (
+            registry_selection.mode == "manual"
+            or (
+                execution_config["provider"] is None
+                and execution_config["model"] is None
+            )
+        )
+        if registry_preference:
+            selection = replace(
+                registry_selection,
+                thinking_level=execution_config["thinking_level"],
+            )
+        else:
+            selection = self._model_selection(
+                provider=execution_config["provider"],
+                model=execution_config["model"],
+                thinking_level=execution_config["thinking_level"],
+                routing_policy=routing_policy,
+            )
         if actor_user_id is not None and self._project_memory_service is not None:
             self._project_memory_service.authorize(
                 workspace_id=workspace_id,
@@ -122,6 +185,13 @@ class AgentRunService:
             workspace_id=workspace_id,
             workspace_root=workspace_root,
         )
+        if self._model_registry is not None:
+            selection = self._model_registry.snapshot_run_selection(
+                record.run_id,
+                conversation_id,
+                selection,
+            )
+        self._run_model_selections[record.run_id] = selection
         try:
             self._task_queue.submit(
                 "agent_run",
@@ -133,6 +203,7 @@ class AgentRunService:
                 workspace_id=workspace_id,
                 focus_files=focus_files or [],
                 actor_user_id=resolved_actor,
+                model_selection=selection.__dict__,
             )
         except TaskQueueError as exc:
             self._metrics.increment("agent_runs_rejected_total")
@@ -153,6 +224,28 @@ class AgentRunService:
         self._assert_actor(record, actor_user_id)
         if record.status != "waiting_approval":
             raise AgentRunInvalidStateError(run_id, record.status)
+        resolve_execution_config = getattr(
+            self._session_service,
+            "resolve_execution_config",
+            None,
+        )
+        if callable(resolve_execution_config):
+            resolve_execution_config(session_id=record.conversation_id)
+        if self._model_registry is not None:
+            selection = self._model_registry.selection_for_run(
+                run_id,
+                record.conversation_id,
+            )
+        else:
+            selection = self._run_model_selections.get(
+                run_id,
+                self._model_selection(
+                    provider=None,
+                    model=None,
+                    thinking_level=None,
+                    routing_policy=None,
+                ),
+            )
         try:
             self._task_queue.submit(
                 "agent_resume",
@@ -160,6 +253,7 @@ class AgentRunService:
                 run_id=run_id,
                 approved=approved,
                 feedback=feedback,
+                model_selection=selection.__dict__,
             )
         except TaskQueueError:
             self._metrics.increment("agent_run_resumes_rejected_total")
@@ -216,6 +310,7 @@ class AgentRunService:
         workspace_id: str,
         focus_files: list[str],
         actor_user_id: str = "demo_user",
+        model_selection: dict | None = None,
         broker_redelivered: bool = False,
     ) -> None:
         started_at = perf_counter()
@@ -246,22 +341,25 @@ class AgentRunService:
         ):
             logger.info("agent run started")
             try:
-                with model_usage_scope(
-                    session_id=conversation_id,
-                    workspace_id=record.workspace_id,
-                    operation="agent",
-                    resource_id=run_id,
+                with model_selection_scope(
+                    ModelSelection(**model_selection) if model_selection else None
                 ):
-                    result = self._runtime.run(
-                        run_id=run_id,
-                        conversation_id=conversation_id,
-                        user_input=message,
-                        history=history,
+                    with model_usage_scope(
+                        session_id=conversation_id,
                         workspace_id=record.workspace_id,
-                        workspace_root=record.workspace_root,
-                        focus_files=focus_files,
-                        actor_user_id=actor_user_id,
-                    )
+                        operation="agent",
+                        resource_id=run_id,
+                    ):
+                        result = self._runtime.run(
+                            run_id=run_id,
+                            conversation_id=conversation_id,
+                            user_input=message,
+                            history=history,
+                            workspace_id=record.workspace_id,
+                            workspace_root=record.workspace_root,
+                            focus_files=focus_files,
+                            actor_user_id=actor_user_id,
+                        )
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -286,6 +384,7 @@ class AgentRunService:
         run_id: str,
         approved: bool,
         feedback: Optional[str],
+        model_selection: dict | None = None,
         broker_redelivered: bool = False,
     ) -> None:
         started_at = perf_counter()
@@ -316,17 +415,20 @@ class AgentRunService:
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
-                with model_usage_scope(
-                    session_id=record.conversation_id,
-                    workspace_id=record.workspace_id,
-                    operation="agent",
-                    resource_id=run_id,
+                with model_selection_scope(
+                    ModelSelection(**model_selection) if model_selection else None
                 ):
-                    result = self._runtime.resume(
-                        run_id=run_id,
-                        approved=approved,
-                        feedback=feedback,
-                    )
+                    with model_usage_scope(
+                        session_id=record.conversation_id,
+                        workspace_id=record.workspace_id,
+                        operation="agent",
+                        resource_id=run_id,
+                    ):
+                        result = self._runtime.resume(
+                            run_id=run_id,
+                            approved=approved,
+                            feedback=feedback,
+                        )
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -349,6 +451,29 @@ class AgentRunService:
         self._metrics.increment("agent_run_executions_total")
         self._metrics.increment(f"agent_run_executions_{status}_total")
         self._metrics.observe_ms("agent_run_execution_duration_ms", duration_ms)
+
+    def _model_selection(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        thinking_level: str | None,
+        routing_policy: str | None,
+    ) -> ModelSelection:
+        if provider is not None or model is not None:
+            return ModelSelection(
+                mode="manual",
+                routing_policy=(routing_policy or "smart"),  # type: ignore[arg-type]
+                preferred_provider=provider or self._llm_provider,
+                preferred_model=model or self._llm_model,
+                thinking_level=thinking_level,
+                fallback_enabled=True,
+            )
+        return ModelSelection(
+            mode="auto",
+            routing_policy=(routing_policy or "smart"),  # type: ignore[arg-type]
+            thinking_level=thinking_level,
+        )
 
     def _record_assistant_message(
         self,
