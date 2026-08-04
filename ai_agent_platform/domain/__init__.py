@@ -8,6 +8,7 @@ from .models import (
     SessionSummary,
     TokenUsageRecord,
     TokenUsageTotals,
+    UserPreferences,
     WorkspaceRecord,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "SessionSummary",
     "TokenUsageRecord",
     "TokenUsageTotals",
+    "UserPreferences",
     "WorkspaceRecord",
 ]

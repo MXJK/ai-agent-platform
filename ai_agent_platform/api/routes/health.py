@@ -8,12 +8,18 @@ def create_health_router(
     metrics: MetricsRegistry,
     *,
     service_name: str,
+    session_storage: str = "memory",
 ) -> APIRouter:
     router = APIRouter()
 
     @router.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", service=service_name)
+        return HealthResponse(
+            status="ok",
+            service=service_name,
+            session_storage=session_storage,
+            persistent_sessions=session_storage == "postgres",
+        )
 
     @router.get("/metrics", response_model=MetricsResponse)
     def get_metrics() -> MetricsResponse:

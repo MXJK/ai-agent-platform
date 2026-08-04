@@ -29,6 +29,52 @@ from ai_agent_platform.repositories.project_memory import (
 
 
 class PostgresRepositoryTests(unittest.TestCase):
+    def test_session_listing_maps_metadata_search_and_cursor_contract(self) -> None:
+        created = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        updated = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        row = (
+            "sess_1",
+            "alice",
+            created,
+            "Persistent conversation",
+            "auto",
+            updated,
+            None,
+            "workspace_main",
+            "fake",
+            "demo-stream-model",
+            "low",
+            "chat",
+            2,
+            "latest answer",
+        )
+        connection = FakeConnection([[row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresSessionRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            sessions = repository.list_sessions(
+                user_id="alice",
+                query="persist%",
+                archived=False,
+                limit=31,
+                before=(updated, "sess_2"),
+            )
+
+        self.assertEqual(sessions[0].title, "Persistent conversation")
+        self.assertEqual(sessions[0].message_count, 2)
+        self.assertEqual(sessions[0].last_message_preview, "latest answer")
+        sql, params = connection.calls[0]
+        self.assertIn("messages history_messages", sql)
+        self.assertIn("messages searched_messages", sql)
+        self.assertIn("sessions.archived_at IS NULL", sql)
+        self.assertIn("ORDER BY sessions.updated_at DESC, sessions.id DESC", sql)
+        self.assertEqual(params, ("alice", "%persist\\%%", "%persist\\%%", updated, "sess_2", 31))
+
     def test_conversation_summary_upsert_uses_optimistic_version(self) -> None:
         now = datetime(2026, 7, 30, tzinfo=timezone.utc)
         summary = ConversationSummary(

@@ -2,6 +2,7 @@ from .memory import (
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
     InMemoryWorkspaceRepository,
+    SessionArchivedError,
     SessionNotFoundError,
 )
 from .postgres import (
@@ -29,5 +30,6 @@ __all__ = [
     "PostgresSessionRepository",
     "PostgresWorkspaceRepository",
     "PostgresProjectMemoryRepository",
+    "SessionArchivedError",
     "SessionNotFoundError",
 ]

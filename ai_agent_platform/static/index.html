@@ -22,6 +22,7 @@
       <symbol id="icon-knowledge" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" /><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></symbol>
       <symbol id="icon-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v5l3 2" /></symbol>
       <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4 12 2.2-6H21" /></symbol>
+      <symbol id="icon-model" viewBox="0 0 24 24"><path d="M12 3 4.5 7.2 12 11.5l7.5-4.3L12 3Z" /><path d="m4.5 12 7.5 4.3 7.5-4.3M4.5 16.8 12 21l7.5-4.2" /></symbol>
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
       <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></symbol>
       <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5" /></symbol>
@@ -62,10 +63,10 @@
           id="toggle-inspector-btn"
           class="icon-button"
           type="button"
-          aria-label="显示运行详情"
+          aria-label="显示会话与运行详情"
           aria-controls="inspector-panel"
           aria-expanded="true"
-          title="运行详情"
+          title="会话与运行详情"
         >
           <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
         </button>
@@ -93,6 +94,10 @@
           <button class="nav-item" type="button" data-view="memory">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>项目记忆</strong><small>跨会话决策与经验</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="models">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
+            <span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span>
           </button>
           <button class="nav-item" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
@@ -151,6 +156,10 @@
           </div>
 
           <div class="composer-wrap">
+            <div id="archived-session-notice" class="archived-session-notice" hidden>
+              <span>这是已归档会话，只能查看历史消息。</span>
+              <button id="restore-current-session-btn" class="text-button" type="button">恢复并继续</button>
+            </div>
             <div class="composer">
               <div class="composer-mode-bar">
                 <div class="composer-tools">
@@ -160,6 +169,43 @@
                       <option value="chat">快速对话</option>
                       <option value="agent">代码 Agent</option>
                     </select>
+                  </label>
+                  <label class="composer-mode-control model-auto-control" for="auto-model-toggle">
+                    <input id="auto-model-toggle" type="checkbox" checked />
+                    <span>Agent 自动选模</span>
+                  </label>
+                  <div class="composer-mode-control model-choice-control">
+                    <span id="session-model-label">路由策略</span>
+                    <select id="session-model-select" aria-label="会话模型或自动路由策略">
+                      <option value="smart">智能 · 按任务难度</option>
+                      <option value="quality">质量优先</option>
+                      <option value="cost">成本优先</option>
+                      <option value="latency">速度优先</option>
+                    </select>
+                    <button
+                      id="model-picker-trigger"
+                      class="model-picker-trigger"
+                      type="button"
+                      aria-haspopup="listbox"
+                      aria-controls="model-picker-menu"
+                      aria-expanded="false"
+                      hidden
+                    >
+                      <span id="model-picker-trigger-content" class="model-picker-trigger-content">选择首选模型</span>
+                      <span class="model-picker-chevron" aria-hidden="true"></span>
+                    </button>
+                    <div id="model-picker-menu" class="model-picker-menu" role="listbox" aria-label="首选模型" hidden>
+                      <div class="model-picker-legend" aria-label="延迟颜色说明">
+                        <span><i class="latency-dot fast"></i>≤ 1000 ms</span>
+                        <span><i class="latency-dot moderate"></i>≤ 3000 ms</span>
+                        <span><i class="latency-dot slow"></i>&gt; 3000 ms</span>
+                      </div>
+                      <div id="model-picker-options" class="model-picker-options"></div>
+                    </div>
+                  </div>
+                  <label id="model-fallback-control" class="composer-mode-control model-auto-control" for="model-fallback-toggle" hidden>
+                    <input id="model-fallback-toggle" type="checkbox" checked />
+                    <span>不可用时 fallback</span>
                   </label>
                 </div>
                 <span id="composer-mode-description">流式回答，不执行代码工具。</span>
@@ -474,12 +520,74 @@
           </div>
         </section>
 
+        <section id="models-view" class="view-panel" data-view-panel="models" aria-labelledby="models-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Global Model Registry</p>
+              <h1 id="models-title">模型管理</h1>
+              <p>全局配置一次，所有本地 Workspace 共用。密钥写入系统钥匙串，不会回显。</p>
+            </div>
+            <button id="refresh-model-registry-btn" class="button secondary" type="button">刷新状态</button>
+          </header>
+
+          <article class="surface">
+            <div class="surface-heading">
+              <div><span class="step-kicker">01 · 连接</span><h2>Provider 凭证</h2><p>连接状态综合最近请求与手动测试；不会定时发送付费探测。</p></div>
+            </div>
+            <div id="provider-connection-grid" class="provider-connection-grid">
+              <div class="empty-state">正在加载 Provider…</div>
+            </div>
+          </article>
+
+          <div class="content-grid model-registry-grid">
+            <article class="surface">
+              <div class="surface-heading">
+                <div><span class="step-kicker">02 · 注册</span><h2 id="model-form-title">添加模型</h2></div>
+                <button id="reset-model-form-btn" class="text-button" type="button">清空</button>
+              </div>
+              <input id="registered-model-id-input" type="hidden" />
+              <div class="field-grid">
+                <label for="registered-model-provider-input">Provider
+                  <select id="registered-model-provider-input">
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="google">Google</option>
+                  </select>
+                </label>
+                <label for="registered-model-name-input">模型 ID<input id="registered-model-name-input" maxlength="128" placeholder="例如 gpt-5-mini" /></label>
+                <label for="registered-model-display-input">显示名称<input id="registered-model-display-input" maxlength="128" placeholder="例如 GPT-5 Mini" /></label>
+                <label for="registered-model-context-input">上下文窗口<input id="registered-model-context-input" type="number" min="1" max="10000000" value="128000" /></label>
+                <label for="registered-model-quality-input">质量分（0–1）<input id="registered-model-quality-input" type="number" min="0" max="1" step="0.01" value="0.7" /></label>
+                <label for="registered-model-latency-input">预估延迟 ms<input id="registered-model-latency-input" type="number" min="1" max="600000" value="1000" /></label>
+                <label for="registered-model-input-cost-input">输入价 / 百万 Token<input id="registered-model-input-cost-input" type="number" min="0" step="0.001" value="0" /></label>
+                <label for="registered-model-output-cost-input">输出价 / 百万 Token<input id="registered-model-output-cost-input" type="number" min="0" step="0.001" value="0" /></label>
+              </div>
+              <div class="model-option-row">
+                <label class="check-field"><input id="registered-model-tools-input" type="checkbox" checked /> 工具调用</label>
+                <label class="check-field"><input id="registered-model-structured-input" type="checkbox" checked /> 结构化输出</label>
+                <label class="check-field"><input id="registered-model-enabled-input" type="checkbox" checked /> 启用</label>
+                <label class="check-field"><input id="registered-model-auto-input" type="checkbox" checked /> 允许自动选择</label>
+              </div>
+              <div class="surface-actions">
+                <p>价格和质量分只用于本地自动路由计算。</p>
+                <button id="save-registered-model-btn" class="button primary" type="button">添加模型</button>
+              </div>
+            </article>
+
+            <article class="surface">
+              <div class="surface-heading"><div><span class="step-kicker">03 · 状态</span><h2>已注册模型</h2></div><span id="registered-model-count" class="meta-badge">0</span></div>
+              <div id="registered-model-list" class="registered-model-list"><div class="empty-state">暂无模型</div></div>
+            </article>
+          </div>
+        </section>
+
         <section id="sessions-view" class="view-panel" data-view-panel="sessions" aria-labelledby="sessions-title" hidden>
           <header class="view-header compact">
             <div>
               <p class="eyebrow">Conversation Memory</p>
               <h1 id="sessions-title">会话记录</h1>
-              <p>浏览当前运行实例中的会话和消息。</p>
+              <p>搜索、归档或恢复持久化会话，并从任意历史记录继续对话。</p>
             </div>
             <div class="button-row">
               <button id="list-sessions-btn" class="button ghost" type="button">刷新</button>
@@ -490,7 +598,18 @@
           <div class="content-grid session-grid">
             <article class="surface">
               <div class="surface-heading"><h2>会话</h2><span id="sessions-count" class="meta-badge">0</span></div>
+              <form id="session-filter-form" class="session-filter-form" role="search">
+                <label class="sr-only" for="session-search-input">搜索会话</label>
+                <input id="session-search-input" type="search" maxlength="200" placeholder="搜索标题或消息正文" />
+                <label class="sr-only" for="session-state-filter">会话状态</label>
+                <select id="session-state-filter">
+                  <option value="active">活跃会话</option>
+                  <option value="archived">已归档</option>
+                </select>
+                <button class="button ghost" type="submit">搜索</button>
+              </form>
               <div id="sessions-list" class="session-list"><div class="empty-state">暂无会话</div></div>
+              <button id="load-more-sessions-btn" class="button ghost session-load-more" type="button" hidden>加载更多</button>
             </article>
             <article class="surface session-detail">
               <div class="surface-heading">
@@ -537,7 +656,7 @@
 
           <div class="metrics-grid">
             <article class="metric-card"><span>API 状态</span><strong id="metric-api">连接中</strong><small>应用服务健康度</small></article>
-            <article class="metric-card"><span>会话数量</span><strong id="metric-sessions">0</strong><small>当前实例内存记录</small></article>
+            <article class="metric-card"><span>会话数量</span><strong id="metric-sessions">0</strong><small>当前筛选中的持久化记录</small></article>
             <article class="metric-card"><span>最新 Agent</span><strong id="metric-run">暂无</strong><small>最近一次运行状态</small></article>
             <article class="metric-card"><span>最近请求</span><strong id="metric-request">暂无</strong><small>状态码与耗时</small></article>
           </div>
@@ -565,34 +684,50 @@
         </section>
       </main>
 
-      <aside id="inspector-panel" class="inspector" aria-label="运行详情">
+      <aside id="inspector-panel" class="inspector" aria-label="会话与运行详情">
         <header class="inspector-header">
-          <div><p class="eyebrow">Inspector</p><h2>运行详情</h2></div>
-          <button id="close-inspector-btn" class="icon-button small" type="button" aria-label="关闭运行详情">
+          <div><p class="eyebrow">Workspace Rail</p><h2>会话与运行</h2></div>
+          <button id="close-inspector-btn" class="icon-button small" type="button" aria-label="关闭会话与运行详情">
             <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
         </header>
-        <div class="inspector-tabs" role="tablist" aria-label="详情类型">
-          <button id="trace-tab" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="trace-panel">执行轨迹</button>
-          <button id="raw-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="raw-panel">原始数据</button>
-        </div>
-        <section id="trace-panel" class="inspector-content" role="tabpanel" aria-labelledby="trace-tab">
-          <div id="trace-list" class="trace-list"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
+
+        <section class="inspector-recent" aria-labelledby="recent-sessions-title">
+          <div class="recent-sessions-heading">
+            <div><p class="eyebrow">Conversations</p><h3 id="recent-sessions-title">最近会话</h3></div>
+            <button id="view-all-sessions-btn" class="text-button" type="button">查看全部</button>
+          </div>
+          <div id="recent-sessions-list" class="recent-sessions-list" aria-live="polite">
+            <div class="empty-state compact">暂无会话</div>
+          </div>
         </section>
-        <section id="raw-panel" class="inspector-content" role="tabpanel" aria-labelledby="raw-tab" hidden>
-          <pre id="raw-output" class="raw-output">等待响应…</pre>
+
+        <section class="inspector-detail" aria-labelledby="inspector-detail-title">
+          <header class="inspector-detail-header">
+            <div><p class="eyebrow">Inspector</p><h3 id="inspector-detail-title">运行详情</h3></div>
+          </header>
+          <div class="inspector-tabs" role="tablist" aria-label="详情类型">
+            <button id="trace-tab" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="trace-panel">执行轨迹</button>
+            <button id="raw-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="raw-panel">原始数据</button>
+          </div>
+          <section id="trace-panel" class="inspector-content" role="tabpanel" aria-labelledby="trace-tab">
+            <div id="trace-list" class="trace-list"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
+          </section>
+          <section id="raw-panel" class="inspector-content" role="tabpanel" aria-labelledby="raw-tab" hidden>
+            <pre id="raw-output" class="raw-output">等待响应…</pre>
+          </section>
+          <footer class="inspector-footer">
+            <span id="last-request-id">Request ID：—</span>
+            <button id="clear-detail-btn" class="text-button" type="button">清空详情</button>
+          </footer>
         </section>
-        <footer class="inspector-footer">
-          <span id="last-request-id">Request ID：—</span>
-          <button id="clear-detail-btn" class="text-button" type="button">清空详情</button>
-        </footer>
       </aside>
     </div>
 
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
       <form method="dialog" class="settings-shell">
         <header class="dialog-header">
-          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>注册代码工作区，Agent 会针对任务实时搜索和读取文件。密钥始终只从服务端环境读取。</p></div>
+          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>注册代码工作区，Agent 会针对任务实时搜索和读取文件。模型与 API Key 请前往“模型管理”。</p></div>
           <button id="close-settings-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭设置">
             <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
@@ -609,18 +744,10 @@
           </section>
 
           <section class="settings-section">
-            <div class="settings-section-heading"><span>02</span><div><h3>模型</h3><p>留空时使用服务端默认配置。</p></div></div>
+            <div class="settings-section-heading"><span>02</span><div><h3>推理</h3><p>会话模型在输入框上方选择；这里保留 Gemini 的思考等级。</p></div></div>
+            <input id="provider-input" type="hidden" />
+            <input id="model-input" type="hidden" />
             <div class="field-grid">
-              <label for="provider-input">Provider
-                <select id="provider-input">
-                  <option value="">服务端默认</option>
-                  <option value="fake">fake</option>
-                  <option value="openai">openai</option>
-                  <option value="anthropic">anthropic</option>
-                  <option value="google">google</option>
-                </select>
-              </label>
-              <label for="model-input">模型名称<input id="model-input" placeholder="服务端默认模型" autocomplete="off" /></label>
               <label for="thinking-level-input">Gemini 思考等级
                 <select id="thinking-level-input">
                   <option value="">服务端默认</option>
@@ -660,7 +787,7 @@
         </div>
 
         <footer class="dialog-footer">
-          <p>界面偏好会保存在当前设备；工作区内容不会上传为向量索引。</p>
+          <p>会话配置保存到数据库；当前设备只保留界面状态。工作区内容不会上传为向量索引。</p>
           <div class="button-row">
             <button class="button ghost" type="submit" value="cancel">取消</button>
             <button id="save-settings-btn" class="button primary" type="button">保存设置</button>

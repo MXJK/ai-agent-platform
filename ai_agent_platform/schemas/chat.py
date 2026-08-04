@@ -5,9 +5,9 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-LLMProviderName = Literal["fake", "openai", "anthropic", "google"]
+LLMProviderName = Literal["fake", "openai", "deepseek", "anthropic", "google"]
 LLMThinkingLevel = Literal["minimal", "low", "medium", "high"]
-LLMRoutingPolicy = Literal["quality", "cost", "latency"]
+LLMRoutingPolicy = Literal["smart", "quality", "cost", "latency"]
 
 
 class ChatStreamRequest(BaseModel):

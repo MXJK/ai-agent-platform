@@ -11,6 +11,15 @@ captures a registered workspace root, searches the live filesystem for the
 current task, reads only necessary source ranges, and places those original
 snippets in the current model context.
 
+## Interview handbook
+
+The repository includes a source-backed Chinese [interview handbook](INTERVIEW_NOTES.md)
+for Python backend and LLM/RAG/Agent engineering roles. Project-specific Parts
+separate implemented behavior from production recommendations; the standalone
+[Agent knowledge system](INTERVIEW_NOTES/10-Agent开发八股知识体系.md) organizes
+general Agent fundamentals into 12 domains, 57 common questions, a terminology
+cheat sheet, and a seven-day review route.
+
 ## Local start
 
 Python 3.10 or newer is required by the Google Gen AI SDK:
@@ -91,6 +100,63 @@ The browser workspace also includes:
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
 
+### Persistent sessions and restart recovery
+
+PostgreSQL is the source of truth for restart-safe conversations. Session rows
+store a deterministic or manually edited title, archive state, last-update
+time, workspace and model configuration; `user_preferences` stores defaults
+for future sessions and the last active session. API keys, database URLs and
+allowed filesystem roots remain server-side configuration and are never part
+of the session or preference records.
+
+`GET /api/v1/sessions` returns recent-first list items with `message_count` and
+`last_message_preview`, supports title/body substring search, active/archived
+filtering and opaque cursor pagination. A newly allocated session stays a local
+draft until its first message is persisted: zero-message rows are omitted from
+history/search and do not replace the last active conversation.
+`PATCH /sessions/{id}` renames,
+archives/restores or changes one conversation; optionally it copies that
+configuration to user defaults without rewriting older sessions. Archived
+conversations remain readable but Chat, message writes and Agent execution
+return `409` until the conversation is restored.
+
+The collapsible desktop inspector places the latest 12 active conversations
+above run details on the right, grouped by today, the previous seven days and
+older entries; the left rail is reserved for primary navigation. Startup recovery checks the URL
+session first, then `last_active_session_id`, then the latest active session;
+stale zero-message candidates are skipped. With no valid session it keeps the
+welcome page and does not create another empty record. Loading a session
+restores messages, summary and its own model,
+workspace and composer mode. Browser `localStorage` is reserved for device UI
+state and the unauthenticated local user ID, not duplicated conversation
+configuration. The health endpoint exposes `session_storage` and
+`persistent_sessions`; memory mode is explicitly labeled temporary in the UI.
+
+### Global model registry
+
+This local single-user application has one global model registry shared by all
+workspaces. The Model Management page can configure OpenAI, DeepSeek,
+Anthropic, and Google once, then register multiple models under each Provider.
+API keys are write-only: PostgreSQL stores only a secret reference and the
+secret value is placed in the operating-system keyring. Existing environment
+variables remain valid bootstrap credentials and are never returned by the API.
+
+The composer exposes the session preference used by Chat, the whole code Agent
+run (including resume), and RAG Ask:
+
+- automatic `smart`, `quality`, `cost`, or `latency` routing;
+- a manually preferred model with an explicit fallback switch and a custom
+  picker sorted by latency, showing exact milliseconds and green/yellow/red
+  latency tiers (`≤1000 ms`, `≤3000 ms`, `>3000 ms`);
+- per-model availability plus observed P50/P95 first-token and total latency.
+
+`smart` creates a deterministic, explainable task profile without another LLM
+call. Easy tasks weight cost and latency more heavily, while difficult tasks
+weight configured quality more heavily. Background embedding, conversation
+compression, and memory extraction retain their independent service policy.
+Connection tests are user-triggered; normal status and latency come from passive
+observations of real requests rather than periodic paid probes.
+
 ## Gemini streaming
 
 Create a local `.env` file to use Gemini:
@@ -113,24 +179,26 @@ when Gemini finishes with `MAX_TOKENS`.
 
 ## Model routing
 
-`LLMClient` now delegates model choice to an independent `ModelRouter`. Every
+`LLMClient` delegates model choice to an independent `ModelRouter`. Every
 request is processed in this order:
 
 ```text
-request requirements
+session auto policy or manually preferred model
+→ deterministic task-complexity profile for smart routing
+→ request requirements
 → capability filter (tool calling, structured output, context window)
-→ quality / cost / latency ranking
+→ smart / quality / cost / latency ranking
 → provider health and circuit-breaker filter
 → selected model + route trace
 → provider call; pre-delta failure may try the next cross-provider candidate
 ```
 
-The model table is supplied through `LLM_MODEL_CATALOG_JSON`. Without it, the
-application derives one conservative entry from `LLM_PROVIDER`, `LLM_MODEL`,
-and `LLM_MODEL_CONTEXT_WINDOW_TOKENS`, preserving single-model local startup.
-A deployment that wants actual routing must configure at least two entries.
-This abbreviated example is formatted for readability; `.env` values must keep
-the JSON array on one line:
+The persistent registry is the runtime model table and updates the router
+without a restart. `LLM_MODEL_CATALOG_JSON` remains a bootstrap/compatibility
+source: without persisted rows the application imports its entries, or derives
+one conservative entry from `LLM_PROVIDER`, `LLM_MODEL`, and
+`LLM_MODEL_CONTEXT_WINDOW_TOKENS`. This abbreviated bootstrap example is
+formatted for readability; `.env` values must keep the JSON array on one line:
 
 ```json
 [
@@ -159,11 +227,14 @@ the JSON array on one line:
 ]
 ```
 
-Prices, quality scores, and latency estimates are operator-maintained routing
-inputs, not live provider facts. `quality` maximizes configured quality,
+Prices and quality scores are locally maintained routing inputs. Configured
+latency is the cold-start estimate; the UI separately labels passive observed
+latency. `quality` maximizes configured quality,
 `cost` minimizes estimated input/output cost, and `latency` minimizes configured
-latency; deterministic tie-breakers keep tests reproducible. Explicit request
-`provider`/`model` values remain hard filters and must match the catalog.
+latency. `smart` varies the quality/cost/latency weights by explainable task
+difficulty; deterministic tie-breakers keep tests reproducible. Legacy explicit
+request `provider`/`model` values remain hard filters. A session manual choice is
+a preferred model, so it can fall back when `fallback_enabled=true`.
 
 Provider health is process-local. A bounded recent-outcome window and consecutive
 failure count open the circuit; after the recovery timeout, the provider becomes
@@ -173,6 +244,13 @@ health snapshot, selection reason, failures, and final model. Events before the
 first non-empty text `delta` are buffered, so a 429, timeout, or transport failure
 can safely fall back across providers. After the first text delta, failures are
 returned with `partial_response=true` and never replayed on another model.
+
+Registry configuration uses `MODEL_REGISTRY_STORE=postgres` for restart-safe
+global configuration and `MODEL_SECRET_BACKEND=keyring` for API keys. The
+write endpoints are available only in local `AUTH_MODE=disabled` mode, whose
+startup boundary is forced to loopback. Use the in-memory backends only for
+tests or explicit temporary runs.
+
 ## Model allowlist and Token budgets
 
 Provider selection and exact Provider/Model pairs are allowlisted before any
@@ -182,8 +260,8 @@ embedding model, and optional budget fallback. To permit several explicit
 choices, configure both lists:
 
 ```dotenv
-MODEL_PROVIDER_ALLOWLIST=openai,anthropic,gemini
-MODEL_ALLOWLIST=openai:gpt-5-mini,anthropic:claude-haiku-4-5,gemini:gemini-embedding-001
+MODEL_PROVIDER_ALLOWLIST=openai,anthropic,google
+MODEL_ALLOWLIST=openai:gpt-5-mini,anthropic:claude-haiku-4-5,google:gemini-embedding-001
 ```
 
 Session and workspace budgets count every ledger record attributed to that
@@ -218,8 +296,10 @@ healthy catalog entries; immediately before each real count/generation attempt,
 the selected provider/model must pass the allowlist and token-budget preflight.
 Any budget downgrade target is sent back through catalog capability and health
 validation before it can replace the routed candidate. Cross-provider fallback
-repeats exact counting and authorization for the new candidate and remains
-limited to the pre-delta window.
+repeats provider-specific counting and authorization for the new candidate and
+remains limited to the pre-delta window. OpenAI, Anthropic, and Google use their
+count APIs; DeepSeek currently uses a conservative preflight estimate and the
+provider's final usage remains the actual ledger value.
 
 ## Code Agent flow
 
@@ -614,11 +694,17 @@ thinking tokens to `token_usage_records`.
 
 Revision `20260731_0012` turns `token_usage_records` into the unified model-use
 ledger: `session_id` becomes nullable for background/global work, and each row
-adds operation/resource, requested Provider/Model, exact input-count method,
+adds operation/resource, requested Provider/Model, input-count method,
 and budget decision metadata. Chat, every Agent model turn, semantic
 conversation compression, RAG Ask, and embeddings write individual rows.
 Historical rows are retained as `operation=chat`; existing missing workspace
 attribution is not guessed.
+
+Revision `20260804_0014` adds persistent session titles, update/archive state,
+per-session model/workspace/composer configuration, `user_preferences`, recent
+session indexes and deterministic backfills. It also snapshots the immutable
+provider/model/thinking selection for each Agent run so approval resume cannot
+inherit a later session configuration.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
@@ -644,7 +730,7 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages and rolling summaries, Agent runs, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
+| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs and immutable model snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |

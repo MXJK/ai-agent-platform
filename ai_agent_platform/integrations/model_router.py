@@ -10,8 +10,9 @@ from time import monotonic
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 
-RoutingPolicy = Literal["quality", "cost", "latency"]
+RoutingPolicy = Literal["smart", "quality", "cost", "latency"]
 CircuitState = Literal["closed", "open", "half_open"]
+TaskComplexity = Literal["low", "medium", "high"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class ModelConfig:
     quality_score: float = 0.5
     latency_ms: int = 1000
     enabled: bool = True
+    auto_eligible: bool = True
 
     def __post_init__(self) -> None:
         if not self.provider.strip() or not self.model.strip():
@@ -72,6 +74,7 @@ class ModelConfig:
             quality_score=float(value.get("quality_score", 0.5)),
             latency_ms=int(value.get("latency_ms", 1000)),
             enabled=bool(value.get("enabled", True)),
+            auto_eligible=bool(value.get("auto_eligible", True)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +91,7 @@ class ModelConfig:
             "quality_score": self.quality_score,
             "latency_ms": self.latency_ms,
             "enabled": self.enabled,
+            "auto_eligible": self.auto_eligible,
         }
 
 
@@ -98,6 +102,8 @@ class RoutingRequirements:
     min_context_tokens: int = 0
     estimated_input_tokens: int = 0
     expected_output_tokens: int = 0
+    task_complexity: TaskComplexity = "medium"
+    complexity_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -107,6 +113,8 @@ class RoutingRequirements:
         ):
             if value < 0:
                 raise ValueError(f"{name} must be greater than or equal to 0")
+        if self.task_complexity not in {"low", "medium", "high"}:
+            raise ValueError("task_complexity must be low, medium, or high")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +123,8 @@ class RoutingRequirements:
             "min_context_tokens": self.min_context_tokens,
             "estimated_input_tokens": self.estimated_input_tokens,
             "expected_output_tokens": self.expected_output_tokens,
+            "task_complexity": self.task_complexity,
+            "complexity_reasons": list(self.complexity_reasons),
         }
 
 
@@ -288,6 +298,7 @@ class RouteCandidateTrace:
     rejection_reasons: list[str]
     estimated_cost_usd: float
     rank: int | None = None
+    smart_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = self.config.to_dict()
@@ -297,6 +308,11 @@ class RouteCandidateTrace:
                 "rejection_reasons": list(self.rejection_reasons),
                 "estimated_cost_usd": round(self.estimated_cost_usd, 8),
                 "rank": self.rank,
+                "smart_score": (
+                    round(self.smart_score, 6)
+                    if self.smart_score is not None
+                    else None
+                ),
                 "health": self.health.to_dict(),
             }
         )
@@ -340,6 +356,8 @@ class ModelRouteTrace:
     budget_requested_model: str | None = None
     budget_actual_provider: str | None = None
     budget_actual_model: str | None = None
+    selection_mode: str = "automatic"
+    fallback_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -349,6 +367,8 @@ class ModelRouteTrace:
             "requested_model": self.requested_model,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "selection_reason": self.selection_reason,
+            "selection_mode": self.selection_mode,
+            "fallback_enabled": self.fallback_enabled,
             "budget": {
                 "decision": self.budget_decision,
                 "reason": self.budget_reason,
@@ -385,7 +405,7 @@ class ModelRouter:
         default_policy: RoutingPolicy = "quality",
         health: ProviderHealthManager | None = None,
     ) -> None:
-        if default_policy not in {"quality", "cost", "latency"}:
+        if default_policy not in {"smart", "quality", "cost", "latency"}:
             raise ValueError(f"unsupported routing policy: {default_policy}")
         if not models:
             raise ValueError("model router requires at least one model")
@@ -395,10 +415,20 @@ class ModelRouter:
         self._models = tuple(models)
         self.default_policy = default_policy
         self.health = health or ProviderHealthManager()
+        self._models_lock = RLock()
 
     @property
     def models(self) -> tuple[ModelConfig, ...]:
-        return self._models
+        with self._models_lock:
+            return self._models
+
+    def replace_models(self, models: Sequence[ModelConfig]) -> None:
+        """Atomically replace the catalog while preserving health history."""
+        keys = [model.key for model in models]
+        if len(keys) != len(set(keys)):
+            raise ValueError("model catalog contains duplicate provider:model entries")
+        with self._models_lock:
+            self._models = tuple(models)
 
     def route(
         self,
@@ -407,14 +437,19 @@ class ModelRouter:
         policy: RoutingPolicy | None = None,
         provider: str | None = None,
         model: str | None = None,
+        preferred_provider: str | None = None,
+        preferred_model: str | None = None,
+        fallback_enabled: bool = True,
     ) -> RoutePlan:
         selected_policy = policy or self.default_policy
-        if selected_policy not in {"quality", "cost", "latency"}:
+        if selected_policy not in {"smart", "quality", "cost", "latency"}:
             raise ValueError(f"unsupported routing policy: {selected_policy}")
 
         traces: list[RouteCandidateTrace] = []
         eligible: list[RouteCandidateTrace] = []
-        for config in self._models:
+        with self._models_lock:
+            models = self._models
+        for config in models:
             health = self.health.snapshot(config.provider)
             rejection_reasons = _rejection_reasons(
                 config,
@@ -422,6 +457,11 @@ class ModelRouter:
                 requirements,
                 requested_provider=provider,
                 requested_model=model,
+                enforce_auto_eligible=(provider is None and model is None),
+                is_preferred=(
+                    config.provider == preferred_provider
+                    and config.model == preferred_model
+                ),
             )
             candidate = RouteCandidateTrace(
                 config=config,
@@ -434,12 +474,32 @@ class ModelRouter:
             if candidate.eligible:
                 eligible.append(candidate)
 
-        eligible.sort(key=lambda item: _sort_key(item, selected_policy))
+        _rank_candidates(eligible, selected_policy, requirements.task_complexity)
+        if preferred_provider and preferred_model:
+            preferred = next(
+                (
+                    item
+                    for item in eligible
+                    if item.config.provider == preferred_provider
+                    and item.config.model == preferred_model
+                ),
+                None,
+            )
+            if preferred is not None:
+                eligible.remove(preferred)
+                eligible.insert(0, preferred)
+            elif not fallback_enabled:
+                eligible.clear()
         for index, candidate in enumerate(eligible, start=1):
             candidate.rank = index
         ranked_configs = tuple(candidate.config for candidate in eligible)
         selection_reason = (
-            _selection_reason(selected_policy, eligible[0], len(eligible))
+            _selection_reason(
+                selected_policy,
+                eligible[0],
+                len(eligible),
+                requirements.task_complexity,
+            )
             if eligible
             else None
         )
@@ -450,7 +510,26 @@ class ModelRouter:
             selection_reason=selection_reason,
             requested_provider=provider,
             requested_model=model,
+            selection_mode=(
+                "explicit"
+                if provider is not None or model is not None
+                else "preferred"
+                if preferred_provider and preferred_model
+                else "automatic"
+            ),
+            fallback_enabled=fallback_enabled,
         )
+        if preferred_provider and preferred_model and eligible:
+            if eligible[0].config.provider == preferred_provider and eligible[0].config.model == preferred_model:
+                trace.selection_reason = (
+                    f"preferred model {preferred_provider}:{preferred_model} is healthy and capable; "
+                    f"fallback={'enabled' if fallback_enabled else 'disabled'}"
+                )
+            else:
+                trace.selection_reason = (
+                    f"preferred model {preferred_provider}:{preferred_model} is ineligible; "
+                    f"{selected_policy} fallback selected {eligible[0].config.key}"
+                )
         return RoutePlan(candidates=ranked_configs, trace=trace)
 
     def record_failure(
@@ -463,7 +542,10 @@ class ModelRouter:
         retryable: bool,
         after_stream_start: bool,
     ) -> None:
-        if retryable:
+        if retryable or code in {
+            "llm_auth_error",
+            "llm_quota_exhausted",
+        }:
             self.health.record_failure(candidate.provider)
         trace.failures.append(
             RouteFailureTrace(
@@ -550,10 +632,14 @@ def _rejection_reasons(
     *,
     requested_provider: str | None,
     requested_model: str | None,
+    enforce_auto_eligible: bool,
+    is_preferred: bool,
 ) -> list[str]:
     reasons: list[str] = []
     if not config.enabled:
         reasons.append("model_disabled")
+    if enforce_auto_eligible and not config.auto_eligible and not is_preferred:
+        reasons.append("automatic_routing_disabled")
     if requested_provider is not None and config.provider != requested_provider:
         reasons.append("provider_not_requested")
     if requested_model is not None and config.model != requested_model:
@@ -612,13 +698,65 @@ def _sort_key(
     )
 
 
+def _rank_candidates(
+    candidates: list[RouteCandidateTrace],
+    policy: RoutingPolicy,
+    complexity: TaskComplexity,
+) -> None:
+    if policy != "smart":
+        candidates.sort(key=lambda item: _sort_key(item, policy))
+        return
+    if not candidates:
+        return
+    costs = [item.estimated_cost_usd for item in candidates]
+    latencies = [item.config.latency_ms for item in candidates]
+    weights = {
+        "low": (0.25, 0.50, 0.25),
+        "medium": (0.50, 0.25, 0.25),
+        "high": (0.75, 0.10, 0.15),
+    }[complexity]
+    quality_weight, cost_weight, latency_weight = weights
+    for item in candidates:
+        normalized_cost = _normalize(item.estimated_cost_usd, costs)
+        normalized_latency = _normalize(item.config.latency_ms, latencies)
+        item.smart_score = (
+            quality_weight * item.config.quality_score
+            - cost_weight * normalized_cost
+            - latency_weight * normalized_latency
+        )
+    candidates.sort(
+        key=lambda item: (
+            -(item.smart_score or 0.0),
+            -item.config.quality_score,
+            item.estimated_cost_usd,
+            item.config.latency_ms,
+            item.config.provider,
+            item.config.model,
+        )
+    )
+
+
+def _normalize(value: float, values: Sequence[float | int]) -> float:
+    minimum = float(min(values))
+    maximum = float(max(values))
+    if maximum <= minimum:
+        return 0.0
+    return (float(value) - minimum) / (maximum - minimum)
+
+
 def _selection_reason(
     policy: RoutingPolicy,
     candidate: RouteCandidateTrace,
     eligible_count: int,
+    complexity: TaskComplexity,
 ) -> str:
     config = candidate.config
-    if policy == "quality":
+    if policy == "smart":
+        metric = (
+            f"smart_score={candidate.smart_score or 0.0:.3f}, "
+            f"task_complexity={complexity}"
+        )
+    elif policy == "quality":
         metric = f"quality_score={config.quality_score:.3f}"
     elif policy == "cost":
         metric = f"estimated_cost_usd={candidate.estimated_cost_usd:.8f}"

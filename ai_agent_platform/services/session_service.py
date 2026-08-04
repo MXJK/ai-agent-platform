@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from time import perf_counter
@@ -14,6 +17,7 @@ from ai_agent_platform.domain import (
     SessionSummary,
     TokenUsageRecord,
     TokenUsageTotals,
+    UserPreferences,
 )
 from ai_agent_platform.services.conversation_compression import (
     ConversationCompressor,
@@ -27,6 +31,9 @@ from ai_agent_platform.token_counting import (
     TOKEN_ESTIMATION_METHOD,
     estimate_message_tokens,
 )
+
+
+_UNSET = object()
 
 
 class SessionService:
@@ -44,6 +51,11 @@ class SessionService:
         summary_max_source_chars: int = 12000,
         metrics: MetricsRegistry | None = None,
         usage_ledger: UsageLedgerService | None = None,
+        default_provider: str | None = None,
+        default_model: str | None = None,
+        default_thinking_level: str | None = None,
+        default_workspace_id: str | None = None,
+        default_composer_mode: str = "chat",
     ) -> None:
         self._repository = repository
         self._agent_runtime = agent_runtime
@@ -55,19 +67,188 @@ class SessionService:
         self._summary_max_source_chars = summary_max_source_chars
         self._metrics = metrics or MetricsRegistry()
         self._usage_ledger = usage_ledger
+        self._default_provider = default_provider
+        self._default_model = default_model
+        self._default_thinking_level = default_thinking_level
+        self._default_workspace_id = default_workspace_id
+        self._default_composer_mode = default_composer_mode
 
     @property
     def summary_enabled(self) -> bool:
         return self._summary_enabled and self._compressor is not None
 
     def create_session(self, user_id: str) -> Session:
-        return self._repository.create_session(user_id=user_id)
+        preferences = self.get_user_preferences(user_id)
+        return self._repository.create_session(
+            user_id=user_id,
+            preferences=preferences,
+        )
 
     def list_sessions(self) -> list[Session]:
         return self._repository.list_sessions()
 
+    def list_sessions_page(
+        self,
+        *,
+        user_id: str | None,
+        query: str | None = None,
+        archived: bool = False,
+        limit: int = 30,
+        cursor: str | None = None,
+    ) -> tuple[list[Session], str | None]:
+        before = _decode_session_cursor(cursor) if cursor else None
+        sessions = self._repository.list_sessions(
+            user_id=user_id,
+            query=query,
+            archived=archived,
+            limit=limit + 1,
+            before=before,
+        )
+        has_more = len(sessions) > limit
+        page = sessions[:limit]
+        next_cursor = None
+        if has_more and page:
+            last = page[-1]
+            next_cursor = _encode_session_cursor(
+                last.updated_at or last.created_at,
+                last.id,
+            )
+        return page, next_cursor
+
     def get_session(self, session_id: str) -> Session:
         return self._repository.get_session(session_id=session_id)
+
+    def get_user_preferences(self, user_id: str) -> UserPreferences:
+        preferences = self._repository.get_user_preferences(user_id)
+        if preferences is not None:
+            return preferences
+        return UserPreferences(
+            user_id=user_id,
+            default_provider=self._default_provider,
+            default_model=self._default_model,
+            default_thinking_level=self._default_thinking_level,
+            default_workspace_id=self._default_workspace_id,
+            default_composer_mode=self._default_composer_mode,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    def save_user_preferences(
+        self,
+        preferences: UserPreferences,
+    ) -> UserPreferences:
+        if preferences.last_active_session_id:
+            session = self.get_session(preferences.last_active_session_id)
+            if session.user_id != preferences.user_id:
+                raise PermissionError("conversation access denied")
+            if session.archived_at is not None:
+                raise ValueError("archived conversation cannot be activated")
+            if session.message_count <= 0:
+                raise ValueError("empty conversation cannot be activated")
+        return self._repository.save_user_preferences(
+            replace(preferences, updated_at=datetime.now(timezone.utc))
+        )
+
+    def activate_session(self, *, user_id: str, session_id: str) -> UserPreferences:
+        session = self.get_session(session_id)
+        if session.user_id != user_id:
+            raise PermissionError("conversation access denied")
+        if session.archived_at is not None:
+            raise ValueError("archived conversation cannot be activated")
+        preferences = replace(
+            self.get_user_preferences(user_id),
+            last_active_session_id=session_id,
+        )
+        return self.save_user_preferences(preferences)
+
+    def update_session(
+        self,
+        *,
+        session_id: str,
+        actor_user_id: str,
+        title: str | None = None,
+        archived: bool | None = None,
+        provider: str | None | object = _UNSET,
+        model: str | None | object = _UNSET,
+        thinking_level: str | None | object = _UNSET,
+        workspace_id: str | None | object = _UNSET,
+        composer_mode: str | object = _UNSET,
+        save_configuration_as_default: bool = False,
+    ) -> Session:
+        session = self.get_session(session_id)
+        if session.user_id != actor_user_id:
+            raise PermissionError("conversation access denied")
+        changes: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+        if title is not None:
+            changes.update(title=title, title_source="manual")
+        if archived is not None:
+            changes["archived_at"] = (
+                datetime.now(timezone.utc) if archived else None
+            )
+        configuration = {
+            "provider": provider,
+            "model": model,
+            "thinking_level": thinking_level,
+            "workspace_id": workspace_id,
+            "composer_mode": composer_mode,
+        }
+        for name, value in configuration.items():
+            if value is not _UNSET:
+                changes[name] = value
+        updated = replace(session, **changes)
+
+        preferences = None
+        if save_configuration_as_default:
+            current = self.get_user_preferences(actor_user_id)
+            preferences = replace(
+                current,
+                default_provider=updated.provider,
+                default_model=updated.model,
+                default_thinking_level=updated.thinking_level,
+                default_workspace_id=updated.workspace_id,
+                default_composer_mode=updated.composer_mode,
+                updated_at=datetime.now(timezone.utc),
+            )
+        if archived and preferences is None:
+            current = self.get_user_preferences(actor_user_id)
+            if current.last_active_session_id == session_id:
+                preferences = replace(
+                    current,
+                    last_active_session_id=None,
+                    updated_at=datetime.now(timezone.utc),
+                )
+        elif archived and preferences is not None:
+            if preferences.last_active_session_id == session_id:
+                preferences = replace(preferences, last_active_session_id=None)
+        return self._repository.save_session(updated, preferences=preferences)
+
+    def resolve_execution_config(
+        self,
+        *,
+        session_id: str,
+        provider: str | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, str | None]:
+        session = self.get_session(session_id)
+        if session.archived_at is not None:
+            from ai_agent_platform.repositories import SessionArchivedError
+
+            raise SessionArchivedError(session_id)
+        return {
+            "provider": provider or session.provider or self._default_provider,
+            "model": model or session.model or self._default_model,
+            "thinking_level": (
+                thinking_level
+                or session.thinking_level
+                or self._default_thinking_level
+            ),
+            "workspace_id": (
+                workspace_id
+                or session.workspace_id
+                or self._default_workspace_id
+            ),
+        }
 
     def add_message(
         self,
@@ -83,6 +264,18 @@ class SessionService:
                 content=content,
             )
         ]
+
+        if role == "user":
+            session = self.get_session(session_id)
+            preferences = self.get_user_preferences(session.user_id)
+            if preferences.last_active_session_id != session_id:
+                self._repository.save_user_preferences(
+                    replace(
+                        preferences,
+                        last_active_session_id=session_id,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
 
         if run_agent and role == "user":
             decision = self._agent_runtime.decide(content)
@@ -462,3 +655,37 @@ def _bounded_source_messages(
         if used >= max_chars:
             break
     return selected
+
+
+def _encode_session_cursor(updated_at: datetime, session_id: str) -> str:
+    payload = json.dumps(
+        [updated_at.isoformat(), session_id],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_session_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode(f"{cursor}{padding}").decode("utf-8")
+        )
+        if not isinstance(payload, list) or len(payload) != 2:
+            raise ValueError
+        updated_at = datetime.fromisoformat(str(payload[0]))
+        if updated_at.tzinfo is None:
+            raise ValueError
+        session_id = str(payload[1])
+        if not session_id:
+            raise ValueError
+        return updated_at, session_id
+    except (
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("invalid session cursor") from exc

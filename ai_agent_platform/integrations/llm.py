@@ -24,6 +24,7 @@ from ai_agent_platform.integrations.model_router import (
     load_model_catalog,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
+from ai_agent_platform.model_registry.selection import current_model_selection
 from ai_agent_platform.token_counting import estimate_text_tokens
 from ai_agent_platform.usage_ledger import (
     TokenBudgetExceededError,
@@ -173,10 +174,16 @@ class LLMClient:
         *,
         model_router: ModelRouter | None = None,
         provider_adapters: Mapping[str, LLMProviderAdapter] | None = None,
+        credential_resolver: Callable[[str], str | None] | None = None,
+        model_access_resolver: Callable[[str, str], bool] | None = None,
+        model_observer: Any = None,
     ) -> None:
         self._settings = settings
         self._usage_ledger = usage_ledger
         self._provider_adapters = dict(provider_adapters or {})
+        self._credential_resolver = credential_resolver
+        self._model_access_resolver = model_access_resolver
+        self._model_observer = model_observer
         catalog = list(
             load_model_catalog(
                 settings.llm_model_catalog_json,
@@ -237,6 +244,31 @@ class LLMClient:
     def set_usage_ledger(self, usage_ledger) -> None:
         self._usage_ledger = usage_ledger
 
+    def set_model_registry(self, registry: Any) -> None:
+        self._credential_resolver = registry.credential_for_provider
+        self._model_access_resolver = registry.is_model_allowed
+        self._model_observer = registry
+
+    def replace_model_catalog(self, models: Iterable[ModelConfig]) -> None:
+        self._model_router.replace_models(tuple(models))
+
+    def test_connection(self, provider: str, model: str) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        events = list(
+            self.stream_chat(
+                [{"role": "user", "content": "Reply with OK only."}],
+                provider=provider,
+                model=model,
+            )
+        )
+        selected = next((event for event in events if event.type == "route"), None)
+        return {
+            "provider": selected.provider if selected else provider,
+            "model": selected.model if selected else model,
+            "status": "available",
+            "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+
     @property
     def native_tool_calling_enabled(self) -> bool:
         return any(
@@ -257,12 +289,26 @@ class LLMClient:
         structured_output: bool = False,
         min_context_tokens: int = 0,
     ) -> LLMToolDecision:
+        (
+            provider,
+            model,
+            routing_policy,
+            preferred_provider,
+            preferred_model,
+            fallback_enabled,
+        ) = self._effective_routing(provider, model, routing_policy)
         if provider is not None or model is not None:
             self._require_model_allowed(
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
         estimated_input_tokens = _estimate_tokens(_join_any_message_text(messages))
+        complexity, complexity_reasons = _assess_task_complexity(
+            _join_any_message_text(messages),
+            estimated_input_tokens=estimated_input_tokens,
+            tool_calling=True,
+            structured_output=structured_output,
+        )
         requirements = RoutingRequirements(
             tool_calling=True,
             structured_output=structured_output,
@@ -272,12 +318,17 @@ class LLMClient:
             ),
             estimated_input_tokens=estimated_input_tokens,
             expected_output_tokens=self._settings.llm_max_output_tokens,
+            task_complexity=complexity,
+            complexity_reasons=complexity_reasons,
         )
         candidates, trace = self._route_allowed(
             requirements,
             policy=routing_policy,
             provider=provider,
             model=model,
+            preferred_provider=preferred_provider,
+            preferred_model=preferred_model,
+            fallback_enabled=fallback_enabled,
         )
         if not candidates:
             raise LLMProviderError(
@@ -315,6 +366,7 @@ class LLMClient:
             candidate = request_plan.candidate or routed_candidate
             candidate_error: LLMProviderError | None = None
             for attempt in range(self._settings.llm_max_retries + 1):
+                attempt_started = time.perf_counter()
                 try:
                     if attempt > 0:
                         request_plan = self._prepare_tool_candidate(
@@ -333,6 +385,11 @@ class LLMClient:
                         tools,
                         aliases,
                         max_output_tokens=request_plan.max_output_tokens,
+                    )
+                    self._observe_success(
+                        candidate,
+                        started_at=attempt_started,
+                        ttft_ms=None,
                     )
                     usage = decision.usage or LLMUsage(
                         input_tokens=request_plan.input_tokens,
@@ -356,6 +413,11 @@ class LLMClient:
                         route_trace=trace.to_dict(),
                     )
                 except LLMProviderError as exc:
+                    self._observe_failure(
+                        candidate,
+                        started_at=attempt_started,
+                        error=str(exc),
+                    )
                     candidate_error = exc
                     if (
                         not exc.retryable
@@ -433,6 +495,9 @@ class LLMClient:
             for attempt in range(self._settings.llm_max_retries + 1):
                 pending_events: list[LLMStreamEvent] = []
                 stream_started = False
+                attempt_started = time.perf_counter()
+                first_delta_ms: int | None = None
+                observation_recorded = False
                 latest_usage: LLMUsage | None = None
                 usage_recorded = False
                 try:
@@ -478,8 +543,17 @@ class LLMClient:
                                 trace,
                                 candidate,
                             )
+                            self._observe_success(
+                                candidate,
+                                started_at=attempt_started,
+                                ttft_ms=first_delta_ms,
+                            )
+                            observation_recorded = True
                         if event.type == "delta" and event.text and not stream_started:
                             stream_started = True
+                            first_delta_ms = int(
+                                (time.perf_counter() - attempt_started) * 1000
+                            )
                             self._model_router.mark_selected(trace, candidate)
                             yield self._route_event(trace, candidate)
                             yield from pending_events
@@ -504,11 +578,22 @@ class LLMClient:
                         if accumulator is not None:
                             accumulator.add(latest_usage)
                     self._model_router.record_success(trace, candidate)
+                    if not observation_recorded:
+                        self._observe_success(
+                            candidate,
+                            started_at=attempt_started,
+                            ttft_ms=first_delta_ms,
+                        )
                     if not stream_started:
                         yield self._route_event(trace, candidate)
                         yield from pending_events
                     return
                 except LLMProviderError as exc:
+                    self._observe_failure(
+                        candidate,
+                        started_at=attempt_started,
+                        error=str(exc),
+                    )
                     candidate_error = exc
                     if stream_started:
                         if not usage_recorded:
@@ -617,12 +702,26 @@ class LLMClient:
         structured_output: bool = False,
         min_context_tokens: int = 0,
     ) -> LLMRequestPlan:
+        (
+            provider,
+            model,
+            routing_policy,
+            preferred_provider,
+            preferred_model,
+            fallback_enabled,
+        ) = self._effective_routing(provider, model, routing_policy)
         if provider is not None or model is not None:
             self._require_model_allowed(
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
         estimated_input_tokens = _estimate_tokens(_join_message_text(messages))
+        complexity, complexity_reasons = _assess_task_complexity(
+            _join_message_text(messages),
+            estimated_input_tokens=estimated_input_tokens,
+            tool_calling=False,
+            structured_output=structured_output,
+        )
         requirements = RoutingRequirements(
             structured_output=structured_output,
             min_context_tokens=max(
@@ -631,12 +730,17 @@ class LLMClient:
             ),
             estimated_input_tokens=estimated_input_tokens,
             expected_output_tokens=self._settings.llm_max_output_tokens,
+            task_complexity=complexity,
+            complexity_reasons=complexity_reasons,
         )
         candidates, trace = self._route_allowed(
             requirements,
             policy=routing_policy,
             provider=provider,
             model=model,
+            preferred_provider=preferred_provider,
+            preferred_model=preferred_model,
+            fallback_enabled=fallback_enabled,
         )
         if not candidates:
             raise LLMProviderError(
@@ -679,7 +783,12 @@ class LLMClient:
         route_trace: dict[str, Any] | None = None
         messages = [{"role": "user", "content": prompt}]
         plan = self.prepare_chat_request(messages)
-        for event in self.stream_chat(messages, request_plan=plan):
+        selection = current_model_selection()
+        for event in self.stream_chat(
+            messages,
+            thinking_level=(selection.thinking_level if selection else None),
+            request_plan=plan,
+        ):
             if event.type == "route":
                 selected_provider = event.provider or selected_provider
                 selected_model = event.model or selected_model
@@ -710,6 +819,14 @@ class LLMClient:
             return adapter.decide_tools(messages, tools, model=candidate.model)
         if candidate.provider == "openai":
             return self._decide_openai_tools(
+                messages,
+                tools,
+                aliases,
+                candidate.model,
+                max_output_tokens=max_output_tokens,
+            )
+        if candidate.provider == "deepseek":
+            return self._decide_deepseek_tools(
                 messages,
                 tools,
                 aliases,
@@ -788,7 +905,8 @@ class LLMClient:
         *,
         max_output_tokens: int,
     ) -> LLMToolDecision:
-        if not self._settings.openai_api_key:
+        api_key = self._api_key("openai")
+        if not api_key:
             raise LLMProviderError("OPENAI_API_KEY is not configured")
         reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
         payload: dict[str, Any] = {
@@ -810,7 +928,7 @@ class LLMClient:
         body = self._post_json(
             "https://api.openai.com/v1/responses",
             headers={
-                "Authorization": f"Bearer {self._settings.openai_api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             payload=payload,
@@ -858,7 +976,8 @@ class LLMClient:
         *,
         max_output_tokens: int,
     ) -> LLMToolDecision:
-        if not self._settings.anthropic_api_key:
+        api_key = self._api_key("anthropic")
+        if not api_key:
             raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
         reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
         system = [
@@ -885,7 +1004,7 @@ class LLMClient:
         body = self._post_json(
             "https://api.anthropic.com/v1/messages",
             headers={
-                "x-api-key": self._settings.anthropic_api_key,
+                "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },
@@ -919,6 +1038,76 @@ class LLMClient:
             provider_items=[dict(block) for block in content if isinstance(block, dict)],
         )
 
+    def _decide_deepseek_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        model: str,
+        *,
+        max_output_tokens: int,
+    ) -> LLMToolDecision:
+        api_key = self._api_key("deepseek")
+        if not api_key:
+            raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+        reverse_aliases = {
+            registry_name: alias for alias, registry_name in aliases.items()
+        }
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": _deepseek_tool_messages(messages, reverse_aliases),
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": reverse_aliases[spec.name],
+                        "description": spec.description,
+                        "parameters": spec.input_schema,
+                    },
+                }
+                for spec in tools
+            ],
+            "tool_choice": "auto",
+            "max_tokens": max_output_tokens,
+            "stream": False,
+        }
+        body = self._post_json(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
+        choices = body.get("choices")
+        first = choices[0] if isinstance(choices, list) and choices else {}
+        message = first.get("message") if isinstance(first, dict) else {}
+        message = message if isinstance(message, dict) else {}
+        calls: list[ToolCall] = []
+        for item in message.get("tool_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            function = function if isinstance(function, dict) else {}
+            alias = str(function.get("name") or "")
+            calls.append(
+                ToolCall(
+                    call_id=str(item.get("id") or f"tool_{uuid4().hex[:12]}"),
+                    name=aliases.get(alias, alias),
+                    arguments=_json_arguments(function.get("arguments")),
+                    source="deepseek_native",
+                )
+            )
+        return LLMToolDecision(
+            text=str(message.get("content") or "").strip(),
+            tool_calls=calls,
+            model=str(body.get("model") or model),
+            provider="deepseek",
+            stop_reason=str(first.get("finish_reason") or ("tool_calls" if calls else "stop")),
+            usage=_chat_usage_from_mapping(body.get("usage")),
+            provider_items=[message] if message else [],
+        )
+
     def _decide_google_tools(
         self,
         messages: list[dict[str, Any]],
@@ -928,7 +1117,8 @@ class LLMClient:
         *,
         max_output_tokens: int,
     ) -> LLMToolDecision:
-        if not self._settings.google_api_key:
+        api_key = self._api_key("google")
+        if not api_key:
             raise LLMProviderError("GOOGLE_API_KEY is not configured")
         try:
             from google import genai
@@ -956,7 +1146,7 @@ class LLMClient:
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
         client = genai.Client(
-            api_key=self._settings.google_api_key,
+            api_key=api_key,
             http_options=types.HttpOptions(
                 timeout=max(1, int(self._settings.llm_timeout_seconds * 1000))
             ),
@@ -1028,19 +1218,27 @@ class LLMClient:
         policy: RoutingPolicy | None = None,
         provider: str | None = None,
         model: str | None = None,
+        preferred_provider: str | None = None,
+        preferred_model: str | None = None,
+        fallback_enabled: bool = True,
     ) -> tuple[tuple[ModelConfig, ...], ModelRouteTrace]:
         route_plan = self._model_router.route(
             requirements,
             policy=policy,
             provider=provider,
             model=model,
+            preferred_provider=preferred_provider,
+            preferred_model=preferred_model,
+            fallback_enabled=fallback_enabled,
         )
+        original_first = route_plan.candidates[0] if route_plan.candidates else None
+        original_reason = route_plan.trace.selection_reason
         allowed: list[ModelConfig] = []
         for candidate_trace in route_plan.trace.candidates:
             config = candidate_trace.config
             if (
                 candidate_trace.eligible
-                and not self._settings.is_model_allowed(
+                and not self._is_model_allowed(
                     config.provider,
                     config.model,
                 )
@@ -1048,8 +1246,28 @@ class LLMClient:
                 candidate_trace.eligible = False
                 candidate_trace.rejection_reasons.append("model_not_allowlisted")
                 candidate_trace.rank = None
+            if (
+                candidate_trace.eligible
+                and config.provider
+                in {"openai", "deepseek", "anthropic", "google"}
+                and config.provider not in self._provider_adapters
+                and not self._api_key(config.provider)
+            ):
+                candidate_trace.eligible = False
+                candidate_trace.rejection_reasons.append(
+                    "provider_credentials_unavailable"
+                )
+                candidate_trace.rank = None
         for config in route_plan.candidates:
-            if self._settings.is_model_allowed(config.provider, config.model):
+            if (
+                self._is_model_allowed(config.provider, config.model)
+                and (
+                    config.provider
+                    not in {"openai", "deepseek", "anthropic", "google"}
+                    or config.provider in self._provider_adapters
+                    or bool(self._api_key(config.provider))
+                )
+            ):
                 allowed.append(config)
         for index, config in enumerate(allowed, start=1):
             item = next(
@@ -1059,13 +1277,60 @@ class LLMClient:
             )
             item.rank = index
         if allowed:
-            route_plan.trace.selection_reason = (
-                f"{route_plan.trace.policy} policy ranked {allowed[0].key} first "
-                f"among {len(allowed)} healthy capable allowlisted candidate(s)"
-            )
+            if original_first is None or original_first.key != allowed[0].key:
+                suffix = (
+                    f"runtime availability filters selected {allowed[0].key} "
+                    f"from {len(allowed)} candidate(s)"
+                )
+                route_plan.trace.selection_reason = (
+                    f"{original_reason}; {suffix}" if original_reason else suffix
+                )
         else:
             route_plan.trace.selection_reason = None
         return tuple(allowed), route_plan.trace
+
+    def _effective_routing(
+        self,
+        provider: str | None,
+        model: str | None,
+        routing_policy: RoutingPolicy | None,
+    ) -> tuple[
+        str | None,
+        str | None,
+        RoutingPolicy | None,
+        str | None,
+        str | None,
+        bool,
+    ]:
+        if provider is not None or model is not None:
+            return provider, model, routing_policy, None, None, False
+        selection = current_model_selection()
+        if selection is None:
+            return provider, model, routing_policy, None, None, True
+        selected_policy = cast(RoutingPolicy, routing_policy or selection.routing_policy)
+        if (
+            selection.mode == "manual"
+            and selection.preferred_provider
+            and selection.preferred_model
+        ):
+            if not selection.fallback_enabled:
+                return (
+                    selection.preferred_provider,
+                    selection.preferred_model,
+                    selected_policy,
+                    None,
+                    None,
+                    False,
+                )
+            return (
+                None,
+                None,
+                selected_policy,
+                selection.preferred_provider,
+                selection.preferred_model,
+                True,
+            )
+        return None, None, selected_policy, None, None, True
 
     def _prepare_chat_candidate(
         self,
@@ -1270,8 +1535,18 @@ class LLMClient:
                 sort_keys=True,
             )
             return _count_fake_text_tokens(serialized), "fake_lexical_tokenizer"
+        if provider == "deepseek":
+            if not self._api_key("deepseek"):
+                raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+            serialized = _join_any_message_text(messages) + json.dumps(
+                [spec.input_schema for spec in tools],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            return _estimate_tokens(serialized), "deepseek_preflight_estimate"
         if provider == "openai":
-            if not self._settings.openai_api_key:
+            api_key = self._api_key("openai")
+            if not api_key:
                 raise LLMProviderError("OPENAI_API_KEY is not configured")
             payload = {
                 "model": model,
@@ -1289,7 +1564,7 @@ class LLMClient:
             body = self._post_json(
                 "https://api.openai.com/v1/responses/input_tokens",
                 headers={
-                    "Authorization": f"Bearer {self._settings.openai_api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 payload=payload,
@@ -1302,7 +1577,8 @@ class LLMClient:
                 )
             return max(0, count), "openai_responses_input_tokens"
         if provider == "anthropic":
-            if not self._settings.anthropic_api_key:
+            api_key = self._api_key("anthropic")
+            if not api_key:
                 raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
             system = [
                 str(message.get("content") or "")
@@ -1329,7 +1605,7 @@ class LLMClient:
             body = self._post_json(
                 "https://api.anthropic.com/v1/messages/count_tokens",
                 headers={
-                    "x-api-key": self._settings.anthropic_api_key,
+                    "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },
@@ -1343,7 +1619,8 @@ class LLMClient:
                 )
             return max(0, count), "anthropic_messages_count_tokens"
         if provider == "google":
-            if not self._settings.google_api_key:
+            api_key = self._api_key("google")
+            if not api_key:
                 raise LLMProviderError("GOOGLE_API_KEY is not configured")
             try:
                 from google import genai
@@ -1368,7 +1645,7 @@ class LLMClient:
             if system_instruction:
                 config_kwargs["system_instruction"] = system_instruction
             client = genai.Client(
-                api_key=self._settings.google_api_key,
+                api_key=api_key,
                 http_options=types.HttpOptions(
                     timeout=max(
                         1,
@@ -1410,7 +1687,7 @@ class LLMClient:
         )
 
     def _require_model_allowed(self, provider: str, model: str) -> None:
-        if not self._settings.is_model_allowed(provider, model):
+        if not self._is_model_allowed(provider, model):
             code = (
                 "llm_provider_not_allowed"
                 if provider
@@ -1429,6 +1706,23 @@ class LLMClient:
                 code=code,
             )
 
+    def _is_model_allowed(self, provider: str, model: str) -> bool:
+        if self._model_access_resolver is not None:
+            return bool(self._model_access_resolver(provider, model))
+        return self._settings.is_model_allowed(provider, model)
+
+    def _api_key(self, provider: str) -> str | None:
+        if self._credential_resolver is not None:
+            value = self._credential_resolver(provider)
+            if value:
+                return value
+        return {
+            "openai": self._settings.openai_api_key,
+            "deepseek": self._settings.deepseek_api_key,
+            "anthropic": self._settings.anthropic_api_key,
+            "google": self._settings.google_api_key,
+        }.get(provider)
+
     def _count_input_tokens(
         self,
         messages: list[dict[str, str]],
@@ -1444,12 +1738,13 @@ class LLMClient:
         if provider == "fake":
             return _count_fake_message_tokens(messages), "fake_lexical_tokenizer"
         if provider == "openai":
-            if not self._settings.openai_api_key:
+            api_key = self._api_key("openai")
+            if not api_key:
                 raise LLMProviderError("OPENAI_API_KEY is not configured")
             body = self._post_json(
                 "https://api.openai.com/v1/responses/input_tokens",
                 headers={
-                    "Authorization": f"Bearer {self._settings.openai_api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 payload={"model": model, "input": messages},
@@ -1461,8 +1756,16 @@ class LLMClient:
                     code="token_count_failed",
                 )
             return max(0, count), "openai_responses_input_tokens"
+        if provider == "deepseek":
+            if not self._api_key("deepseek"):
+                raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+            return (
+                _estimate_tokens(_join_message_text(messages)),
+                "deepseek_preflight_estimate",
+            )
         if provider == "anthropic":
-            if not self._settings.anthropic_api_key:
+            api_key = self._api_key("anthropic")
+            if not api_key:
                 raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
             system_messages = [
                 message["content"]
@@ -1482,7 +1785,7 @@ class LLMClient:
             body = self._post_json(
                 "https://api.anthropic.com/v1/messages/count_tokens",
                 headers={
-                    "x-api-key": self._settings.anthropic_api_key,
+                    "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },
@@ -1496,7 +1799,8 @@ class LLMClient:
                 )
             return max(0, count), "anthropic_messages_count_tokens"
         if provider == "google":
-            if not self._settings.google_api_key:
+            api_key = self._api_key("google")
+            if not api_key:
                 raise LLMProviderError("GOOGLE_API_KEY is not configured")
             try:
                 from google import genai
@@ -1512,7 +1816,7 @@ class LLMClient:
                 else None
             )
             client = genai.Client(
-                api_key=self._settings.google_api_key,
+                api_key=api_key,
                 http_options=types.HttpOptions(
                     timeout=max(
                         1,
@@ -1569,6 +1873,40 @@ class LLMClient:
             context=plan.usage_context,
         )
 
+    def _observe_success(
+        self,
+        candidate: ModelConfig,
+        *,
+        started_at: float,
+        ttft_ms: int | None,
+    ) -> None:
+        if self._model_observer is None:
+            return
+        with suppress(Exception):
+            self._model_observer.record_success(
+                candidate.provider,
+                candidate.model,
+                total_latency_ms=int((time.perf_counter() - started_at) * 1000),
+                ttft_ms=ttft_ms,
+            )
+
+    def _observe_failure(
+        self,
+        candidate: ModelConfig,
+        *,
+        started_at: float,
+        error: str,
+    ) -> None:
+        if self._model_observer is None:
+            return
+        with suppress(Exception):
+            self._model_observer.record_failure(
+                candidate.provider,
+                candidate.model,
+                total_latency_ms=int((time.perf_counter() - started_at) * 1000),
+                error=error,
+            )
+
     def _post_json(
         self,
         url: str,
@@ -1588,7 +1926,7 @@ class LLMClient:
                     raise LLMProviderError(
                         f"llm provider returned HTTP {response.status_code}",
                         retryable=retryable,
-                        code="llm_http_error",
+                        code=_http_error_code(response.status_code),
                     )
                 body = response.json()
         except httpx.TimeoutException as exc:
@@ -1637,6 +1975,12 @@ class LLMClient:
                 model,
                 max_output_tokens=max_output_tokens,
             )
+        if provider == "deepseek":
+            return lambda messages: self._stream_deepseek(
+                messages,
+                model,
+                max_output_tokens=max_output_tokens,
+            )
         if provider == "anthropic":
             return lambda messages: self._stream_anthropic(
                 messages,
@@ -1675,7 +2019,8 @@ class LLMClient:
         *,
         max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
-        if not self._settings.openai_api_key:
+        api_key = self._api_key("openai")
+        if not api_key:
             raise LLMProviderError("OPENAI_API_KEY is not configured")
 
         payload = {
@@ -1685,7 +2030,7 @@ class LLMClient:
             "stream": True,
         }
         headers = {
-            "Authorization": f"Bearer {self._settings.openai_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         yield from self._stream_http_sse(
@@ -1702,7 +2047,8 @@ class LLMClient:
         *,
         max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
-        if not self._settings.anthropic_api_key:
+        api_key = self._api_key("anthropic")
+        if not api_key:
             raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
 
         system_messages = [
@@ -1723,7 +2069,7 @@ class LLMClient:
             payload["system"] = "\n\n".join(system_messages)
 
         headers = {
-            "x-api-key": self._settings.anthropic_api_key,
+            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
@@ -1734,6 +2080,33 @@ class LLMClient:
             parser=_parse_anthropic_event,
         )
 
+    def _stream_deepseek(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        *,
+        max_output_tokens: int,
+    ) -> Iterable[LLMStreamEvent]:
+        api_key = self._api_key("deepseek")
+        if not api_key:
+            raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_output_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        yield from self._stream_http_sse(
+            "https://api.deepseek.com/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+            parser=_parse_deepseek_event,
+        )
+
     def _stream_google(
         self,
         messages: list[dict[str, str]],
@@ -1742,7 +2115,8 @@ class LLMClient:
         thinking_level: str | None = None,
         max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
-        if not self._settings.google_api_key:
+        api_key = self._api_key("google")
+        if not api_key:
             raise LLMProviderError("GOOGLE_API_KEY is not configured")
 
         try:
@@ -1783,7 +2157,7 @@ class LLMClient:
             config_kwargs["system_instruction"] = system_instruction
 
         client = genai.Client(
-            api_key=self._settings.google_api_key,
+            api_key=api_key,
             http_options=types.HttpOptions(
                 timeout=max(1, int(self._settings.llm_timeout_seconds * 1000))
             ),
@@ -1865,6 +2239,7 @@ class LLMClient:
                         raise LLMProviderError(
                             f"llm provider returned HTTP {response.status_code}",
                             retryable=retryable,
+                            code=_http_error_code(response.status_code),
                         )
 
                     event_name = ""
@@ -1885,11 +2260,27 @@ class LLMClient:
                         elif line.startswith("data:"):
                             data_lines.append(line.removeprefix("data:").strip())
         except httpx.TimeoutException as exc:
-            raise LLMProviderError("llm provider request timed out", retryable=True) from exc
+            raise LLMProviderError(
+                "llm provider request timed out",
+                retryable=True,
+                code="llm_timeout",
+            ) from exc
         except httpx.TransportError as exc:
             raise LLMProviderError(
-                "llm provider network request failed", retryable=True
+                "llm provider network request failed",
+                retryable=True,
+                code="llm_transport_error",
             ) from exc
+
+
+def _http_error_code(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "llm_auth_error"
+    if status_code == 402:
+        return "llm_quota_exhausted"
+    if status_code == 429:
+        return "rate_limit"
+    return "llm_http_error"
 
 
 def _parse_sse_event(event_name: str, data_lines: list[str], parser):
@@ -1952,6 +2343,28 @@ def _parse_anthropic_event(
         yield LLMStreamEvent(type="done")
     elif event_type == "error":
         raise LLMProviderError(_error_message(payload), retryable=True)
+
+
+def _parse_deepseek_event(
+    event_name: str, payload: dict[str, object]
+) -> Iterable[LLMStreamEvent]:
+    error = payload.get("error")
+    if error:
+        raise LLMProviderError(_error_message(payload), retryable=False)
+    usage = _chat_usage_from_mapping(payload.get("usage"))
+    if usage is not None:
+        yield LLMStreamEvent(type="usage", usage=usage)
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                yield LLMStreamEvent(type="delta", text=text)
 
 
 def _google_contents(messages: list[dict[str, str]], types: Any) -> list[Any]:
@@ -2138,6 +2551,20 @@ def _usage_from_mapping(value: Any) -> LLMUsage | None:
     )
 
 
+def _chat_usage_from_mapping(value: Any) -> LLMUsage | None:
+    if not isinstance(value, dict):
+        return None
+    details = value.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    completion_tokens = int(value.get("completion_tokens") or 0)
+    reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+    return LLMUsage(
+        input_tokens=int(value.get("prompt_tokens") or 0),
+        output_tokens=max(0, completion_tokens - reasoning_tokens),
+        thoughts_tokens=max(0, reasoning_tokens),
+    )
+
+
 def _openai_tool_input(
     messages: list[dict[str, Any]],
     reverse_aliases: dict[str, str],
@@ -2255,6 +2682,117 @@ def _anthropic_tool_messages(
             converted.append({"role": role, "content": blocks})
     flush_tool_results()
     return converted
+
+
+def _deepseek_tool_messages(
+    messages: list[dict[str, Any]],
+    reverse_aliases: dict[str, str],
+) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "tool":
+            converted.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(message.get("call_id") or ""),
+                    "content": json.dumps(
+                        message.get("content"),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+            )
+            continue
+        if role not in {"system", "user", "assistant"}:
+            continue
+        if role == "assistant" and message.get("provider") == "deepseek":
+            provider_items = message.get("provider_items")
+            if isinstance(provider_items, list) and provider_items:
+                converted.extend(
+                    dict(item) for item in provider_items if isinstance(item, dict)
+                )
+                continue
+        item: dict[str, Any] = {
+            "role": role,
+            "content": str(message.get("content") or ""),
+        }
+        tool_calls = []
+        for call in message.get("tool_calls", []):
+            if not isinstance(call, dict):
+                continue
+            registry_name = str(call.get("name") or "")
+            tool_calls.append(
+                {
+                    "id": str(call.get("call_id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": reverse_aliases.get(registry_name, registry_name),
+                        "arguments": json.dumps(
+                            call.get("arguments") or {},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            )
+        if tool_calls:
+            item["tool_calls"] = tool_calls
+        converted.append(item)
+    return converted
+
+
+def _assess_task_complexity(
+    text: str,
+    *,
+    estimated_input_tokens: int,
+    tool_calling: bool,
+    structured_output: bool,
+) -> tuple[Literal["low", "medium", "high"], tuple[str, ...]]:
+    """Return a deterministic, explainable profile without another LLM call."""
+    normalized = text.lower()
+    score = 0
+    reasons: list[str] = []
+    if tool_calling:
+        score += 2
+        reasons.append("requires_tool_calling")
+    if structured_output:
+        score += 1
+        reasons.append("requires_structured_output")
+    if estimated_input_tokens >= 12_000:
+        score += 3
+        reasons.append("very_long_context")
+    elif estimated_input_tokens >= 4_000:
+        score += 1
+        reasons.append("long_context")
+    complex_markers = (
+        "architecture",
+        "debug",
+        "migration",
+        "refactor",
+        "security",
+        "multi-file",
+        "performance",
+        "架构",
+        "调试",
+        "迁移",
+        "重构",
+        "安全",
+        "多文件",
+        "性能",
+    )
+    marker_count = sum(marker in normalized for marker in complex_markers)
+    if marker_count:
+        score += min(3, marker_count)
+        reasons.append("complex_task_markers")
+    if len(text) >= 2_000:
+        score += 1
+        reasons.append("long_instruction")
+    if score >= 5:
+        return "high", tuple(reasons or ["high_signal_score"])
+    if score <= 1:
+        return "low", tuple(reasons or ["short_general_request"])
+    return "medium", tuple(reasons or ["moderate_request"])
 
 
 def _google_tool_contents(

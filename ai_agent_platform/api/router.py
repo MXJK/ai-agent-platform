@@ -7,12 +7,14 @@ from ai_agent_platform.api.routes import (
     create_chat_router,
     create_health_router,
     create_knowledge_bases_router,
+    create_model_registry_router,
     create_sessions_router,
     create_workspaces_router,
     create_project_memories_router,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueue
 from ai_agent_platform.integrations import LLMClient
+from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.services import (
     AgentRunService,
     KnowledgeBaseService,
@@ -32,12 +34,26 @@ def create_api_router(
     settings: Settings,
     metrics: MetricsRegistry,
     task_queue: TaskQueue,
+    model_registry: ModelRegistryService,
 ) -> APIRouter:
     router = APIRouter()
     router.include_router(
-        create_health_router(metrics, service_name=settings.app_name)
+        create_health_router(
+            metrics,
+            service_name=settings.app_name,
+            session_storage=settings.session_repository,
+        )
     )
-    router.include_router(create_sessions_router(session_service, settings))
+    router.include_router(
+        create_sessions_router(
+            session_service,
+            settings,
+            workspace_service=workspace_service,
+        )
+    )
+    router.include_router(
+        create_model_registry_router(model_registry, session_service, settings)
+    )
     router.include_router(
         create_chat_router(
             session_service,
@@ -46,6 +62,7 @@ def create_api_router(
             metrics,
             project_memory_service=project_memory_service,
             task_queue=task_queue,
+            model_registry=model_registry,
         )
     )
     router.include_router(create_agent_runs_router(agent_run_service, settings))
@@ -66,6 +83,7 @@ def create_api_router(
             llm_client,
             session_service=session_service,
             workspace_service=workspace_service,
+            model_registry=model_registry,
         )
     )
     return router

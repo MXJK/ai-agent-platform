@@ -13,6 +13,16 @@ from .agent import (
 from .chat import ChatStreamRequest
 from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
+from .model_registry import (
+    ModelConnectionTestResponse,
+    ModelRegistryResponse,
+    ProviderConnectionResponse,
+    ProviderConnectionUpsertRequest,
+    RegisteredModelResponse,
+    RegisteredModelUpsertRequest,
+    SessionModelPreferenceRequest,
+    SessionModelPreferenceResponse,
+)
 from .rag import (
     DocumentIngestResponse,
     IndexJobResponse,
@@ -33,7 +43,9 @@ from .rag import (
 from .session import (
     ContextTokenUsageResponse,
     CreateSessionRequest,
+    SessionPatchRequest,
     SessionResponse,
+    SessionConfigurationPatch,
     SessionsResponse,
     TokenUsageResponse,
     TokenBudgetScopeResponse,
@@ -42,6 +54,8 @@ from .session import (
     TokenUsagesResponse,
     TokenUsageTotalsResponse,
     WorkspaceTokenBreakdownResponse,
+    UserPreferencesPatchRequest,
+    UserPreferencesResponse,
 )
 from .summary import SessionSummaryResponse
 from .workspace import (
@@ -91,6 +105,14 @@ __all__ = [
     "HealthResponse",
     "MessageResponse",
     "MessagesResponse",
+    "ModelConnectionTestResponse",
+    "ModelRegistryResponse",
+    "ProviderConnectionResponse",
+    "ProviderConnectionUpsertRequest",
+    "RegisteredModelResponse",
+    "RegisteredModelUpsertRequest",
+    "SessionModelPreferenceRequest",
+    "SessionModelPreferenceResponse",
     "MetricsResponse",
     "RAGAskRequest",
     "RAGAskResponse",
@@ -100,6 +122,8 @@ __all__ = [
     "RerankerCapabilitiesResponse",
     "RetrievalExecutionResponse",
     "SessionResponse",
+    "SessionPatchRequest",
+    "SessionConfigurationPatch",
     "SessionsResponse",
     "SessionSummaryResponse",
     "TimingMetricResponse",
@@ -110,6 +134,8 @@ __all__ = [
     "TokenUsagesResponse",
     "TokenUsageTotalsResponse",
     "WorkspaceTokenBreakdownResponse",
+    "UserPreferencesPatchRequest",
+    "UserPreferencesResponse",
     "WorkspaceDirectoryBrowseResponse",
     "WorkspaceDirectoryResponse",
     "WorkspaceResponse",

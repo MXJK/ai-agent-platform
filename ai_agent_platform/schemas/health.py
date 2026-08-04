@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: str
     service: str
+    session_storage: str = "memory"
+    persistent_sessions: bool = False
 
 
 class TimingMetricResponse(BaseModel):

@@ -5,7 +5,7 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunNotFoundError,
 )
 from ai_agent_platform.core import Settings, TaskQueueError, request_user_id
-from ai_agent_platform.repositories import SessionNotFoundError
+from ai_agent_platform.repositories import SessionArchivedError, SessionNotFoundError
 from ai_agent_platform.schemas import (
     AgentRunEventsResponse,
     AgentRunRequest,
@@ -41,6 +41,10 @@ def create_agent_runs_router(
                 message=request.message,
                 workspace_id=request.workspace_id,
                 focus_files=request.focus_files,
+                provider=request.provider,
+                model=request.model,
+                thinking_level=request.thinking_level,
+                routing_policy=request.routing_policy,
                 actor_user_id=(
                     request_user_id(http_request, settings)
                     if settings.auth_mode != "disabled"
@@ -51,6 +55,13 @@ def create_agent_runs_router(
             raise HTTPException(status_code=404, detail="conversation not found") from exc
         except WorkspaceNotFoundError as exc:
             raise HTTPException(status_code=404, detail="workspace not found") from exc
+        except SessionArchivedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="archived conversation must be restored before continuing",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except TaskQueueError as exc:
@@ -87,6 +98,11 @@ def create_agent_runs_router(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(exc),
+            ) from exc
+        except SessionArchivedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="archived conversation must be restored before continuing",
             ) from exc
         except TaskQueueError as exc:
             raise HTTPException(

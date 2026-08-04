@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "INTEGRATE-MODEL-ROUTER-USAGE"
-next_action: "审阅并按需推送 codex/model-router-usage-integration"
+active_task: "RIGHT-INSPECTOR-RECENT-SESSIONS"
+next_action: "Review the pushed branch on GitHub and decide whether to merge it"
 blockers: []
 last_verified_commit: "f5415465e29420d99daa2048341d7b14fa6cec72"
-updated_at: "2026-08-03T15:54:07+08:00"
+updated_at: "2026-08-04T14:49:51+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

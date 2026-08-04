@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from threading import Lock
 from uuid import uuid4
@@ -11,11 +12,16 @@ from ai_agent_platform.domain import (
     Message,
     Session,
     TokenUsageRecord,
+    UserPreferences,
     WorkspaceRecord,
 )
 
 
 class SessionNotFoundError(Exception):
+    pass
+
+
+class SessionArchivedError(Exception):
     pass
 
 
@@ -27,21 +33,74 @@ class InMemorySessionRepository:
         self._messages: dict[str, list[Message]] = defaultdict(list)
         self._conversation_summaries: dict[str, ConversationSummary] = {}
         self._token_usage: dict[str, TokenUsageRecord] = {}
+        self._user_preferences: dict[str, UserPreferences] = {}
         self._lock = Lock()
 
-    def create_session(self, user_id: str) -> Session:
+    def create_session(
+        self,
+        user_id: str,
+        preferences: UserPreferences | None = None,
+    ) -> Session:
         with self._lock:
+            now = _now()
+            preferences = preferences or self._user_preferences.get(user_id)
             session = Session(
                 id=f"sess_{uuid4().hex[:12]}",
                 user_id=user_id,
-                created_at=_now(),
+                created_at=now,
+                updated_at=now,
+                workspace_id=(
+                    preferences.default_workspace_id if preferences else None
+                ),
+                provider=preferences.default_provider if preferences else None,
+                model=preferences.default_model if preferences else None,
+                thinking_level=(
+                    preferences.default_thinking_level if preferences else None
+                ),
+                composer_mode=(
+                    preferences.default_composer_mode if preferences else "chat"
+                ),
             )
             self._sessions[session.id] = session
             return session
 
-    def list_sessions(self) -> list[Session]:
+    def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        query: str | None = None,
+        archived: bool | None = None,
+        limit: int | None = None,
+        before: tuple[datetime, str] | None = None,
+    ) -> list[Session]:
         with self._lock:
-            return list(self._sessions.values())
+            normalized_query = (query or "").strip().casefold()
+            sessions = []
+            for session in self._sessions.values():
+                if user_id is not None and session.user_id != user_id:
+                    continue
+                if session.message_count <= 0:
+                    continue
+                if archived is not None and (session.archived_at is not None) != archived:
+                    continue
+                updated_at = session.updated_at or session.created_at
+                if before is not None and (updated_at, session.id) >= before:
+                    continue
+                if normalized_query:
+                    searchable = [session.title]
+                    searchable.extend(
+                        message.content for message in self._messages[session.id]
+                    )
+                    if not any(
+                        normalized_query in value.casefold() for value in searchable
+                    ):
+                        continue
+                sessions.append(session)
+            sessions.sort(
+                key=lambda item: (item.updated_at or item.created_at, item.id),
+                reverse=True,
+            )
+            return sessions[:limit] if limit is not None else sessions
 
     def get_session(self, session_id: str) -> Session:
         with self._lock:
@@ -50,19 +109,62 @@ class InMemorySessionRepository:
             except KeyError as exc:
                 raise SessionNotFoundError(session_id) from exc
 
+    def save_session(
+        self,
+        session: Session,
+        *,
+        preferences: UserPreferences | None = None,
+    ) -> Session:
+        with self._lock:
+            if session.id not in self._sessions:
+                raise SessionNotFoundError(session.id)
+            self._sessions[session.id] = session
+            if preferences is not None:
+                self._user_preferences[preferences.user_id] = preferences
+            return session
+
+    def get_user_preferences(self, user_id: str) -> UserPreferences | None:
+        with self._lock:
+            return self._user_preferences.get(user_id)
+
+    def save_user_preferences(
+        self, preferences: UserPreferences
+    ) -> UserPreferences:
+        with self._lock:
+            self._user_preferences[preferences.user_id] = preferences
+            return preferences
+
     def add_message(self, session_id: str, role: str, content: str) -> Message:
         with self._lock:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
 
+            session = self._sessions[session_id]
+            if session.archived_at is not None:
+                raise SessionArchivedError(session_id)
+
+            now = _now()
             message = Message(
                 id=f"msg_{uuid4().hex[:12]}",
                 session_id=session_id,
                 role=role,
                 content=content,
-                created_at=_now(),
+                created_at=now,
             )
             self._messages[session_id].append(message)
+            title = session.title
+            title_source = session.title_source
+            if role == "user" and title_source == "default":
+                title = _derive_session_title(content)
+                title_source = "auto"
+            self._sessions[session_id] = replace(
+                session,
+                title=title,
+                title_source=title_source,
+                updated_at=now,
+                message_count=session.message_count + 1,
+                last_message_preview=_message_preview(content),
+            )
             return message
 
     def list_messages(self, session_id: str) -> list[Message]:
@@ -308,3 +410,14 @@ class InMemoryKnowledgeBaseRepository:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _derive_session_title(content: str) -> str:
+    normalized = " ".join(content.split()).strip()
+    if not normalized:
+        return "新会话"
+    return normalized[:48]
+
+
+def _message_preview(content: str) -> str:
+    return " ".join(content.split()).strip()[:120]
