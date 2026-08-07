@@ -371,6 +371,10 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
+        self.assertIn(
+            '/static/styles.css?v=20260807-document-toolbar-2',
+            response.text,
+        )
         self.assertIn('id="composer-mode-input"', response.text)
         self.assertNotIn('id="session-token-usage"', response.text)
         self.assertNotIn('id="composer-attachment-btn"', response.text)
@@ -424,6 +428,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("document_filename_conflict", script_response.text)
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
+        self.assertIn("flex: 1 1 440px", stylesheet_response.text)
         self.assertIn(".document-name-cell::before", stylesheet_response.text)
         self.assertIn("isCurrentRagRequest", script_response.text)
         self.assertIn('signal: request.controller.signal', script_response.text)

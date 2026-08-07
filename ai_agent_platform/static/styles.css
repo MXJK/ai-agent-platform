@@ -4687,14 +4687,15 @@ body.inspector-hidden .inspector {
 
 .document-toolbar {
   align-items: stretch;
+  flex-wrap: wrap;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
 }
 
 .document-filters {
   display: grid;
-  min-width: 0;
-  flex: 1;
+  min-width: min(100%, 440px);
+  flex: 1 1 440px;
   grid-template-columns: minmax(180px, 1fr) minmax(118px, auto) minmax(126px, auto);
   gap: 8px;
 }
@@ -4704,6 +4705,7 @@ body.inspector-hidden .inspector {
   align-self: center;
   justify-content: flex-end;
   flex-wrap: wrap;
+  margin-left: auto;
   min-width: max-content;
 }
 
@@ -4974,6 +4976,7 @@ body.inspector-hidden .inspector {
 
   .document-filters {
     width: 100%;
+    min-width: 0;
   }
 
   .document-actions {
