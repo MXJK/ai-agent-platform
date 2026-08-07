@@ -11,6 +11,7 @@
   --muted: #8d9eaf;
   --line: #213348;
   --line-strong: #344a62;
+  --line-hover: #4a6077;
   --brand: #8fa6ff;
   --brand-strong: #b0beff;
   --brand-soft: rgba(143, 166, 255, 0.16);
@@ -39,6 +40,14 @@
   --topbar-height: 68px;
   --sidebar-width: 246px;
   --inspector-width: 336px;
+  --z-base: 0;
+  --z-raised: 1;
+  --z-sticky: 10;
+  --z-header: 60;
+  --z-navigation: 70;
+  --z-overlay: 80;
+  --z-toast: 150;
+  --z-skip-link: 200;
   --transition-fast: 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
   --transition-base: 240ms cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -138,14 +147,14 @@ p {
 
 .skip-link {
   position: fixed;
-  z-index: 200;
+  z-index: var(--z-skip-link);
   top: 10px;
   left: 12px;
   padding: 10px 14px;
   transform: translateY(-160%);
   border-radius: var(--radius-sm);
   background: var(--ink);
-  color: #fff;
+  color: var(--canvas);
   text-decoration: none;
   transition: transform 160ms ease;
 }
@@ -172,7 +181,7 @@ p {
 
 .topbar {
   position: sticky;
-  z-index: 60;
+  z-index: var(--z-header);
   top: 0;
   display: grid;
   grid-template-columns: minmax(230px, 1fr) auto minmax(230px, 1fr);
@@ -485,7 +494,7 @@ body.inspector-hidden .app-shell {
 
 .primary-nav::before {
   position: absolute;
-  z-index: 0;
+  z-index: var(--z-base);
   top: 24px;
   bottom: 24px;
   left: 27px;
@@ -578,7 +587,7 @@ body.inspector-hidden .app-shell {
 
 .nav-item {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
   width: 100%;
@@ -712,7 +721,7 @@ body.inspector-hidden .app-shell {
 
 .workspace {
   min-width: 0;
-  padding: 36px clamp(24px, 3.8vw, 58px) 58px;
+  padding: 30px clamp(24px, 3.8vw, 58px) 58px;
 }
 
 .view-panel {
@@ -722,11 +731,11 @@ body.inspector-hidden .app-shell {
 
 .view-header {
   display: flex;
-  min-height: 108px;
+  min-height: 100px;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 28px;
+  margin-bottom: 20px;
 }
 
 .view-header.compact {
@@ -776,7 +785,7 @@ body.inspector-hidden .app-shell {
   display: grid;
   grid-template-columns: 90px minmax(0, 1fr);
   max-width: 920px;
-  margin: 20px auto 0;
+  margin: 4px auto 0;
   align-items: stretch;
   gap: clamp(24px, 4vw, 54px);
   text-align: left;
@@ -785,7 +794,7 @@ body.inspector-hidden .app-shell {
 .welcome-signal {
   position: relative;
   display: flex;
-  min-height: 254px;
+  min-height: 224px;
   flex-direction: column;
   justify-content: space-between;
   padding: 7px 0;
@@ -811,7 +820,7 @@ body.inspector-hidden .app-shell {
 
 .welcome-signal i {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
@@ -835,16 +844,16 @@ body.inspector-hidden .app-shell {
   border-color: var(--brand);
   background: var(--brand);
   box-shadow: 0 0 0 5px var(--brand-soft), 0 0 24px rgba(143, 166, 255, 0.3);
-  animation: signal-breathe 2.8s ease-in-out infinite;
+  animation: signal-arrive 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .welcome-signal span:last-child i {
   border-color: rgba(98, 214, 194, 0.66);
 }
 
-@keyframes signal-breathe {
-  0%, 100% { box-shadow: 0 0 0 4px var(--brand-soft), 0 0 18px rgba(143, 166, 255, 0.2); }
-  50% { box-shadow: 0 0 0 7px rgba(143, 166, 255, 0.08), 0 0 28px rgba(143, 166, 255, 0.34); }
+@keyframes signal-arrive {
+  from { box-shadow: 0 0 0 0 rgba(143, 166, 255, 0), 0 0 0 rgba(143, 166, 255, 0); }
+  to { box-shadow: 0 0 0 5px var(--brand-soft), 0 0 24px rgba(143, 166, 255, 0.3); }
 }
 
 .welcome-content {
@@ -856,7 +865,7 @@ body.inspector-hidden .app-shell {
   display: inline-flex;
   min-width: 112px;
   height: 30px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   align-items: center;
   justify-content: center;
   gap: 9px;
@@ -882,7 +891,7 @@ body.inspector-hidden .app-shell {
 }
 
 .welcome-state h2 {
-  margin-bottom: 9px;
+  margin-bottom: 7px;
   font-family: var(--font-display);
   font-size: clamp(25px, 3vw, 32px);
   font-weight: 650;
@@ -891,7 +900,7 @@ body.inspector-hidden .app-shell {
 
 .welcome-content > p {
   max-width: 650px;
-  margin-bottom: 27px;
+  margin-bottom: 20px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.75;
@@ -906,8 +915,8 @@ body.inspector-hidden .app-shell {
 
 .prompt-card {
   position: relative;
-  min-height: 104px;
-  padding: 17px 16px 15px;
+  min-height: 88px;
+  padding: 14px 15px 13px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(12, 24, 36, 0.68);
@@ -928,7 +937,7 @@ body.inspector-hidden .app-shell {
 }
 
 .prompt-card span {
-  margin-bottom: 16px;
+  margin-bottom: 11px;
   color: var(--brand-strong);
   font-family: var(--font-mono);
   font-size: 8px;
@@ -945,10 +954,10 @@ body.inspector-hidden .app-shell {
 
 .composer-wrap {
   position: sticky;
-  z-index: 10;
+  z-index: var(--z-sticky);
   bottom: 14px;
   max-width: 920px;
-  margin: 32px auto 0;
+  margin: 24px auto 0;
 }
 
 .archived-session-notice {
@@ -1348,7 +1357,7 @@ body.inspector-hidden .app-shell {
 
 .model-picker-menu {
   position: absolute;
-  z-index: 80;
+  z-index: var(--z-overlay);
   bottom: calc(100% + 10px);
   right: 0;
   left: auto;
@@ -1450,8 +1459,8 @@ body.inspector-hidden .app-shell {
 }
 
 .composer textarea {
-  min-height: 76px;
-  padding: 15px 10px 8px;
+  min-height: 64px;
+  padding: 12px 10px 6px;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -1673,7 +1682,7 @@ body.inspector-hidden .app-shell {
   display: grid;
   width: 18px;
   height: 18px;
-  z-index: 1;
+  z-index: var(--z-raised);
   place-items: center;
   border: 1px solid rgba(143, 166, 255, 0.28);
   border-radius: 50%;
@@ -1813,7 +1822,7 @@ textarea {
 input:hover,
 select:hover,
 textarea:hover {
-  border-color: #4a6077;
+  border-color: var(--line-hover);
 }
 
 input:disabled,
@@ -1868,7 +1877,7 @@ textarea:focus {
 
 .provider-connection-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -3131,7 +3140,7 @@ textarea:focus {
   flex-direction: column;
   overflow: hidden;
   border-left: 1px solid var(--line);
-  background: #091522;
+  background: var(--canvas-deep);
   transition: opacity var(--transition-fast), transform var(--transition-base);
 }
 
@@ -3629,7 +3638,7 @@ body.inspector-hidden .inspector {
 
 .toast-region {
   position: fixed;
-  z-index: 150;
+  z-index: var(--z-toast);
   right: 18px;
   bottom: 18px;
   display: grid;
@@ -3704,7 +3713,7 @@ body.inspector-hidden .inspector {
 
   .inspector {
     position: fixed;
-    z-index: 80;
+    z-index: var(--z-overlay);
     top: var(--topbar-height);
     right: 0;
     width: min(380px, 92vw);
@@ -3755,7 +3764,7 @@ body.inspector-hidden .inspector {
 
   .sidebar {
     position: fixed;
-    z-index: 70;
+    z-index: var(--z-navigation);
     top: auto;
     right: 0;
     bottom: 0;
