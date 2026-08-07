@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "DYNAMIC-MODEL-POLICY"
-next_action: "Review the dynamic model admission diff, then restart the backend to activate it and commit if accepted"
+next_action: "Restart the backend and confirm a frontend-selected registered model can chat in the ai-agent-platform workspace"
 blockers: []
-last_verified_commit: "d7478ff2992b5bb2d46bb3a0d989e54789af1935"
-updated_at: "2026-08-07T17:26:54+08:00"
+last_verified_commit: "2aff6a4f9be0a410a60cc2415cacfc7727c9df1f"
+updated_at: "2026-08-07T17:30:36+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
