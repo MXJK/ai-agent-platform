@@ -12,6 +12,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
 from ai_agent_platform.agents.coding.change_loop import (
+    SANDBOX_ARTIFACT_TOOLS,
     ChangeLoopExecutor,
     partition_tool_calls,
 )
@@ -82,6 +83,46 @@ MAX_ROUTING_CATALOG_ENTRIES = 50
 MAX_ROUTING_CATALOG_CHARS = 12000
 MAX_SELECTED_KNOWLEDGE_BASES = 3
 RAG_RESULTS_PER_KNOWLEDGE_BASE = 5
+PROJECT_OVERVIEW_MARKERS = (
+    "这个项目是干什么",
+    "这个项目做什么",
+    "项目是干什么",
+    "项目是做什么",
+    "介绍一下这个项目",
+    "介绍这个项目",
+    "what does this project do",
+    "what is this project",
+    "project overview",
+    "summarize this project",
+)
+MANAGED_DOCUMENT_MARKERS = (
+    "文档",
+    "知识库",
+    "手册",
+    "规范",
+    "政策",
+    "policy",
+    "manual",
+    "guide",
+    "spec",
+)
+ENTRY_FILE_PRIORITY = {
+    "readme.md": 0,
+    "readme.rst": 1,
+    "readme.txt": 2,
+    "pyproject.toml": 3,
+    "package.json": 4,
+    "go.mod": 5,
+    "cargo.toml": 6,
+    "pom.xml": 7,
+    "build.gradle": 8,
+    "build.gradle.kts": 9,
+    "composer.json": 10,
+    "requirements.txt": 11,
+    "docker-compose.yml": 12,
+    "docker-compose.yaml": 13,
+    "makefile": 14,
+}
 
 
 def _merge_llm_usage(
@@ -213,6 +254,10 @@ class CodingAgentRuntime:
             "context_files": [],
             "seen_context_keys": [],
             "exploration_round": 0,
+            "exploration_strategy": "not_started",
+            "context_sufficient": False,
+            "context_budget_exhausted": False,
+            "context_stop_reason": "not_started",
             "change_iteration": 0,
             "changed_files": [],
             "validation_history": [],
@@ -834,6 +879,13 @@ class CodingAgentRuntime:
                 route = "hybrid" if selected else "repo"
             elif route == "none":
                 route = "repo"
+        route_reason = str(state.get("route_reason") or fallback_reason)
+        if _is_generic_project_overview_request(state["user_input"], catalog):
+            route = "repo"
+            selected = []
+            route_reason = (
+                "generic project overview requires live workspace entry files"
+            )
         if state.get("intent") == "small_talk":
             route = "none"
             selected = []
@@ -841,7 +893,6 @@ class CodingAgentRuntime:
         warnings = list(state.get("context_warnings", []))
         if route in {"rag", "hybrid"} and not selected:
             warnings.append("no routable knowledge base was available")
-        route_reason = str(state.get("route_reason") or fallback_reason)
         if route == "repo" and fallback_route == "repo" and not route_reason:
             route_reason = fallback_reason
         return {
@@ -1032,13 +1083,20 @@ class CodingAgentRuntime:
         proposed = [
             call for call in proposed if call.name in READ_ONLY_REPOSITORY_TOOLS
         ]
-        deterministic = self._fallback_exploration_calls(state)
-        calls = _unique_calls(proposed + deterministic)
+        if _is_generic_project_overview_request(
+            state["user_input"],
+            state.get("knowledge_base_catalog", []),
+        ):
+            proposed = [
+                call for call in proposed if call.name != "repo.search_code"
+            ]
+        strategy, deterministic = self._fallback_exploration_calls(state)
+        calls = _unique_exploration_calls(proposed + deterministic)
         seen = set(state.get("seen_context_keys", []))
         context_files = set(state.get("context_files", []))
         filtered: list[ToolCall] = []
         for call in calls:
-            key = _tool_call_key(call)
+            key = _exploration_call_key(call)
             if key in seen:
                 continue
             if call.name == "repo.read_file":
@@ -1065,6 +1123,7 @@ class CodingAgentRuntime:
                 break
         return {
             "exploration_round": round_number,
+            "exploration_strategy": strategy,
             "analysis_tool_calls": filtered,
             "seen_context_keys": list(seen),
             "tool_calls": list(state.get("tool_calls", [])) + filtered,
@@ -1074,6 +1133,7 @@ class CodingAgentRuntime:
                 summary="规划本轮只读搜索与原始文件读取。",
                 output={
                     "round": round_number,
+                    "strategy": strategy,
                     "planned_tools": [call.name for call in filtered],
                     "limit": self._max_read_tools_per_round,
                 },
@@ -1082,12 +1142,15 @@ class CodingAgentRuntime:
 
     def _fallback_exploration_calls(
         self, state: CodingAgentState
-    ) -> list[ToolCall]:
+    ) -> tuple[str, list[ToolCall]]:
         read_files = set(state.get("context_files", []))
+        discovered = _rank_discovered_paths(
+            _candidate_paths(state.get("exploration_results", [])),
+        )
         candidates = unique(
             state.get("focus_files", [])
             + extract_paths(state["user_input"])
-            + _candidate_paths(state.get("exploration_results", []))
+            + discovered
         )
         calls = [
             ToolCall(
@@ -1099,18 +1162,69 @@ class CodingAgentRuntime:
             if path not in read_files
         ]
         if calls:
-            return calls
-        return [
-            ToolCall(
-                name="repo.search_code",
-                arguments={
-                    "query": build_workspace_query(state),
-                    "max_results": 12,
-                    "context_lines": 1,
-                },
-                source="rules",
+            strategy = (
+                "read_discovered_entries"
+                if discovered
+                else "read_explicit_candidates"
             )
-        ]
+            return strategy, calls
+
+        previous_results = state.get("exploration_results", [])
+        generic_project_overview = _is_generic_project_overview_request(
+            state["user_input"],
+            state.get("knowledge_base_catalog", []),
+        )
+        if generic_project_overview and not previous_results:
+            return (
+                "discover_project_entries",
+                [
+                    ToolCall(
+                        name="repo.list_files",
+                        arguments={"path": "", "max_results": 120},
+                        source="rules",
+                    )
+                ],
+            )
+        if generic_project_overview:
+            return (
+                "fallback_project_search",
+                [
+                    ToolCall(
+                        name="repo.search_code",
+                        arguments={
+                            "query": build_workspace_query(state),
+                            "max_results": 12,
+                            "context_lines": 1,
+                        },
+                        source="rules",
+                    )
+                ],
+            )
+        if previous_results or state.get("exploration_round", 0) > 0:
+            return (
+                "broaden_file_inventory",
+                [
+                    ToolCall(
+                        name="repo.list_files",
+                        arguments={"path": "", "max_results": 120},
+                        source="rules",
+                    )
+                ],
+            )
+        return (
+            "targeted_search",
+            [
+                ToolCall(
+                    name="repo.search_code",
+                    arguments={
+                        "query": build_workspace_query(state),
+                        "max_results": 12,
+                        "context_lines": 1,
+                    },
+                    source="rules",
+                )
+            ],
+        )
 
     def _execute_exploration(self, state: CodingAgentState) -> CodingAgentState:
         context = ToolExecutionContext(
@@ -1199,10 +1313,39 @@ class CodingAgentRuntime:
             for path in _candidate_paths(state.get("exploration_results", []))
             if path not in context_files
         ]
-        no_new_plan = not state.get("analysis_tool_calls", [])
-        sufficient = budget_exhausted or no_new_plan or (
-            bool(context_files) and not unread
+        has_repo_evidence = bool(sources)
+        sufficient = has_repo_evidence and (budget_exhausted or not unread)
+        failed_count = sum(
+            1
+            for result in state.get("exploration_results", [])
+            if not result.get("ok")
         )
+        zero_result_count = sum(
+            1
+            for result in state.get("exploration_results", [])
+            if result.get("ok")
+            and isinstance(result.get("result"), dict)
+            and result["result"].get("count") == 0
+        )
+        if budget_exhausted:
+            stop_reason = "budget_exhausted"
+        elif sufficient:
+            stop_reason = "evidence_sufficient"
+        elif unread:
+            stop_reason = "unread_candidates"
+        elif failed_count:
+            stop_reason = "tool_failure_retry"
+        elif zero_result_count:
+            stop_reason = "zero_results_retry"
+        elif not state.get("analysis_tool_calls", []):
+            stop_reason = "no_new_plan_retry"
+        else:
+            stop_reason = "evidence_incomplete"
+        warnings = list(state.get("context_warnings", []))
+        if budget_exhausted and not has_repo_evidence:
+            warning = "live repository exploration exhausted without evidence"
+            if warning not in warnings:
+                warnings.append(warning)
         sources.sort(
             key=lambda source: (
                 0
@@ -1220,6 +1363,8 @@ class CodingAgentRuntime:
             "context_chars": chars,
             "context_budget_exhausted": budget_exhausted,
             "context_sufficient": sufficient,
+            "context_stop_reason": stop_reason,
+            "context_warnings": warnings,
             "trace": _append_trace(
                 state,
                 node="assess_context",
@@ -1232,12 +1377,17 @@ class CodingAgentRuntime:
                     "unread_candidates": len(unread),
                     "sufficient": sufficient,
                     "budget_exhausted": budget_exhausted,
+                    "stop_reason": stop_reason,
+                    "failed_tools": failed_count,
+                    "zero_result_tools": zero_result_count,
                 },
             ),
         }
 
     def _route_after_context(self, state: CodingAgentState) -> str:
-        if not state.get("context_sufficient"):
+        if not state.get("context_sufficient") and not state.get(
+            "context_budget_exhausted"
+        ):
             return "plan_exploration"
         return "merge_evidence"
 
@@ -1364,6 +1514,13 @@ class CodingAgentRuntime:
                 native_signatures = []
                 native_call_count = 0
         analysis_calls, change_calls, validation_calls = partition_tool_calls(tool_calls)
+        if uses_native:
+            analysis_calls.extend(
+                call
+                for call in tool_calls
+                if call.name in SANDBOX_ARTIFACT_TOOLS
+                and call not in analysis_calls
+            )
         approval_tools = collect_approval_required_tools(tool_calls, tool_specs)
         return {
             "tool_calls": list(state.get("tool_calls", [])) + tool_calls,
@@ -1502,16 +1659,94 @@ def _tool_call_key(call: ToolCall) -> str:
     return f"tool:{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
 
 
-def _unique_calls(calls: list[ToolCall]) -> list[ToolCall]:
+def _exploration_call_key(call: ToolCall) -> str:
+    arguments = call.arguments
+    if call.name in {"repo.search_code", "repo.find_files"}:
+        identity = {
+            "query": arguments.get("query"),
+            "path": arguments.get("path") or "",
+        }
+    elif call.name == "repo.list_files":
+        identity = {"path": arguments.get("path") or ""}
+    elif call.name == "repo.read_file":
+        identity = {
+            "path": arguments.get("path"),
+            "start_line": arguments.get("start_line") or 1,
+            "end_line": arguments.get("end_line"),
+        }
+    else:
+        identity = arguments
+    return (
+        f"explore:{call.name}:"
+        f"{json.dumps(identity, sort_keys=True, ensure_ascii=False)}"
+    )
+
+
+def _unique_exploration_calls(calls: list[ToolCall]) -> list[ToolCall]:
     seen: set[str] = set()
     result: list[ToolCall] = []
     for call in calls:
-        key = _tool_call_key(call)
+        key = _exploration_call_key(call)
         if key in seen:
             continue
         seen.add(key)
         result.append(call)
     return result
+
+
+def _is_generic_project_overview_request(
+    user_input: str,
+    knowledge_bases: list[dict[str, Any]],
+) -> bool:
+    normalized = user_input.casefold()
+    if not any(marker in normalized for marker in PROJECT_OVERVIEW_MARKERS):
+        return False
+    if any(marker in normalized for marker in MANAGED_DOCUMENT_MARKERS):
+        return False
+    for item in knowledge_bases:
+        tags = item.get("tags") or []
+        values = [
+            item.get("id"),
+            item.get("name"),
+            *(tags if isinstance(tags, list) else []),
+        ]
+        if any(
+            str(value).strip()
+            and str(value).casefold() in normalized
+            for value in values
+        ):
+            return False
+    return True
+
+
+def _rank_discovered_paths(paths: list[str]) -> list[str]:
+    def rank(path: str) -> tuple[int, int, int, str]:
+        candidate = Path(path)
+        name = candidate.name.casefold()
+        if name.startswith("readme."):
+            priority = 0
+        elif name in ENTRY_FILE_PRIORITY:
+            priority = ENTRY_FILE_PRIORITY[name]
+        elif name in {"main.py", "app.py", "index.js", "index.ts", "main.go"}:
+            priority = 20
+        elif candidate.suffix.casefold() in {
+            ".py",
+            ".go",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".java",
+            ".rs",
+        }:
+            priority = 30
+        elif candidate.suffix.casefold() in {".md", ".rst", ".txt"}:
+            priority = 40
+        else:
+            priority = 50
+        hidden = int(any(part.startswith(".") for part in candidate.parts))
+        return priority, hidden, len(candidate.parts), path
+
+    return sorted(unique(paths), key=rank)
 
 
 def _routing_catalog(
@@ -1569,6 +1804,8 @@ def _candidate_paths(results: list[dict[str, Any]]) -> list[str]:
             continue
         if result.get("name") == "repo.find_files":
             paths.extend(str(item) for item in output.get("matches", []))
+        if result.get("name") == "repo.list_files":
+            paths.extend(str(item) for item in output.get("files", []))
         if result.get("name") == "repo.search_code":
             paths.extend(
                 str(item.get("path"))

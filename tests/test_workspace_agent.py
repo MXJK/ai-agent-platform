@@ -119,6 +119,29 @@ class RepositoryToolTests(unittest.TestCase):
                 )
                 self.assertFalse(result.ok, path)
 
+    def test_list_files_skips_ignored_directories_and_symlink_escapes(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as outside_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            ignored = root / ".venv-backup" / "bin"
+            ignored.mkdir(parents=True)
+            (ignored / "python").symlink_to(Path(outside_dir) / "python")
+            outside = Path(outside_dir) / "secret.txt"
+            outside.write_text("secret", encoding="utf-8")
+            (root / "escape-link.txt").symlink_to(outside)
+            registry = ToolRegistry()
+            register_repository_tools(registry)
+            context = ToolExecutionContext("session", "workspace", str(root))
+
+            result = registry.execute(
+                ToolCall(name="repo.list_files", arguments={}),
+                context=context,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.result["files"], ["README.md"])
+        self.assertFalse(result.result["truncated"])
+
     def test_search_falls_back_when_ripgrep_is_unavailable(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -185,6 +208,127 @@ class ProjectInstructionTests(unittest.TestCase):
 
 
 class AgentContextBudgetTests(unittest.TestCase):
+    def test_project_overview_discovers_and_reads_project_entries(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text(
+                "# Compass\nA repository-aware agent platform.\n",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                '[project]\nname = "compass"\n',
+                encoding="utf-8",
+            )
+            runtime = CodingAgentRuntime(max_exploration_rounds=4)
+
+            result = runtime.run(
+                conversation_id="session",
+                user_input="这个项目是干什么的？",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+
+        repo_sources = [
+            source
+            for source in result.context_sources
+            if source.kind != "project_instruction"
+        ]
+        self.assertIn("README.md", [source.path for source in repo_sources])
+        strategies = [
+            item["output"]["strategy"]
+            for item in result.trace
+            if item["node"] == "plan_exploration"
+        ]
+        self.assertEqual(
+            strategies,
+            ["discover_project_entries", "read_discovered_entries"],
+        )
+        assessments = [
+            item for item in result.trace if item["node"] == "assess_context"
+        ]
+        self.assertFalse(assessments[0]["output"]["sufficient"])
+        self.assertEqual(
+            assessments[0]["output"]["stop_reason"],
+            "unread_candidates",
+        )
+        self.assertEqual(
+            assessments[-1]["output"]["stop_reason"],
+            "evidence_sufficient",
+        )
+
+    def test_zero_result_switches_from_search_to_broader_inventory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(max_exploration_rounds=4)
+
+            result = runtime.run(
+                conversation_id="session",
+                user_input="Where is MissingSymbol implemented?",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+
+        strategies = [
+            item["output"]["strategy"]
+            for item in result.trace
+            if item["node"] == "plan_exploration"
+        ]
+        self.assertEqual(
+            strategies,
+            [
+                "targeted_search",
+                "broaden_file_inventory",
+                "read_discovered_entries",
+            ],
+        )
+        assessments = [
+            item for item in result.trace if item["node"] == "assess_context"
+        ]
+        self.assertEqual(
+            assessments[0]["output"]["stop_reason"],
+            "zero_results_retry",
+        )
+        self.assertFalse(assessments[0]["output"]["sufficient"])
+        self.assertIn("README.md", [source.path for source in result.context_sources])
+
+    def test_empty_workspace_stops_only_when_exploration_budget_is_exhausted(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            runtime = CodingAgentRuntime(max_exploration_rounds=2)
+            result = runtime.run(
+                conversation_id="session",
+                user_input="这个项目是干什么的？",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=temp_dir,
+            )
+
+        assessments = [
+            item for item in result.trace if item["node"] == "assess_context"
+        ]
+        self.assertEqual(len(assessments), 2)
+        self.assertFalse(assessments[0]["output"]["sufficient"])
+        self.assertFalse(assessments[-1]["output"]["sufficient"])
+        self.assertTrue(assessments[-1]["output"]["budget_exhausted"])
+        self.assertEqual(
+            assessments[-1]["output"]["stop_reason"],
+            "budget_exhausted",
+        )
+        self.assertTrue(
+            any(
+                "exhausted without evidence" in warning
+                for warning in next(
+                    item
+                    for item in result.trace
+                    if item["node"] == "merge_evidence"
+                )["output"]["warnings"]
+            )
+        )
+
     def test_running_record_exposes_completed_checkpoint_trace(self) -> None:
         entered_classification = Event()
         release_classification = Event()

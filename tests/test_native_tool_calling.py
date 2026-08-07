@@ -338,6 +338,85 @@ class ScriptedNativePlanner:
         return "fallback"
 
 
+class RecoveringArtifactNativePlanner(ScriptedNativePlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_failure = False
+        self.observed_recovery = False
+
+    def decide_tool_calls(
+        self,
+        messages: list[dict[str, object]],
+        tool_specs: list[ToolSpec],
+    ) -> LLMToolDecision:
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="list_failure",
+                        name="repo.list_files",
+                        arguments={"path": "missing"},
+                        source="test_native",
+                    ),
+                    ToolCall(
+                        call_id="workspace_status",
+                        name="sandbox.workspace_status",
+                        arguments={},
+                        source="test_native",
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        if self.decisions == 2:
+            tool_messages = [
+                message for message in messages if message.get("role") == "tool"
+            ]
+            self.observed_failure = any(
+                message.get("call_id") == "list_failure"
+                and not bool(message.get("content", {}).get("ok"))
+                for message in tool_messages
+            )
+            self.observed_tool_result = any(
+                message.get("call_id") == "workspace_status"
+                and bool(message.get("content", {}).get("ok"))
+                for message in tool_messages
+            )
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="read_recovery",
+                        name="repo.read_file",
+                        arguments={"path": "app.py"},
+                        source="test_native",
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        tool_messages = [
+            message for message in messages if message.get("role") == "tool"
+        ]
+        self.observed_recovery = any(
+            message.get("call_id") == "read_recovery"
+            and bool(message.get("content", {}).get("ok"))
+            for message in tool_messages
+        )
+        return LLMToolDecision(
+            text="Recovered by reading app.py after the failed listing.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class NativeToolLoopTests(unittest.TestCase):
     def test_tool_result_is_fed_back_before_final_answer(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -388,6 +467,42 @@ class NativeToolLoopTests(unittest.TestCase):
         )
         self.assertEqual(native_result["call_id"], "native_call_1")
         self.assertEqual(planner.decisions, 2)
+
+    def test_artifact_tool_does_not_preempt_failure_observation_and_replan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = 42\n", encoding="utf-8")
+            planner = RecoveringArtifactNativePlanner()
+            runtime = CodingAgentRuntime(
+                planner=planner,
+                max_tool_rounds=4,
+                max_tool_calls=6,
+            )
+
+            result = runtime.run(
+                conversation_id="sess_recovery",
+                user_input="explain app.py and recover from tool failures",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+                focus_files=["app.py"],
+            )
+
+        self.assertEqual(
+            result.answer,
+            "Recovered by reading app.py after the failed listing.",
+        )
+        self.assertTrue(planner.observed_failure)
+        self.assertTrue(planner.observed_tool_result)
+        self.assertTrue(planner.observed_recovery)
+        self.assertEqual(planner.decisions, 3)
+        self.assertNotIn("collect_artifacts", [item["node"] for item in result.trace])
+        list_result = next(
+            item for item in result.tool_results if item["call_id"] == "list_failure"
+        )
+        self.assertFalse(list_result["ok"])
 
 
 if __name__ == "__main__":

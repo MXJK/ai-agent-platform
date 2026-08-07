@@ -16,6 +16,10 @@
   },
   "fixtures": [
     {
+      "filename": "README.md",
+      "content": "# Evaluation Agent Platform\nA repository-aware coding agent with live workspace exploration and approval-aware tools.\n"
+    },
+    {
       "filename": "ai_agent_platform/api/routes/agent_runs.py",
       "content": "def run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:\n    \"\"\"Create an asynchronous agent run and return a run id.\"\"\"\n    return agent_run_service.submit_run(request)\n"
     },
@@ -49,6 +53,16 @@
     }
   ],
   "cases": [
+    {
+      "id": "agent_project_overview_reads_live_entry_files",
+      "type": "agent",
+      "message": "这个项目是干什么的？",
+      "expected_status": "completed",
+      "expected_intent": "repository_question",
+      "expected_tools": ["repo.list_files", "repo.read_file"],
+      "expected_files": ["README.md"],
+      "expected_answer_keywords": ["README.md", "repository-aware"]
+    },
     {
       "id": "agent_locates_run_agent",
       "type": "agent",

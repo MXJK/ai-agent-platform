@@ -27,6 +27,7 @@ IGNORED_DIRECTORIES = {
     "vendor",
     "venv",
 }
+IGNORED_DIRECTORY_PREFIXES = (".venv-", "venv-")
 SENSITIVE_FILENAMES = {
     ".env",
     ".env.local",
@@ -54,15 +55,21 @@ class RepositoryToolKit:
         base_path = _resolve_path(root, path or ".")
         if not base_path.is_dir():
             raise ValueError(f"path is not an existing directory: {path or '.'}")
-        files = [
-            _relative_to(candidate, root)
-            for candidate in _iter_files(base_path)
-        ][: max(1, max_results)]
+        limit = max(1, max_results)
+        discovered: list[str] = []
+        for candidate in _iter_files(base_path):
+            relative = _safe_relative_to(candidate, root)
+            if relative is None:
+                continue
+            discovered.append(relative)
+            if len(discovered) > limit:
+                break
+        files = discovered[:limit]
         return {
             "path": path or ".",
             "files": files,
             "count": len(files),
-            "truncated": len(files) >= max(1, max_results),
+            "truncated": len(discovered) > limit,
         }
 
     def find_files(
@@ -269,17 +276,20 @@ def _resolve_path(root: Path, path: str) -> Path:
 
 def _iter_files(base_path: Path) -> Iterable[Path]:
     if base_path.is_file():
-        if not _is_ignored(base_path):
+        if not base_path.is_symlink() and not _is_ignored(base_path):
             yield base_path
         return
     for current_root, directory_names, filenames in os.walk(base_path):
-        directory_names[:] = sorted(
-            name for name in directory_names if name not in IGNORED_DIRECTORIES
-        )
         current = Path(current_root)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if not _is_ignored_directory_name(name)
+            and not (current / name).is_symlink()
+        )
         for filename in sorted(filenames):
             candidate = current / filename
-            if not _is_ignored(candidate):
+            if not candidate.is_symlink() and not _is_ignored(candidate):
                 yield candidate
 
 
@@ -416,7 +426,13 @@ def _query_terms(query: str) -> list[str]:
 
 
 def _is_ignored(path: Path) -> bool:
-    return any(part in IGNORED_DIRECTORIES for part in path.parts)
+    return any(_is_ignored_directory_name(part) for part in path.parts)
+
+
+def _is_ignored_directory_name(name: str) -> bool:
+    return name in IGNORED_DIRECTORIES or name.startswith(
+        IGNORED_DIRECTORY_PREFIXES
+    )
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -434,3 +450,15 @@ def _is_sensitive(path: Path) -> bool:
 
 def _relative_to(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root).as_posix()
+
+
+def _safe_relative_to(path: Path, root: Path) -> str | None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None

@@ -218,13 +218,13 @@ def route_after_inspection(state: CodingAgentState) -> InspectionRoute:
         return "execute_changes"
     if state.get("validation_tool_calls"):
         return "validate_changes"
+    if state.get("native_tool_loop_active") and state.get("analysis_tool_calls"):
+        return "plan_tools"
     if any(
         call.name in SANDBOX_LIFECYCLE_TOOLS
         for call in state.get("tool_calls", [])
     ):
         return "collect_artifacts"
-    if state.get("native_tool_loop_active") and state.get("analysis_tool_calls"):
-        return "plan_tools"
     return "compose_answer"
 
 

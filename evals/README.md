@@ -11,7 +11,8 @@ Run:
 ```
 
 The runner ingests the fixture files from `agent_cases.json`, executes search
-and agent cases, and reports checks for:
+and agent cases, including a live-workspace project-overview regression, and
+reports checks for:
 
 - intent classification
 - tool planning

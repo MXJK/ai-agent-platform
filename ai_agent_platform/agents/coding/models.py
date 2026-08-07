@@ -50,8 +50,10 @@ class CodingAgentState(TypedDict, total=False):
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
     exploration_round: int
+    exploration_strategy: str
     context_sufficient: bool
     context_budget_exhausted: bool
+    context_stop_reason: str
     context_chars: int
     context_files: list[str]
     seen_context_keys: list[str]

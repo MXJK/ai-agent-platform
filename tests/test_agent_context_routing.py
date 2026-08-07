@@ -146,6 +146,50 @@ class FakeMemoryProvider:
 
 
 class AgentContextRoutingTests(unittest.TestCase):
+    def test_generic_project_overview_prefers_live_repo_over_unrelated_rag(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text(
+                "# Live project\nThis is the current workspace.\n",
+                encoding="utf-8",
+            )
+            provider = FakeKnowledgeProvider(count=1)
+            runtime = CodingAgentRuntime(
+                planner=RoutingPlanner(
+                    route="rag",
+                    intent="repository_question",
+                    selected=["kb_00"],
+                ),
+                knowledge_context_provider=provider,
+            )
+
+            result = runtime.run(
+                conversation_id="session",
+                user_input="这个项目是干什么的？",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+
+        self.assertEqual(result.context_route, "repo")
+        self.assertEqual(result.selected_knowledge_base_ids, [])
+        self.assertIn(
+            "README.md",
+            [source.path for source in result.context_sources],
+        )
+        self.assertFalse(
+            any(source.kind == "knowledge_chunk" for source in result.context_sources)
+        )
+        route_trace = next(
+            item for item in result.trace if item["node"] == "decide_context_source"
+        )
+        self.assertIn(
+            "live workspace entry files",
+            route_trace["output"]["route_reason"],
+        )
+
     def test_hybrid_filters_catalog_selection_and_merges_sources(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -315,6 +315,7 @@ setup_workspace
 → decide_context_source
 → retrieve_project_memory (orthogonal to repo/RAG routing)
    ├─ repo   → plan_exploration → execute_exploration → assess_context
+   │                    ↑ change strategy on zero hits/failures/unread candidates ─┘
    ├─ rag    → retrieve_knowledge
    ├─ hybrid → retrieve_knowledge → repository exploration
    └─ none
@@ -326,7 +327,10 @@ names, descriptions, and tags. It selects `none`, `repo`, `rag`, or `hybrid`
 and at most three managed knowledge bases. Repository evidence still comes from
 live files; document evidence reuses the independent RAG search stack.
 Project memory contributes at most six current-revision active records within a
-3,000-character budget. `merge_evidence` preserves all provenance types before
+3,000-character budget. A generic project-overview request that does not name a
+managed knowledge base is forced to `repo`; it discovers and reads README files,
+project manifests, and entry points instead of filling a live-evidence gap with
+unrelated managed documents. `merge_evidence` preserves all provenance types before
 tool/change planning or answer generation. Change runs retain human approval,
 per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
 artifacts. The registered source workspace is never modified directly.
@@ -345,9 +349,13 @@ Default exploration budgets:
 - 32,000 source-evidence characters
 - 16,000 project-instruction characters
 
-Repeated tool calls, identical line segments, and duplicate content do not
-consume the evidence budget again. When a budget is exhausted the Agent answers
-from collected evidence and marks uncertainty.
+Exploration exposes auditable strategies such as `targeted_search`,
+`broaden_file_inventory`, and `read_discovered_entries`. Zero hits, tool errors,
+and unread candidates trigger another observation and a changed strategy; an
+empty plan alone is not sufficient evidence. The loop exits only with relevant
+repository evidence or an explicit round/file/character budget exhaustion.
+Repeated calls, line segments, and content do not consume the budget twice; an
+evidence-free exhaustion is recorded as a warning and answered with uncertainty.
 
 ### Native tool-calling loop
 
@@ -371,7 +379,9 @@ native tool call
 
 The default limits are four model tool rounds and twelve calls per run,
 configured by `AGENT_MAX_TOOL_ROUNDS` and `AGENT_MAX_TOOL_CALLS`. Repeating an
-identical tool name and arguments is treated as no progress.
+identical tool name and arguments is treated as no progress. A failed read-only
+call and same-round artifact results are fed back before replanning;
+`workspace_status` or `git_diff` cannot preempt pending analysis observations.
 
 `ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
 validates both input and output at execution. Tool specs also declare timeout,
@@ -388,8 +398,9 @@ directories. `AGENTS.override.md` replaces `AGENTS.md` in the same directory;
 nearer directories are later and therefore more specific. Multi-directory
 tasks retain each rule's applicable path.
 
-README files and directories are not injected automatically. They are read only
-when task-driven search selects them.
+README files and directories are not injected unconditionally. Generic project
+overviews inventory the workspace and prioritize README/project manifests;
+other tasks still read only paths selected by search or file discovery.
 
 Conversation history uses two layers: an incrementally compressed rolling
 summary for older turns plus the latest unsummarized messages. Compression runs
@@ -456,7 +467,9 @@ returned.
 
 The tools reject absolute or traversal paths, escaping symlinks, binary or
 oversized files, dependency/build directories, real `.env` files, private keys,
-and common credential files.
+and common credential files. File listing skips symlinks, resolved paths outside
+the workspace, and ignored directories such as `.venv-*` per entry, so one unsafe
+path does not abort the whole inventory.
 
 ### Sandbox boundary
 

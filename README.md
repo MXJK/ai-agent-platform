@@ -295,6 +295,7 @@ setup_workspace
 → decide_context_source
 → retrieve_project_memory（与 repo/RAG 路由正交）
    ├─ repo   → plan_exploration → execute_exploration → assess_context
+   │                    ↑ 零命中/失败/未读候选时换策略 ─────┘
    ├─ rag    → retrieve_knowledge
    ├─ hybrid → retrieve_knowledge → repository exploration
    └─ none
@@ -304,7 +305,8 @@ setup_workspace
 分类器只接收一个受控目录，其中包括知识库 ID、名称、描述和标签。它会选择 `none`、
 `repo`、`rag` 或 `hybrid`，最多选中三个托管知识库。仓库证据仍来自实时文件，文档
 证据复用独立的 RAG 搜索栈。项目记忆最多贡献六条当前 revision 的活跃记录，总预算
-为 3,000 字符。
+为 3,000 字符。未显式指向知识库的通用“项目介绍”问题强制使用 `repo`，先发现并
+读取 README、项目清单和入口文件，避免无关托管文档填补源码证据真空。
 
 `merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。变更任务继续
 使用人工审批、每次运行独立的沙箱副本、验证、一次有界修复，以及 Diff/测试产物；
@@ -322,8 +324,11 @@ setup_workspace
 - 32,000 个源码证据字符；
 - 16,000 个项目指令字符。
 
-重复工具调用、相同行区间和重复内容不会再次消耗证据预算。预算耗尽时，Agent 会基于
-已有证据作答，并明确标注不确定性。
+探索采用 `targeted_search → broaden_file_inventory → read_discovered_entries` 等可审计
+策略：零命中、工具错误或尚有未读候选都会继续观察并换策略；空计划本身不代表证据
+充分。只有取得相关仓库证据或明确耗尽轮数/文件/字符预算才会离开探索循环。重复工具
+调用、相同行区间和重复内容不会再次消耗证据预算；预算耗尽且仍无证据时会记录明确
+警告，回答必须标注不确定性。
 
 ### 原生工具调用循环
 
@@ -344,7 +349,9 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 ```
 
 默认每次运行最多四轮模型工具调用和十二次调用，可通过 `AGENT_MAX_TOOL_ROUNDS` 和
-`AGENT_MAX_TOOL_CALLS` 配置。重复相同工具名和参数会被视为没有进展。
+`AGENT_MAX_TOOL_CALLS` 配置。重复相同工具名和参数会被视为没有进展。只读调用失败时，
+错误和同轮只读 artifact 结果都会回灌模型再规划；`workspace_status`/`git_diff` 不会在
+仍有分析结果待观察时提前终止循环。
 
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
 和输出。工具规格还声明超时、重试和幂等行为。只有幂等工具遇到可重试失败时才会重试；
@@ -358,7 +365,8 @@ Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md
 `AGENTS.override.md` 会替代 `AGENTS.md`；越靠近目标文件的规则越晚加载，也更具体。
 涉及多个目录的任务会保留每条规则的适用路径。
 
-README 文件和目录不会自动注入上下文，只有任务驱动搜索选中时才会读取。
+README 文件和目录不会无条件注入上下文；通用项目概览会先列举工作区并优先读取
+README/项目清单，其他任务仍只读取搜索或文件发现选中的路径。
 
 会话历史分两层：旧轮次进入增量压缩的滚动摘要，最新消息保持未压缩。成功完成 Chat
 或 Agent 响应后才会触发压缩；原始消息会被保留，类似凭据的值会被脱敏，同时保存
@@ -415,7 +423,8 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
 - `repo.read_file`：读取 UTF-8 文件的指定行区间，并返回真实行号和哈希。
 
 这些工具会拒绝绝对路径、目录穿越、逃逸符号链接、二进制或超大文件、依赖和构建
-目录、真实 `.env`、私钥及常见凭据文件。
+目录、真实 `.env`、私钥及常见凭据文件。文件列举会逐项跳过符号链接、越界解析目标
+及 `.venv-*` 等忽略目录，不会因单个不安全条目让整个目录发现失败。
 
 ### 沙箱边界
 
