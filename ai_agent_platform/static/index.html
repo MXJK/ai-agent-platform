@@ -7,7 +7,7 @@
       name="description"
       content="AI Agent Platform — 面向代码、知识库与智能工作流的统一工作台"
     />
-    <meta name="theme-color" content="#0d1015" />
+    <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
@@ -38,7 +38,7 @@
         <span class="brand-mark" aria-hidden="true">A</span>
         <span>
           <strong>AI Agent Platform</strong>
-          <small>智能研发工作台</small>
+          <small>Agent engineering console</small>
         </span>
       </a>
 
@@ -127,9 +127,9 @@
         <section id="chat-view" class="view-panel active" data-view-panel="chat" aria-labelledby="chat-title">
           <header class="view-header">
             <div>
-              <p class="eyebrow">AI Workspace</p>
-              <h1 id="chat-title">今天想一起解决什么？</h1>
-              <p>在同一个连续会话中快速问答，或把代码任务交给 Agent。</p>
+              <p class="eyebrow">Agent Command Deck</p>
+              <h1 id="chat-title">把任务交给 Agent，<br />每一步仍由你掌控。</h1>
+              <p>从问题、计划到执行与验证，全部保留在同一个可追溯会话中。</p>
             </div>
             <span id="chat-meta" class="status-pill neutral" role="status" aria-live="polite">
               <span class="status-dot" aria-hidden="true"></span><span>等待输入</span>
@@ -138,19 +138,27 @@
 
           <div id="chat-output" class="conversation" aria-live="polite" aria-label="对话内容">
             <div class="welcome-state">
-              <div class="welcome-mark" aria-hidden="true"><strong>A</strong><span>READY</span></div>
-              <h2>从一个具体问题开始</h2>
-              <p>解释代码、分析架构，或把需要执行的任务交给 Agent。</p>
-              <div class="prompt-grid" aria-label="推荐问题">
-                <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
-                  <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
-                </button>
-                <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理">
-                  <span>分析实现</span><strong>检查 SSE 流式输出</strong>
-                </button>
-                <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略">
-                  <span>规划质量</span><strong>设计可靠的测试策略</strong>
-                </button>
+              <div class="welcome-signal" aria-hidden="true">
+                <span class="active"><i></i><b>ASK</b></span>
+                <span><i></i><b>PLAN</b></span>
+                <span><i></i><b>ACT</b></span>
+                <span><i></i><b>VERIFY</b></span>
+              </div>
+              <div class="welcome-content">
+                <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
+                <h2>从一个具体问题开始</h2>
+                <p>先理解上下文，再选择快速回答或代码 Agent；涉及写入时会暂停等待审批。</p>
+                <div class="prompt-grid" aria-label="推荐问题">
+                  <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
+                    <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
+                  </button>
+                  <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理">
+                    <span>分析实现</span><strong>检查 SSE 流式输出</strong>
+                  </button>
+                  <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略">
+                    <span>规划质量</span><strong>设计可靠的测试策略</strong>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

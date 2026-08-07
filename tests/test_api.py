@@ -317,6 +317,8 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('class="recent-sessions"', response.text)
         self.assertIn('id="session-search-input"', response.text)
         self.assertIn('id="archived-session-notice"', response.text)
+        self.assertIn('class="welcome-signal"', response.text)
+        self.assertIn("<b>VERIFY</b>", response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
         self.assertIn("最终结果数", response.text)
@@ -350,7 +352,7 @@ class ApiTests(unittest.TestCase):
             stylesheet_response.text,
         )
         self.assertIn(
-            "height: calc(100vh - var(--topbar-height) - 64px",
+            "height: calc(100vh - var(--topbar-height) - 70px",
             stylesheet_response.text,
         )
         self.assertNotIn('switchView("agent");', script_response.text)
@@ -358,6 +360,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("renderExecutionProcess", script_response.text)
         self.assertIn("traceToolNames", script_response.text)
         self.assertIn("renderResponseMetrics", script_response.text)
+        self.assertIn('class="welcome-signal"', script_response.text)
+        self.assertIn("--signal: #62d6c2", stylesheet_response.text)
+        self.assertIn("@keyframes signal-arrive", stylesheet_response.text)
+        self.assertIn("--z-overlay: 80", stylesheet_response.text)
         self.assertIn("loadSessionTokenUsage", script_response.text)
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)

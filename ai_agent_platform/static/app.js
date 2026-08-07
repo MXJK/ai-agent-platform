@@ -1355,13 +1355,21 @@ async function ensureSession() {
 function resetChatView() {
   $("chat-output").innerHTML = `
     <div class="welcome-state">
-      <div class="welcome-mark" aria-hidden="true"><strong>A</strong><span>READY</span></div>
-      <h2>从一个具体问题开始</h2>
-      <p>解释代码、分析架构，或把需要执行的任务交给 Agent。</p>
-      <div class="prompt-grid" aria-label="推荐问题">
-        <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
-        <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
-        <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略"><span>规划质量</span><strong>设计可靠的测试策略</strong></button>
+      <div class="welcome-signal" aria-hidden="true">
+        <span class="active"><i></i><b>ASK</b></span>
+        <span><i></i><b>PLAN</b></span>
+        <span><i></i><b>ACT</b></span>
+        <span><i></i><b>VERIFY</b></span>
+      </div>
+      <div class="welcome-content">
+        <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
+        <h2>从一个具体问题开始</h2>
+        <p>先理解上下文，再选择快速回答或代码 Agent；涉及写入时会暂停等待审批。</p>
+        <div class="prompt-grid" aria-label="推荐问题">
+          <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
+          <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
+          <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略"><span>规划质量</span><strong>设计可靠的测试策略</strong></button>
+        </div>
       </div>
     </div>
   `;
