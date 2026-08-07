@@ -259,18 +259,19 @@ write endpoints are available only in local `AUTH_MODE=disabled` mode, whose
 startup boundary is forced to loopback. Use the in-memory backends only for
 tests or explicit temporary runs.
 
-## Model allowlist and Token budgets
+## Dynamic model admission and Token budgets
 
-Provider selection and exact Provider/Model pairs are allowlisted before any
-count or generation request. Empty allowlist variables are secure by default:
-they derive a minimal allowlist containing only the configured primary LLM,
-embedding model, and optional budget fallback. To permit several explicit
-choices, configure both lists:
+The persistent model registry is the only runtime admission source for chat and
+Agent models. Once a model and its provider connection are registered and
+enabled in the frontend, that model is available for manual selection and
+automatic routing without a static environment allowlist. Unregistered or
+disabled models and disabled provider connections are still rejected before a
+count or generation request leaves the process.
 
-```dotenv
-MODEL_PROVIDER_ALLOWLIST=openai,anthropic,google
-MODEL_ALLOWLIST=openai:gpt-5-mini,anthropic:claude-haiku-4-5,google:gemini-embedding-001
-```
+`LLM_PROVIDER`, `LLM_MODEL`, and `LLM_MODEL_CATALOG_JSON` only bootstrap an empty
+registry and preserve compatibility; they do not create a second admission
+policy. After the persistent registry exists, frontend enable/disable changes
+update the runtime catalog immediately without a restart.
 
 Session and workspace budgets count every ledger record attributed to that
 scope:
@@ -285,7 +286,7 @@ TOKEN_BUDGET_ACTION=reject
 output token is rejected before the user message or model call is committed,
 and an allowed request's provider output limit is capped to the remaining hard
 budget. APIs return `429` with `code=token_budget_exceeded`. With `downgrade`,
-configure an allowlisted lower-cost pair:
+configure a lower-cost pair that is imported into the registry:
 
 ```dotenv
 TOKEN_BUDGET_ACTION=downgrade
@@ -299,14 +300,15 @@ soft budget: fallback usage continues to accumulate. Budget preflight reads
 committed ledger rows; strict cross-process reservation is intentionally not
 claimed.
 
-Routing and governance form one pipeline: the router filters and ranks eligible,
-healthy catalog entries; immediately before each real count/generation attempt,
-the selected provider/model must pass the allowlist and token-budget preflight.
-Any budget downgrade target is sent back through catalog capability and health
-validation before it can replace the routed candidate. Cross-provider fallback
-repeats provider-specific counting and authorization for the new candidate and
-remains limited to the pre-delta window. OpenAI, Anthropic, and Google use their
-count APIs; DeepSeek currently uses a conservative preflight estimate and the
+Routing and governance form one pipeline: the router filters and ranks
+registered, enabled, capable, healthy catalog entries; immediately before each
+real count/generation attempt, the selected provider/model must pass registry
+availability and token-budget preflight again. Any budget downgrade target is
+sent back through registry, catalog capability, and health validation before it
+can replace the routed candidate. Cross-provider fallback repeats
+provider-specific counting and authorization for the new candidate and remains
+limited to the pre-delta window. OpenAI, Anthropic, and Google use their count
+APIs; DeepSeek currently uses a conservative preflight estimate and the
 provider's final usage remains the actual ledger value.
 
 ## Code Agent flow

@@ -223,18 +223,6 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         return LLMClient(
             Settings(
                 llm_max_retries=0,
-                model_provider_allowlist=(
-                    "primary_fake",
-                    "backup_fake",
-                    "fake",
-                    "local",
-                ),
-                model_allowlist=(
-                    "primary_fake:primary-model",
-                    "backup_fake:backup-model",
-                    "fake:demo-stream-model",
-                    "local:gemini-embedding-001",
-                ),
             ),
             model_router=self.router,
             provider_adapters={
@@ -280,25 +268,19 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
             ["primary_fake", "backup_fake"],
         )
 
-    def test_unallowlisted_catalog_model_is_filtered_before_provider_call(self) -> None:
+    def test_runtime_unavailable_catalog_model_is_filtered_before_provider_call(self) -> None:
         primary = ScriptedFakeProvider([_success_script("primary-model")])
         backup = ScriptedFakeProvider([_success_script("backup-model")])
-        settings = Settings(
-            llm_max_retries=0,
-            model_provider_allowlist=("backup_fake", "fake", "local"),
-            model_allowlist=(
-                "backup_fake:backup-model",
-                "fake:demo-stream-model",
-                "local:gemini-embedding-001",
-            ),
-        )
         client = LLMClient(
-            settings,
+            Settings(llm_max_retries=0),
             model_router=self.router,
             provider_adapters={
                 "primary_fake": primary,
                 "backup_fake": backup,
             },
+            model_access_resolver=lambda provider, model: (
+                provider == "backup_fake" and model == "backup-model"
+            ),
         )
 
         events = list(client.stream_chat(_messages()))
@@ -309,7 +291,7 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
             for item in (events[0].route_trace or {})["candidates"]
             if item["provider"] == "primary_fake"
         )
-        self.assertIn("model_not_allowlisted", primary_trace["rejection_reasons"])
+        self.assertIn("model_unavailable", primary_trace["rejection_reasons"])
         self.assertEqual(primary.stream_calls, [])
 
     def test_fallback_authorizes_each_attempt_and_records_only_actual_usage(self) -> None:
@@ -403,12 +385,6 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
                 llm_model="primary-model",
                 token_budget_fallback_provider="openai",
                 token_budget_fallback_model="cheap-model",
-                model_provider_allowlist=("google", "openai", "local"),
-                model_allowlist=(
-                    "google:primary-model",
-                    "openai:cheap-model",
-                    "local:gemini-embedding-001",
-                ),
             ),
             AlwaysDowngradeLedger(),
             model_router=ModelRouter([primary_model, fallback_model]),

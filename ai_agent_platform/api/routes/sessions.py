@@ -4,6 +4,7 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.project_memory import (
     MemoryAccessDeniedError,
     ProjectMemoryService,
@@ -43,6 +44,7 @@ def create_sessions_router(
     settings: Settings | None = None,
     workspace_service: WorkspaceService | None = None,
     memory_service: ProjectMemoryService | None = None,
+    model_registry: ModelRegistryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
     settings = settings or Settings()
@@ -317,24 +319,31 @@ def create_sessions_router(
         return session
 
     def _validate_configuration(session, configuration) -> None:
-        effective_provider = (
-            configuration.provider
-            if "provider" in configuration.model_fields_set
-            else session.provider
-        ) or settings.llm_provider
-        effective_model = (
-            configuration.model
-            if "model" in configuration.model_fields_set
-            else session.model
-        ) or settings.llm_model
-        if not settings.is_model_allowed(effective_provider, effective_model):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "configured model is not allowlisted: "
-                    f"{effective_provider}:{effective_model}"
-                ),
-            )
+        if (
+            model_registry is not None
+            and {"provider", "model"} & configuration.model_fields_set
+        ):
+            effective_provider = (
+                configuration.provider
+                if "provider" in configuration.model_fields_set
+                else session.provider
+            ) or settings.llm_provider
+            effective_model = (
+                configuration.model
+                if "model" in configuration.model_fields_set
+                else session.model
+            ) or settings.llm_model
+            if not model_registry.is_model_available(
+                effective_provider,
+                effective_model,
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "configured model is not registered and enabled: "
+                        f"{effective_provider}:{effective_model}"
+                    ),
+                )
         if (
             "composer_mode" in configuration.model_fields_set
             and configuration.composer_mode is None
@@ -362,22 +371,29 @@ def create_sessions_router(
         changes: dict,
         actor_user_id: str,
     ) -> None:
-        effective_provider = (
-            changes.get("default_provider", current.default_provider)
-            or settings.llm_provider
-        )
-        effective_model = (
-            changes.get("default_model", current.default_model)
-            or settings.llm_model
-        )
-        if not settings.is_model_allowed(effective_provider, effective_model):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "configured model is not allowlisted: "
-                    f"{effective_provider}:{effective_model}"
-                ),
+        if model_registry is not None and {
+            "default_provider",
+            "default_model",
+        } & changes.keys():
+            effective_provider = (
+                changes.get("default_provider", current.default_provider)
+                or settings.llm_provider
             )
+            effective_model = (
+                changes.get("default_model", current.default_model)
+                or settings.llm_model
+            )
+            if not model_registry.is_model_available(
+                effective_provider,
+                effective_model,
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "configured model is not registered and enabled: "
+                        f"{effective_provider}:{effective_model}"
+                    ),
+                )
         if changes.get("default_composer_mode", "present") is None:
             raise HTTPException(
                 status_code=400,

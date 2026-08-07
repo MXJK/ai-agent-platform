@@ -15,7 +15,7 @@ from ai_agent_platform.integrations import (
     ModelRouter,
     RoutingRequirements,
 )
-from ai_agent_platform.integrations.llm import _parse_deepseek_event
+from ai_agent_platform.integrations.llm import LLMStreamEvent, _parse_deepseek_event
 from ai_agent_platform.integrations.tools import ToolSpec
 from ai_agent_platform.main import create_app
 from ai_agent_platform.model_registry import (
@@ -58,6 +58,19 @@ def _registered_payload(provider: str = "openai") -> dict:
         "enabled": True,
         "auto_eligible": True,
     }
+
+
+class _RegisteredProviderAdapter:
+    def __init__(self) -> None:
+        self.stream_calls: list[str] = []
+
+    def stream_chat(self, messages, *, model, thinking_level):
+        self.stream_calls.append(model)
+        yield LLMStreamEvent(type="delta", text=f"reply from {model}")
+        yield LLMStreamEvent(type="done")
+
+    def decide_tools(self, messages, tools, *, model):
+        raise AssertionError("tool selection is not used by this chat test")
 
 
 class ModelRegistryServiceTests(unittest.TestCase):
@@ -188,6 +201,41 @@ class ModelRegistryServiceTests(unittest.TestCase):
         self.assertEqual(restored.preferred_model, "gemini-3-pro")
         self.assertEqual(restored.thinking_level, "high")
 
+    def test_manual_preference_requires_enabled_model_and_connection(self) -> None:
+        self.service.upsert_connection(
+            provider="openai",
+            display_name="OpenAI",
+            api_key="sk-test-secret",
+            enabled=True,
+        )
+        model = self.service.create_model(**_registered_payload())
+        self.service.update_model(model["id"], enabled=False)
+
+        with self.assertRaisesRegex(ValueError, "must both be enabled"):
+            self.service.set_preference(
+                session_id="session-1",
+                mode="manual",
+                routing_policy="smart",
+                preferred_model_id=model["id"],
+                fallback_enabled=True,
+            )
+
+        self.service.update_model(model["id"], enabled=True)
+        self.service.upsert_connection(
+            provider="openai",
+            display_name="OpenAI",
+            api_key=None,
+            enabled=False,
+        )
+        with self.assertRaisesRegex(ValueError, "must both be enabled"):
+            self.service.set_preference(
+                session_id="session-1",
+                mode="manual",
+                routing_policy="smart",
+                preferred_model_id=model["id"],
+                fallback_enabled=True,
+            )
+
     def test_passive_telemetry_updates_latency_and_status(self) -> None:
         self.service.upsert_connection(
             provider="openai",
@@ -309,11 +357,22 @@ class ModelRegistryApiTests(unittest.TestCase):
                 model_secret_backend="memory",
                 workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
             )
-            with TestClient(create_app(settings=settings)) as client:
+            provider_adapter = _RegisteredProviderAdapter()
+            llm_client = LLMClient(
+                settings,
+                provider_adapters={"openai": provider_adapter},
+            )
+            with TestClient(
+                create_app(settings=settings, llm_client=llm_client)
+            ) as client:
                 session_id = client.post(
                     "/api/v1/sessions",
                     json={"user_id": "local"},
                 ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": temp_dir},
+                ).raise_for_status()
                 saved = client.put(
                     "/api/v1/model-registry/connections/openai",
                     json={
@@ -335,6 +394,26 @@ class ModelRegistryApiTests(unittest.TestCase):
                         "fallback_enabled": True,
                     },
                 )
+                workspace_change = client.patch(
+                    f"/api/v1/sessions/{session_id}",
+                    json={"configuration": {"workspace_id": "project"}},
+                )
+                unregistered_change = client.patch(
+                    f"/api/v1/sessions/{session_id}",
+                    json={
+                        "configuration": {
+                            "provider": "openai",
+                            "model": "not-registered",
+                        }
+                    },
+                )
+                chat = client.post(
+                    "/api/v1/chat/stream",
+                    json={
+                        "conversation_id": session_id,
+                        "message": "hello from a dynamically registered model",
+                    },
+                )
 
                 registry = client.get("/api/v1/model-registry").json()
                 session = client.get(f"/api/v1/sessions/{session_id}").json()
@@ -348,6 +427,13 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertEqual(preference.status_code, 200)
         self.assertEqual(preference.json()["preferred_model_id"], model["id"])
         self.assertTrue(preference.json()["fallback_enabled"])
+        self.assertEqual(workspace_change.status_code, 200)
+        self.assertEqual(workspace_change.json()["workspace_id"], "project")
+        self.assertEqual(unregistered_change.status_code, 400)
+        self.assertIn("not registered and enabled", unregistered_change.text)
+        self.assertEqual(chat.status_code, 200)
+        self.assertIn("reply from test-model", chat.text)
+        self.assertEqual(provider_adapter.stream_calls, ["test-model"])
         self.assertEqual(session["provider"], "openai")
         self.assertEqual(session["model"], "test-model")
         self.assertIn('id="auto-model-toggle"', frontend)

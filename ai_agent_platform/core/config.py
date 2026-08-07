@@ -44,8 +44,6 @@ class Settings:
     llm_circuit_error_rate_threshold: float = 0.5
     model_registry_store: str = "memory"
     model_secret_backend: str = "keyring"
-    model_provider_allowlist: tuple[str, ...] = ()
-    model_allowlist: tuple[str, ...] = ()
     session_token_budget: int = 0
     workspace_token_budget: int = 0
     token_budget_action: str = "reject"
@@ -199,31 +197,6 @@ class Settings:
                 self.token_budget_fallback_provider,
                 {"anthropic", "deepseek", "fake", "google", "openai"},
             )
-        if any(not item.strip() for item in self.model_provider_allowlist):
-            raise ValueError("model_provider_allowlist must not contain blanks")
-        if any(
-            ":" not in item or not all(part.strip() for part in item.split(":", 1))
-            for item in self.model_allowlist
-        ):
-            raise ValueError(
-                "model_allowlist entries must use exact provider:model pairs"
-            )
-        configured_models = [
-            (self.llm_provider, self.llm_model),
-            (self.embedding_provider, self.embedding_model),
-        ]
-        if self.token_budget_fallback_provider and self.token_budget_fallback_model:
-            configured_models.append(
-                (
-                    self.token_budget_fallback_provider,
-                    self.token_budget_fallback_model,
-                )
-            )
-        for provider, model in configured_models:
-            if not self.is_model_allowed(provider, model):
-                raise ValueError(
-                    f"configured model is not allowlisted: {provider}:{model}"
-                )
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
@@ -506,33 +479,6 @@ class Settings:
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
 
-    def is_model_allowed(self, provider: str, model: str) -> bool:
-        providers = set(self.model_provider_allowlist) or {
-            self.llm_provider,
-            self.embedding_provider,
-            *(
-                [self.token_budget_fallback_provider]
-                if self.token_budget_fallback_provider
-                else []
-            ),
-        }
-        models = set(self.model_allowlist) or {
-            f"{self.llm_provider}:{self.llm_model}",
-            f"{self.embedding_provider}:{self.embedding_model}",
-            *(
-                [
-                    (
-                        f"{self.token_budget_fallback_provider}:"
-                        f"{self.token_budget_fallback_model}"
-                    )
-                ]
-                if self.token_budget_fallback_provider
-                and self.token_budget_fallback_model
-                else []
-            ),
-        }
-        return provider in providers and f"{provider}:{model}" in models
-
     @classmethod
     def from_env(cls) -> "Settings":
         dotenv = _load_dotenv()
@@ -627,16 +573,6 @@ class Settings:
             ),
             llm_thinking_level=_env(
                 "LLM_THINKING_LEVEL", cls.llm_thinking_level, dotenv
-            ),
-            model_provider_allowlist=_csv_env(
-                "MODEL_PROVIDER_ALLOWLIST",
-                cls.model_provider_allowlist,
-                dotenv,
-            ),
-            model_allowlist=_csv_env(
-                "MODEL_ALLOWLIST",
-                cls.model_allowlist,
-                dotenv,
             ),
             session_token_budget=_int_env(
                 "SESSION_TOKEN_BUDGET",

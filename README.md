@@ -245,16 +245,16 @@ Provider 回退。已经发出首个文本 delta 后，失败会以 `partial_res
 `MODEL_SECRET_BACKEND=keyring`。写接口仅在本地 `AUTH_MODE=disabled` 模式开放，
 此模式会强制绑定回环地址。内存后端只应用于测试或明确的临时运行。
 
-## 模型白名单与 Token 预算
+## 动态模型准入与 Token 预算
 
-任何计数或生成请求开始前，Provider 选择和精确的 Provider/Model 组合都必须通过
-白名单。白名单环境变量为空时采取安全默认值：系统只允许当前主 LLM、嵌入模型和
-可选预算回退模型。允许多个明确选项时，需要同时配置：
+持久化模型注册中心是聊天与 Agent 的唯一运行时模型准入来源。通过前端模型管理页
+注册并启用模型、同时启用对应 Provider 连接后，该模型即可用于手动选择和自动路由，
+无需在 `.env` 维护 Provider/Model 白名单。未注册、已停用的模型或已停用的 Provider
+连接仍会在计数和生成请求发出前被拒绝。
 
-```dotenv
-MODEL_PROVIDER_ALLOWLIST=openai,anthropic,google
-MODEL_ALLOWLIST=openai:gpt-5-mini,anthropic:claude-haiku-4-5,google:gemini-embedding-001
-```
+`LLM_PROVIDER`、`LLM_MODEL` 和 `LLM_MODEL_CATALOG_JSON` 只负责空注册中心的启动导入与
+兼容，不会形成第二份静态准入策略；持久化注册中心建立后，前端的启用/停用状态立即
+影响运行时目录，无需重启。
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
@@ -268,7 +268,7 @@ TOKEN_BUDGET_ACTION=reject
 会在提交用户消息或调用模型之前拒绝请求；允许执行的请求也会把 Provider 输出上限
 限制到剩余硬预算。API 返回 `429` 和 `code=token_budget_exceeded`。
 
-使用 `downgrade` 时，应配置一个已进入白名单的低成本组合：
+使用 `downgrade` 时，应配置一个会被导入注册中心的低成本组合：
 
 ```dotenv
 TOKEN_BUDGET_ACTION=downgrade
@@ -280,10 +280,11 @@ TOKEN_BUDGET_FALLBACK_MODEL=gpt-5-nano
 实际模型元数据。这是软预算，回退模型的用量仍会继续累积。预算预检读取已经提交的
 账本记录，项目不会宣称具备严格的跨进程预算预留能力。
 
-路由与治理属于同一条流水线：路由器先筛选、排序符合条件且健康的模型；每次真实的
-计数或生成尝试前，选中的 Provider/Model 都必须通过白名单和 Token 预算预检。预算
-降级目标必须重新通过目录能力与健康校验。跨 Provider 回退会为新候选重复执行对应
-Provider 的计数与授权，并且仍仅限于首个 delta 之前。
+路由与治理属于同一条流水线：路由器先筛选、排序已注册、已启用、符合能力要求且健康
+的模型；每次真实的计数或生成尝试前，选中的 Provider/Model 都必须再次通过注册中心
+可用性和 Token 预算预检。预算降级目标必须重新通过目录注册状态、能力与健康校验。
+跨 Provider 回退会为新候选重复执行对应 Provider 的计数与授权，并且仍仅限于首个
+delta 之前。
 
 OpenAI、Anthropic 和 Google 使用各自的计数 API；DeepSeek 目前在预检阶段采用保守
 估算，最终仍以 Provider 返回的实际用量写入账本。

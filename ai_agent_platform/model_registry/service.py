@@ -318,6 +318,10 @@ class ModelRegistryService:
             model = self._repository.get_model(preferred_model_id)
             if model is None:
                 raise ModelRegistryNotFoundError(preferred_model_id)
+            if not self.is_model_available(model.provider, model.model):
+                raise ValueError(
+                    "preferred model and provider connection must both be enabled"
+                )
         else:
             preferred_model_id = None
         preference = SessionModelPreference(
@@ -375,7 +379,7 @@ class ModelRegistryService:
             return None
         return self._secret_store.get(connection.secret_ref)
 
-    def is_model_allowed(self, provider: str, model: str) -> bool:
+    def is_model_available(self, provider: str, model: str) -> bool:
         connection = self._repository.get_connection(provider)
         registered = self._repository.get_model_by_key(provider, model)
         return bool(

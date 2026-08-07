@@ -582,7 +582,7 @@ class ApiTests(unittest.TestCase):
                 ).json()["messages"]
                 self.assertEqual(messages, [])
 
-    def test_chat_downgrades_to_allowlisted_cheap_model_over_budget(self) -> None:
+    def test_chat_downgrades_to_registered_cheap_model_over_budget(self) -> None:
         with TemporaryDirectory() as temp_dir:
             settings = Settings(
                 llm_provider="fake",

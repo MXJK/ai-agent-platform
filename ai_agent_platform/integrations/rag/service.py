@@ -714,10 +714,6 @@ class OpenAIEmbeddingProvider:
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
         self._usage_ledger = usage_ledger
-        if not settings.is_model_allowed("openai", self._model):
-            raise RAGConfigurationError(
-                f"embedding model is not allowlisted: openai:{self._model}"
-            )
 
     def embed_texts(
         self,
@@ -775,10 +771,6 @@ class GeminiEmbeddingProvider:
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
         self._usage_ledger = usage_ledger
-        if not settings.is_model_allowed("gemini", self._model):
-            raise RAGConfigurationError(
-                f"embedding model is not allowlisted: gemini:{self._model}"
-            )
 
     def embed_texts(
         self,

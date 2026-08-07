@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "WORKSPACE-HARDENING-UX"
-next_action: "Review the conflict-resolved workspace hardening branch and approve the PostgreSQL migration only after duplicate roots are resolved"
+active_task: "DYNAMIC-MODEL-POLICY"
+next_action: "Review the dynamic model admission diff, then restart the backend to activate it and commit if accepted"
 blockers: []
 last_verified_commit: "d7478ff2992b5bb2d46bb3a0d989e54789af1935"
-updated_at: "2026-08-07T15:04:13+08:00"
+updated_at: "2026-08-07T17:26:54+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

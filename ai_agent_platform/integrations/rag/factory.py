@@ -42,11 +42,6 @@ def create_rag_service(
             usage_ledger=usage_ledger,
         )
     elif settings.embedding_provider == "local":
-        if not settings.is_model_allowed("local", settings.embedding_model):
-            raise RAGConfigurationError(
-                "embedding model is not allowlisted: "
-                f"local:{settings.embedding_model}"
-            )
         embedding_provider = HashingEmbeddingProvider(
             dimensions=settings.local_embedding_dimensions,
             model=settings.embedding_model,

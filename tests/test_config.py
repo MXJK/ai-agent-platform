@@ -86,11 +86,6 @@ class SettingsTests(unittest.TestCase):
                 "LLM_CIRCUIT_ERROR_WINDOW_SIZE": "12",
                 "LLM_CIRCUIT_ERROR_RATE_MIN_REQUESTS": "6",
                 "LLM_CIRCUIT_ERROR_RATE_THRESHOLD": "0.6",
-                "MODEL_PROVIDER_ALLOWLIST": "fake,local",
-                "MODEL_ALLOWLIST": (
-                    "fake:fake-chat-1,local:gemini-embedding-001,"
-                    "fake:fake-cheap"
-                ),
                 "SESSION_TOKEN_BUDGET": "50000",
                 "WORKSPACE_TOKEN_BUDGET": "250000",
                 "TOKEN_BUDGET_ACTION": "downgrade",
@@ -183,8 +178,6 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.llm_circuit_error_window_size, 12)
         self.assertEqual(settings.llm_circuit_error_rate_min_requests, 6)
         self.assertEqual(settings.llm_circuit_error_rate_threshold, 0.6)
-        self.assertEqual(settings.model_provider_allowlist, ("fake", "local"))
-        self.assertIn("fake:fake-cheap", settings.model_allowlist)
         self.assertEqual(settings.session_token_budget, 50000)
         self.assertEqual(settings.workspace_token_budget, 250000)
         self.assertEqual(settings.token_budget_action, "downgrade")
@@ -315,16 +308,6 @@ class SettingsTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             Settings(llm_circuit_error_rate_threshold=1.1)
-
-    def test_rejects_unallowlisted_configured_models(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not allowlisted"):
-            Settings(
-                model_provider_allowlist=("fake", "local"),
-                model_allowlist=(
-                    "fake:different-model",
-                    "local:gemini-embedding-001",
-                ),
-            )
 
     def test_downgrade_budget_requires_a_fallback_model(self) -> None:
         with self.assertRaisesRegex(ValueError, "require a fallback"):

@@ -289,16 +289,11 @@ class OpenAIStreamingTests(unittest.TestCase):
         self.assertTrue(post.call_args.args[0].endswith("/responses/input_tokens"))
         self.assertEqual(post.call_args.kwargs["payload"]["input"], messages)
 
-    def test_request_override_must_be_allowlisted(self) -> None:
+    def test_request_override_must_be_registered_in_runtime_catalog(self) -> None:
         client = LLMClient(
             Settings(
                 llm_provider="fake",
                 llm_model="fake-primary",
-                model_provider_allowlist=("fake", "local"),
-                model_allowlist=(
-                    "fake:fake-primary",
-                    "local:gemini-embedding-001",
-                ),
             )
         )
 

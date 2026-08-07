@@ -50,6 +50,7 @@ def create_api_router(
             settings,
             workspace_service=workspace_service,
             memory_service=project_memory_service,
+            model_registry=model_registry,
         )
     )
     router.include_router(

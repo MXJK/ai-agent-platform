@@ -246,7 +246,7 @@ class LLMClient:
 
     def set_model_registry(self, registry: Any) -> None:
         self._credential_resolver = registry.credential_for_provider
-        self._model_access_resolver = registry.is_model_allowed
+        self._model_access_resolver = registry.is_model_available
         self._model_observer = registry
 
     def replace_model_catalog(self, models: Iterable[ModelConfig]) -> None:
@@ -298,7 +298,7 @@ class LLMClient:
             fallback_enabled,
         ) = self._effective_routing(provider, model, routing_policy)
         if provider is not None or model is not None:
-            self._require_model_allowed(
+            self._require_model_available(
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
@@ -711,7 +711,7 @@ class LLMClient:
             fallback_enabled,
         ) = self._effective_routing(provider, model, routing_policy)
         if provider is not None or model is not None:
-            self._require_model_allowed(
+            self._require_model_available(
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
@@ -1238,13 +1238,13 @@ class LLMClient:
             config = candidate_trace.config
             if (
                 candidate_trace.eligible
-                and not self._is_model_allowed(
+                and not self._is_model_available(
                     config.provider,
                     config.model,
                 )
             ):
                 candidate_trace.eligible = False
-                candidate_trace.rejection_reasons.append("model_not_allowlisted")
+                candidate_trace.rejection_reasons.append("model_unavailable")
                 candidate_trace.rank = None
             if (
                 candidate_trace.eligible
@@ -1260,7 +1260,7 @@ class LLMClient:
                 candidate_trace.rank = None
         for config in route_plan.candidates:
             if (
-                self._is_model_allowed(config.provider, config.model)
+                self._is_model_available(config.provider, config.model)
                 and (
                     config.provider
                     not in {"openai", "deepseek", "anthropic", "google"}
@@ -1390,7 +1390,7 @@ class LLMClient:
         usage_context: Any = None,
     ) -> LLMRequestPlan:
         usage_context = usage_context or current_model_usage_context()
-        self._require_model_allowed(candidate.provider, candidate.model)
+        self._require_model_available(candidate.provider, candidate.model)
         input_tokens, count_method = count_tokens(
             candidate.provider,
             candidate.model,
@@ -1421,7 +1421,7 @@ class LLMClient:
                 authorization.provider != candidate.provider
                 or authorization.model != candidate.model
             ):
-                self._require_model_allowed(
+                self._require_model_available(
                     authorization.provider,
                     authorization.model,
                 )
@@ -1473,7 +1473,7 @@ class LLMClient:
                 trace.selection_reason = (
                     "token budget downgraded the routed candidate from "
                     f"{candidate.key} to {actual_candidate.key} after capability, "
-                    "allowlist, context, and health validation"
+                    "registration, context, and health validation"
                 )
                 fallback_candidates = ()
 
@@ -1686,30 +1686,30 @@ class LLMClient:
             code="llm_provider_not_allowed",
         )
 
-    def _require_model_allowed(self, provider: str, model: str) -> None:
-        if not self._is_model_allowed(provider, model):
+    def _require_model_available(self, provider: str, model: str) -> None:
+        if not self._is_model_available(provider, model):
+            registered_providers = {
+                item.provider for item in self._model_router.models
+            }
             code = (
                 "llm_provider_not_allowed"
-                if provider
-                not in (
-                    set(self._settings.model_provider_allowlist)
-                    or {
-                        self._settings.llm_provider,
-                        self._settings.embedding_provider,
-                        self._settings.token_budget_fallback_provider,
-                    }
-                )
+                if provider not in registered_providers
                 else "llm_model_not_allowed"
             )
             raise LLMProviderError(
-                f"model selection is not allowlisted: {provider}:{model}",
+                f"model selection is not registered and enabled: {provider}:{model}",
                 code=code,
             )
 
-    def _is_model_allowed(self, provider: str, model: str) -> bool:
+    def _is_model_available(self, provider: str, model: str) -> bool:
         if self._model_access_resolver is not None:
             return bool(self._model_access_resolver(provider, model))
-        return self._settings.is_model_allowed(provider, model)
+        return any(
+            item.provider == provider
+            and item.model == model
+            and item.enabled
+            for item in self._model_router.models
+        )
 
     def _api_key(self, provider: str) -> str | None:
         if self._credential_resolver is not None:
