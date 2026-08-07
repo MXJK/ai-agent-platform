@@ -224,6 +224,17 @@ class AgentRunService:
         self._assert_actor(record, actor_user_id)
         if record.status != "waiting_approval":
             raise AgentRunInvalidStateError(run_id, record.status)
+        if (
+            approved
+            and actor_user_id is not None
+            and self._project_memory_service is not None
+            and self._approval_requires_editor(record)
+        ):
+            self._project_memory_service.authorize(
+                workspace_id=record.workspace_id,
+                actor_user_id=actor_user_id,
+                required_role="editor",
+            )
         resolve_execution_config = getattr(
             self._session_service,
             "resolve_execution_config",
@@ -253,6 +264,7 @@ class AgentRunService:
                 run_id=run_id,
                 approved=approved,
                 feedback=feedback,
+                actor_user_id=actor_user_id,
                 model_selection=selection.__dict__,
             )
         except TaskQueueError:
@@ -384,6 +396,7 @@ class AgentRunService:
         run_id: str,
         approved: bool,
         feedback: Optional[str],
+        actor_user_id: str | None = None,
         model_selection: dict | None = None,
         broker_redelivered: bool = False,
     ) -> None:
@@ -415,6 +428,17 @@ class AgentRunService:
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
+                if (
+                    approved
+                    and actor_user_id is not None
+                    and self._project_memory_service is not None
+                    and self._approval_requires_editor(record)
+                ):
+                    self._project_memory_service.authorize(
+                        workspace_id=record.workspace_id,
+                        actor_user_id=actor_user_id,
+                        required_role="editor",
+                    )
                 with model_selection_scope(
                     ModelSelection(**model_selection) if model_selection else None
                 ):
@@ -445,6 +469,21 @@ class AgentRunService:
                 extra={"status": result.status},
             )
             self._record_assistant_message(result)
+
+    @staticmethod
+    def _approval_requires_editor(record: AgentRunRecord) -> bool:
+        pending = record.pending_approval or {}
+        approval_tools = pending.get("approval_required_tools") or []
+        if approval_tools:
+            return any(
+                item.get("permission_level") != "read_only"
+                for item in approval_tools
+                if isinstance(item, dict)
+            )
+        return pending.get("type") in {
+            "tool_plan_review",
+            "repair_plan_review",
+        }
 
     def _record_execution_metrics(self, *, status: str, started_at: float) -> None:
         duration_ms = int((perf_counter() - started_at) * 1000)

@@ -18,15 +18,28 @@ class WorkspaceUpsertRequest(BaseModel):
 class WorkspaceResponse(BaseModel):
     id: str
     root_path: str
+    status: str = "ready"
+    role: str | None = None
+    can_update: bool = True
     revision: int
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def from_domain(cls, workspace: WorkspaceRecord) -> "WorkspaceResponse":
+    def from_domain(
+        cls,
+        workspace: WorkspaceRecord,
+        *,
+        status: str = "ready",
+        role: str | None = None,
+        can_update: bool = True,
+    ) -> "WorkspaceResponse":
         return cls(
             id=workspace.id,
             root_path=workspace.root_path,
+            status=status,
+            role=role,
+            can_update=can_update,
             revision=workspace.revision,
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,

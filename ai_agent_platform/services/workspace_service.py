@@ -18,6 +18,9 @@ class WorkspaceStore(Protocol):
     def get(self, workspace_id: str) -> WorkspaceRecord | None:
         ...
 
+    def get_by_root_path(self, root_path: str) -> WorkspaceRecord | None:
+        ...
+
     def list(self) -> list[WorkspaceRecord]:
         ...
 
@@ -27,6 +30,10 @@ class WorkspaceNotFoundError(KeyError):
 
 
 class WorkspaceValidationError(ValueError):
+    pass
+
+
+class WorkspaceRootConflictError(WorkspaceValidationError):
     pass
 
 
@@ -46,10 +53,22 @@ class WorkspaceService:
 
     def register(self, *, workspace_id: str, root_path: str) -> WorkspaceRecord:
         root = self._resolve_allowed_root(root_path)
-        return self._store.upsert(
-            workspace_id=workspace_id,
-            root_path=str(root),
-        )
+        existing = self._store.get_by_root_path(str(root))
+        if existing is not None and existing.id != workspace_id:
+            raise WorkspaceRootConflictError(
+                "workspace root is already registered"
+            )
+        try:
+            return self._store.upsert(
+                workspace_id=workspace_id,
+                root_path=str(root),
+            )
+        except Exception as exc:
+            if getattr(exc, "sqlstate", None) == "23505":
+                raise WorkspaceRootConflictError(
+                    "workspace root is already registered"
+                ) from exc
+            raise
 
     def get(self, workspace_id: str) -> WorkspaceRecord:
         workspace = self._store.get(workspace_id)
@@ -100,6 +119,13 @@ class WorkspaceService:
         workspace = self.get(workspace_id)
         root = self._resolve_allowed_root(workspace.root_path)
         return str(root)
+
+    def status(self, workspace_id: str) -> str:
+        try:
+            self.resolve_for_run(workspace_id)
+        except WorkspaceValidationError:
+            return "unavailable"
+        return "ready"
 
     def _resolve_allowed_root(self, root_path: str) -> Path:
         root = Path(root_path).expanduser().resolve()
