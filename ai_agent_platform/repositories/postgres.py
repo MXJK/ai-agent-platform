@@ -1122,6 +1122,18 @@ class PostgresWorkspaceRepository:
             ).fetchone()
         return _workspace_from_row(row) if row is not None else None
 
+    def get_by_root_path(self, root_path: str) -> WorkspaceRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, root_path, created_at, updated_at, revision
+                FROM workspaces
+                WHERE root_path = %s
+                """,
+                (root_path,),
+            ).fetchone()
+        return _workspace_from_row(row) if row is not None else None
+
     def list(self) -> list[WorkspaceRecord]:
         with self._connect() as conn:
             rows = conn.execute(

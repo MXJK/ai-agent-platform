@@ -128,6 +128,13 @@ class ProjectMemoryService:
             )
         self._require_role(workspace_id, actor_user_id, required_role)
 
+    def role_for(self, *, workspace_id: str, actor_user_id: str) -> str | None:
+        member = self._repository.get_member(
+            workspace_id=workspace_id,
+            user_id=actor_user_id,
+        )
+        return member.role if member is not None else None
+
     def get_settings(
         self, *, workspace_id: str, actor_user_id: str
     ) -> MemorySettings:

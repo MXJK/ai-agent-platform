@@ -21,6 +21,7 @@ from ai_agent_platform.schemas import (
 from ai_agent_platform.services import (
     SessionService,
     WorkspaceNotFoundError,
+    WorkspaceRootConflictError,
     WorkspaceService,
     WorkspaceValidationError,
     summarize_token_usage,
@@ -42,8 +43,11 @@ def create_workspaces_router(
         response_model=WorkspaceDirectoryBrowseResponse,
     )
     def browse_workspace_directories(
+        http_request: Request,
         path: str | None = Query(default=None, min_length=1, max_length=2000),
     ) -> WorkspaceDirectoryBrowseResponse:
+        if settings.auth_mode != "disabled":
+            request_user_id(http_request, settings)
         try:
             current_path, parent_path, directories = (
                 workspace_service.browse_directories(path)
@@ -91,6 +95,8 @@ def create_workspaces_router(
                 workspace_id=workspace_id,
                 root_path=request.root_path,
             )
+        except WorkspaceRootConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except WorkspaceValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if memory_service is not None:
@@ -98,11 +104,17 @@ def create_workspaces_router(
                 workspace_id=workspace.id,
                 actor_user_id=request_user_id(http_request, settings),
             )
-        return WorkspaceResponse.from_domain(workspace)
+        return WorkspaceResponse.from_domain(
+            workspace,
+            status=workspace_service.status(workspace.id),
+            role="admin",
+            can_update=True,
+        )
 
     @router.get("/workspaces", response_model=WorkspacesResponse)
     def list_workspaces(http_request: Request) -> WorkspacesResponse:
         workspaces = workspace_service.list()
+        actor_user_id: str | None = None
         if settings.auth_mode != "disabled" and memory_service is not None:
             actor_user_id = request_user_id(http_request, settings)
             visible = []
@@ -118,7 +130,7 @@ def create_workspaces_router(
             workspaces = visible
         return WorkspacesResponse(
             workspaces=[
-                WorkspaceResponse.from_domain(item)
+                _workspace_response(item, actor_user_id=actor_user_id)
                 for item in workspaces
             ]
         )
@@ -144,7 +156,14 @@ def create_workspaces_router(
                 )
             except MemoryAccessDeniedError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
-        return WorkspaceResponse.from_domain(workspace)
+        return _workspace_response(
+            workspace,
+            actor_user_id=(
+                request_user_id(http_request, settings)
+                if settings.auth_mode != "disabled"
+                else None
+            ),
+        )
 
     @router.get(
         "/workspaces/{workspace_id}/token-usage",
@@ -215,6 +234,24 @@ def create_workspaces_router(
                 if budget is not None
                 else None
             ),
+        )
+
+    def _workspace_response(
+        workspace,
+        *,
+        actor_user_id: str | None,
+    ) -> WorkspaceResponse:
+        role = "admin"
+        if memory_service is not None and actor_user_id is not None:
+            role = memory_service.role_for(
+                workspace_id=workspace.id,
+                actor_user_id=actor_user_id,
+            )
+        return WorkspaceResponse.from_domain(
+            workspace,
+            status=workspace_service.status(workspace.id),
+            role=role,
+            can_update=role == "admin",
         )
 
     return router

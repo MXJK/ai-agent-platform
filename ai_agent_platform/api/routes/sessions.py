@@ -4,6 +4,10 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.project_memory import (
+    MemoryAccessDeniedError,
+    ProjectMemoryService,
+)
 from ai_agent_platform.repositories import (
     SessionArchivedError,
     SessionNotFoundError,
@@ -38,6 +42,7 @@ def create_sessions_router(
     session_service: SessionService,
     settings: Settings | None = None,
     workspace_service: WorkspaceService | None = None,
+    memory_service: ProjectMemoryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
     settings = settings or Settings()
@@ -159,7 +164,7 @@ def create_sessions_router(
             name: getattr(request, name)
             for name in request.model_fields_set
         }
-        _validate_preference_changes(current, changes)
+        _validate_preference_changes(current, changes, user_id)
         try:
             updated = session_service.save_user_preferences(
                 replace(current, **changes)
@@ -350,8 +355,13 @@ def create_sessions_router(
                     status_code=404,
                     detail="workspace not found",
                 ) from exc
+            _authorize_workspace(configuration.workspace_id, session.user_id)
 
-    def _validate_preference_changes(current, changes: dict) -> None:
+    def _validate_preference_changes(
+        current,
+        changes: dict,
+        actor_user_id: str,
+    ) -> None:
         effective_provider = (
             changes.get("default_provider", current.default_provider)
             or settings.llm_provider
@@ -385,5 +395,18 @@ def create_sessions_router(
                     status_code=404,
                     detail="workspace not found",
                 ) from exc
+            _authorize_workspace(workspace_id, actor_user_id)
+
+    def _authorize_workspace(workspace_id: str, actor_user_id: str) -> None:
+        if settings.auth_mode == "disabled" or memory_service is None:
+            return
+        try:
+            memory_service.authorize(
+                workspace_id=workspace_id,
+                actor_user_id=actor_user_id,
+                required_role="viewer",
+            )
+        except MemoryAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     return router

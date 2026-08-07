@@ -18,6 +18,110 @@ from ai_agent_platform.services import AgentRunService
 
 
 class InProcessTaskQueueTests(unittest.TestCase):
+    def test_viewer_cannot_approve_workspace_mutation(self) -> None:
+        record = AgentRunRecord(
+            run_id="run_waiting",
+            thread_id="run_waiting",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/tmp/workspace",
+            status="waiting_approval",
+            checkpoint_id="checkpoint_1",
+            latest_node="review_tool_plan",
+            next_nodes=["review_tool_plan"],
+            trace=[],
+            pending_approval={
+                "type": "tool_plan_review",
+                "approval_required_tools": [
+                    {
+                        "name": "sandbox.apply_patch",
+                        "permission_level": "write_safe",
+                    }
+                ],
+            },
+        )
+
+        class RuntimeStub:
+            def get_run(self, _: str) -> AgentRunRecord:
+                return record
+
+        class ViewerOnlyMemoryService:
+            def authorize(self, *, required_role: str, **_: object) -> None:
+                if required_role == "editor":
+                    raise PermissionError("editor access is required")
+
+        service = AgentRunService(
+            runtime=RuntimeStub(),
+            session_service=SimpleNamespace(
+                get_session=lambda **_: SimpleNamespace(user_id="viewer"),
+            ),
+            workspace_service=SimpleNamespace(),
+            project_memory_service=ViewerOnlyMemoryService(),
+        )
+        with self.assertRaisesRegex(PermissionError, "editor access"):
+            service.resume_run(
+                run_id=record.run_id,
+                approved=True,
+                actor_user_id="viewer",
+            )
+        service.close()
+
+    def test_editor_can_queue_workspace_mutation_approval(self) -> None:
+        record = AgentRunRecord(
+            run_id="run_waiting",
+            thread_id="run_waiting",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/tmp/workspace",
+            status="waiting_approval",
+            checkpoint_id="checkpoint_1",
+            latest_node="review_tool_plan",
+            next_nodes=["review_tool_plan"],
+            trace=[],
+            pending_approval={
+                "type": "tool_plan_review",
+                "approval_required_tools": [
+                    {
+                        "name": "sandbox.apply_patch",
+                        "permission_level": "write_safe",
+                    }
+                ],
+            },
+        )
+        authorizations: list[str] = []
+        queued: list[dict] = []
+
+        class RuntimeStub:
+            def get_run(self, _: str) -> AgentRunRecord:
+                return record
+
+        class EditorMemoryService:
+            def authorize(self, *, required_role: str, **_: object) -> None:
+                authorizations.append(required_role)
+
+        class CaptureQueue:
+            def submit(self, _task_name: str, _task, **payload: object) -> None:
+                queued.append(payload)
+
+        service = AgentRunService(
+            runtime=RuntimeStub(),
+            session_service=SimpleNamespace(
+                get_session=lambda **_: SimpleNamespace(user_id="editor"),
+            ),
+            workspace_service=SimpleNamespace(),
+            project_memory_service=EditorMemoryService(),
+            task_queue=CaptureQueue(),
+        )
+        resumed = service.resume_run(
+            run_id=record.run_id,
+            approved=True,
+            actor_user_id="editor",
+        )
+        self.assertEqual(resumed, record)
+        self.assertEqual(authorizations, ["editor"])
+        self.assertEqual(queued[0]["actor_user_id"], "editor")
+        service.close()
+
     def test_applies_backpressure_and_records_metrics(self) -> None:
         metrics = MetricsRegistry()
         queue = InProcessTaskQueue(max_workers=1, max_queue_size=0, metrics=metrics)

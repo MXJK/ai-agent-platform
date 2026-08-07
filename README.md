@@ -96,7 +96,8 @@ Token 时才作为后备。
 - 托管知识库目录、多文件上传、混合检索、问答、引用和索引任务状态；
 - 项目记忆治理页，包括模式、状态和类型筛选，证据、置信度、乐观锁编辑、确认、
   拒绝、遗忘和索引修复；
-- 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区目录选择；
+- 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区目录选择，以及在 Agent 输入区持续可见的
+  工作区 ID、规范路径、可用状态与角色；
 - Agent 运行详情、审批风险、验证产物、错误和指标；
 - 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
 
@@ -380,7 +381,9 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 ## 工作区 API
 
 `workspace_id` 只允许字母、数字、`_`、`-` 和 `.`。根路径必须是规范化绝对路径，
-解析符号链接后仍要位于 `WORKSPACE_ALLOWED_ROOTS` 内。
+解析符号链接后仍要位于 `WORKSPACE_ALLOWED_ROOTS` 内。同一个规范化根路径只能登记为
+一个工作区；使用另一个 ID 重复登记会返回 `409`。列表与详情响应还会返回 `status`、
+`role` 和 `can_update`，供客户端区分路径可用性和当前用户能力。
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/workspaces/project \
@@ -392,6 +395,14 @@ curl http://localhost:8000/api/v1/workspaces/project
 curl http://localhost:8000/api/v1/workspaces/project/token-usage
 curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 ```
+
+前端把当前运行工作区、用户默认工作区和新登记草稿作为三个独立状态：草稿输入不会
+提前改变 Agent 上下文，登记成功后才显式激活；单个工作区 Token 用量加载失败也不会
+把登记结果误报为失败。Agent 模式没有可用工作区时会在请求发送前阻止提交。
+
+在 `AUTH_MODE=trusted_header` 下，目录浏览也要求可信网关身份；会话配置和用户默认值
+只能引用当前用户至少拥有 viewer 权限的工作区。viewer 可以启动只读分析，但批准包含
+写入或外部副作用工具的计划至少需要 editor 权限，且 Worker 执行前会再次授权。
 
 v1 有意不提供工作区删除接口。更新根目录会递增 `workspaces.revision`，旧 revision 的
 记忆不再参与检索。管理员可以明确确认一条旧记录，把它复制到当前 revision；历史记录
@@ -634,6 +645,7 @@ RAG_RERANK_DEFAULT_ENABLED=false
   Provider/Model、输入计数方式和预算决策；
 - `20260804_0014`：添加持久化会话标题、更新时间/归档状态、会话级模型/工作区/模式
   配置、用户偏好、近期会话索引和确定性回填，并为每次 Agent 运行保存不可变模型快照。
+- `20260807_0015`：为规范化工作区根路径添加唯一约束；升级前必须先处理已有重复路径。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。

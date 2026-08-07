@@ -1118,6 +1118,10 @@ class ProjectMemoryApiTests(unittest.TestCase):
                 "X-Gateway-Auth": "unit-test-trust-secret",
             }
             with TestClient(create_app(settings=settings)) as client:
+                self.assertEqual(
+                    client.get("/api/v1/workspace-directories").status_code,
+                    401,
+                )
                 spoofed = client.post(
                     "/api/v1/sessions",
                     headers={"X-Authenticated-User": "alice"},
@@ -1136,6 +1140,12 @@ class ProjectMemoryApiTests(unittest.TestCase):
                     headers=alice_headers,
                     json={"root_path": str(workspace)},
                 )
+                duplicate = client.put(
+                    "/api/v1/workspaces/project-copy",
+                    headers=bob_headers,
+                    json={"root_path": str(workspace)},
+                )
+                self.assertEqual(duplicate.status_code, 409)
                 created = client.post(
                     "/api/v1/workspaces/project/memories",
                     headers=alice_headers,
@@ -1181,6 +1191,22 @@ class ProjectMemoryApiTests(unittest.TestCase):
                     headers=bob_headers,
                     json={"user_id": "alice"},
                 ).json()["id"]
+                self.assertEqual(
+                    client.patch(
+                        f"/api/v1/sessions/{bob_session}",
+                        headers=bob_headers,
+                        json={"configuration": {"workspace_id": "project"}},
+                    ).status_code,
+                    403,
+                )
+                self.assertEqual(
+                    client.patch(
+                        "/api/v1/users/me/preferences",
+                        headers=bob_headers,
+                        json={"default_workspace_id": "project"},
+                    ).status_code,
+                    403,
+                )
                 self.assertEqual(
                     client.post(
                         "/api/v1/agent/runs",

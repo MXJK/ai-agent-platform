@@ -94,6 +94,27 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual(created.status_code, 200)
                 self.assertEqual(created.json()["root_path"], str(workspace.resolve()))
+                self.assertEqual(created.json()["status"], "ready")
+                self.assertEqual(created.json()["role"], "admin")
+                self.assertTrue(created.json()["can_update"])
+                repeated = client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                )
+                self.assertEqual(repeated.status_code, 200)
+                self.assertEqual(
+                    repeated.json()["revision"],
+                    created.json()["revision"],
+                )
+                conflict = client.put(
+                    "/api/v1/workspaces/project-copy",
+                    json={"root_path": str(workspace)},
+                )
+                self.assertEqual(conflict.status_code, 409)
+                self.assertEqual(
+                    conflict.json()["detail"],
+                    "workspace root is already registered",
+                )
                 self.assertEqual(
                     client.get("/api/v1/workspaces/project").json()["id"],
                     "project",
@@ -303,7 +324,9 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('id="composer-attachment-btn"', response.text)
         self.assertNotIn('id="composer-provider-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
-        self.assertIn('id="workspace-id-input"', response.text)
+        self.assertIn('id="workspace-draft-id-input"', response.text)
+        self.assertIn('id="composer-workspace-select"', response.text)
+        self.assertIn('id="workspace-catalog-list"', response.text)
         self.assertIn('id="open-workspace-picker-btn"', response.text)
         self.assertIn('id="workspace-picker-dialog"', response.text)
         self.assertIn('id="workspace-token-list"', response.text)

@@ -19,7 +19,11 @@ const state = {
   sessionTokenUsage: {},
   requestLog: [],
   workspaces: [],
+  workspacesLoaded: false,
+  activeWorkspaceId: "",
+  defaultWorkspaceId: "",
   workspaceTokenUsage: {},
+  workspaceTokenUsageErrors: {},
   workspaceDirectoryPath: null,
   workspaceDirectoryParentPath: null,
   knowledgeBases: [],
@@ -556,17 +560,81 @@ function closeWorkspacePicker() {
 function updateContextSummary() {
   const userId = $("user-id-input").value.trim() || "demo_user";
   const thinkingLevel = $("thinking-level-input").value.trim();
-  const workspaceId = $("workspace-id-input").value.trim() || "workspace_main";
+  const workspace = currentWorkspace();
+  const workspaceId = workspace?.id || "";
+  const workspaceLabel = workspaceId || "未选择";
+  const workspaceReady = workspaceIsReady(workspace);
+  const workspaceRoot = workspace?.root_path || "Agent 运行前必须选择一个可用工作区";
+  const roleLabel = workspaceRoleLabel(workspace?.role);
   const modelLabel = `${currentModelSelectionLabel()}${thinkingLevel ? ` · ${thinkingLevel}` : ""}`;
 
   $("context-user").textContent = userId;
   $("context-model").textContent = modelLabel;
-  $("context-workspace").textContent = workspaceId;
+  $("context-workspace").textContent = workspaceLabel;
   $("composer-context").textContent = modelLabel;
-  $("agent-workspace-badge").textContent = workspaceId;
+  $("agent-workspace-badge").textContent = workspaceReady
+    ? `${workspaceId} · 可用`
+    : workspaceId
+      ? `${workspaceId} · 不可用`
+      : "未选择工作区";
+  $("composer-workspace-id").textContent = workspaceId || "未选择工作区";
+  $("composer-workspace-root").textContent = workspaceRoot;
+  $("composer-workspace-status").className = `workspace-status-dot ${
+    workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
+  }`;
+  $("agent-workspace-context-id").textContent = workspaceId || "未选择工作区";
+  $("agent-workspace-root").textContent = workspaceRoot;
+  $("agent-workspace-role").textContent = workspace
+    ? `${roleLabel} · ${workspaceReady ? "可运行" : "路径不可用"}`
+    : "未连接";
+  $("agent-workspace-context").className = `agent-workspace-context ${
+    workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
+  }`;
+  $("workspace-current-summary").textContent = workspaceLabel;
+  $("workspace-default-summary").textContent = state.defaultWorkspaceId || "未设置";
   $("header-session-id").textContent = state.currentSession?.title
     || state.conversationId
     || "尚未创建";
+
+  const existingDraft = state.workspaces.find(
+    (item) => item.id === $("workspace-draft-id-input").value.trim(),
+  );
+  const registerButton = $("register-workspace-btn");
+  registerButton.textContent = existingDraft ? "更新登记" : "登记工作区";
+  registerButton.disabled = Boolean(existingDraft && !existingDraft.can_update);
+}
+
+function currentWorkspace() {
+  return state.workspaces.find((item) => item.id === state.activeWorkspaceId) || null;
+}
+
+function workspaceIsReady(workspace) {
+  return Boolean(workspace && workspace.status !== "unavailable");
+}
+
+function workspaceRoleLabel(role) {
+  return {
+    admin: "管理员",
+    editor: "可编辑",
+    viewer: "只读",
+  }[role] || "本地管理";
+}
+
+function setActiveWorkspace(workspaceId) {
+  const normalizedId = workspaceId || "";
+  state.activeWorkspaceId = normalizedId && (
+    !state.workspacesLoaded
+    || state.workspaces.some((item) => item.id === normalizedId)
+  ) ? normalizedId : "";
+  for (const selectId of ["workspace-select", "composer-workspace-select"]) {
+    const select = $(selectId);
+    if (select) {
+      select.value = state.activeWorkspaceId;
+    }
+  }
+  updateContextSummary();
+  updateComposerAvailability();
+  renderWorkspaceCatalog();
 }
 
 function configurationFromInputs() {
@@ -574,7 +642,7 @@ function configurationFromInputs() {
     provider: $("provider-input").value.trim() || null,
     model: $("model-input").value.trim() || null,
     thinking_level: $("thinking-level-input").value.trim() || null,
-    workspace_id: $("workspace-id-input").value.trim() || null,
+    workspace_id: state.activeWorkspaceId || null,
     composer_mode: state.composerMode,
   };
 }
@@ -584,12 +652,7 @@ function applyConfigurationToInputs(source, defaults = false) {
   $("provider-input").value = value("provider");
   $("model-input").value = value("model");
   $("thinking-level-input").value = value("thinking_level");
-  $("workspace-id-input").value = value("workspace_id");
-  const workspace = state.workspaces.find((item) => item.id === value("workspace_id"));
-  if (workspace) {
-    $("workspace-select").value = workspace.id;
-    $("workspace-root-input").value = workspace.root_path;
-  }
+  setActiveWorkspace(value("workspace_id"));
   updateComposerMode(value("composer_mode") || "chat");
   updateContextSummary();
 }
@@ -613,6 +676,7 @@ async function saveSettings() {
         },
       );
       state.preferences = await fetchJson("/users/me/preferences");
+      state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
       replaceSessionInLists(state.currentSession);
     } else {
       state.preferences = await fetchJson("/users/me/preferences", {
@@ -625,8 +689,10 @@ async function saveSettings() {
           default_composer_mode: configuration.composer_mode,
         }),
       });
+      state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
     }
     updateContextSummary();
+    renderWorkspaceCatalog();
     updateComposerAvailability();
     closeSettings();
     showToast(state.currentSession ? "当前会话和默认设置已保存" : "默认设置已保存");
@@ -642,6 +708,7 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   state.composerMode = mode === "agent" ? "agent" : "chat";
   $("composer-mode-input").value = state.composerMode;
   const isAgent = state.composerMode === "agent";
+  $("workspace-context-strip").hidden = !isAgent;
   $("composer-mode-description").textContent = isAgent
     ? "读取工作区并运行工具；高风险操作等待审批。"
     : "流式回答，不执行代码工具。";
@@ -683,11 +750,13 @@ async function persistComposerMode(mode) {
 function updateComposerAvailability() {
   const archived = Boolean(state.currentSession?.archived_at);
   const streaming = Boolean(state.chatController);
+  const agentNeedsWorkspace = state.composerMode === "agent"
+    && !workspaceIsReady(currentWorkspace());
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
-  $("send-chat-btn").disabled = archived || streaming;
-  $("run-agent-btn").disabled = archived;
+  $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace;
+  $("run-agent-btn").disabled = archived || !workspaceIsReady(currentWorkspace());
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
   }
@@ -1410,6 +1479,7 @@ async function createSession() {
 
 async function loadPreferences() {
   state.preferences = await fetchJson("/users/me/preferences");
+  state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
   if (!state.currentSession) {
     applyConfigurationToInputs(state.preferences, true);
   }
@@ -2078,8 +2148,8 @@ async function streamChat() {
     const payload = {
       conversation_id: conversationId,
       message,
-      ...($("workspace-id-input").value.trim()
-        ? { workspace_id: $("workspace-id-input").value.trim() }
+      ...(state.activeWorkspaceId
+        ? { workspace_id: state.activeWorkspaceId }
         : {}),
       ...optionalModelFields(),
     };
@@ -2364,6 +2434,15 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     showToast("请先描述 Agent 任务", "warning");
     return null;
   }
+  const workspace = currentWorkspace();
+  if (!workspaceIsReady(workspace)) {
+    showToast(
+      workspace ? "当前工作区路径不可用，请切换工作区" : "请先选择 Agent 工作区",
+      "warning",
+    );
+    openSettings();
+    return null;
+  }
   let submittedRun = null;
   const button = $("run-agent-btn");
   button.disabled = true;
@@ -2379,9 +2458,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     const payload = {
       conversation_id: conversationId,
       message,
-      ...($("workspace-id-input").value.trim()
-        ? { workspace_id: $("workspace-id-input").value.trim() }
-        : {}),
+      workspace_id: workspace.id,
       ...optionalModelFields(),
       focus_files: csvValues($("focus-files-input").value),
     };
@@ -3062,7 +3139,18 @@ async function deleteKnowledgeBase() {
 }
 
 function activeWorkspaceId() {
-  return $("workspace-id-input").value.trim() || "workspace_main";
+  return state.activeWorkspaceId;
+}
+
+function requireActiveWorkspace() {
+  const workspace = currentWorkspace();
+  if (!workspace) {
+    throw new Error("请先选择工作区");
+  }
+  if (!workspaceIsReady(workspace)) {
+    throw new Error("当前工作区路径不可用，请切换或更新登记");
+  }
+  return workspace.id;
 }
 
 function memoryPayload() {
@@ -3171,7 +3259,7 @@ function renderMemoryJobs(jobs) {
 }
 
 async function loadMemorySettings() {
-  const workspaceId = activeWorkspaceId();
+  const workspaceId = requireActiveWorkspace();
   const body = await fetchJson(
     `/workspaces/${encodeURIComponent(workspaceId)}/memory-settings`,
   );
@@ -3181,7 +3269,14 @@ async function loadMemorySettings() {
 }
 
 async function listProjectMemories() {
-  const workspaceId = activeWorkspaceId();
+  if (!workspaceIsReady(currentWorkspace())) {
+    state.projectMemories = [];
+    state.selectedMemoryId = "";
+    renderProjectMemories();
+    renderMemoryJobs([]);
+    return [];
+  }
+  const workspaceId = requireActiveWorkspace();
   const params = new URLSearchParams();
   if ($("memory-status-filter").value) {
     params.set("status", $("memory-status-filter").value);
@@ -3204,6 +3299,14 @@ async function listProjectMemories() {
 }
 
 async function refreshProjectMemory() {
+  if (!workspaceIsReady(currentWorkspace())) {
+    state.projectMemories = [];
+    state.selectedMemoryId = "";
+    renderProjectMemories();
+    renderMemoryJobs([]);
+    $("memory-status").textContent = "请先选择可用工作区";
+    return;
+  }
   try {
     await Promise.all([loadMemorySettings(), listProjectMemories()]);
   } catch (error) {
@@ -3213,8 +3316,8 @@ async function refreshProjectMemory() {
 }
 
 async function saveMemoryMode() {
-  const workspaceId = activeWorkspaceId();
   try {
+    const workspaceId = requireActiveWorkspace();
     const body = await fetchJson(
       `/workspaces/${encodeURIComponent(workspaceId)}/memory-settings`,
       {
@@ -3236,8 +3339,9 @@ async function createProjectMemory() {
     return;
   }
   try {
+    const workspaceId = requireActiveWorkspace();
     const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/memories`,
       { method: "POST", body: JSON.stringify(payload) },
     );
     await listProjectMemories();
@@ -3255,8 +3359,9 @@ async function updateProjectMemory() {
     return;
   }
   try {
+    const workspaceId = requireActiveWorkspace();
     const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories/${encodeURIComponent(current.id)}`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/memories/${encodeURIComponent(current.id)}`,
       {
         method: "PATCH",
         body: JSON.stringify({ ...memoryPayload(), version: current.version }),
@@ -3277,8 +3382,9 @@ async function transitionProjectMemory(action) {
     return;
   }
   try {
+    const workspaceId = requireActiveWorkspace();
     const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories/${encodeURIComponent(current.id)}/${action}`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/memories/${encodeURIComponent(current.id)}/${action}`,
       {
         method: "POST",
         body: JSON.stringify({ version: current.version }),
@@ -3302,8 +3408,9 @@ async function forgetProjectMemory() {
     return;
   }
   try {
+    const workspaceId = requireActiveWorkspace();
     await fetchJson(
-      `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories/${encodeURIComponent(current.id)}`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/memories/${encodeURIComponent(current.id)}`,
       { method: "DELETE" },
     );
     clearMemorySelection();
@@ -3316,8 +3423,9 @@ async function forgetProjectMemory() {
 
 async function reindexProjectMemories() {
   try {
+    const workspaceId = requireActiveWorkspace();
     const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories/reindex`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/memories/reindex`,
       { method: "POST", body: "{}" },
     );
     showToast(`已提交 ${body.queued_count || 0} 条索引事件`);
@@ -3327,34 +3435,59 @@ async function reindexProjectMemories() {
 }
 
 async function registerWorkspace() {
-  const workspaceId = $("workspace-id-input").value.trim();
-  const rootPath = $("workspace-root-input").value.trim();
+  const workspaceId = $("workspace-draft-id-input").value.trim();
+  const rootPath = $("workspace-draft-root-input").value.trim();
   if (!workspaceId) {
     showToast("请填写工作区 ID", "warning");
+    $("workspace-draft-id-input").focus();
     return;
   }
   if (!rootPath) {
     showToast("请填写工作区根路径", "warning");
-    $("workspace-root-input").focus();
+    $("workspace-draft-root-input").focus();
     return;
   }
-  $("register-workspace-btn").disabled = true;
+  const button = $("register-workspace-btn");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  setWorkspaceRegistrationResult("正在验证路径并登记…", "pending");
   try {
     const body = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`, {
       method: "PUT",
       body: JSON.stringify({ root_path: rootPath }),
     });
     setRaw(body);
-    await listWorkspaces();
-    $("workspace-select").value = workspaceId;
+    state.workspaces = [
+      ...state.workspaces.filter((item) => item.id !== body.id),
+      body,
+    ].sort((left, right) => left.id.localeCompare(right.id));
+    setActiveWorkspace(body.id);
+    setWorkspaceRegistrationResult(
+      `${body.id} 已登记并设为当前工作区 · ${body.root_path}`,
+      "success",
+    );
     showToast(`工作区 ${workspaceId} 已注册`, "success");
+    try {
+      await listWorkspaces();
+    } catch (refreshError) {
+      showToast(`工作区已登记，但列表刷新失败：${humanizeError(refreshError)}`, "warning");
+    }
     return body;
   } catch (error) {
+    setWorkspaceRegistrationResult(humanizeError(error), "error");
     showToast(humanizeError(error), "error");
     return null;
   } finally {
-    $("register-workspace-btn").disabled = false;
+    button.removeAttribute("aria-busy");
+    updateContextSummary();
   }
+}
+
+function setWorkspaceRegistrationResult(message, status) {
+  const result = $("workspace-registration-result");
+  result.hidden = false;
+  result.className = `workspace-registration-result ${status}`;
+  result.textContent = message;
 }
 
 function workspaceIdForPath(path) {
@@ -3434,7 +3567,7 @@ async function openWorkspacePicker() {
   if (!dialog.open) {
     dialog.showModal();
   }
-  const currentValue = $("workspace-root-input").value.trim();
+  const currentValue = $("workspace-draft-root-input").value.trim();
   try {
     await browseWorkspaceDirectories(currentValue || null);
   } catch (error) {
@@ -3459,8 +3592,8 @@ async function chooseWorkspaceDirectory() {
     return;
   }
   const chooseButton = $("choose-workspace-directory-btn");
-  $("workspace-root-input").value = path;
-  $("workspace-id-input").value = workspaceIdForPath(path);
+  $("workspace-draft-root-input").value = path;
+  $("workspace-draft-id-input").value = workspaceIdForPath(path);
   updateContextSummary();
   chooseButton.disabled = true;
   chooseButton.setAttribute("aria-busy", "true");
@@ -3478,38 +3611,85 @@ async function chooseWorkspaceDirectory() {
 async function listWorkspaces() {
   const body = await fetchJson("/workspaces");
   state.workspaces = body.workspaces || [];
-  const select = $("workspace-select");
-  const selectedId = $("workspace-id-input").value.trim();
-  select.innerHTML = '<option value="">选择工作区</option>';
-  for (const workspace of state.workspaces) {
-    const option = document.createElement("option");
-    option.value = workspace.id;
-    option.textContent = `${workspace.id} · ${workspace.root_path}`;
-    option.dataset.rootPath = workspace.root_path;
-    select.appendChild(option);
-  }
-  select.value = state.workspaces.some((item) => item.id === selectedId)
-    ? selectedId
-    : "";
+  state.workspacesLoaded = true;
+  renderWorkspaceSelectOptions();
+  const preferredId = state.activeWorkspaceId
+    || state.currentSession?.workspace_id
+    || state.defaultWorkspaceId;
+  setActiveWorkspace(
+    state.workspaces.some((item) => item.id === preferredId) ? preferredId : "",
+  );
   await loadWorkspaceTokenUsage();
   renderWorkspaceTokenUsage();
+}
+
+function renderWorkspaceSelectOptions() {
+  for (const selectId of ["workspace-select", "composer-workspace-select"]) {
+    const select = $(selectId);
+    select.innerHTML = '<option value="">选择工作区</option>';
+    for (const workspace of state.workspaces) {
+      const option = document.createElement("option");
+      option.value = workspace.id;
+      option.textContent = `${workspace.id} · ${
+        workspace.status === "unavailable" ? "路径不可用" : workspace.root_path
+      }`;
+      option.disabled = workspace.status === "unavailable";
+      select.appendChild(option);
+    }
+    select.value = state.activeWorkspaceId;
+  }
+}
+
+function renderWorkspaceCatalog() {
+  const list = $("workspace-catalog-list");
+  if (!list) {
+    return;
+  }
+  if (!state.workspaces.length) {
+    list.innerHTML = '<div class="empty-state compact">暂无已登记工作区，请在下方登记代码目录。</div>';
+    return;
+  }
+  list.innerHTML = state.workspaces.map((workspace) => {
+    const ready = workspaceIsReady(workspace);
+    const current = workspace.id === state.activeWorkspaceId;
+    const isDefault = workspace.id === state.defaultWorkspaceId;
+    return `
+      <article class="workspace-catalog-card ${current ? "is-current" : ""} ${ready ? "" : "is-unavailable"}" data-workspace-id="${escapeHtml(workspace.id)}">
+        <span class="workspace-status-dot ${ready ? "is-ready" : "is-unavailable"}" aria-hidden="true"></span>
+        <div class="workspace-catalog-copy">
+          <div><strong>${escapeHtml(workspace.id)}</strong>${current ? "<span>当前</span>" : ""}${isDefault ? "<span>默认</span>" : ""}</div>
+          <code>${escapeHtml(workspace.root_path)}</code>
+          <small>${escapeHtml(workspaceRoleLabel(workspace.role))} · ${ready ? "目录可访问" : "目录当前不可访问"}</small>
+        </div>
+        <div class="workspace-catalog-actions">
+          <button class="text-button" type="button" data-workspace-action="select" ${ready && !current ? "" : "disabled"}>${current ? "使用中" : "设为当前"}</button>
+          <button class="text-button" type="button" data-workspace-action="edit" ${workspace.can_update ? "" : "disabled"}>编辑登记</button>
+        </div>
+      </article>`;
+  }).join("");
 }
 
 async function loadWorkspaceTokenUsage(
   workspaceIds = state.workspaces.map((item) => item.id),
 ) {
-  const entries = await Promise.all(
-    workspaceIds.map(async (workspaceId) => [
+  const results = await Promise.allSettled(
+    workspaceIds.map(async (workspaceId) => ({
       workspaceId,
-      await fetchJson(
+      usage: await fetchJson(
         `/workspaces/${encodeURIComponent(workspaceId)}/token-usage`,
       ),
-    ]),
+    })),
   );
-  for (const [workspaceId, usage] of entries) {
-    state.workspaceTokenUsage[workspaceId] = usage;
+  for (const [index, result] of results.entries()) {
+    const workspaceId = workspaceIds[index];
+    if (result.status === "fulfilled") {
+      state.workspaceTokenUsage[workspaceId] = result.value.usage;
+      delete state.workspaceTokenUsageErrors[workspaceId];
+    } else {
+      state.workspaceTokenUsageErrors[workspaceId] = humanizeError(result.reason);
+    }
   }
-  return entries;
+  return results;
 }
 
 function renderWorkspaceTokenUsage() {
@@ -3524,6 +3704,7 @@ function renderWorkspaceTokenUsage() {
   }
   for (const workspace of state.workspaces) {
     const usage = state.workspaceTokenUsage[workspace.id];
+    const usageError = state.workspaceTokenUsageErrors[workspace.id];
     const workspaceBudget = usage?.budget?.workspace;
     const operationSummary = (usage?.operations || [])
       .map(
@@ -3539,7 +3720,7 @@ function renderWorkspaceTokenUsage() {
           <strong>${escapeHtml(workspace.id)}</strong>
           <small>${escapeHtml(workspace.root_path)}</small>
         </div>
-        <span>${escapeHtml(formatTokenCount(usage?.total_tokens || 0))}</span>
+        <span>${usageError ? "用量不可用" : escapeHtml(formatTokenCount(usage?.total_tokens || 0))}</span>
       </div>
       <div class="workspace-token-metrics">
         <small>输入 <strong>${escapeHtml(formatTokenCount(usage?.input_tokens || 0))}</strong></small>
@@ -3554,6 +3735,7 @@ function renderWorkspaceTokenUsage() {
             : "未启用"
         } · ${escapeHtml(usage?.budget?.action || "reject")}</small>
         ${operationSummary ? `<small>${escapeHtml(operationSummary)}</small>` : ""}
+        ${usageError ? `<small class="workspace-usage-error">${escapeHtml(usageError)}</small>` : ""}
       </div>
     `;
     list.appendChild(item);
@@ -3619,6 +3801,8 @@ function bindEvents() {
     }
   });
   $("open-workspace-picker-btn").addEventListener("click", openWorkspacePicker);
+  $("composer-workspace-settings-btn").addEventListener("click", openSettings);
+  $("agent-workspace-settings-btn").addEventListener("click", openSettings);
   $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
   $("workspace-picker-dialog").addEventListener("click", (event) => {
     if (event.target === $("workspace-picker-dialog")) {
@@ -3853,16 +4037,37 @@ function bindEvents() {
   $("refresh-workspaces-btn").addEventListener("click", () => {
     listWorkspaces().catch((error) => showToast(humanizeError(error), "error"));
   });
-  $("workspace-select").addEventListener("change", (event) => {
-    const workspace = state.workspaces.find((item) => item.id === event.target.value);
+  const handleWorkspaceSelection = (event) => {
+    setActiveWorkspace(event.target.value);
+    if (state.currentView === "memory") {
+      refreshProjectMemory();
+    }
+  };
+  $("workspace-select").addEventListener("change", handleWorkspaceSelection);
+  $("composer-workspace-select").addEventListener(
+    "change",
+    handleWorkspaceSelection,
+  );
+  $("workspace-catalog-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-workspace-id]");
+    const action = event.target.closest("[data-workspace-action]")?.dataset.workspaceAction;
+    if (!card || !action) {
+      return;
+    }
+    const workspace = state.workspaces.find((item) => item.id === card.dataset.workspaceId);
     if (!workspace) {
       return;
     }
-    $("workspace-id-input").value = workspace.id;
-    $("workspace-root-input").value = workspace.root_path;
-    updateContextSummary();
-    if (state.currentView === "memory") {
-      refreshProjectMemory();
+    if (action === "select") {
+      setActiveWorkspace(workspace.id);
+      return;
+    }
+    if (action === "edit" && workspace.can_update) {
+      $("workspace-draft-id-input").value = workspace.id;
+      $("workspace-draft-root-input").value = workspace.root_path;
+      $("workspace-registration-result").hidden = true;
+      updateContextSummary();
+      $("workspace-draft-root-input").focus();
     }
   });
 
@@ -3887,7 +4092,7 @@ function bindEvents() {
     }
     try {
       const memory = await fetchJson(
-        `/workspaces/${encodeURIComponent(activeWorkspaceId())}/memories/${encodeURIComponent(row.dataset.memoryId)}`,
+        `/workspaces/${encodeURIComponent(requireActiveWorkspace())}/memories/${encodeURIComponent(row.dataset.memoryId)}`,
       );
       selectProjectMemory(memory);
     } catch (error) {
@@ -3959,9 +4164,14 @@ function bindEvents() {
   $("conversation-id-input").addEventListener("input", (event) => {
     updateContextSummary();
   });
-  ["user-id-input", "provider-input", "model-input", "thinking-level-input", "workspace-id-input", "workspace-root-input"].forEach((id) => {
+  ["user-id-input", "provider-input", "model-input", "thinking-level-input", "workspace-draft-id-input", "workspace-draft-root-input"].forEach((id) => {
     $(id).addEventListener("input", updateContextSummary);
     $(id).addEventListener("change", updateContextSummary);
+  });
+  ["workspace-draft-id-input", "workspace-draft-root-input"].forEach((id) => {
+    $(id).addEventListener("input", () => {
+      $("workspace-registration-result").hidden = true;
+    });
   });
 
   window.addEventListener("hashchange", () => {
@@ -4037,10 +4247,14 @@ async function init() {
     listSessions(false),
     loadPreferences(),
     loadModelRegistry(),
-    listWorkspaces(),
     listKnowledgeBases(),
     loadRagCapabilities(),
   ]);
+  try {
+    await listWorkspaces();
+  } catch (error) {
+    showToast(`工作区列表加载失败：${humanizeError(error)}`, "error");
+  }
   await restoreInitialSession();
 }
 

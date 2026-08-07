@@ -88,7 +88,9 @@ The browser workspace also includes:
   citations, and index-job status;
 - a project-memory governance page with mode/status/type filters, evidence,
   confidence, optimistic edits, confirm/reject/forget, and index repair;
-- local workspace folder selection constrained by `WORKSPACE_ALLOWED_ROOTS`;
+- local workspace folder selection constrained by `WORKSPACE_ALLOWED_ROOTS`,
+  with persistent Agent context showing the workspace ID, canonical path,
+  availability, and role;
 - Agent run details, approval risk, validation artifacts, errors, and metrics;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
@@ -420,7 +422,10 @@ take precedence.
 
 `workspace_id` uses letters, digits, `_`, `-`, and `.`. Root paths are
 canonical absolute paths and must remain under `WORKSPACE_ALLOWED_ROOTS` after
-symbolic links are resolved.
+symbolic links are resolved. One canonical root can belong to only one
+workspace; registering the same root under another ID returns `409`. List and
+detail responses also expose `status`, `role`, and `can_update` so clients can
+render path availability and the current user's capability.
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/workspaces/project \
@@ -432,6 +437,19 @@ curl http://localhost:8000/api/v1/workspaces/project
 curl http://localhost:8000/api/v1/workspaces/project/token-usage
 curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 ```
+
+The frontend keeps the active run workspace, the user's default workspace, and
+the registration draft as separate states. Draft input does not change Agent
+context before registration succeeds, and one token-usage request failure does
+not turn successful registration into an error. Agent submission is blocked
+client-side until a usable workspace is selected.
+
+With `AUTH_MODE=trusted_header`, directory browsing also requires trusted
+gateway identity. Session configuration and user defaults may reference only a
+workspace where the actor has at least viewer access. A viewer may start
+read-only analysis, but approving a plan containing writes or external side
+effects requires editor access; the worker checks that access again before
+execution.
 
 There is intentionally no workspace deletion endpoint in v1. Updating a root
 increments `workspaces.revision`; old-revision memories stop participating in
@@ -721,6 +739,9 @@ per-session model/workspace/composer configuration, `user_preferences`, recent
 session indexes and deterministic backfills. It also snapshots the immutable
 provider/model/thinking selection for each Agent run so approval resume cannot
 inherit a later session configuration.
+
+Revision `20260807_0015` adds a unique constraint for canonical workspace root
+paths. Existing duplicate roots must be resolved before the upgrade.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

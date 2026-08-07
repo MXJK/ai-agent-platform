@@ -9,12 +9,36 @@ from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.agents.coding.planner import RuleBasedAgentPlanner
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.repositories import InMemoryWorkspaceRepository
-from ai_agent_platform.services import WorkspaceService, WorkspaceValidationError
+from ai_agent_platform.services import (
+    WorkspaceRootConflictError,
+    WorkspaceService,
+    WorkspaceValidationError,
+)
 from ai_agent_platform.tools import register_repository_tools
 from ai_agent_platform.integrations.tools import ToolRegistry
 
 
 class WorkspaceServiceTests(unittest.TestCase):
+    def test_translates_concurrent_unique_root_conflict(self) -> None:
+        class UniqueViolation(Exception):
+            sqlstate = "23505"
+
+        class RacingStore(InMemoryWorkspaceRepository):
+            def upsert(self, *, workspace_id: str, root_path: str):
+                raise UniqueViolation("unique root")
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            service = WorkspaceService(
+                store=RacingStore(),
+                allowed_roots=(str(root),),
+            )
+            with self.assertRaisesRegex(
+                WorkspaceRootConflictError,
+                "already registered",
+            ):
+                service.register(workspace_id="racing", root_path=str(root))
+
     def test_update_only_affects_new_root_snapshots_and_isolates_workspaces(self) -> None:
         with TemporaryDirectory() as temp_dir:
             allowed = Path(temp_dir)

@@ -302,6 +302,17 @@ class InMemoryWorkspaceRepository:
         with self._lock:
             return self._workspaces.get(workspace_id)
 
+    def get_by_root_path(self, root_path: str) -> WorkspaceRecord | None:
+        with self._lock:
+            return next(
+                (
+                    record
+                    for record in self._workspaces.values()
+                    if record.root_path == root_path
+                ),
+                None,
+            )
+
     def list(self) -> list[WorkspaceRecord]:
         with self._lock:
             return sorted(
