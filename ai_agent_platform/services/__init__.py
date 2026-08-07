@@ -18,6 +18,7 @@ from ai_agent_platform.usage_ledger import (
 )
 from .workspace_service import (
     WorkspaceNotFoundError,
+    WorkspaceRootConflictError,
     WorkspaceService,
     WorkspaceValidationError,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "current_model_usage_context",
     "model_usage_scope",
     "WorkspaceNotFoundError",
+    "WorkspaceRootConflictError",
     "WorkspaceService",
     "ConversationCompressor",
     "LLMConversationCompressor",

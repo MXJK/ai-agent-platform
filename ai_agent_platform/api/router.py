@@ -49,6 +49,7 @@ def create_api_router(
             session_service,
             settings,
             workspace_service=workspace_service,
+            memory_service=project_memory_service,
         )
     )
     router.include_router(

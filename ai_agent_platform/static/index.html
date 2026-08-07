@@ -7,7 +7,7 @@
       name="description"
       content="AI Agent Platform — 面向代码、知识库与智能工作流的统一工作台"
     />
-    <meta name="theme-color" content="#0d1015" />
+    <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
@@ -38,7 +38,7 @@
         <span class="brand-mark" aria-hidden="true">A</span>
         <span>
           <strong>AI Agent Platform</strong>
-          <small>智能研发工作台</small>
+          <small>Agent engineering console</small>
         </span>
       </a>
 
@@ -117,7 +117,7 @@
           <dl class="context-list">
             <div><dt>用户</dt><dd id="context-user">demo_user</dd></div>
             <div><dt>模型</dt><dd id="context-model">默认配置</dd></div>
-            <div><dt>工作区</dt><dd id="context-workspace">workspace_main</dd></div>
+            <div><dt>工作区</dt><dd id="context-workspace">未选择</dd></div>
           </dl>
           <p id="session-status" class="context-note">创建会话后即可开始工作</p>
         </div>
@@ -127,9 +127,9 @@
         <section id="chat-view" class="view-panel active" data-view-panel="chat" aria-labelledby="chat-title">
           <header class="view-header">
             <div>
-              <p class="eyebrow">AI Workspace</p>
-              <h1 id="chat-title">今天想一起解决什么？</h1>
-              <p>在同一个连续会话中快速问答，或把代码任务交给 Agent。</p>
+              <p class="eyebrow">Agent Command Deck</p>
+              <h1 id="chat-title">把任务交给 Agent，<br />每一步仍由你掌控。</h1>
+              <p>从问题、计划到执行与验证，全部保留在同一个可追溯会话中。</p>
             </div>
             <span id="chat-meta" class="status-pill neutral" role="status" aria-live="polite">
               <span class="status-dot" aria-hidden="true"></span><span>等待输入</span>
@@ -138,19 +138,27 @@
 
           <div id="chat-output" class="conversation" aria-live="polite" aria-label="对话内容">
             <div class="welcome-state">
-              <div class="welcome-mark" aria-hidden="true"><strong>A</strong><span>READY</span></div>
-              <h2>从一个具体问题开始</h2>
-              <p>解释代码、分析架构，或把需要执行的任务交给 Agent。</p>
-              <div class="prompt-grid" aria-label="推荐问题">
-                <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
-                  <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
-                </button>
-                <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理">
-                  <span>分析实现</span><strong>检查 SSE 流式输出</strong>
-                </button>
-                <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略">
-                  <span>规划质量</span><strong>设计可靠的测试策略</strong>
-                </button>
+              <div class="welcome-signal" aria-hidden="true">
+                <span class="active"><i></i><b>ASK</b></span>
+                <span><i></i><b>PLAN</b></span>
+                <span><i></i><b>ACT</b></span>
+                <span><i></i><b>VERIFY</b></span>
+              </div>
+              <div class="welcome-content">
+                <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
+                <h2>从一个具体问题开始</h2>
+                <p>先理解上下文，再选择快速回答或代码 Agent；涉及写入时会暂停等待审批。</p>
+                <div class="prompt-grid" aria-label="推荐问题">
+                  <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
+                    <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
+                  </button>
+                  <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理">
+                    <span>分析实现</span><strong>检查 SSE 流式输出</strong>
+                  </button>
+                  <button type="button" class="prompt-card" data-prompt="为这个项目设计一套可靠的测试策略">
+                    <span>规划质量</span><strong>设计可靠的测试策略</strong>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -210,6 +218,21 @@
                 </div>
                 <span id="composer-mode-description">流式回答，不执行代码工具。</span>
               </div>
+              <div id="workspace-context-strip" class="workspace-context-strip" hidden>
+                <div class="workspace-context-main">
+                  <span id="composer-workspace-status" class="workspace-status-dot" aria-hidden="true"></span>
+                  <div>
+                    <span>代码上下文</span>
+                    <strong id="composer-workspace-id">未选择工作区</strong>
+                    <code id="composer-workspace-root">Agent 运行前必须选择一个可用工作区</code>
+                  </div>
+                </div>
+                <label class="sr-only" for="composer-workspace-select">切换当前工作区</label>
+                <select id="composer-workspace-select" aria-label="切换当前工作区">
+                  <option value="">选择工作区</option>
+                </select>
+                <button id="composer-workspace-settings-btn" class="text-button" type="button">管理</button>
+              </div>
               <label class="sr-only" for="chat-message-input">输入消息</label>
               <textarea
                 id="chat-message-input"
@@ -254,7 +277,13 @@
               <article class="surface task-card">
                 <div class="surface-heading">
                   <div><span class="step-kicker">01 · 任务</span><h2>描述你希望 Agent 完成的工作</h2></div>
-                  <span id="agent-workspace-badge" class="meta-badge">workspace_main</span>
+                  <span id="agent-workspace-badge" class="meta-badge">未选择工作区</span>
+                </div>
+                <div id="agent-workspace-context" class="agent-workspace-context is-missing">
+                  <span class="workspace-status-dot" aria-hidden="true"></span>
+                  <div><strong id="agent-workspace-context-id">未选择工作区</strong><code id="agent-workspace-root">请先选择 Agent 要读取的代码目录</code></div>
+                  <span id="agent-workspace-role" class="workspace-role">未连接</span>
+                  <button id="agent-workspace-settings-btn" class="text-button" type="button">切换</button>
                 </div>
                 <label for="agent-message-input">任务目标</label>
                 <textarea
@@ -766,15 +795,25 @@
 
           <section class="settings-section">
             <div class="settings-section-heading"><span>03</span><div><h3>代码工作区</h3><p>根路径必须位于服务端允许的目录中。</p></div></div>
-            <label for="workspace-select">已注册工作区
+            <label for="workspace-select">当前工作区
               <select id="workspace-select"><option value="">尚未加载</option></select>
             </label>
+            <div class="workspace-selection-summary" aria-live="polite">
+              <span>当前 <strong id="workspace-current-summary">未选择</strong></span>
+              <span>用户默认 <strong id="workspace-default-summary">未设置</strong></span>
+            </div>
+            <div id="workspace-catalog-list" class="workspace-catalog-list">
+              <div class="empty-state compact">正在加载已注册工作区…</div>
+            </div>
+            <div class="workspace-registration-heading">
+              <div><strong>登记新目录</strong><small>下方内容是登记草稿，不会改变当前工作区，直到登记成功。</small></div>
+            </div>
             <div class="field-grid">
-              <label for="workspace-id-input">工作区 ID<input id="workspace-id-input" value="workspace_main" /></label>
+              <label for="workspace-draft-id-input">工作区 ID<input id="workspace-draft-id-input" placeholder="例如 payments-api" autocomplete="off" /></label>
               <div class="field-control">
-                <label for="workspace-root-input">根路径</label>
+                <label for="workspace-draft-root-input">根路径</label>
                 <div class="input-action">
-                  <input id="workspace-root-input" placeholder="/path/to/local/workspace" autocomplete="off" />
+                  <input id="workspace-draft-root-input" placeholder="/path/to/local/workspace" autocomplete="off" />
                   <button id="open-workspace-picker-btn" class="button ghost" type="button">
                     <svg class="app-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
                     选择文件夹
@@ -784,8 +823,9 @@
             </div>
             <div class="button-row">
               <button id="refresh-workspaces-btn" class="button ghost" type="button">刷新列表</button>
-              <button id="register-workspace-btn" class="button secondary" type="button">注册或更新</button>
+              <button id="register-workspace-btn" class="button secondary" type="button">登记工作区</button>
             </div>
+            <div id="workspace-registration-result" class="workspace-registration-result" role="status" aria-live="polite" hidden></div>
           </section>
         </div>
 

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AUTO-DISCOVER-MODELS"
-next_action: "Review the simplified model registration flow with a configured Provider API key"
+active_task: "WORKSPACE-HARDENING-UX"
+next_action: "Review the pushed workspace hardening branch and approve the PostgreSQL migration only after duplicate roots are resolved"
 blockers: []
 last_verified_commit: "f5415465e29420d99daa2048341d7b14fa6cec72"
-updated_at: "2026-08-04T16:24:44+08:00"
+updated_at: "2026-08-07T14:55:19+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
