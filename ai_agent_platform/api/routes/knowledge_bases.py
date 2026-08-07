@@ -1,6 +1,7 @@
 from fastapi import (
     APIRouter,
     File,
+    Form,
     HTTPException,
     Path,
     Query,
@@ -8,6 +9,8 @@ from fastapi import (
     UploadFile,
     status,
 )
+import mimetypes
+from typing import Literal
 from uuid import uuid4
 
 from ai_agent_platform.integrations import (
@@ -26,6 +29,12 @@ from ai_agent_platform.schemas import (
     KnowledgeBaseResponse,
     KnowledgeBasesResponse,
     KnowledgeBaseUpdateRequest,
+    KnowledgeDocumentBulkDeleteRequest,
+    KnowledgeDocumentBulkDeleteResponse,
+    KnowledgeDocumentDeleteFailure,
+    KnowledgeDocumentResponse,
+    KnowledgeDocumentsResponse,
+    KnowledgeDocumentUpdateRequest,
     RAGCapabilitiesResponse,
     RAGAskRequest,
     RAGAskResponse,
@@ -36,6 +45,8 @@ from ai_agent_platform.schemas import (
     RetrievalExecutionResponse,
 )
 from ai_agent_platform.services import (
+    DocumentFilenameConflictError,
+    DocumentNotFoundError,
     IndexJobNotFoundError,
     KnowledgeBaseAlreadyExistsError,
     KnowledgeBaseNotFoundError,
@@ -55,6 +66,7 @@ KNOWLEDGE_BASE_ID = Path(
     pattern=r"^[a-zA-Z0-9_-]+$",
 )
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+DOCUMENT_ID = Path(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
 
 
 def create_knowledge_bases_router(
@@ -169,6 +181,9 @@ def create_knowledge_bases_router(
     )
     async def ingest_document(
         file: UploadFile = File(...),
+        title: str | None = Form(default=None, max_length=255),
+        description: str = Form(default="", max_length=2000),
+        tags: str = Form(default="", max_length=1000),
         knowledge_base_id: str = KNOWLEDGE_BASE_ID,
     ) -> DocumentIngestResponse:
         filename = _upload_filename(file.filename)
@@ -188,7 +203,21 @@ def create_knowledge_bases_router(
                 knowledge_base_id=knowledge_base_id,
                 filename=filename,
                 content=content,
+                title=title.strip() if title and title.strip() else None,
+                description=description,
+                tags=_form_tags(tags),
+                media_type=_upload_media_type(filename, file.content_type),
             )
+        except DocumentFilenameConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "document_filename_conflict",
+                    "message": "a document with this filename already exists",
+                    "existing_document_id": exc.existing_document_id,
+                    "filename": exc.filename,
+                },
+            ) from exc
         except RAGValidationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KnowledgeBaseNotFoundError as exc:
@@ -199,6 +228,191 @@ def create_knowledge_bases_router(
         except RAGProviderError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return DocumentIngestResponse.from_domain(ingested)
+
+    @router.get(
+        "/knowledge-bases/{knowledge_base_id}/documents",
+        response_model=KnowledgeDocumentsResponse,
+    )
+    def list_documents(
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+        query: str = Query(default="", max_length=255),
+        status_filter: Literal[
+            "pending",
+            "parsing",
+            "embedding",
+            "vector_written",
+            "active",
+            "failed",
+        ]
+        | None = Query(default=None, alias="status"),
+        sort: Literal[
+            "updated_at_desc",
+            "created_at_desc",
+            "title_asc",
+        ] = Query(default="updated_at_desc"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+    ) -> KnowledgeDocumentsResponse:
+        try:
+            documents, total = knowledge_base_service.list_documents(
+                knowledge_base_id=knowledge_base_id,
+                query=query,
+                status=status_filter,
+                sort=sort,
+                page=page,
+                page_size=page_size,
+            )
+        except KnowledgeBaseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="knowledge base not found") from exc
+        return KnowledgeDocumentsResponse(
+            items=[KnowledgeDocumentResponse.from_domain(item) for item in documents],
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+
+    @router.post(
+        "/knowledge-bases/{knowledge_base_id}/documents/bulk-delete",
+        response_model=KnowledgeDocumentBulkDeleteResponse,
+    )
+    def bulk_delete_documents(
+        request: KnowledgeDocumentBulkDeleteRequest,
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> KnowledgeDocumentBulkDeleteResponse:
+        deleted_ids: list[str] = []
+        failures: list[KnowledgeDocumentDeleteFailure] = []
+        for document_id in dict.fromkeys(request.document_ids):
+            try:
+                knowledge_base_service.delete_document(
+                    knowledge_base_id=knowledge_base_id,
+                    document_id=document_id,
+                )
+                deleted_ids.append(document_id)
+            except (KnowledgeBaseNotFoundError, DocumentNotFoundError):
+                failures.append(
+                    KnowledgeDocumentDeleteFailure(
+                        document_id=document_id,
+                        code="document_not_found",
+                        message="document not found in this knowledge base",
+                    )
+                )
+            except RAGProviderError as exc:
+                failures.append(
+                    KnowledgeDocumentDeleteFailure(
+                        document_id=document_id,
+                        code="document_delete_failed",
+                        message=str(exc),
+                    )
+                )
+        return KnowledgeDocumentBulkDeleteResponse(
+            deleted_ids=deleted_ids,
+            failures=failures,
+        )
+
+    @router.get(
+        "/knowledge-bases/{knowledge_base_id}/documents/{document_id}",
+        response_model=KnowledgeDocumentResponse,
+    )
+    def get_document(
+        document_id: str = DOCUMENT_ID,
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> KnowledgeDocumentResponse:
+        try:
+            document = knowledge_base_service.get_document(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+            )
+        except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="document not found") from exc
+        return KnowledgeDocumentResponse.from_domain(document)
+
+    @router.patch(
+        "/knowledge-bases/{knowledge_base_id}/documents/{document_id}",
+        response_model=KnowledgeDocumentResponse,
+    )
+    def update_document(
+        request: KnowledgeDocumentUpdateRequest,
+        document_id: str = DOCUMENT_ID,
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> KnowledgeDocumentResponse:
+        try:
+            document = knowledge_base_service.update_document(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+                title=request.title,
+                description=request.description,
+                tags=request.tags,
+            )
+        except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="document not found") from exc
+        return KnowledgeDocumentResponse.from_domain(document)
+
+    @router.put(
+        "/knowledge-bases/{knowledge_base_id}/documents/{document_id}/content",
+        response_model=DocumentIngestResponse,
+    )
+    async def replace_document_content(
+        file: UploadFile = File(...),
+        document_id: str = DOCUMENT_ID,
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> DocumentIngestResponse:
+        filename = _upload_filename(file.filename)
+        if not filename or len(filename) > 255:
+            raise HTTPException(status_code=400, detail="invalid upload filename")
+        media_type = _upload_media_type(filename, file.content_type)
+        try:
+            content = await file.read(MAX_DOCUMENT_BYTES + 1)
+        finally:
+            await file.close()
+        if len(content) > MAX_DOCUMENT_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="uploaded file exceeds the 20 MiB limit",
+            )
+        try:
+            ingested = knowledge_base_service.replace_document_file(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+                filename=filename,
+                content=content,
+                media_type=media_type,
+            )
+        except DocumentFilenameConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "document_filename_conflict",
+                    "message": "a document with this filename already exists",
+                    "existing_document_id": exc.existing_document_id,
+                    "filename": exc.filename,
+                },
+            ) from exc
+        except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="document not found") from exc
+        except RAGValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RAGProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return DocumentIngestResponse.from_domain(ingested)
+
+    @router.delete(
+        "/knowledge-bases/{knowledge_base_id}/documents/{document_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def delete_document(
+        document_id: str = DOCUMENT_ID,
+        knowledge_base_id: str = KNOWLEDGE_BASE_ID,
+    ) -> Response:
+        try:
+            knowledge_base_service.delete_document(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+            )
+        except (KnowledgeBaseNotFoundError, DocumentNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="document not found") from exc
+        except RAGProviderError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.get(
         "/knowledge-bases/{knowledge_base_id}/index-jobs",
@@ -388,3 +602,19 @@ def _upload_filename(filename: str | None) -> str:
     if normalized.startswith("/") or any(part in {"", ".", ".."} for part in parts):
         return parts[-1] if parts else ""
     return normalized
+
+
+def _upload_media_type(filename: str, reported: str | None) -> str | None:
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed:
+        return guessed
+    value = (reported or "").strip().lower()
+    return value if value and value != "application/octet-stream" else None
+
+
+def _form_tags(value: str) -> list[str]:
+    return [
+        item.strip()
+        for item in value.replace("，", ",").split(",")
+        if item.strip()
+    ]

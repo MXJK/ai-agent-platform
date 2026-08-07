@@ -88,9 +88,9 @@ The browser workspace also includes:
   citations, and index-job status;
 - a project-memory governance page with mode/status/type filters, evidence,
   confidence, optimistic edits, confirm/reject/forget, and index repair;
-- local workspace folder selection constrained by `WORKSPACE_ALLOWED_ROOTS`,
-  with persistent Agent context showing the workspace ID, canonical path,
-  availability, and role;
+- local workspace folder management constrained by `WORKSPACE_ALLOWED_ROOTS`,
+  including current/default selection, invalid-path relinking, and safe removal;
+  Agent input keeps the current workspace availability and role visible;
 - Agent run details, approval risk, validation artifacts, errors, and metrics;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
@@ -123,8 +123,9 @@ stale zero-message candidates are skipped. With no valid session it keeps the
 welcome page and does not create another empty record. Loading a session
 restores messages, summary and its own model,
 workspace and composer mode. Browser `localStorage` is reserved for device UI
-state and the unauthenticated local user ID, not duplicated conversation
-configuration. The health endpoint exposes `session_storage` and
+state; it stores neither user IDs nor duplicated conversation configuration.
+Local single-user mode uses an internal identity, while authenticated mode gets
+identity from the trusted gateway. The health endpoint exposes `session_storage` and
 `persistent_sessions`; memory mode is explicitly labeled temporary in the UI.
 
 ### Global model registry
@@ -175,8 +176,10 @@ GOOGLE_API_KEY=your_google_ai_studio_key
 ```
 
 Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
-`thinking_level`. The UI can override the server default. SSE responses emit
-heartbeats while the provider is idle, report thinking tokens separately, and
+`thinking_level`. API requests and existing session configuration can still
+override the server default, but the personal workspace manager does not expose
+this option. SSE responses emit heartbeats while the provider is idle, report
+thinking tokens separately, and
 return an explicit `max_output_tokens` error instead of a normal completion
 when Gemini finishes with `MAX_TOKENS`.
 
@@ -434,6 +437,7 @@ curl -X PUT http://localhost:8000/api/v1/workspaces/project \
 
 curl http://localhost:8000/api/v1/workspaces
 curl http://localhost:8000/api/v1/workspaces/project
+curl -X DELETE http://localhost:8000/api/v1/workspaces/project
 curl http://localhost:8000/api/v1/workspaces/project/token-usage
 curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 ```
@@ -451,11 +455,15 @@ read-only analysis, but approving a plan containing writes or external side
 effects requires editor access; the worker checks that access again before
 execution.
 
-There is intentionally no workspace deletion endpoint in v1. Updating a root
-increments `workspaces.revision`; old-revision memories stop participating in
-retrieval. An administrator can explicitly confirm an old record to copy it
-into the current revision; the historical record remains unchanged. Every
-`agent_runs` row keeps its captured `workspace_root`.
+The `available` response field reports whether the saved path can currently be
+read. `DELETE` performs a soft removal: it removes the workspace from selection
+without deleting local files or cascading into sessions, usage, or project
+memories. Registering the same ID restores it. Restoring the same path preserves
+its revision; only a real root-path change increments `workspaces.revision`, so
+old-revision memories stop participating in retrieval. An administrator can
+explicitly confirm an old record to copy it into the current revision; the
+historical record remains unchanged. Every `agent_runs` row keeps its captured
+`workspace_root`.
 
 Start an Agent run:
 
@@ -615,11 +623,25 @@ DELETE /api/v1/knowledge-bases/{knowledge_base_id}
 ```
 
 Catalog records contain an immutable ID plus editable name, description, and
-tags. Deletion removes vectors first and then cascades PostgreSQL documents and
-chunks. Document RAG endpoints remain available independently:
+tags. The workbench selects a knowledge base on the left and manages its
+Documents, Retrieval Q&A, and Settings on the right; the selected base and tab
+are device preferences. Narrow screens use a top selector, document cards, and
+a full-screen detail panel. Deleting a non-empty base requires typing its ID in
+the UI, then removes vectors before cascading PostgreSQL documents and chunks.
+
+Document records expose title, original filename, description, tags, MIME type,
+size, content hash, chunk count, index state, and lifecycle timestamps. The
+service keeps parsed text, chunks, and upload metadata, but not the original
+file or a download endpoint. Document endpoints remain available independently:
 
 ```text
-POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
+GET    /api/v1/knowledge-bases/{knowledge_base_id}/documents
+POST   /api/v1/knowledge-bases/{knowledge_base_id}/documents
+POST   /api/v1/knowledge-bases/{knowledge_base_id}/documents/bulk-delete
+GET    /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
+PATCH  /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
+PUT    /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/content
+DELETE /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
 GET  /api/v1/rag/capabilities
@@ -638,6 +660,14 @@ Supported uploads include PDF, DOCX, Markdown, UTF-8 text/configuration files,
 and the existing UTF-8 source-code formats. Legacy `.doc` files and scanned
 documents requiring OCR are not supported.
 
+The list defaults to 20 documents ordered by latest update and supports
+title/filename search, index-state filtering, and sorting. Metadata edits do
+not re-embed content. Explicit `PUT` replacement retains the document ID,
+title, description, and tags. A duplicate filename within the same knowledge
+base returns HTTP 409 `document_filename_conflict` with the existing document
+ID instead of overwriting it. Bulk deletion accepts at most 100 IDs and returns
+`deleted_ids` plus per-item `failures`.
+
 Only these document endpoints use chunking, embeddings, and the configured
 vector store. Agent RAG routing calls the same search implementation and
 degrades to an evidence warning when retrieval is unavailable.
@@ -645,8 +675,10 @@ degrades to an evidence warning when retrieval is unavailable.
 Each upload records a queryable index job with the state sequence
 `pending → parsing → embedding → vector_written → active`; a failure from any
 non-terminal state is recorded as `failed` with a bounded error message.
-Vector replacement writes the new points before removing stale points, so an
-embedding failure does not delete the previous searchable version first.
+Replacement parses, chunks, and embeds before switching, while retaining old
+document, chunk, and vector snapshots for compensation. A failure keeps the
+old searchable version. Deletion removes vectors before metadata and restores
+snapshots if a later step fails, preventing searchable orphans.
 
 Search performs two independent candidate recalls:
 
@@ -742,6 +774,13 @@ inherit a later session configuration.
 
 Revision `20260807_0015` adds a unique constraint for canonical workspace root
 paths. Existing duplicate roots must be resolved before the upgrade.
+
+Revision `20260807_0016` adds manageable knowledge-document metadata, chunk
+statistics and index timestamps, backfills legacy rows, and adds per-base
+filename and update-order indexes.
+
+Revision `20260807_0017` adds `workspaces.removed_at` for soft removal and
+same-path restoration without deleting sessions, usage, or project memories.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

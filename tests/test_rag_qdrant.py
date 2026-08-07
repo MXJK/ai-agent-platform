@@ -85,6 +85,45 @@ class QdrantVectorStoreTests(unittest.TestCase):
         )
         self.assertEqual([item.id for item in results], ["chk_0"])
 
+    def test_document_snapshot_restores_previous_vectors(self) -> None:
+        store = QdrantVectorStore(
+            url=":memory:",
+            api_key=None,
+            collection_name="rag_snapshot_test",
+        )
+        original = DocumentChunk(
+            id="original_chunk",
+            knowledge_base_id="docs",
+            document_id="doc_1",
+            filename="guide.md",
+            chunk_index=0,
+            text="original searchable text",
+        )
+        replacement = DocumentChunk(
+            id="replacement_chunk",
+            knowledge_base_id="docs",
+            document_id="doc_1",
+            filename="guide.md",
+            chunk_index=0,
+            text="replacement searchable text",
+        )
+        store.upsert_chunks([original], [[1.0, 0.0]])
+        snapshot = store.snapshot_document(document_id="doc_1")
+        store.replace_document(
+            document_id="doc_1",
+            chunks=[replacement],
+            embeddings=[[0.0, 1.0]],
+        )
+        store.restore_document(document_id="doc_1", snapshot=snapshot)
+
+        results = store.search(
+            knowledge_base_id="docs",
+            query_embedding=[1.0, 0.0],
+            limit=5,
+        )
+        self.assertEqual([item.id for item in results], ["original_chunk"])
+        self.assertEqual(results[0].text, "original searchable text")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,11 +27,13 @@ from ai_agent_platform.integrations.rag.errors import (
 )
 from ai_agent_platform.integrations.rag.models import (
     DocumentChunk,
+    DocumentVectorSnapshot,
     DocumentStore,
     EmbeddingProvider,
     IndexJob,
     IndexJobStore,
     IngestedDocument,
+    KnowledgeDocument,
     ParsedDocument,
     RAGAnswer,
     RAGSearchResult,
@@ -92,6 +94,7 @@ class InMemoryRAGMetadataStore:
     """Process-local lexical index and index-job journal."""
 
     def __init__(self) -> None:
+        self._documents: dict[str, KnowledgeDocument] = {}
         self._chunks: dict[str, DocumentChunk] = {}
         self._jobs: dict[str, IndexJob] = {}
         self._lock = Lock()
@@ -100,14 +103,183 @@ class InMemoryRAGMetadataStore:
         self,
         document: ParsedDocument,
         chunks: list[DocumentChunk],
-    ) -> None:
+    ) -> KnowledgeDocument:
         with self._lock:
+            now = _utcnow()
+            existing = self._documents.get(document.id)
+            stored = KnowledgeDocument(
+                id=document.id,
+                knowledge_base_id=document.knowledge_base_id,
+                title=(document.title or document.filename).strip(),
+                filename=document.filename,
+                description=document.description.strip(),
+                tags=list(document.tags),
+                media_type=document.media_type,
+                byte_size=document.byte_size,
+                content_hash=hashlib.sha256(document.text.encode("utf-8")).hexdigest(),
+                chunk_count=len(chunks),
+                is_searchable=True,
+                last_index_status="vector_written",
+                last_index_error=None,
+                created_at=existing.created_at if existing is not None else now,
+                updated_at=now,
+                indexed_at=now,
+                source_uri=document.source_uri,
+            )
+            self._documents[document.id] = stored
             self._chunks = {
                 chunk_id: chunk
                 for chunk_id, chunk in self._chunks.items()
                 if chunk.document_id != document.id
             }
             self._chunks.update({chunk.id: chunk for chunk in chunks})
+            return stored
+
+    def find_document_by_filename(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocument | None:
+        with self._lock:
+            for document in self._documents.values():
+                if (
+                    document.knowledge_base_id == knowledge_base_id
+                    and document.filename.casefold() == filename.casefold()
+                ):
+                    return self._with_latest_job_locked(document)
+        return None
+
+    def get_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument | None:
+        with self._lock:
+            document = self._documents.get(document_id)
+            if document is None or document.knowledge_base_id != knowledge_base_id:
+                return None
+            return self._with_latest_job_locked(document)
+
+    def list_documents(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        status: str | None,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        with self._lock:
+            documents = [
+                self._with_latest_job_locked(document)
+                for document in self._documents.values()
+                if document.knowledge_base_id == knowledge_base_id
+            ]
+        query_key = query.strip().casefold()
+        if query_key:
+            documents = [
+                document
+                for document in documents
+                if query_key
+                in " ".join(
+                    (
+                        document.title,
+                        document.filename,
+                        document.description,
+                        " ".join(document.tags),
+                    )
+                ).casefold()
+            ]
+        if status:
+            documents = [
+                document
+                for document in documents
+                if document.last_index_status == status
+            ]
+        if sort == "title_asc":
+            documents.sort(key=lambda item: (item.title.casefold(), item.id))
+        elif sort == "created_at_desc":
+            documents.sort(key=lambda item: (item.created_at, item.id), reverse=True)
+        else:
+            documents.sort(key=lambda item: (item.updated_at, item.id), reverse=True)
+        total = len(documents)
+        start = (page - 1) * page_size
+        return documents[start : start + page_size], total
+
+    def update_document_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        title: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeDocument | None:
+        with self._lock:
+            document = self._documents.get(document_id)
+            if document is None or document.knowledge_base_id != knowledge_base_id:
+                return None
+            updated = replace(
+                document,
+                title=title,
+                description=description,
+                tags=list(tags),
+                updated_at=_utcnow(),
+            )
+            self._documents[document_id] = updated
+            return self._with_latest_job_locked(updated)
+
+    def get_document_chunks(
+        self,
+        *,
+        document_id: str,
+    ) -> list[DocumentChunk]:
+        with self._lock:
+            chunks = [
+                chunk
+                for chunk in self._chunks.values()
+                if chunk.document_id == document_id
+            ]
+        return sorted(chunks, key=lambda chunk: (chunk.chunk_index, chunk.id))
+
+    def delete_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> bool:
+        with self._lock:
+            document = self._documents.get(document_id)
+            if document is None or document.knowledge_base_id != knowledge_base_id:
+                return False
+            del self._documents[document_id]
+            self._chunks = {
+                chunk_id: chunk
+                for chunk_id, chunk in self._chunks.items()
+                if chunk.document_id != document_id
+            }
+            return True
+
+    def _with_latest_job_locked(
+        self,
+        document: KnowledgeDocument,
+    ) -> KnowledgeDocument:
+        jobs = [
+            job
+            for job in self._jobs.values()
+            if job.document_id == document.id
+        ]
+        if not jobs:
+            return document
+        latest = max(jobs, key=lambda job: (job.created_at, job.id))
+        return replace(
+            document,
+            last_index_status=latest.status,
+            last_index_error=latest.error,
+        )
 
     def search_lexical(
         self,
@@ -126,6 +298,11 @@ class InMemoryRAGMetadataStore:
 
     def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
         with self._lock:
+            self._documents = {
+                document_id: document
+                for document_id, document in self._documents.items()
+                if document.knowledge_base_id != knowledge_base_id
+            }
             self._chunks = {
                 chunk_id: chunk
                 for chunk_id, chunk in self._chunks.items()
@@ -211,6 +388,12 @@ class TextDocumentParser:
         filename: str,
         content: str,
         source_uri: str | None = None,
+        document_id: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
+        byte_size: int | None = None,
     ) -> ParsedDocument:
         extension = _file_extension(filename)
         if extension not in SUPPORTED_DOCUMENT_EXTENSIONS:
@@ -228,15 +411,21 @@ class TextDocumentParser:
             raise RAGValidationError("document text is empty")
 
         return ParsedDocument(
-            id=_document_id(
-                knowledge_base_id=knowledge_base_id,
-                filename=filename,
-                source_uri=source_uri,
-            ),
+            id=document_id
+            or _document_id(
+                    knowledge_base_id=knowledge_base_id,
+                    filename=filename,
+                    source_uri=source_uri,
+                ),
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             text=text,
             source_uri=source_uri,
+            title=title,
+            description=description,
+            tags=list(tags or []),
+            media_type=media_type,
+            byte_size=byte_size,
         )
 
     def parse_bytes(
@@ -246,6 +435,12 @@ class TextDocumentParser:
         filename: str,
         content: bytes,
         source_uri: str | None = None,
+        document_id: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
+        byte_size: int | None = None,
     ) -> ParsedDocument:
         extension = _file_extension(filename)
         if extension in SUPPORTED_TEXT_EXTENSIONS:
@@ -270,6 +465,12 @@ class TextDocumentParser:
             filename=filename,
             content=text,
             source_uri=source_uri,
+            document_id=document_id,
+            title=title,
+            description=description,
+            tags=tags,
+            media_type=media_type,
+            byte_size=byte_size if byte_size is not None else len(content),
         )
 
 
@@ -776,6 +977,34 @@ class InMemoryVectorStore:
                 if chunk.knowledge_base_id != knowledge_base_id
             ]
 
+    def snapshot_document(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentVectorSnapshot:
+        with self._lock:
+            rows = [
+                (chunk, list(embedding))
+                for chunk, embedding in self._rows
+                if chunk.document_id == document_id
+            ]
+        return DocumentVectorSnapshot(
+            chunks=[chunk for chunk, _ in rows],
+            embeddings=[embedding for _, embedding in rows],
+        )
+
+    def restore_document(
+        self,
+        *,
+        document_id: str,
+        snapshot: DocumentVectorSnapshot,
+    ) -> None:
+        self.replace_document(
+            document_id=document_id,
+            chunks=snapshot.chunks,
+            embeddings=snapshot.embeddings,
+        )
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -860,6 +1089,51 @@ class ChromaVectorStore:
 
     def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
         self._collection.delete(where={"knowledge_base_id": knowledge_base_id})
+
+    def snapshot_document(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentVectorSnapshot:
+        result = self._collection.get(
+            where={"document_id": document_id},
+            include=["documents", "metadatas", "embeddings"],
+        )
+        ids = list(result.get("ids") or [])
+        documents = list(result.get("documents") or [])
+        metadatas = list(result.get("metadatas") or [])
+        raw_embeddings = result.get("embeddings")
+        embeddings = list(raw_embeddings) if raw_embeddings is not None else []
+        chunks = [
+            DocumentChunk(
+                id=str(chunk_id),
+                knowledge_base_id=str(metadata["knowledge_base_id"]),
+                document_id=str(metadata["document_id"]),
+                filename=str(metadata["filename"]),
+                chunk_index=int(metadata["chunk_index"]),
+                text=str(documents[index]),
+                start_line=_optional_int(metadata.get("start_line")),
+                end_line=_optional_int(metadata.get("end_line")),
+                symbols=_metadata_symbols(metadata.get("symbols")),
+            )
+            for index, (chunk_id, metadata) in enumerate(zip(ids, metadatas))
+        ]
+        return DocumentVectorSnapshot(
+            chunks=chunks,
+            embeddings=[[float(value) for value in row] for row in embeddings],
+        )
+
+    def restore_document(
+        self,
+        *,
+        document_id: str,
+        snapshot: DocumentVectorSnapshot,
+    ) -> None:
+        self.replace_document(
+            document_id=document_id,
+            chunks=snapshot.chunks,
+            embeddings=snapshot.embeddings,
+        )
 
     def upsert_chunks(
         self,
@@ -1003,6 +1277,53 @@ class QdrantVectorStore:
             ),
         )
 
+    def snapshot_document(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentVectorSnapshot:
+        if not self._collection_exists():
+            return DocumentVectorSnapshot(chunks=[], embeddings=[])
+        points = self._document_points(
+            document_id=document_id,
+            with_payload=True,
+            with_vectors=True,
+        )
+        chunks: list[DocumentChunk] = []
+        embeddings: list[list[float]] = []
+        for point in points:
+            payload = point.payload or {}
+            vector = point.vector
+            if isinstance(vector, dict):
+                vector = next(iter(vector.values()), [])
+            chunks.append(
+                DocumentChunk(
+                    id=str(payload["chunk_id"]),
+                    knowledge_base_id=str(payload["knowledge_base_id"]),
+                    document_id=str(payload["document_id"]),
+                    filename=str(payload["filename"]),
+                    chunk_index=int(payload["chunk_index"]),
+                    text=str(payload["text"]),
+                    start_line=_optional_int(payload.get("start_line")),
+                    end_line=_optional_int(payload.get("end_line")),
+                    symbols=_metadata_symbols(payload.get("symbols")),
+                )
+            )
+            embeddings.append([float(value) for value in (vector or [])])
+        return DocumentVectorSnapshot(chunks=chunks, embeddings=embeddings)
+
+    def restore_document(
+        self,
+        *,
+        document_id: str,
+        snapshot: DocumentVectorSnapshot,
+    ) -> None:
+        self.replace_document(
+            document_id=document_id,
+            chunks=snapshot.chunks,
+            embeddings=snapshot.embeddings,
+        )
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -1142,8 +1463,24 @@ class QdrantVectorStore:
         return any(item.name == self._collection_name for item in collections)
 
     def _document_point_ids(self, *, document_id: str) -> set[str]:
+        return {
+            str(point.id)
+            for point in self._document_points(
+                document_id=document_id,
+                with_payload=False,
+                with_vectors=False,
+            )
+        }
+
+    def _document_points(
+        self,
+        *,
+        document_id: str,
+        with_payload: bool,
+        with_vectors: bool,
+    ) -> list[object]:
         if not self._collection_exists():
-            return set()
+            return []
         FieldCondition = _qdrant_model("FieldCondition")
         Filter = _qdrant_model("Filter")
         MatchValue = _qdrant_model("MatchValue")
@@ -1155,7 +1492,7 @@ class QdrantVectorStore:
                 )
             ]
         )
-        point_ids: set[str] = set()
+        collected: list[object] = []
         offset = None
         while True:
             points, next_offset = self._client.scroll(
@@ -1163,12 +1500,12 @@ class QdrantVectorStore:
                 scroll_filter=document_filter,
                 limit=256,
                 offset=offset,
-                with_payload=False,
-                with_vectors=False,
+                with_payload=with_payload,
+                with_vectors=with_vectors,
             )
-            point_ids.update(str(point.id) for point in points)
+            collected.extend(points)
             if next_offset is None:
-                return point_ids
+                return collected
             offset = next_offset
 
 
@@ -1215,14 +1552,14 @@ class RAGService:
         self._default_recall_limit = default_recall_limit
         self._max_prompt_chars = max_prompt_chars
         self._lexical_weight = lexical_weight
-        self._document_store = document_store
         self._rrf_k = rrf_k
         self._memory_metadata_store = InMemoryRAGMetadataStore()
+        self._document_store = document_store or self._memory_metadata_store
         self._index_job_store = (
             index_job_store
             or (
-                document_store
-                if _supports_index_job_store(document_store)
+                self._document_store
+                if _supports_index_job_store(self._document_store)
                 else self._memory_metadata_store
             )
         )
@@ -1234,6 +1571,11 @@ class RAGService:
         filename: str,
         content: str,
         source_uri: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
+        byte_size: int | None = None,
     ) -> IngestedDocument:
         return self._run_index_job(
             knowledge_base_id=knowledge_base_id,
@@ -1243,6 +1585,11 @@ class RAGService:
                 filename=filename,
                 content=content,
                 source_uri=source_uri,
+                title=title,
+                description=description,
+                tags=tags,
+                media_type=media_type,
+                byte_size=byte_size,
             ),
         )
 
@@ -1252,6 +1599,7 @@ class RAGService:
         knowledge_base_id: str,
         filename: str,
         parse_document,
+        replacing_document_id: str | None = None,
     ) -> IngestedDocument:
         now = _utcnow()
         job = IndexJob(
@@ -1259,7 +1607,7 @@ class RAGService:
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             status="pending",
-            document_id=None,
+            document_id=replacing_document_id,
             chunk_count=0,
             error=None,
             created_at=now,
@@ -1269,6 +1617,9 @@ class RAGService:
         current_status = "pending"
         document: ParsedDocument | None = None
         chunks: list[DocumentChunk] = []
+        vector_snapshot: DocumentVectorSnapshot | None = None
+        vector_mutated = False
+        stored_document: KnowledgeDocument | None = None
         try:
             job = self._transition_index_job(
                 job=job,
@@ -1295,11 +1646,16 @@ class RAGService:
                     task_type="document",
                 )
             _validate_embeddings(chunks, embeddings)
+            if replacing_document_id is not None:
+                vector_snapshot = self._vector_store.snapshot_document(
+                    document_id=replacing_document_id
+                )
             replace_document = getattr(
                 self._vector_store,
                 "replace_document",
                 None,
             )
+            vector_mutated = True
             if callable(replace_document):
                 replace_document(
                     document_id=document.id,
@@ -1313,10 +1669,16 @@ class RAGService:
                 status="vector_written",
             )
             current_status = job.status
-            if self._document_store is not None:
-                self._document_store.save_document(document, chunks)
-            self._memory_metadata_store.save_document(document, chunks)
+            stored_document = self._document_store.save_document(document, chunks)
+            if self._document_store is not self._memory_metadata_store:
+                self._memory_metadata_store.save_document(document, chunks)
+            vector_mutated = False
             job = self._transition_index_job(job=job, status="active")
+            stored_document = replace(
+                stored_document,
+                last_index_status="active",
+                last_index_error=None,
+            )
             return IngestedDocument(
                 knowledge_base_id=document.knowledge_base_id,
                 document_id=document.id,
@@ -1324,8 +1686,20 @@ class RAGService:
                 chunk_count=len(chunks),
                 index_job_id=job.id,
                 index_status=job.status,
+                document=stored_document,
             )
         except Exception as exc:
+            if vector_mutated and document is not None:
+                try:
+                    if vector_snapshot is not None:
+                        self._vector_store.restore_document(
+                            document_id=document.id,
+                            snapshot=vector_snapshot,
+                        )
+                    else:
+                        self._vector_store.delete_document(document_id=document.id)
+                except Exception:
+                    pass
             if current_status not in {"active", "failed"}:
                 try:
                     self._index_job_store.transition_index_job(
@@ -1367,6 +1741,10 @@ class RAGService:
         filename: str,
         content: bytes,
         source_uri: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
     ) -> IngestedDocument:
         return self._run_index_job(
             knowledge_base_id=knowledge_base_id,
@@ -1376,8 +1754,143 @@ class RAGService:
                 filename=filename,
                 content=content,
                 source_uri=source_uri,
+                title=title,
+                description=description,
+                tags=tags,
+                media_type=media_type,
+                byte_size=len(content),
             ),
         )
+
+    def replace_file(
+        self,
+        *,
+        document: KnowledgeDocument,
+        filename: str,
+        content: bytes,
+        media_type: str | None,
+    ) -> IngestedDocument:
+        return self._run_index_job(
+            knowledge_base_id=document.knowledge_base_id,
+            filename=filename,
+            parse_document=lambda: self._parser.parse_bytes(
+                knowledge_base_id=document.knowledge_base_id,
+                filename=filename,
+                content=content,
+                source_uri=document.source_uri,
+                document_id=document.id,
+                title=document.title,
+                description=document.description,
+                tags=document.tags,
+                media_type=media_type,
+                byte_size=len(content),
+            ),
+            replacing_document_id=document.id,
+        )
+
+    def find_document_by_filename(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocument | None:
+        return self._document_store.find_document_by_filename(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+        )
+
+    def get_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument | None:
+        return self._document_store.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+
+    def list_documents(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        status: str | None,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        return self._document_store.list_documents(
+            knowledge_base_id=knowledge_base_id,
+            query=query,
+            status=status,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+
+    def update_document_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        title: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeDocument | None:
+        updated = self._document_store.update_document_metadata(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+            title=title,
+            description=description,
+            tags=tags,
+        )
+        if updated is not None and self._document_store is not self._memory_metadata_store:
+            memory_document = self._memory_metadata_store.get_document(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+            )
+            if memory_document is not None:
+                self._memory_metadata_store.update_document_metadata(
+                    knowledge_base_id=knowledge_base_id,
+                    document_id=document_id,
+                    title=title,
+                    description=description,
+                    tags=tags,
+                )
+        return updated
+
+    def delete_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> bool:
+        snapshot = self._vector_store.snapshot_document(document_id=document_id)
+        self._vector_store.delete_document(document_id=document_id)
+        try:
+            deleted = self._document_store.delete_document(
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+            )
+            if not deleted:
+                self._vector_store.restore_document(
+                    document_id=document_id,
+                    snapshot=snapshot,
+                )
+                return False
+            if self._document_store is not self._memory_metadata_store:
+                self._memory_metadata_store.delete_document(
+                    knowledge_base_id=knowledge_base_id,
+                    document_id=document_id,
+                )
+            return True
+        except Exception:
+            self._vector_store.restore_document(
+                document_id=document_id,
+                snapshot=snapshot,
+            )
+            raise
 
     def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
         self._vector_store.delete_knowledge_base(

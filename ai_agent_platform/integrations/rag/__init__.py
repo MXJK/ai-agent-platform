@@ -17,11 +17,13 @@ from ai_agent_platform.integrations.rag.evaluation import (
 )
 from ai_agent_platform.integrations.rag.models import (
     DocumentChunk,
+    DocumentVectorSnapshot,
     DocumentStore,
     EmbeddingProvider,
     IndexJob,
     IndexJobStore,
     IngestedDocument,
+    KnowledgeDocument,
     ParsedDocument,
     RAGAnswer,
     RAGSearchResult,
@@ -51,6 +53,7 @@ from ai_agent_platform.integrations.rag.service import (
 __all__ = [
     "ChromaVectorStore",
     "DocumentChunk",
+    "DocumentVectorSnapshot",
     "DocumentStore",
     "EmbeddingProvider",
     "IndexJob",
@@ -59,6 +62,7 @@ __all__ = [
     "HashingEmbeddingProvider",
     "InMemoryVectorStore",
     "IngestedDocument",
+    "KnowledgeDocument",
     "NoopReranker",
     "OpenAIEmbeddingProvider",
     "ParsedDocument",

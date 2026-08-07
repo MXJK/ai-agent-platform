@@ -1,5 +1,7 @@
 from .agent_run_service import AgentRunService
 from .knowledge_base_service import (
+    DocumentFilenameConflictError,
+    DocumentNotFoundError,
     IndexJobNotFoundError,
     KnowledgeBaseAlreadyExistsError,
     KnowledgeBaseNotFoundError,
@@ -31,6 +33,8 @@ from .conversation_compression import (
 
 __all__ = [
     "AgentRunService",
+    "DocumentFilenameConflictError",
+    "DocumentNotFoundError",
     "KnowledgeBaseAlreadyExistsError",
     "IndexJobNotFoundError",
     "KnowledgeBaseNotFoundError",

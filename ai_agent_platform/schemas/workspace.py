@@ -24,6 +24,7 @@ class WorkspaceResponse(BaseModel):
     revision: int
     created_at: datetime
     updated_at: datetime
+    available: bool = True
 
     @classmethod
     def from_domain(
@@ -33,6 +34,7 @@ class WorkspaceResponse(BaseModel):
         status: str = "ready",
         role: str | None = None,
         can_update: bool = True,
+        available: bool = True,
     ) -> "WorkspaceResponse":
         return cls(
             id=workspace.id,
@@ -43,6 +45,7 @@ class WorkspaceResponse(BaseModel):
             revision=workspace.revision,
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
+            available=available,
         )
 
 

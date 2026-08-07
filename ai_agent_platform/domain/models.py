@@ -119,6 +119,7 @@ class WorkspaceRecord:
     created_at: datetime
     updated_at: datetime
     revision: int = 1
+    removed_at: datetime | None = None
 
 
 @dataclass(frozen=True)

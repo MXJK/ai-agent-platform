@@ -9,6 +9,7 @@ from ai_agent_platform.domain import KnowledgeBaseRecord
 from ai_agent_platform.integrations.rag import (
     IndexJob,
     IngestedDocument,
+    KnowledgeDocument,
     RerankerCapabilities,
     RetrievedDocument,
     RetrievalExecution,
@@ -57,6 +58,58 @@ class KnowledgeBasesResponse(BaseModel):
     knowledge_bases: list[KnowledgeBaseResponse]
 
 
+class KnowledgeDocumentResponse(BaseModel):
+    id: str
+    knowledge_base_id: str
+    title: str
+    filename: str
+    description: str
+    tags: list[str]
+    media_type: Optional[str] = None
+    byte_size: Optional[int] = None
+    content_hash: str
+    chunk_count: int
+    is_searchable: bool
+    last_index_status: str
+    last_index_error: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    indexed_at: Optional[datetime] = None
+    source_uri: Optional[str] = None
+
+    @classmethod
+    def from_domain(cls, document: KnowledgeDocument) -> "KnowledgeDocumentResponse":
+        return cls(**document.__dict__)
+
+
+class KnowledgeDocumentsResponse(BaseModel):
+    items: list[KnowledgeDocumentResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class KnowledgeDocumentUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2000)
+    tags: list[KnowledgeBaseTag] = Field(default_factory=list, max_length=20)
+
+
+class KnowledgeDocumentBulkDeleteRequest(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class KnowledgeDocumentDeleteFailure(BaseModel):
+    document_id: str
+    code: str
+    message: str
+
+
+class KnowledgeDocumentBulkDeleteResponse(BaseModel):
+    deleted_ids: list[str]
+    failures: list[KnowledgeDocumentDeleteFailure]
+
+
 class DocumentIngestResponse(BaseModel):
     knowledge_base_id: str
     document_id: str
@@ -64,6 +117,7 @@ class DocumentIngestResponse(BaseModel):
     chunk_count: int
     index_job_id: Optional[str] = None
     index_status: str
+    document: Optional[KnowledgeDocumentResponse] = None
 
     @classmethod
     def from_domain(cls, document: IngestedDocument) -> "DocumentIngestResponse":
@@ -74,6 +128,11 @@ class DocumentIngestResponse(BaseModel):
             chunk_count=document.chunk_count,
             index_job_id=document.index_job_id,
             index_status=document.index_status,
+            document=(
+                KnowledgeDocumentResponse.from_domain(document.document)
+                if document.document is not None
+                else None
+            ),
         )
 
 

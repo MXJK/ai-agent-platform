@@ -14,6 +14,32 @@ class ParsedDocument:
     filename: str
     text: str
     source_uri: str | None = None
+    title: str | None = None
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+    media_type: str | None = None
+    byte_size: int | None = None
+
+
+@dataclass(frozen=True)
+class KnowledgeDocument:
+    id: str
+    knowledge_base_id: str
+    title: str
+    filename: str
+    description: str
+    tags: list[str]
+    media_type: str | None
+    byte_size: int | None
+    content_hash: str
+    chunk_count: int
+    is_searchable: bool
+    last_index_status: str
+    last_index_error: str | None
+    created_at: datetime
+    updated_at: datetime
+    indexed_at: datetime | None
+    source_uri: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +84,13 @@ class IngestedDocument:
     chunk_count: int
     index_job_id: str | None = None
     index_status: str = "active"
+    document: KnowledgeDocument | None = None
+
+
+@dataclass(frozen=True)
+class DocumentVectorSnapshot:
+    chunks: list[DocumentChunk]
+    embeddings: list[list[float]]
 
 
 @dataclass(frozen=True)
@@ -124,6 +157,21 @@ class VectorStore(Protocol):
     def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
         ...
 
+    def snapshot_document(
+        self,
+        *,
+        document_id: str,
+    ) -> DocumentVectorSnapshot:
+        ...
+
+    def restore_document(
+        self,
+        *,
+        document_id: str,
+        snapshot: DocumentVectorSnapshot,
+    ) -> None:
+        ...
+
     def upsert_chunks(
         self,
         chunks: list[DocumentChunk],
@@ -155,7 +203,61 @@ class DocumentStore(Protocol):
         self,
         document: ParsedDocument,
         chunks: list[DocumentChunk],
-    ) -> None:
+    ) -> KnowledgeDocument:
+        ...
+
+    def find_document_by_filename(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocument | None:
+        ...
+
+    def get_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument | None:
+        ...
+
+    def list_documents(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        status: str | None,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        ...
+
+    def update_document_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        title: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeDocument | None:
+        ...
+
+    def get_document_chunks(
+        self,
+        *,
+        document_id: str,
+    ) -> list[DocumentChunk]:
+        ...
+
+    def delete_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> bool:
         ...
 
     def search_lexical(

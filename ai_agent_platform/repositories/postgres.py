@@ -25,6 +25,7 @@ from ai_agent_platform.domain import (
 from ai_agent_platform.integrations.rag import (
     DocumentChunk,
     IndexJob,
+    KnowledgeDocument,
     ParsedDocument,
     RetrievedDocument,
 )
@@ -697,34 +698,58 @@ class PostgresDocumentRepository:
         self,
         document: ParsedDocument,
         chunks: list[DocumentChunk],
-    ) -> None:
+    ) -> KnowledgeDocument:
         Jsonb = _require_jsonb()
+        now = _now()
         with self._connect() as conn:
-            conn.execute(
+            row = conn.execute(
                 """
                 INSERT INTO documents (
                     id,
                     knowledge_base_id,
+                    title,
                     filename,
+                    description,
+                    tags,
                     source_uri,
+                    media_type,
+                    byte_size,
                     content_hash,
-                    created_at
+                    chunk_count,
+                    created_at,
+                    updated_at,
+                    indexed_at
                 )
-                VALUES (%s, %s, %s, %s, %s, NOW())
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    NOW(), NOW(), NOW()
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     knowledge_base_id = EXCLUDED.knowledge_base_id,
                     filename = EXCLUDED.filename,
                     source_uri = EXCLUDED.source_uri,
-                    content_hash = EXCLUDED.content_hash
+                    media_type = EXCLUDED.media_type,
+                    byte_size = EXCLUDED.byte_size,
+                    content_hash = EXCLUDED.content_hash,
+                    chunk_count = EXCLUDED.chunk_count,
+                    updated_at = NOW(),
+                    indexed_at = NOW()
+                RETURNING created_at, updated_at, indexed_at
                 """,
                 (
                     document.id,
                     document.knowledge_base_id,
+                    (document.title or document.filename).strip(),
                     document.filename,
+                    document.description.strip(),
+                    Jsonb(document.tags),
                     document.source_uri,
+                    document.media_type,
+                    document.byte_size,
                     _sha256_text(document.text),
+                    len(chunks),
                 ),
-            )
+            ).fetchone()
             conn.execute(
                 """
                 DELETE FROM document_chunks
@@ -771,6 +796,179 @@ class PostgresDocumentRepository:
                         _qdrant_point_id(chunk.id),
                     ),
                 )
+        created_at, updated_at, indexed_at = row or (now, now, now)
+        return KnowledgeDocument(
+            id=document.id,
+            knowledge_base_id=document.knowledge_base_id,
+            title=(document.title or document.filename).strip(),
+            filename=document.filename,
+            description=document.description.strip(),
+            tags=list(document.tags),
+            media_type=document.media_type,
+            byte_size=document.byte_size,
+            content_hash=_sha256_text(document.text),
+            chunk_count=len(chunks),
+            is_searchable=True,
+            last_index_status="vector_written",
+            last_index_error=None,
+            created_at=created_at,
+            updated_at=updated_at,
+            indexed_at=indexed_at,
+            source_uri=document.source_uri,
+        )
+
+    def find_document_by_filename(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+    ) -> KnowledgeDocument | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                _knowledge_document_select(
+                    "WHERE documents.knowledge_base_id = %s "
+                    "AND LOWER(documents.filename) = LOWER(%s) "
+                    "LIMIT 1"
+                ),
+                (knowledge_base_id, filename),
+            ).fetchone()
+        return _knowledge_document_from_row(row) if row is not None else None
+
+    def get_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                _knowledge_document_select(
+                    "WHERE documents.knowledge_base_id = %s "
+                    "AND documents.id = %s"
+                ),
+                (knowledge_base_id, document_id),
+            ).fetchone()
+        return _knowledge_document_from_row(row) if row is not None else None
+
+    def list_documents(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        status: str | None,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        conditions = ["documents.knowledge_base_id = %s"]
+        params: list[object] = [knowledge_base_id]
+        if query:
+            pattern = f"%{_escape_like(query)}%"
+            conditions.append(
+                "(documents.title ILIKE %s ESCAPE '\\\\' "
+                "OR documents.filename ILIKE %s ESCAPE '\\\\' "
+                "OR documents.description ILIKE %s ESCAPE '\\\\')"
+            )
+            params.extend((pattern, pattern, pattern))
+        if status:
+            conditions.append("COALESCE(latest_job.status, 'active') = %s")
+            params.append(status)
+        where_sql = "WHERE " + " AND ".join(conditions)
+        order_sql = {
+            "title_asc": "documents.title ASC, documents.id ASC",
+            "created_at_desc": "documents.created_at DESC, documents.id DESC",
+            "updated_at_desc": "documents.updated_at DESC, documents.id DESC",
+        }[sort]
+        with self._connect() as conn:
+            total_row = conn.execute(
+                _knowledge_document_count_select(where_sql),
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                _knowledge_document_select(
+                    f"{where_sql} ORDER BY {order_sql} LIMIT %s OFFSET %s"
+                ),
+                (*params, page_size, (page - 1) * page_size),
+            ).fetchall()
+        return (
+            [_knowledge_document_from_row(row) for row in rows],
+            int(total_row[0]) if total_row is not None else 0,
+        )
+
+    def update_document_metadata(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        title: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeDocument | None:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE documents
+                SET title = %s, description = %s, tags = %s, updated_at = NOW()
+                WHERE knowledge_base_id = %s AND id = %s
+                RETURNING id
+                """,
+                (title, description, Jsonb(tags), knowledge_base_id, document_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+
+    def get_document_chunks(
+        self,
+        *,
+        document_id: str,
+    ) -> list[DocumentChunk]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, knowledge_base_id, document_id, filename, chunk_index,
+                       text, start_line, end_line, symbols
+                FROM document_chunks
+                WHERE document_id = %s
+                ORDER BY chunk_index ASC, id ASC
+                """,
+                (document_id,),
+            ).fetchall()
+        return [
+            DocumentChunk(
+                id=str(row[0]),
+                knowledge_base_id=str(row[1]),
+                document_id=str(row[2]),
+                filename=str(row[3]),
+                chunk_index=int(row[4]),
+                text=str(row[5]),
+                start_line=int(row[6]) if row[6] is not None else None,
+                end_line=int(row[7]) if row[7] is not None else None,
+                symbols=[str(item) for item in (row[8] or [])],
+            )
+            for row in rows
+        ]
+
+    def delete_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                DELETE FROM documents
+                WHERE knowledge_base_id = %s AND id = %s
+                RETURNING id
+                """,
+                (knowledge_base_id, document_id),
+            ).fetchone()
+        return row is not None
 
     def search_lexical(
         self,
@@ -1076,7 +1274,24 @@ class PostgresKnowledgeBaseRepository:
         knowledge_base_id: str,
         document_id: str,
     ) -> None:
-        del knowledge_base_id, document_id
+        del document_id
+        self.touch(knowledge_base_id)
+
+    def forget_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        del document_id
+        self.touch(knowledge_base_id)
+
+    def touch(self, knowledge_base_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE knowledge_bases SET updated_at = NOW() WHERE id = %s",
+                (knowledge_base_id,),
+            )
 
     def _connect(self):
         psycopg = _require_psycopg()
@@ -1103,8 +1318,9 @@ class PostgresWorkspaceRepository:
                         ELSE workspaces.revision
                     END,
                     root_path = EXCLUDED.root_path,
+                    removed_at = NULL,
                     updated_at = NOW()
-                RETURNING id, root_path, created_at, updated_at, revision
+                RETURNING id, root_path, created_at, updated_at, revision, removed_at
                 """,
                 (workspace_id, root_path),
             ).fetchone()
@@ -1114,7 +1330,19 @@ class PostgresWorkspaceRepository:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, root_path, created_at, updated_at, revision
+                SELECT id, root_path, created_at, updated_at, revision, removed_at
+                FROM workspaces
+                WHERE id = %s AND removed_at IS NULL
+                """,
+                (workspace_id,),
+            ).fetchone()
+        return _workspace_from_row(row) if row is not None else None
+
+    def get_including_removed(self, workspace_id: str) -> WorkspaceRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, root_path, created_at, updated_at, revision, removed_at
                 FROM workspaces
                 WHERE id = %s
                 """,
@@ -1138,12 +1366,26 @@ class PostgresWorkspaceRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, root_path, created_at, updated_at, revision
+                SELECT id, root_path, created_at, updated_at, revision, removed_at
                 FROM workspaces
+                WHERE removed_at IS NULL
                 ORDER BY id ASC
                 """
             ).fetchall()
         return [_workspace_from_row(row) for row in rows]
+
+    def remove(self, workspace_id: str) -> WorkspaceRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE workspaces
+                SET removed_at = NOW(), updated_at = NOW()
+                WHERE id = %s AND removed_at IS NULL
+                RETURNING id, root_path, created_at, updated_at, revision, removed_at
+                """,
+                (workspace_id,),
+            ).fetchone()
+        return _workspace_from_row(row) if row is not None else None
 
     def _connect(self):
         psycopg = _require_psycopg()
@@ -1427,6 +1669,7 @@ def _workspace_from_row(row: tuple[Any, ...]) -> WorkspaceRecord:
         created_at=row[2],
         updated_at=row[3],
         revision=int(row[4]) if len(row) > 4 else 1,
+        removed_at=row[5] if len(row) > 5 else None,
     )
 
 
@@ -1448,6 +1691,73 @@ def _knowledge_base_from_row(
 
 def _knowledge_base_from_count_row(row: tuple[Any, ...]) -> KnowledgeBaseRecord:
     return _knowledge_base_from_row(row[:6], document_count=int(row[6]))
+
+
+def _knowledge_document_from_clause() -> str:
+    return """
+        FROM documents
+        LEFT JOIN LATERAL (
+            SELECT status, error
+            FROM rag_index_jobs
+            WHERE rag_index_jobs.document_id = documents.id
+            ORDER BY rag_index_jobs.created_at DESC, rag_index_jobs.id DESC
+            LIMIT 1
+        ) AS latest_job ON TRUE
+    """
+
+
+def _knowledge_document_select(suffix: str) -> str:
+    return f"""
+        SELECT
+            documents.id,
+            documents.knowledge_base_id,
+            documents.title,
+            documents.filename,
+            documents.description,
+            documents.tags,
+            documents.media_type,
+            documents.byte_size,
+            documents.content_hash,
+            documents.chunk_count,
+            documents.source_uri,
+            documents.created_at,
+            documents.updated_at,
+            documents.indexed_at,
+            COALESCE(latest_job.status, 'active'),
+            latest_job.error
+        {_knowledge_document_from_clause()}
+        {suffix}
+    """
+
+
+def _knowledge_document_count_select(where_sql: str) -> str:
+    return f"""
+        SELECT COUNT(documents.id)
+        {_knowledge_document_from_clause()}
+        {where_sql}
+    """
+
+
+def _knowledge_document_from_row(row: tuple[Any, ...]) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        id=str(row[0]),
+        knowledge_base_id=str(row[1]),
+        title=str(row[2]),
+        filename=str(row[3]),
+        description=str(row[4] or ""),
+        tags=[str(tag) for tag in (row[5] or [])],
+        media_type=str(row[6]) if row[6] is not None else None,
+        byte_size=int(row[7]) if row[7] is not None else None,
+        content_hash=str(row[8]),
+        chunk_count=int(row[9]),
+        source_uri=str(row[10]) if row[10] is not None else None,
+        created_at=row[11],
+        updated_at=row[12],
+        indexed_at=row[13],
+        is_searchable=True,
+        last_index_status=str(row[14]),
+        last_index_error=str(row[15]) if row[15] is not None else None,
+    )
 
 
 def _index_job_from_row(row: tuple[Any, ...]) -> IndexJob:

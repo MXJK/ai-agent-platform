@@ -21,7 +21,13 @@ class WorkspaceStore(Protocol):
     def get_by_root_path(self, root_path: str) -> WorkspaceRecord | None:
         ...
 
+    def get_including_removed(self, workspace_id: str) -> WorkspaceRecord | None:
+        ...
+
     def list(self) -> list[WorkspaceRecord]:
+        ...
+
+    def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         ...
 
 
@@ -76,8 +82,24 @@ class WorkspaceService:
             raise WorkspaceNotFoundError(workspace_id)
         return workspace
 
+    def get_including_removed(self, workspace_id: str) -> WorkspaceRecord | None:
+        return self._store.get_including_removed(workspace_id)
+
     def list(self) -> list[WorkspaceRecord]:
         return self._store.list()
+
+    def remove(self, workspace_id: str) -> WorkspaceRecord:
+        workspace = self._store.remove(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(workspace_id)
+        return workspace
+
+    def is_available(self, workspace_id: str) -> bool:
+        try:
+            self.resolve_for_run(workspace_id)
+        except (WorkspaceNotFoundError, WorkspaceValidationError):
+            return False
+        return True
 
     def browse_directories(
         self,

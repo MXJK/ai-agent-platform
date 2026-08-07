@@ -121,6 +121,58 @@ class ApiTests(unittest.TestCase):
                 )
                 listed = client.get("/api/v1/workspaces").json()["workspaces"]
                 self.assertEqual([item["id"] for item in listed], ["project"])
+                self.assertTrue(listed[0]["available"])
+
+    def test_workspace_remove_preserves_registration_for_restore(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            with self._client(root) as client:
+                created = client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                ).json()
+
+                removed = client.delete("/api/v1/workspaces/project")
+
+                self.assertEqual(removed.status_code, 204)
+                self.assertEqual(
+                    client.get("/api/v1/workspaces").json()["workspaces"],
+                    [],
+                )
+                self.assertEqual(
+                    client.get("/api/v1/workspaces/project").status_code,
+                    404,
+                )
+                self.assertEqual(
+                    client.delete("/api/v1/workspaces/project").status_code,
+                    404,
+                )
+
+                restored = client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                ).json()
+                self.assertEqual(restored["revision"], created["revision"])
+                self.assertTrue(restored["available"])
+
+    def test_workspace_listing_marks_moved_folder_unavailable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            with self._client(root) as client:
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                )
+                workspace.rmdir()
+
+                listed = client.get("/api/v1/workspaces").json()["workspaces"]
+
+                self.assertEqual(len(listed), 1)
+                self.assertFalse(listed[0]["available"])
 
     def test_workspace_rejects_missing_outside_and_symlink_escape(self) -> None:
         with TemporaryDirectory() as allowed_dir, TemporaryDirectory() as outside_dir:
@@ -324,9 +376,11 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('id="composer-attachment-btn"', response.text)
         self.assertNotIn('id="composer-provider-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
-        self.assertIn('id="workspace-draft-id-input"', response.text)
+        self.assertNotIn('id="workspace-draft-id-input"', response.text)
         self.assertIn('id="composer-workspace-select"', response.text)
-        self.assertIn('id="workspace-catalog-list"', response.text)
+        self.assertNotIn('id="workspace-catalog-list"', response.text)
+        self.assertIn('id="workspace-manager-list"', response.text)
+        self.assertIn('id="workspace-default-toggle"', response.text)
         self.assertIn('id="open-workspace-picker-btn"', response.text)
         self.assertIn('id="workspace-picker-dialog"', response.text)
         self.assertIn('id="workspace-token-list"', response.text)
@@ -344,6 +398,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("<b>VERIFY</b>", response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
         self.assertIn('id="document-files-input"', response.text)
+        self.assertIn('id="knowledge-documents-panel"', response.text)
+        self.assertIn('id="knowledge-ask-panel"', response.text)
+        self.assertIn('id="knowledge-settings-panel"', response.text)
+        self.assertIn('id="knowledge-document-rows"', response.text)
+        self.assertIn('id="document-drawer"', response.text)
+        self.assertIn('class="button-row document-actions"', response.text)
         self.assertIn("最终结果数", response.text)
         self.assertIn('id="rag-rerank-toggle"', response.text)
         self.assertIn('id="rag-strategy-summary"', response.text)
@@ -359,6 +419,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("session.message_count > 0", script_response.text)
         self.assertIn("隐藏会话与运行详情", script_response.text)
         self.assertIn("setRagRequestBusy", script_response.text)
+        self.assertIn("listKnowledgeDocuments", script_response.text)
+        self.assertIn("bulkDeleteKnowledgeDocuments", script_response.text)
+        self.assertIn("document_filename_conflict", script_response.text)
+        self.assertIn(".knowledge-workbench", stylesheet_response.text)
+        self.assertIn(".document-actions", stylesheet_response.text)
+        self.assertIn(".document-name-cell::before", stylesheet_response.text)
         self.assertIn("isCurrentRagRequest", script_response.text)
         self.assertIn('signal: request.controller.signal', script_response.text)
         self.assertNotIn('id="document-content-input"', response.text)
@@ -845,6 +911,164 @@ class ApiTests(unittest.TestCase):
                 ).status_code,
                 404,
             )
+
+    def test_knowledge_document_management_crud_replace_and_bulk_delete(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            client.post(
+                "/api/v1/knowledge-bases",
+                json={
+                    "id": "managed_docs",
+                    "name": "Managed Docs",
+                    "description": "",
+                    "tags": [],
+                },
+            ).raise_for_status()
+
+            created = client.post(
+                "/api/v1/knowledge-bases/managed_docs/documents",
+                files={"file": ("guide.md", b"legacy falcon instructions")},
+                data={
+                    "title": "Falcon guide",
+                    "description": "Operator reference",
+                    "tags": "falcon, operations",
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+            document = created.json()["document"]
+            document_id = document["id"]
+            self.assertEqual(document["title"], "Falcon guide")
+            self.assertEqual(document["tags"], ["falcon", "operations"])
+            self.assertEqual(document["byte_size"], len(b"legacy falcon instructions"))
+            self.assertEqual(document["last_index_status"], "active")
+
+            duplicate = upload_document(
+                client,
+                "managed_docs",
+                "guide.md",
+                "silent replacement must not happen",
+            )
+            self.assertEqual(duplicate.status_code, 409)
+            self.assertEqual(
+                duplicate.json()["detail"]["code"],
+                "document_filename_conflict",
+            )
+            self.assertEqual(
+                duplicate.json()["detail"]["existing_document_id"],
+                document_id,
+            )
+
+            listed = client.get(
+                "/api/v1/knowledge-bases/managed_docs/documents",
+                params={"query": "Falcon", "sort": "title_asc"},
+            ).json()
+            self.assertEqual(listed["total"], 1)
+            self.assertEqual(listed["items"][0]["filename"], "guide.md")
+
+            updated = client.patch(
+                f"/api/v1/knowledge-bases/managed_docs/documents/{document_id}",
+                json={
+                    "title": "Current Falcon guide",
+                    "description": "Updated metadata only",
+                    "tags": ["current"],
+                },
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["title"], "Current Falcon guide")
+            self.assertEqual(updated.json()["content_hash"], document["content_hash"])
+
+            replaced = client.put(
+                f"/api/v1/knowledge-bases/managed_docs/documents/{document_id}/content",
+                files={"file": ("guide.md", b"phoenix mode is the current policy")},
+            )
+            self.assertEqual(replaced.status_code, 200)
+            self.assertEqual(replaced.json()["document_id"], document_id)
+            self.assertEqual(
+                replaced.json()["document"]["title"],
+                "Current Falcon guide",
+            )
+            search = client.post(
+                "/api/v1/knowledge-bases/managed_docs/search",
+                json={"query": "phoenix current policy", "limit": 5},
+            ).json()
+            self.assertTrue(
+                any("phoenix" in item["text"] for item in search["results"])
+            )
+            self.assertFalse(
+                any("legacy falcon" in item["text"] for item in search["results"])
+            )
+
+            second = upload_document(
+                client,
+                "managed_docs",
+                "runbook.md",
+                "runbook content",
+            ).json()["document"]
+            first_page = client.get(
+                "/api/v1/knowledge-bases/managed_docs/documents",
+                params={"page": 1, "page_size": 1, "status": "active"},
+            ).json()
+            second_page = client.get(
+                "/api/v1/knowledge-bases/managed_docs/documents",
+                params={"page": 2, "page_size": 1, "status": "active"},
+            ).json()
+            self.assertEqual(first_page["total"], 2)
+            self.assertEqual(len(first_page["items"]), 1)
+            self.assertEqual(len(second_page["items"]), 1)
+            self.assertNotEqual(
+                first_page["items"][0]["id"],
+                second_page["items"][0]["id"],
+            )
+            deleted = client.post(
+                "/api/v1/knowledge-bases/managed_docs/documents/bulk-delete",
+                json={"document_ids": [document_id, "doc_missing", second["id"]]},
+            )
+            self.assertEqual(deleted.status_code, 200)
+            self.assertEqual(set(deleted.json()["deleted_ids"]), {document_id, second["id"]})
+            self.assertEqual(
+                deleted.json()["failures"],
+                [
+                    {
+                        "document_id": "doc_missing",
+                        "code": "document_not_found",
+                        "message": "document not found in this knowledge base",
+                    }
+                ],
+            )
+            self.assertEqual(
+                client.get(
+                    "/api/v1/knowledge-bases/managed_docs/documents"
+                ).json()["total"],
+                0,
+            )
+
+    def test_failed_document_replacement_keeps_previous_content_searchable(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            client.post(
+                "/api/v1/knowledge-bases",
+                json={"id": "safe_replace", "name": "Safe", "tags": []},
+            ).raise_for_status()
+            document_id = upload_document(
+                client,
+                "safe_replace",
+                "policy.md",
+                "durable bluebird policy",
+            ).json()["document_id"]
+
+            failed = client.put(
+                f"/api/v1/knowledge-bases/safe_replace/documents/{document_id}/content",
+                files={"file": ("policy.exe", b"not a supported document")},
+            )
+            self.assertEqual(failed.status_code, 400)
+            loaded = client.get(
+                f"/api/v1/knowledge-bases/safe_replace/documents/{document_id}"
+            ).json()
+            self.assertTrue(loaded["is_searchable"])
+            self.assertEqual(loaded["last_index_status"], "failed")
+            results = client.post(
+                "/api/v1/knowledge-bases/safe_replace/search",
+                json={"query": "bluebird policy", "limit": 3},
+            ).json()["results"]
+            self.assertTrue(any("bluebird" in item["text"] for item in results))
 
     def test_document_upload_rejects_empty_invalid_and_oversized_files(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:

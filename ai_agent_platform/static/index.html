@@ -115,7 +115,6 @@
             <button id="sidebar-settings-btn" class="text-button" type="button">编辑</button>
           </div>
           <dl class="context-list">
-            <div><dt>用户</dt><dd id="context-user">demo_user</dd></div>
             <div><dt>模型</dt><dd id="context-model">默认配置</dd></div>
             <div><dt>工作区</dt><dd id="context-workspace">未选择</dd></div>
           </dl>
@@ -351,60 +350,87 @@
             <div>
               <p class="eyebrow">Grounded Knowledge</p>
               <h1 id="rag-title">知识库</h1>
-              <p>录入可信资料，用检索结果支撑每一次回答。</p>
+              <p>选中一个知识库，集中管理文档、索引健康和检索问答。</p>
             </div>
-            <span id="rag-status" class="meta-badge">等待操作</span>
+            <span id="rag-status" class="meta-badge" role="status" aria-live="polite">等待加载</span>
           </header>
 
-          <article class="surface">
-            <div class="surface-heading">
-              <div><span class="step-kicker">01 · 目录</span><h2>管理知识库</h2></div>
-              <button id="refresh-knowledge-bases-btn" class="text-button" type="button">刷新</button>
-            </div>
-            <div class="field-grid">
-              <label for="kb-catalog-id-input">知识库 ID<input id="kb-catalog-id-input" maxlength="128" placeholder="例如 product_docs" /></label>
-              <label for="kb-name-input">名称<input id="kb-name-input" maxlength="128" placeholder="例如 产品文档" /></label>
-            </div>
-            <label for="kb-description-input">描述</label>
-            <textarea id="kb-description-input" rows="3" maxlength="1000" placeholder="说明这个知识库适合回答哪些问题"></textarea>
-            <label for="kb-tags-input">标签</label>
-            <input id="kb-tags-input" maxlength="1000" placeholder="逗号分隔，例如 产品, API, 使用指南" />
-            <div class="surface-actions">
-              <p>Agent 只读取目录元数据判断是否需要检索，不会在分类阶段读取正文。</p>
-              <div class="button-row">
-                <button id="create-knowledge-base-btn" class="button primary" type="button">创建</button>
-                <button id="update-knowledge-base-btn" class="button secondary" type="button">保存修改</button>
-                <button id="delete-knowledge-base-btn" class="button ghost" type="button">删除</button>
+          <div class="knowledge-workbench">
+            <aside class="surface knowledge-catalog" aria-label="知识库目录">
+              <div class="knowledge-catalog-heading">
+                <div><span class="utility-label">Knowledge bases</span><h2>知识库</h2></div>
+                <button id="new-knowledge-base-btn" class="icon-button compact-icon" type="button" aria-label="新建知识库" title="新建知识库">
+                  <svg class="app-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
+                </button>
               </div>
-            </div>
-            <div id="knowledge-base-list" class="session-list"><div class="empty-state">暂无知识库</div></div>
-          </article>
+              <label class="mobile-kb-selector" for="mobile-knowledge-base-select">
+                <span>当前知识库</span>
+                <select id="mobile-knowledge-base-select" aria-label="选择当前知识库"></select>
+              </label>
+              <label class="catalog-search" for="knowledge-base-search-input">
+                <span class="sr-only">搜索知识库</span>
+                <input id="knowledge-base-search-input" type="search" placeholder="搜索名称、ID 或标签" />
+              </label>
+              <div id="knowledge-base-list" class="knowledge-base-list" role="listbox" aria-label="选择知识库">
+                <div class="empty-state">暂无知识库</div>
+              </div>
+              <button id="refresh-knowledge-bases-btn" class="text-button catalog-refresh" type="button">刷新目录</button>
+            </aside>
 
-          <div class="content-grid equal-grid">
-            <article class="surface">
-              <div class="surface-heading"><div><span class="step-kicker">02 · 录入</span><h2>添加知识</h2></div></div>
-              <div class="field-grid">
-                <label for="kb-id-input">知识库
-                  <select id="kb-id-input"><option value="">请先创建知识库</option></select>
-                </label>
-                <label for="document-files-input">选择文件
-                  <input
-                    id="document-files-input"
-                    type="file"
-                    multiple
-                    accept=".pdf,.docx,.md,.markdown,.txt,.html,.json,.yaml,.yml,.toml,.py,.js,.jsx,.ts,.tsx,.css,.go,.java,.rs"
-                  />
-                </label>
-              </div>
-              <div id="selected-document-files" class="selected-files">尚未选择文件</div>
-              <div class="surface-actions">
-                <p>支持 PDF、DOCX、Markdown 与 UTF-8 文本；单个文件最大 20 MiB。</p>
-                <button id="ingest-doc-btn" class="button secondary" type="button">录入所选文件</button>
-              </div>
-            </article>
+            <section class="knowledge-detail" aria-label="当前知识库">
+              <header class="surface knowledge-context-header">
+                <input id="kb-id-input" type="hidden" />
+                <div class="knowledge-context-copy">
+                  <span class="utility-label">当前知识库</span>
+                  <h2 id="selected-kb-name">请选择知识库</h2>
+                  <p id="selected-kb-description">选中后即可查看和管理文档。</p>
+                  <div id="selected-kb-tags" class="tag-row"></div>
+                </div>
+                <div class="knowledge-health-summary" aria-live="polite">
+                  <span id="selected-kb-health" class="index-status neutral"><i aria-hidden="true"></i>未选择</span>
+                  <strong id="selected-kb-document-count">—</strong>
+                  <small>个文档</small>
+                </div>
+              </header>
 
-            <article class="surface">
-              <div class="surface-heading"><div><span class="step-kicker">03 · 提问</span><h2>检索并生成回答</h2></div></div>
+              <div class="knowledge-tabs" role="tablist" aria-label="知识库功能">
+                <button id="knowledge-documents-tab" class="knowledge-tab active" type="button" role="tab" aria-selected="true" aria-controls="knowledge-documents-panel" data-rag-tab="documents">文档</button>
+                <button id="knowledge-ask-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="knowledge-ask-panel" data-rag-tab="ask">检索问答</button>
+                <button id="knowledge-settings-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="knowledge-settings-panel" data-rag-tab="settings">设置</button>
+              </div>
+
+              <section id="knowledge-documents-panel" class="surface knowledge-tab-panel" role="tabpanel" aria-labelledby="knowledge-documents-tab" data-rag-tab-panel="documents">
+                <div class="document-toolbar">
+                  <div class="document-filters">
+                    <label for="document-search-input"><span class="sr-only">搜索文档</span><input id="document-search-input" type="search" placeholder="搜索标题或文件名" /></label>
+                    <label for="document-status-filter"><span class="sr-only">索引状态</span><select id="document-status-filter"><option value="">全部状态</option><option value="active">可用</option><option value="failed">失败</option><option value="embedding">嵌入中</option><option value="vector_written">写入中</option></select></label>
+                    <label for="document-sort-input"><span class="sr-only">文档排序</span><select id="document-sort-input"><option value="updated_at_desc">最近更新</option><option value="created_at_desc">最近创建</option><option value="title_asc">标题 A–Z</option></select></label>
+                  </div>
+                  <div class="button-row document-actions" aria-label="文档批量操作">
+                    <button id="bulk-delete-documents-btn" class="button ghost" type="button" disabled>删除已选</button>
+                    <label class="button primary upload-trigger" for="document-files-input">批量上传</label>
+                    <input id="document-files-input" class="sr-only" type="file" multiple accept=".pdf,.docx,.md,.markdown,.txt,.html,.json,.yaml,.yml,.toml,.py,.js,.jsx,.ts,.tsx,.css,.go,.java,.rs" />
+                  </div>
+                </div>
+                <div id="selected-document-files" class="upload-queue" hidden></div>
+                <div id="document-upload-actions" class="upload-actions" hidden>
+                  <span>单个文件最大 20 MiB；同名文件需要显式确认替换。</span>
+                  <button id="ingest-doc-btn" class="button secondary" type="button">开始上传</button>
+                </div>
+                <div class="document-table-wrap">
+                  <table class="document-table">
+                    <thead><tr><th><input id="select-all-documents" type="checkbox" aria-label="选择当前页所有文档" /></th><th>文档</th><th>索引状态</th><th>类型 / 大小</th><th>分块</th><th>更新时间</th></tr></thead>
+                    <tbody id="knowledge-document-rows"><tr><td colspan="6"><div class="empty-state">请先选择知识库</div></td></tr></tbody>
+                  </table>
+                </div>
+                <footer class="document-pagination">
+                  <span id="document-page-summary">—</span>
+                  <div class="button-row"><button id="previous-document-page" class="button ghost" type="button">上一页</button><button id="next-document-page" class="button ghost" type="button">下一页</button></div>
+                </footer>
+              </section>
+
+              <section id="knowledge-ask-panel" class="surface knowledge-tab-panel" role="tabpanel" aria-labelledby="knowledge-ask-tab" data-rag-tab-panel="ask" hidden>
+                <div class="surface-heading"><div><span class="utility-label">Retrieval</span><h2>检索并生成回答</h2></div></div>
               <label for="rag-question-input">问题或搜索词</label>
               <textarea id="rag-question-input" rows="6" maxlength="4000">这个项目主要包含哪些后端能力？</textarea>
               <details class="advanced-options">
@@ -436,7 +462,48 @@
               </div>
               <div id="rag-answer" class="rich-output empty-output">检索结果和回答会显示在这里。</div>
               <div id="rag-citations" class="citation-list"></div>
-            </article>
+              </section>
+
+              <section id="knowledge-settings-panel" class="surface knowledge-tab-panel" role="tabpanel" aria-labelledby="knowledge-settings-tab" data-rag-tab-panel="settings" hidden>
+                <div class="surface-heading"><div><span class="utility-label">Catalog metadata</span><h2 id="knowledge-settings-title">知识库设置</h2></div></div>
+                <div class="field-grid">
+                  <label for="kb-catalog-id-input">知识库 ID<input id="kb-catalog-id-input" maxlength="128" placeholder="例如 product_docs" /></label>
+                  <label for="kb-name-input">名称<input id="kb-name-input" maxlength="128" placeholder="例如 产品文档" /></label>
+                </div>
+                <label for="kb-description-input">描述</label>
+                <textarea id="kb-description-input" rows="4" maxlength="1000" placeholder="说明这个知识库适合回答哪些问题"></textarea>
+                <label for="kb-tags-input">标签</label>
+                <input id="kb-tags-input" maxlength="1000" placeholder="逗号分隔，例如 产品, API, 使用指南" />
+                <div class="settings-note">Agent 使用名称、描述和标签判断是否需要检索，分类阶段不读取文档正文。</div>
+                <div class="surface-actions">
+                  <button id="delete-knowledge-base-btn" class="button danger" type="button">删除知识库</button>
+                  <div class="button-row">
+                    <button id="create-knowledge-base-btn" class="button primary" type="button">创建知识库</button>
+                    <button id="update-knowledge-base-btn" class="button secondary" type="button">保存修改</button>
+                  </div>
+                </div>
+              </section>
+            </section>
+          </div>
+
+          <div id="document-drawer" class="document-drawer" hidden>
+            <button id="document-drawer-backdrop" class="drawer-backdrop" type="button" aria-label="关闭文档详情"></button>
+            <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="document-drawer-title">
+              <header class="drawer-header"><div><span class="utility-label">Document detail</span><h2 id="document-drawer-title">文档详情</h2></div><button id="close-document-drawer" class="icon-button" type="button" aria-label="关闭文档详情"><svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></header>
+              <div class="drawer-body">
+                <label for="document-title-input">标题<input id="document-title-input" maxlength="255" /></label>
+                <label for="document-description-input">描述<textarea id="document-description-input" rows="4" maxlength="2000"></textarea></label>
+                <label for="document-tags-input">标签<input id="document-tags-input" maxlength="1000" placeholder="逗号分隔" /></label>
+                <dl id="document-metadata-list" class="document-metadata-list"></dl>
+                <div id="document-index-error" class="document-index-error" hidden></div>
+                <div class="replace-document-block">
+                  <label for="replace-document-file">替换文件<input id="replace-document-file" type="file" accept=".pdf,.docx,.md,.markdown,.txt,.html,.json,.yaml,.yml,.toml,.py,.js,.jsx,.ts,.tsx,.css,.go,.java,.rs" /></label>
+                  <p>替换会重新解析和建索引；失败时继续使用旧内容。</p>
+                  <button id="replace-document-btn" class="button secondary" type="button">替换并重建索引</button>
+                </div>
+              </div>
+              <footer class="drawer-footer"><button id="delete-document-btn" class="button danger" type="button">删除文档</button><button id="save-document-btn" class="button primary" type="button">保存元数据</button></footer>
+            </aside>
           </div>
         </section>
 
@@ -758,82 +825,47 @@
 
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
       <form method="dialog" class="settings-shell">
+        <input id="user-id-input" type="hidden" value="demo_user" />
+        <input id="conversation-id-input" type="hidden" />
+        <input id="provider-input" type="hidden" />
+        <input id="model-input" type="hidden" />
+        <input id="thinking-level-input" type="hidden" />
+        <input id="workspace-id-input" type="hidden" />
+        <input id="workspace-root-input" type="hidden" />
         <header class="dialog-header">
-          <div><p class="eyebrow">Workspace Settings</p><h2 id="settings-title">工作区设置</h2><p>注册代码工作区，Agent 会针对任务实时搜索和读取文件。模型与 API Key 请前往“模型管理”。</p></div>
+          <div><p class="eyebrow">Local Workspaces</p><h2 id="settings-title">工作区管理</h2><p>选择 Agent 可以读取和操作的本地文件夹。</p></div>
           <button id="close-settings-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭设置">
             <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
         </header>
 
-        <div class="settings-body">
-          <section class="settings-section">
-            <div class="settings-section-heading"><span>01</span><div><h3>会话</h3><p>标识当前用户和正在使用的会话。</p></div></div>
-            <div class="field-grid">
-              <label for="user-id-input">用户 ID<input id="user-id-input" value="demo_user" autocomplete="off" /></label>
-              <label for="conversation-id-input">会话 ID<input id="conversation-id-input" placeholder="留空时自动创建" autocomplete="off" /></label>
+        <div class="settings-body workspace-manager-body">
+          <section class="workspace-manager-toolbar" aria-labelledby="workspace-library-title">
+            <div>
+              <span class="utility-label">Folder library</span>
+              <h3 id="workspace-library-title">已添加的文件夹</h3>
+              <p>选择一个文件夹作为当前会话的工作区。</p>
             </div>
-            <button id="load-session-btn" class="button ghost" type="button">加载指定会话</button>
+            <button id="open-workspace-picker-btn" class="button primary" type="button">
+              <svg class="app-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
+              添加文件夹
+            </button>
           </section>
 
-          <section class="settings-section">
-            <div class="settings-section-heading"><span>02</span><div><h3>推理</h3><p>会话模型在输入框上方选择；这里保留 Gemini 的思考等级。</p></div></div>
-            <input id="provider-input" type="hidden" />
-            <input id="model-input" type="hidden" />
-            <div class="field-grid">
-              <label for="thinking-level-input">Gemini 思考等级
-                <select id="thinking-level-input">
-                  <option value="">服务端默认</option>
-                  <option value="minimal">minimal</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                </select>
-              </label>
-            </div>
-            <p class="privacy-note"><span aria-hidden="true">i</span> 思考等级仅用于 Gemini 3；当前页面不会读取或保存任何模型 API Key。</p>
-          </section>
+          <label class="workspace-default-option" for="workspace-default-toggle">
+            <input id="workspace-default-toggle" type="checkbox" />
+            <span><strong>同时设为新会话默认工作区</strong><small id="workspace-default-help">不勾选时，只切换当前会话。</small></span>
+          </label>
 
-          <section class="settings-section">
-            <div class="settings-section-heading"><span>03</span><div><h3>代码工作区</h3><p>根路径必须位于服务端允许的目录中。</p></div></div>
-            <label for="workspace-select">当前工作区
-              <select id="workspace-select"><option value="">尚未加载</option></select>
-            </label>
-            <div class="workspace-selection-summary" aria-live="polite">
-              <span>当前 <strong id="workspace-current-summary">未选择</strong></span>
-              <span>用户默认 <strong id="workspace-default-summary">未设置</strong></span>
-            </div>
-            <div id="workspace-catalog-list" class="workspace-catalog-list">
-              <div class="empty-state compact">正在加载已注册工作区…</div>
-            </div>
-            <div class="workspace-registration-heading">
-              <div><strong>登记新目录</strong><small>下方内容是登记草稿，不会改变当前工作区，直到登记成功。</small></div>
-            </div>
-            <div class="field-grid">
-              <label for="workspace-draft-id-input">工作区 ID<input id="workspace-draft-id-input" placeholder="例如 payments-api" autocomplete="off" /></label>
-              <div class="field-control">
-                <label for="workspace-draft-root-input">根路径</label>
-                <div class="input-action">
-                  <input id="workspace-draft-root-input" placeholder="/path/to/local/workspace" autocomplete="off" />
-                  <button id="open-workspace-picker-btn" class="button ghost" type="button">
-                    <svg class="app-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
-                    选择文件夹
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div class="button-row">
-              <button id="refresh-workspaces-btn" class="button ghost" type="button">刷新列表</button>
-              <button id="register-workspace-btn" class="button secondary" type="button">登记工作区</button>
-            </div>
-            <div id="workspace-registration-result" class="workspace-registration-result" role="status" aria-live="polite" hidden></div>
-          </section>
+          <div id="workspace-manager-list" class="workspace-manager-list" role="list" aria-live="polite">
+            <div class="empty-state">正在加载工作区…</div>
+          </div>
         </div>
 
         <footer class="dialog-footer">
-          <p>会话配置保存到数据库；当前设备只保留界面状态。工作区内容不会上传为向量索引。</p>
+          <p>移除只会取消文件夹注册，不会删除电脑文件、历史会话或项目记忆。</p>
           <div class="button-row">
-            <button class="button ghost" type="submit" value="cancel">取消</button>
-            <button id="save-settings-btn" class="button primary" type="button">保存设置</button>
+            <button class="button secondary" type="submit" value="cancel">完成</button>
           </div>
         </footer>
       </form>
@@ -842,7 +874,7 @@
     <dialog id="workspace-picker-dialog" class="settings-dialog workspace-picker-dialog" aria-labelledby="workspace-picker-title">
       <form method="dialog" class="settings-shell workspace-picker-shell">
         <header class="dialog-header">
-          <div><p class="eyebrow">Local Workspace</p><h2 id="workspace-picker-title">选择工作区文件夹</h2><p>仅显示服务端通过 WORKSPACE_ALLOWED_ROOTS 允许访问的位置。</p></div>
+          <div><p class="eyebrow">Local Workspace</p><h2 id="workspace-picker-title">添加工作区文件夹</h2><p id="workspace-picker-description">仅显示服务端允许访问的位置。</p></div>
           <button id="close-workspace-picker-btn" class="icon-button" type="submit" value="cancel" aria-label="关闭文件夹选择器">
             <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
@@ -866,7 +898,7 @@
         </div>
 
         <footer class="dialog-footer">
-          <p>选择后会自动注册工作区；不会上传目录内容。</p>
+          <p>选择后会自动添加并切换；文件内容只在任务需要时读取。</p>
           <div class="button-row">
             <button class="button ghost" type="submit" value="cancel">取消</button>
             <button id="choose-workspace-directory-btn" class="button primary" type="button" disabled>选择此文件夹</button>

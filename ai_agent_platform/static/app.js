@@ -26,7 +26,19 @@ const state = {
   workspaceTokenUsageErrors: {},
   workspaceDirectoryPath: null,
   workspaceDirectoryParentPath: null,
+  workspaceRelinkId: null,
   knowledgeBases: [],
+  preferredKnowledgeBaseId: "",
+  knowledgeDocuments: [],
+  knowledgeDocumentTotal: 0,
+  knowledgeDocumentPage: 1,
+  knowledgeDocumentPageSize: 20,
+  selectedDocumentIds: new Set(),
+  activeKnowledgeDocument: null,
+  activeKnowledgeTab: "documents",
+  documentRequestController: null,
+  documentRequestGeneration: 0,
+  documentDrawerReturnFocus: null,
   rerankEnabled: false,
   rerankerCapabilities: {
     available: false,
@@ -471,7 +483,8 @@ function saveUiPreferences() {
         view: state.currentView,
         inspectorHidden: document.body.classList.contains("inspector-hidden"),
         rerankEnabled: state.rerankEnabled,
-        userId: $("user-id-input")?.value.trim() || "demo_user",
+        knowledgeBaseId: $("kb-id-input")?.value || "",
+        knowledgeTab: state.activeKnowledgeTab,
       }),
     );
   } catch {
@@ -538,9 +551,17 @@ function selectInspectorTab(name) {
 
 function openSettings() {
   const dialog = $("settings-dialog");
+  const defaultToggle = $("workspace-default-toggle");
+  defaultToggle.checked = !state.currentSession;
+  defaultToggle.disabled = !state.currentSession;
+  $("workspace-default-help").textContent = state.currentSession
+    ? "不勾选时，只切换当前会话。"
+    : "当前没有会话，所选文件夹将成为新会话的默认工作区。";
+  renderWorkspaceManager();
   if (!dialog.open) {
     dialog.showModal();
   }
+  listWorkspaces().catch((error) => showToast(humanizeError(error), "error"));
 }
 
 function closeSettings() {
@@ -555,34 +576,32 @@ function closeWorkspacePicker() {
   if (dialog.open) {
     dialog.close();
   }
+  state.workspaceRelinkId = null;
 }
 
 function updateContextSummary() {
-  const userId = $("user-id-input").value.trim() || "demo_user";
-  const thinkingLevel = $("thinking-level-input").value.trim();
   const workspace = currentWorkspace();
   const workspaceId = workspace?.id || "";
-  const workspaceLabel = workspaceId || "未选择";
+  const workspaceLabel = workspace ? workspaceName(workspace) : "未选择";
   const workspaceReady = workspaceIsReady(workspace);
   const workspaceRoot = workspace?.root_path || "Agent 运行前必须选择一个可用工作区";
   const roleLabel = workspaceRoleLabel(workspace?.role);
-  const modelLabel = `${currentModelSelectionLabel()}${thinkingLevel ? ` · ${thinkingLevel}` : ""}`;
+  const modelLabel = currentModelSelectionLabel();
 
-  $("context-user").textContent = userId;
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceLabel;
   $("composer-context").textContent = modelLabel;
   $("agent-workspace-badge").textContent = workspaceReady
-    ? `${workspaceId} · 可用`
-    : workspaceId
-      ? `${workspaceId} · 不可用`
+    ? `${workspaceLabel} · 可用`
+    : workspace
+      ? `${workspaceLabel} · 不可用`
       : "未选择工作区";
-  $("composer-workspace-id").textContent = workspaceId || "未选择工作区";
+  $("composer-workspace-id").textContent = workspaceLabel;
   $("composer-workspace-root").textContent = workspaceRoot;
   $("composer-workspace-status").className = `workspace-status-dot ${
     workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
   }`;
-  $("agent-workspace-context-id").textContent = workspaceId || "未选择工作区";
+  $("agent-workspace-context-id").textContent = workspaceLabel;
   $("agent-workspace-root").textContent = workspaceRoot;
   $("agent-workspace-role").textContent = workspace
     ? `${roleLabel} · ${workspaceReady ? "可运行" : "路径不可用"}`
@@ -590,18 +609,9 @@ function updateContextSummary() {
   $("agent-workspace-context").className = `agent-workspace-context ${
     workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
   }`;
-  $("workspace-current-summary").textContent = workspaceLabel;
-  $("workspace-default-summary").textContent = state.defaultWorkspaceId || "未设置";
   $("header-session-id").textContent = state.currentSession?.title
     || state.conversationId
     || "尚未创建";
-
-  const existingDraft = state.workspaces.find(
-    (item) => item.id === $("workspace-draft-id-input").value.trim(),
-  );
-  const registerButton = $("register-workspace-btn");
-  registerButton.textContent = existingDraft ? "更新登记" : "登记工作区";
-  registerButton.disabled = Boolean(existingDraft && !existingDraft.can_update);
 }
 
 function currentWorkspace() {
@@ -609,7 +619,11 @@ function currentWorkspace() {
 }
 
 function workspaceIsReady(workspace) {
-  return Boolean(workspace && workspace.status !== "unavailable");
+  return Boolean(
+    workspace
+    && workspace.status !== "unavailable"
+    && workspace.available !== false,
+  );
 }
 
 function workspaceRoleLabel(role) {
@@ -626,25 +640,18 @@ function setActiveWorkspace(workspaceId) {
     !state.workspacesLoaded
     || state.workspaces.some((item) => item.id === normalizedId)
   ) ? normalizedId : "";
-  for (const selectId of ["workspace-select", "composer-workspace-select"]) {
+  for (const selectId of ["composer-workspace-select"]) {
     const select = $(selectId);
     if (select) {
       select.value = state.activeWorkspaceId;
     }
   }
+  $("workspace-id-input").value = state.activeWorkspaceId;
+  $("workspace-root-input").value = currentWorkspace()?.root_path || "";
   updateContextSummary();
   updateComposerAvailability();
+  renderWorkspaceManager();
   renderWorkspaceCatalog();
-}
-
-function configurationFromInputs() {
-  return {
-    provider: $("provider-input").value.trim() || null,
-    model: $("model-input").value.trim() || null,
-    thinking_level: $("thinking-level-input").value.trim() || null,
-    workspace_id: state.activeWorkspaceId || null,
-    composer_mode: state.composerMode,
-  };
 }
 
 function applyConfigurationToInputs(source, defaults = false) {
@@ -654,56 +661,9 @@ function applyConfigurationToInputs(source, defaults = false) {
   $("thinking-level-input").value = value("thinking_level");
   setActiveWorkspace(value("workspace_id"));
   updateComposerMode(value("composer_mode") || "chat");
+  renderWorkspaceManager();
   updateContextSummary();
 }
-
-async function saveSettings() {
-  const button = $("save-settings-btn");
-  button.disabled = true;
-  button.setAttribute("aria-busy", "true");
-  saveUiPreferences();
-  try {
-    const configuration = configurationFromInputs();
-    if (state.currentSession) {
-      state.currentSession = await fetchJson(
-        `/sessions/${encodeURIComponent(state.currentSession.id)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            configuration,
-            save_configuration_as_default: true,
-          }),
-        },
-      );
-      state.preferences = await fetchJson("/users/me/preferences");
-      state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
-      replaceSessionInLists(state.currentSession);
-    } else {
-      state.preferences = await fetchJson("/users/me/preferences", {
-        method: "PATCH",
-        body: JSON.stringify({
-          default_provider: configuration.provider,
-          default_model: configuration.model,
-          default_thinking_level: configuration.thinking_level,
-          default_workspace_id: configuration.workspace_id,
-          default_composer_mode: configuration.composer_mode,
-        }),
-      });
-      state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
-    }
-    updateContextSummary();
-    renderWorkspaceCatalog();
-    updateComposerAvailability();
-    closeSettings();
-    showToast(state.currentSession ? "当前会话和默认设置已保存" : "默认设置已保存");
-  } catch (error) {
-    showToast(humanizeError(error), "error");
-  } finally {
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-  }
-}
-
 function updateComposerMode(mode = $("composer-mode-input").value) {
   state.composerMode = mode === "agent" ? "agent" : "chat";
   $("composer-mode-input").value = state.composerMode;
@@ -852,7 +812,10 @@ async function fetchJson(path, options = {}) {
       }
     }
     if (!response.ok) {
-      throw new Error(`${response.status} ${parseErrorDetail(body, response.statusText)}`);
+      const error = new Error(`${response.status} ${parseErrorDetail(body, response.statusText)}`);
+      error.status = response.status;
+      error.body = body;
+      throw error;
     }
     pushRequestLog({
       method,
@@ -2711,48 +2674,104 @@ async function ingestDocument() {
   const ingested = [];
   const failures = [];
   $("ingest-doc-btn").disabled = true;
+  $("document-files-input").disabled = true;
   try {
     for (const [index, file] of files.entries()) {
-      $("rag-status").textContent = `正在录入 ${index + 1}/${files.length}…`;
+      updateUploadQueueItem(index, "uploading", `正在上传 ${index + 1}/${files.length}`);
+      $("rag-status").textContent = `正在上传 ${index + 1}/${files.length}…`;
       const form = new FormData();
       form.append("file", file, file.name);
       try {
-        const body = await fetchJson(
-          `/knowledge-bases/${encodeURIComponent(kbId)}/documents`,
-          { method: "POST", body: form },
-        );
+        let body;
+        try {
+          body = await fetchJson(
+            `/knowledge-bases/${encodeURIComponent(kbId)}/documents`,
+            { method: "POST", body: form },
+          );
+        } catch (error) {
+          const detail = error.body?.detail;
+          if (
+            error.status !== 409
+            || detail?.code !== "document_filename_conflict"
+          ) {
+            throw error;
+          }
+          updateUploadQueueItem(index, "conflict", "发现同名文档，等待确认");
+          const shouldReplace = window.confirm(
+            `知识库中已有 ${file.name}。是否替换原文档并重建索引？`,
+          );
+          if (!shouldReplace) {
+            failures.push({ filename: file.name, error: "用户取消替换" });
+            updateUploadQueueItem(index, "conflict", "已保留原文档");
+            continue;
+          }
+          const replacement = new FormData();
+          replacement.append("file", file, file.name);
+          body = await fetchJson(
+            `/knowledge-bases/${encodeURIComponent(kbId)}/documents/${encodeURIComponent(detail.existing_document_id)}/content`,
+            { method: "PUT", body: replacement },
+          );
+        }
         ingested.push(body);
+        updateUploadQueueItem(index, "success", `可用 · ${body.chunk_count} 个分块`);
       } catch (error) {
         failures.push({ filename: file.name, error: humanizeError(error) });
+        updateUploadQueueItem(index, "failed", humanizeError(error));
       }
     }
-    await listKnowledgeBases();
-    $("kb-id-input").value = kbId;
+    await Promise.all([listKnowledgeBases({ preserveSelection: kbId }), listKnowledgeDocuments()]);
     const chunkCount = ingested.reduce((total, item) => total + item.chunk_count, 0);
     $("rag-status").textContent = failures.length
-      ? `已录入 ${ingested.length}，失败 ${failures.length}`
-      : `已录入 ${ingested.length} 个文件`;
+      ? `已处理 ${ingested.length}，未完成 ${failures.length}`
+      : `已建立 ${ingested.length} 个文档索引`;
     setRaw({ documents: ingested, failures });
     input.value = "";
-    renderSelectedDocumentFiles();
+    $("document-upload-actions").hidden = true;
     if (failures.length) {
       showToast(
-        `${ingested.length} 个文件录入成功，${failures.length} 个失败；详情见原始数据`,
+        `${ingested.length} 个文件已完成，${failures.length} 个未完成`,
         ingested.length ? "warning" : "error",
       );
     } else {
-      showToast(`已录入 ${ingested.length} 个文件，共 ${chunkCount} 个片段`);
+      showToast(`已上传 ${ingested.length} 个文件，共 ${chunkCount} 个分块`);
     }
   } finally {
     $("ingest-doc-btn").disabled = false;
+    $("document-files-input").disabled = false;
   }
 }
 
 function renderSelectedDocumentFiles() {
   const files = Array.from($("document-files-input").files || []);
-  $("selected-document-files").textContent = files.length
-    ? `已选择 ${files.length} 个文件：${files.map((file) => file.name).join("、")}`
-    : "尚未选择文件";
+  const queue = $("selected-document-files");
+  queue.hidden = !files.length;
+  $("document-upload-actions").hidden = !files.length;
+  queue.innerHTML = files
+    .map(
+      (file, index) => `
+        <div class="upload-queue-item" data-upload-index="${index}" data-state="pending">
+          <strong>${escapeHtml(file.name)}</strong>
+          <span>等待上传</span>
+          <small>${escapeHtml(formatByteSize(file.size))}</small>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function updateUploadQueueItem(index, status, message) {
+  const item = document.querySelector(`[data-upload-index="${index}"]`);
+  if (!item) return;
+  item.dataset.state = status;
+  item.querySelector("span").textContent = message;
+}
+
+function formatByteSize(value) {
+  if (value === null || value === undefined) return "未知大小";
+  const bytes = Number(value);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function renderRerankControl() {
@@ -3024,54 +3043,159 @@ function knowledgeBasePayload() {
   };
 }
 
-function selectKnowledgeBase(knowledgeBase) {
+function currentKnowledgeBase() {
+  const id = $("kb-id-input").value;
+  return state.knowledgeBases.find((item) => item.id === id) || null;
+}
+
+function setKnowledgeTab(tabName, { focus = false } = {}) {
+  const allowed = new Set(["documents", "ask", "settings"]);
+  const tab = allowed.has(tabName) ? tabName : "documents";
+  state.activeKnowledgeTab = tab;
+  document.querySelectorAll("[data-rag-tab]").forEach((button) => {
+    const active = button.dataset.ragTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    if (active && focus) button.focus();
+  });
+  document.querySelectorAll("[data-rag-tab-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.ragTabPanel !== tab;
+  });
+  saveUiPreferences();
+}
+
+function renderKnowledgeContext() {
+  const knowledgeBase = currentKnowledgeBase();
+  const unavailable = !knowledgeBase;
+  $("knowledge-documents-tab").disabled = unavailable;
+  $("knowledge-ask-tab").disabled = unavailable;
   if (!knowledgeBase) {
+    $("selected-kb-name").textContent = "请选择知识库";
+    $("selected-kb-description").textContent = "选中后即可查看和管理文档。";
+    $("selected-kb-tags").innerHTML = "";
+    $("selected-kb-document-count").textContent = "—";
+    $("selected-kb-health").className = "index-status neutral";
+    $("selected-kb-health").innerHTML = '<i aria-hidden="true"></i>未选择';
     return;
   }
+  $("selected-kb-name").textContent = knowledgeBase.name;
+  $("selected-kb-description").textContent = knowledgeBase.description || "暂无描述";
+  $("selected-kb-tags").innerHTML = (knowledgeBase.tags || [])
+    .map((tag) => `<span class="tag-chip">${escapeHtml(tag)}</span>`)
+    .join("");
+  $("selected-kb-document-count").textContent = String(knowledgeBase.document_count || 0);
+  const hasFailures = state.knowledgeDocuments.some(
+    (document) => document.last_index_status === "failed",
+  );
+  const health = hasFailures ? "failed" : "active";
+  $("selected-kb-health").className = `index-status ${health}`;
+  $("selected-kb-health").innerHTML = `<i aria-hidden="true"></i>${hasFailures ? "存在索引异常" : "索引可用"}`;
+}
+
+function populateKnowledgeBaseForm(knowledgeBase) {
   $("kb-catalog-id-input").value = knowledgeBase.id;
+  $("kb-catalog-id-input").disabled = true;
   $("kb-name-input").value = knowledgeBase.name;
   $("kb-description-input").value = knowledgeBase.description || "";
   $("kb-tags-input").value = (knowledgeBase.tags || []).join(", ");
+  $("create-knowledge-base-btn").hidden = true;
+  $("update-knowledge-base-btn").hidden = false;
+  $("delete-knowledge-base-btn").hidden = false;
+  $("knowledge-settings-title").textContent = "知识库设置";
+}
+
+function selectKnowledgeBase(knowledgeBase, { loadDocuments = true } = {}) {
+  state.selectedDocumentIds.clear();
+  state.knowledgeDocumentPage = 1;
+  state.activeKnowledgeDocument = null;
+  closeDocumentDrawer({ restoreFocus: false });
+  if (!knowledgeBase) {
+    $("kb-id-input").value = "";
+    state.knowledgeDocuments = [];
+    state.knowledgeDocumentTotal = 0;
+    renderKnowledgeBases();
+    renderKnowledgeContext();
+    renderKnowledgeDocuments();
+    return;
+  }
+  populateKnowledgeBaseForm(knowledgeBase);
   $("kb-id-input").value = knowledgeBase.id;
+  renderKnowledgeBases();
+  renderKnowledgeContext();
+  saveUiPreferences();
+  if (loadDocuments) {
+    listKnowledgeDocuments().catch((error) => showToast(humanizeError(error), "error"));
+  }
 }
 
 function renderKnowledgeBases() {
   const list = $("knowledge-base-list");
-  const select = $("kb-id-input");
-  const selectedId = select.value;
-  select.innerHTML = '<option value="">请选择知识库</option>';
-  for (const knowledgeBase of state.knowledgeBases) {
-    const option = document.createElement("option");
-    option.value = knowledgeBase.id;
-    option.textContent = `${knowledgeBase.name} (${knowledgeBase.id})`;
-    select.appendChild(option);
-  }
-  if (state.knowledgeBases.some((item) => item.id === selectedId)) {
-    select.value = selectedId;
-  } else if (state.knowledgeBases.length) {
-    select.value = state.knowledgeBases[0].id;
-  }
-  if (!state.knowledgeBases.length) {
-    list.innerHTML = '<div class="empty-state">暂无知识库，请先创建目录。</div>';
+  const selectedId = $("kb-id-input").value;
+  const mobileSelect = $("mobile-knowledge-base-select");
+  mobileSelect.innerHTML = state.knowledgeBases.length
+    ? state.knowledgeBases
+      .map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.document_count)} 个文档</option>`)
+      .join("")
+    : '<option value="" selected disabled>暂无知识库</option>';
+  mobileSelect.disabled = !state.knowledgeBases.length;
+  const query = $("knowledge-base-search-input").value.trim().toLowerCase();
+  const items = query
+    ? state.knowledgeBases.filter((item) => (
+      `${item.id} ${item.name} ${item.description || ""} ${(item.tags || []).join(" ")}`
+        .toLowerCase()
+        .includes(query)
+    ))
+    : state.knowledgeBases;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-state">${state.knowledgeBases.length ? "没有匹配的知识库" : "暂无知识库，可以从新建开始。"}</div>`;
     return;
   }
-  list.innerHTML = state.knowledgeBases
+  list.innerHTML = items
     .map(
       (item) => `
-        <button class="session-row" type="button" data-knowledge-base-id="${escapeHtml(item.id)}">
-          <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.id)} · ${escapeHtml(item.document_count)} 个文档</small></span>
-          <small>${escapeHtml(truncate(item.description || (item.tags || []).join(", ") || "暂无描述", 80))}</small>
+        <button class="knowledge-base-row" type="button" role="option" aria-selected="${String(item.id === selectedId)}" data-knowledge-base-id="${escapeHtml(item.id)}">
+          <strong>${escapeHtml(item.name)}</strong>
+          <span class="kb-count">${escapeHtml(item.document_count)}</span>
+          <small>${escapeHtml(item.id)} · ${escapeHtml(truncate((item.tags || []).join(" / ") || item.description || "暂无标签", 48))}</small>
         </button>
       `,
     )
     .join("");
 }
 
-async function listKnowledgeBases() {
+async function listKnowledgeBases({ preserveSelection = "" } = {}) {
+  const currentId = $("kb-id-input").value;
+  const selectedId = preserveSelection || currentId || state.preferredKnowledgeBaseId;
   const body = await fetchJson("/knowledge-bases");
   state.knowledgeBases = body.knowledge_bases || [];
   renderKnowledgeBases();
+  const selected = state.knowledgeBases.find((item) => item.id === selectedId)
+    || state.knowledgeBases[0]
+    || null;
+  if (selected && selected.id === currentId) {
+    populateKnowledgeBaseForm(selected);
+    renderKnowledgeBases();
+    renderKnowledgeContext();
+    saveUiPreferences();
+  } else {
+    selectKnowledgeBase(selected);
+  }
   return state.knowledgeBases;
+}
+
+function beginCreateKnowledgeBase() {
+  selectKnowledgeBase(null, { loadDocuments: false });
+  $("kb-catalog-id-input").disabled = false;
+  $("kb-catalog-id-input").value = "";
+  $("kb-name-input").value = "";
+  $("kb-description-input").value = "";
+  $("kb-tags-input").value = "";
+  $("create-knowledge-base-btn").hidden = false;
+  $("update-knowledge-base-btn").hidden = true;
+  $("delete-knowledge-base-btn").hidden = true;
+  $("knowledge-settings-title").textContent = "新建知识库";
+  setKnowledgeTab("settings");
+  $("kb-catalog-id-input").focus();
 }
 
 async function createKnowledgeBase() {
@@ -3086,8 +3210,9 @@ async function createKnowledgeBase() {
       method: "POST",
       body: JSON.stringify({ id, ...payload }),
     });
-    await listKnowledgeBases();
+    state.knowledgeBases.push(body);
     selectKnowledgeBase(body);
+    setKnowledgeTab("documents");
     setRaw(body);
     showToast("知识库已创建");
   } catch (error) {
@@ -3107,8 +3232,8 @@ async function updateKnowledgeBase() {
       method: "PUT",
       body: JSON.stringify(payload),
     });
-    await listKnowledgeBases();
-    selectKnowledgeBase(body);
+    state.knowledgeBases = state.knowledgeBases.map((item) => item.id === id ? body : item);
+    selectKnowledgeBase(body, { loadDocuments: false });
     setRaw(body);
     showToast("知识库元数据已更新");
   } catch (error) {
@@ -3122,19 +3247,287 @@ async function deleteKnowledgeBase() {
     showToast("请选择要删除的知识库", "warning");
     return;
   }
-  if (!window.confirm(`删除知识库 ${id}？其中的文档、分块和向量也会被删除。`)) {
-    return;
-  }
+  const knowledgeBase = currentKnowledgeBase();
+  const confirmed = knowledgeBase?.document_count
+    ? window.prompt(`删除后将移除 ${knowledgeBase.document_count} 个文档、分块和向量。输入 ${id} 确认：`) === id
+    : window.confirm(`删除知识库 ${id}？`);
+  if (!confirmed) return;
   try {
     await fetchJson(`/knowledge-bases/${encodeURIComponent(id)}`, { method: "DELETE" });
     $("kb-catalog-id-input").value = "";
     $("kb-name-input").value = "";
     $("kb-description-input").value = "";
     $("kb-tags-input").value = "";
+    $("kb-id-input").value = "";
     await listKnowledgeBases();
     showToast("知识库已删除");
   } catch (error) {
     showToast(humanizeError(error), "error");
+  }
+}
+
+function documentIndexPresentation(status, searchable = true) {
+  if (status === "failed") {
+    return {
+      state: "failed",
+      className: "failed",
+      label: searchable ? "替换失败 · 旧版可用" : "索引失败",
+    };
+  }
+  if (["pending", "parsing", "embedding", "vector_written"].includes(status)) {
+    return { state: "processing", className: "processing", label: "建立索引中" };
+  }
+  return { state: "active", className: "active", label: "可用" };
+}
+
+function renderKnowledgeDocuments({ loading = false } = {}) {
+  const body = $("knowledge-document-rows");
+  const selectedAll = state.knowledgeDocuments.length > 0
+    && state.knowledgeDocuments.every((item) => state.selectedDocumentIds.has(item.id));
+  $("select-all-documents").checked = selectedAll;
+  $("select-all-documents").disabled = !state.knowledgeDocuments.length;
+  $("bulk-delete-documents-btn").disabled = !state.selectedDocumentIds.size;
+  $("bulk-delete-documents-btn").textContent = state.selectedDocumentIds.size
+    ? `删除已选 (${state.selectedDocumentIds.size})`
+    : "删除已选";
+  if (loading) {
+    body.innerHTML = '<tr><td colspan="6"><div class="empty-state" aria-busy="true">正在加载文档…</div></td></tr>';
+  } else if (!currentKnowledgeBase()) {
+    body.innerHTML = '<tr><td colspan="6"><div class="empty-state">请先选择知识库</div></td></tr>';
+  } else if (!state.knowledgeDocuments.length) {
+    body.innerHTML = '<tr><td colspan="6"><div class="empty-state">这个知识库还没有文档。使用“批量上传”建立第一份索引。</div></td></tr>';
+  } else {
+    body.innerHTML = state.knowledgeDocuments.map((documentItem) => {
+      const status = documentIndexPresentation(
+        documentItem.last_index_status,
+        documentItem.is_searchable,
+      );
+      const extension = documentItem.filename.includes(".")
+        ? documentItem.filename.split(".").pop().toUpperCase()
+        : "FILE";
+      return `
+        <tr class="document-row" data-document-id="${escapeHtml(documentItem.id)}" data-index-state="${status.state}">
+          <td><input class="document-select" type="checkbox" aria-label="选择 ${escapeHtml(documentItem.title)}" ${state.selectedDocumentIds.has(documentItem.id) ? "checked" : ""} /></td>
+          <td class="document-name-cell"><button class="document-open-button" type="button" data-open-document="${escapeHtml(documentItem.id)}"><strong>${escapeHtml(documentItem.title)}</strong><span>${escapeHtml(documentItem.filename)}</span></button>${documentItem.tags?.length ? `<small class="document-tag-summary">${escapeHtml(documentItem.tags.join(" / "))}</small>` : ""}</td>
+          <td data-label="状态"><span class="index-status ${status.className}"><i aria-hidden="true"></i>${escapeHtml(status.label)}</span></td>
+          <td data-label="类型"><span class="document-type">${escapeHtml(extension)} · ${escapeHtml(formatByteSize(documentItem.byte_size))}</span></td>
+          <td data-label="分块"><span class="document-chunk-count">${escapeHtml(documentItem.chunk_count)}</span></td>
+          <td data-label="更新"><span class="document-date">${escapeHtml(formatDate(documentItem.updated_at))}</span></td>
+        </tr>`;
+    }).join("");
+  }
+  const pageCount = Math.max(1, Math.ceil(state.knowledgeDocumentTotal / state.knowledgeDocumentPageSize));
+  $("document-page-summary").textContent = state.knowledgeDocumentTotal
+    ? `共 ${state.knowledgeDocumentTotal} 个文档 · 第 ${state.knowledgeDocumentPage}/${pageCount} 页`
+    : "暂无文档";
+  $("previous-document-page").disabled = state.knowledgeDocumentPage <= 1;
+  $("next-document-page").disabled = state.knowledgeDocumentPage >= pageCount;
+  renderKnowledgeContext();
+}
+
+async function listKnowledgeDocuments() {
+  const knowledgeBaseId = $("kb-id-input").value;
+  if (state.documentRequestController) state.documentRequestController.abort();
+  if (!knowledgeBaseId) {
+    state.knowledgeDocuments = [];
+    state.knowledgeDocumentTotal = 0;
+    renderKnowledgeDocuments();
+    return;
+  }
+  state.documentRequestController = new AbortController();
+  const generation = ++state.documentRequestGeneration;
+  state.selectedDocumentIds.clear();
+  renderKnowledgeDocuments({ loading: true });
+  const params = new URLSearchParams({
+    query: $("document-search-input").value.trim(),
+    sort: $("document-sort-input").value,
+    page: String(state.knowledgeDocumentPage),
+    page_size: String(state.knowledgeDocumentPageSize),
+  });
+  if ($("document-status-filter").value) {
+    params.set("status", $("document-status-filter").value);
+  }
+  try {
+    const response = await fetchJson(
+      `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents?${params}`,
+      { signal: state.documentRequestController.signal },
+    );
+    if (generation !== state.documentRequestGeneration) return;
+    state.knowledgeDocuments = response.items || [];
+    state.knowledgeDocumentTotal = response.total || 0;
+    $("rag-status").textContent = `已加载 ${state.knowledgeDocumentTotal} 个文档`;
+    renderKnowledgeDocuments();
+  } catch (error) {
+    if (error.name === "AbortError" || generation !== state.documentRequestGeneration) return;
+    state.knowledgeDocuments = [];
+    state.knowledgeDocumentTotal = 0;
+    renderKnowledgeDocuments();
+    throw error;
+  } finally {
+    if (generation === state.documentRequestGeneration) {
+      state.documentRequestController = null;
+    }
+  }
+}
+
+function renderDocumentDrawer(documentItem) {
+  $("document-drawer-title").textContent = documentItem.title;
+  $("document-title-input").value = documentItem.title;
+  $("document-description-input").value = documentItem.description || "";
+  $("document-tags-input").value = (documentItem.tags || []).join(", ");
+  $("replace-document-file").value = "";
+  const status = documentIndexPresentation(
+    documentItem.last_index_status,
+    documentItem.is_searchable,
+  );
+  $("document-metadata-list").innerHTML = [
+    ["文件名", documentItem.filename],
+    ["文档 ID", documentItem.id],
+    ["索引状态", status.label],
+    ["MIME", documentItem.media_type || "未知"],
+    ["文件大小", formatByteSize(documentItem.byte_size)],
+    ["分块数", String(documentItem.chunk_count)],
+    ["内容哈希", documentItem.content_hash],
+    ["创建时间", formatDate(documentItem.created_at)],
+    ["索引时间", formatDate(documentItem.indexed_at)],
+  ].map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  $("document-index-error").hidden = !documentItem.last_index_error;
+  $("document-index-error").textContent = documentItem.last_index_error
+    ? `最近索引失败：${documentItem.last_index_error}。当前仍使用上一版可用内容。`
+    : "";
+}
+
+async function openDocumentDrawer(documentId, returnFocus = document.activeElement) {
+  const knowledgeBaseId = $("kb-id-input").value;
+  state.documentDrawerReturnFocus = returnFocus;
+  const documentItem = await fetchJson(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}`,
+  );
+  state.activeKnowledgeDocument = documentItem;
+  renderDocumentDrawer(documentItem);
+  $("document-drawer").hidden = false;
+  document.body.style.overflow = "hidden";
+  $("close-document-drawer").focus();
+}
+
+function closeDocumentDrawer({ restoreFocus = true } = {}) {
+  const drawer = $("document-drawer");
+  if (!drawer || drawer.hidden) return;
+  drawer.hidden = true;
+  document.body.style.overflow = "";
+  state.activeKnowledgeDocument = null;
+  if (restoreFocus && state.documentDrawerReturnFocus?.isConnected) {
+    state.documentDrawerReturnFocus.focus();
+  }
+}
+
+async function saveKnowledgeDocument() {
+  const documentItem = state.activeKnowledgeDocument;
+  if (!documentItem) return;
+  const payload = {
+    title: $("document-title-input").value.trim(),
+    description: $("document-description-input").value.trim(),
+    tags: csvValues($("document-tags-input").value.replaceAll("，", ",")),
+  };
+  if (!payload.title) {
+    showToast("文档标题不能为空", "warning");
+    return;
+  }
+  $("save-document-btn").disabled = true;
+  try {
+    const updated = await fetchJson(
+      `/knowledge-bases/${encodeURIComponent(documentItem.knowledge_base_id)}/documents/${encodeURIComponent(documentItem.id)}`,
+      { method: "PATCH", body: JSON.stringify(payload) },
+    );
+    state.activeKnowledgeDocument = updated;
+    renderDocumentDrawer(updated);
+    await Promise.all([listKnowledgeDocuments(), listKnowledgeBases({ preserveSelection: documentItem.knowledge_base_id })]);
+    showToast("文档元数据已保存");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    $("save-document-btn").disabled = false;
+  }
+}
+
+async function replaceKnowledgeDocument() {
+  const documentItem = state.activeKnowledgeDocument;
+  const file = $("replace-document-file").files?.[0];
+  if (!documentItem || !file) {
+    showToast("请先选择替换文件", "warning");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file, file.name);
+  $("replace-document-btn").disabled = true;
+  $("replace-document-btn").textContent = "重建索引中…";
+  try {
+    const response = await fetchJson(
+      `/knowledge-bases/${encodeURIComponent(documentItem.knowledge_base_id)}/documents/${encodeURIComponent(documentItem.id)}/content`,
+      { method: "PUT", body: form },
+    );
+    state.activeKnowledgeDocument = response.document;
+    renderDocumentDrawer(response.document);
+    await Promise.all([listKnowledgeDocuments(), listKnowledgeBases({ preserveSelection: documentItem.knowledge_base_id })]);
+    showToast("文件已替换，新索引可用");
+  } catch (error) {
+    showToast(`替换失败，继续使用旧内容：${humanizeError(error)}`, "error");
+    try {
+      const latest = await fetchJson(
+        `/knowledge-bases/${encodeURIComponent(documentItem.knowledge_base_id)}/documents/${encodeURIComponent(documentItem.id)}`,
+      );
+      state.activeKnowledgeDocument = latest;
+      renderDocumentDrawer(latest);
+    } catch {
+      // Keep the existing drawer content if status refresh also fails.
+    }
+  } finally {
+    $("replace-document-btn").disabled = false;
+    $("replace-document-btn").textContent = "替换并重建索引";
+  }
+}
+
+async function deleteKnowledgeDocument(documentItem = state.activeKnowledgeDocument) {
+  if (!documentItem || !window.confirm(`删除文档“${documentItem.title}”？其分块和向量也会被移除。`)) return;
+  try {
+    await fetchJson(
+      `/knowledge-bases/${encodeURIComponent(documentItem.knowledge_base_id)}/documents/${encodeURIComponent(documentItem.id)}`,
+      { method: "DELETE" },
+    );
+    closeDocumentDrawer();
+    await Promise.all([listKnowledgeDocuments(), listKnowledgeBases({ preserveSelection: documentItem.knowledge_base_id })]);
+    showToast("文档已删除");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function bulkDeleteKnowledgeDocuments() {
+  const ids = [...state.selectedDocumentIds];
+  if (!ids.length) return;
+  const names = state.knowledgeDocuments
+    .filter((item) => state.selectedDocumentIds.has(item.id))
+    .map((item) => item.title);
+  if (!window.confirm(`删除已选 ${ids.length} 个文档？\n${names.join("、")}`)) return;
+  const knowledgeBaseId = $("kb-id-input").value;
+  $("bulk-delete-documents-btn").disabled = true;
+  try {
+    const response = await fetchJson(
+      `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/bulk-delete`,
+      { method: "POST", body: JSON.stringify({ document_ids: ids }) },
+    );
+    state.selectedDocumentIds.clear();
+    await Promise.all([listKnowledgeDocuments(), listKnowledgeBases({ preserveSelection: knowledgeBaseId })]);
+    if (response.failures?.length) {
+      showToast(`已删除 ${response.deleted_ids.length} 个，${response.failures.length} 个失败`, "warning");
+    } else {
+      showToast(`已删除 ${response.deleted_ids.length} 个文档`);
+    }
+    setRaw(response);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    renderKnowledgeDocuments();
   }
 }
 
@@ -3434,60 +3827,148 @@ async function reindexProjectMemories() {
   }
 }
 
-async function registerWorkspace() {
-  const workspaceId = $("workspace-draft-id-input").value.trim();
-  const rootPath = $("workspace-draft-root-input").value.trim();
-  if (!workspaceId) {
-    showToast("请填写工作区 ID", "warning");
-    $("workspace-draft-id-input").focus();
+function workspaceName(workspace) {
+  return workspace.root_path.split(/[\\/]/).filter(Boolean).at(-1) || workspace.id;
+}
+
+function renderWorkspaceManager() {
+  const list = $("workspace-manager-list");
+  if (!list) {
     return;
   }
-  if (!rootPath) {
-    showToast("请填写工作区根路径", "warning");
-    $("workspace-draft-root-input").focus();
+  const activeId = state.activeWorkspaceId;
+  const defaultId = state.defaultWorkspaceId;
+  list.innerHTML = "";
+  if (!state.workspaces.length) {
+    list.innerHTML = `
+      <div class="workspace-manager-empty">
+        ${iconMarkup("folder")}
+        <strong>还没有工作区</strong>
+        <p>添加一个代码文件夹，Agent 才能读取项目上下文。</p>
+        <button class="button primary" type="button" data-workspace-add>添加第一个文件夹</button>
+      </div>
+    `;
     return;
   }
-  const button = $("register-workspace-btn");
-  button.disabled = true;
-  button.setAttribute("aria-busy", "true");
-  setWorkspaceRegistrationResult("正在验证路径并登记…", "pending");
-  try {
-    const body = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`, {
-      method: "PUT",
-      body: JSON.stringify({ root_path: rootPath }),
-    });
-    setRaw(body);
-    state.workspaces = [
-      ...state.workspaces.filter((item) => item.id !== body.id),
-      body,
-    ].sort((left, right) => left.id.localeCompare(right.id));
-    setActiveWorkspace(body.id);
-    setWorkspaceRegistrationResult(
-      `${body.id} 已登记并设为当前工作区 · ${body.root_path}`,
-      "success",
-    );
-    showToast(`工作区 ${workspaceId} 已注册`, "success");
-    try {
-      await listWorkspaces();
-    } catch (refreshError) {
-      showToast(`工作区已登记，但列表刷新失败：${humanizeError(refreshError)}`, "warning");
-    }
-    return body;
-  } catch (error) {
-    setWorkspaceRegistrationResult(humanizeError(error), "error");
-    showToast(humanizeError(error), "error");
-    return null;
-  } finally {
-    button.removeAttribute("aria-busy");
-    updateContextSummary();
+  for (const workspace of state.workspaces) {
+    const ready = workspaceIsReady(workspace);
+    const canUpdate = workspace.can_update !== false;
+    const active = workspace.id === activeId;
+    const isDefault = workspace.id === defaultId;
+    const item = document.createElement("article");
+    item.className = `workspace-manager-item${active ? " active" : ""}${ready ? "" : " unavailable"}`;
+    item.setAttribute("role", "listitem");
+    item.innerHTML = `
+      <button
+        class="workspace-manager-select"
+        type="button"
+        data-workspace-select="${escapeHtml(workspace.id)}"
+        ${ready ? "" : "disabled"}
+        aria-label="切换到 ${escapeHtml(workspaceName(workspace))}"
+      >
+        <span class="workspace-manager-icon" aria-hidden="true">${iconMarkup("folder")}</span>
+        <span class="workspace-manager-copy">
+          <strong>${escapeHtml(workspaceName(workspace))}</strong>
+          <small title="${escapeHtml(workspace.root_path)}">${escapeHtml(workspace.root_path)}</small>
+        </span>
+        <span class="workspace-manager-status">
+          ${active ? '<span class="workspace-badge current">当前</span>' : ""}
+          ${isDefault ? '<span class="workspace-badge">新会话默认</span>' : ""}
+          ${ready ? "" : '<span class="workspace-badge warning">无法访问</span>'}
+        </span>
+      </button>
+      <div class="workspace-manager-actions">
+        ${!ready && canUpdate ? `<button class="text-button" type="button" data-workspace-relink="${escapeHtml(workspace.id)}">重新选择位置</button>` : ""}
+        ${canUpdate ? `<button class="text-button danger-text" type="button" data-workspace-remove="${escapeHtml(workspace.id)}">移除</button>` : ""}
+      </div>
+    `;
+    list.appendChild(item);
   }
 }
 
-function setWorkspaceRegistrationResult(message, status) {
-  const result = $("workspace-registration-result");
-  result.hidden = false;
-  result.className = `workspace-registration-result ${status}`;
-  result.textContent = message;
+async function persistWorkspaceSelection(
+  workspaceId,
+  { setDefault = $("workspace-default-toggle").checked, announce = true } = {},
+) {
+  const workspace = state.workspaces.find((item) => item.id === workspaceId) || null;
+  if (workspaceId && (!workspace || !workspaceIsReady(workspace))) {
+    throw new Error("所选工作区当前无法访问，请重新选择文件夹位置");
+  }
+  const list = $("workspace-manager-list");
+  list?.setAttribute("aria-busy", "true");
+  try {
+    if (state.currentSession) {
+      state.currentSession = await fetchJson(
+        `/sessions/${encodeURIComponent(state.currentSession.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            configuration: { workspace_id: workspaceId || null },
+          }),
+        },
+      );
+      replaceSessionInLists(state.currentSession);
+    }
+    if (!state.currentSession || setDefault) {
+      state.preferences = await fetchJson("/users/me/preferences", {
+        method: "PATCH",
+        body: JSON.stringify({ default_workspace_id: workspaceId || null }),
+      });
+      state.defaultWorkspaceId = state.preferences.default_workspace_id || "";
+    }
+    setActiveWorkspace(workspaceId || "");
+    if (state.currentView === "memory") {
+      refreshProjectMemory();
+    }
+    if (announce) {
+      showToast(workspace ? `已切换到 ${workspaceName(workspace)}` : "已清除当前工作区");
+    }
+  } finally {
+    list?.removeAttribute("aria-busy");
+  }
+}
+
+async function registerWorkspace(workspaceId, rootPath) {
+  const body = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ root_path: rootPath }),
+  });
+  setRaw(body);
+  await listWorkspaces();
+  return body;
+}
+
+async function removeWorkspace(workspaceId) {
+  const workspace = state.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) {
+    return;
+  }
+  if (!window.confirm(
+    `从工作区列表移除“${workspaceName(workspace)}”？\n\n电脑中的文件、历史会话和项目记忆都会保留。`,
+  )) {
+    return;
+  }
+  const wasActive = state.activeWorkspaceId === workspaceId;
+  const wasDefault = state.defaultWorkspaceId === workspaceId;
+  try {
+    await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: "DELETE",
+    });
+    if (wasActive) {
+      await persistWorkspaceSelection("", { setDefault: wasDefault, announce: false });
+    } else if (wasDefault) {
+      state.preferences = await fetchJson("/users/me/preferences", {
+        method: "PATCH",
+        body: JSON.stringify({ default_workspace_id: null }),
+      });
+      state.defaultWorkspaceId = "";
+    }
+    delete state.workspaceTokenUsage[workspaceId];
+    await listWorkspaces();
+    showToast(`已移除 ${workspaceName(workspace)}；本地文件保持不变`);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
 }
 
 function workspaceIdForPath(path) {
@@ -3562,12 +4043,30 @@ async function browseWorkspaceDirectories(path = null) {
   }
 }
 
-async function openWorkspacePicker() {
+async function openWorkspacePicker(workspaceId = null) {
+  state.workspaceRelinkId = typeof workspaceId === "string" ? workspaceId : null;
+  const relinkWorkspace = state.workspaces.find(
+    (item) => item.id === state.workspaceRelinkId,
+  );
+  $("workspace-picker-title").textContent = relinkWorkspace
+    ? `重新选择 ${workspaceName(relinkWorkspace)} 的位置`
+    : "添加工作区文件夹";
+  $("workspace-picker-description").textContent = relinkWorkspace
+    ? "选择新的文件夹位置；历史会话和项目记忆仍与这个工作区关联。"
+    : "仅显示服务端允许访问的位置。";
+  $("choose-workspace-directory-btn").textContent = relinkWorkspace
+    ? "使用此位置"
+    : "添加此文件夹";
   const dialog = $("workspace-picker-dialog");
   if (!dialog.open) {
     dialog.showModal();
   }
-  const currentValue = $("workspace-draft-root-input").value.trim();
+  const activeWorkspace = currentWorkspace();
+  const currentValue = workspaceIsReady(relinkWorkspace)
+    ? relinkWorkspace.root_path
+    : workspaceIsReady(activeWorkspace)
+      ? activeWorkspace.root_path
+      : "";
   try {
     await browseWorkspaceDirectories(currentValue || null);
   } catch (error) {
@@ -3592,16 +4091,17 @@ async function chooseWorkspaceDirectory() {
     return;
   }
   const chooseButton = $("choose-workspace-directory-btn");
-  $("workspace-draft-root-input").value = path;
-  $("workspace-draft-id-input").value = workspaceIdForPath(path);
-  updateContextSummary();
+  const relinking = Boolean(state.workspaceRelinkId);
+  const workspaceId = state.workspaceRelinkId || workspaceIdForPath(path);
   chooseButton.disabled = true;
   chooseButton.setAttribute("aria-busy", "true");
   try {
-    const workspace = await registerWorkspace();
-    if (workspace) {
-      closeWorkspacePicker();
-    }
+    const workspace = await registerWorkspace(workspaceId, path);
+    await persistWorkspaceSelection(workspace.id, { announce: false });
+    closeWorkspacePicker();
+    showToast(`${relinking ? "已重新关联" : "已添加"} ${workspaceName(workspace)}`);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
   } finally {
     chooseButton.disabled = false;
     chooseButton.removeAttribute("aria-busy");
@@ -3619,21 +4119,23 @@ async function listWorkspaces() {
   setActiveWorkspace(
     state.workspaces.some((item) => item.id === preferredId) ? preferredId : "",
   );
+  renderWorkspaceManager();
+  updateContextSummary();
   await loadWorkspaceTokenUsage();
   renderWorkspaceTokenUsage();
 }
 
 function renderWorkspaceSelectOptions() {
-  for (const selectId of ["workspace-select", "composer-workspace-select"]) {
+  for (const selectId of ["composer-workspace-select"]) {
     const select = $(selectId);
     select.innerHTML = '<option value="">选择工作区</option>';
     for (const workspace of state.workspaces) {
       const option = document.createElement("option");
       option.value = workspace.id;
-      option.textContent = `${workspace.id} · ${
-        workspace.status === "unavailable" ? "路径不可用" : workspace.root_path
+      option.textContent = `${workspaceName(workspace)} · ${
+        workspaceIsReady(workspace) ? workspace.root_path : "路径不可用"
       }`;
-      option.disabled = workspace.status === "unavailable";
+      option.disabled = !workspaceIsReady(workspace);
       select.appendChild(option);
     }
     select.value = state.activeWorkspaceId;
@@ -3793,14 +4295,13 @@ function bindEvents() {
 
   $("open-settings-btn").addEventListener("click", openSettings);
   $("sidebar-settings-btn").addEventListener("click", openSettings);
-  $("save-settings-btn").addEventListener("click", saveSettings);
   $("close-settings-btn").addEventListener("click", closeSettings);
   $("settings-dialog").addEventListener("click", (event) => {
     if (event.target === $("settings-dialog")) {
       closeSettings();
     }
   });
-  $("open-workspace-picker-btn").addEventListener("click", openWorkspacePicker);
+  $("open-workspace-picker-btn").addEventListener("click", () => openWorkspacePicker());
   $("composer-workspace-settings-btn").addEventListener("click", openSettings);
   $("agent-workspace-settings-btn").addEventListener("click", openSettings);
   $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
@@ -3829,6 +4330,31 @@ function bindEvents() {
     "click",
     chooseWorkspaceDirectory,
   );
+  $("workspace-manager-list").addEventListener("click", async (event) => {
+    const add = event.target.closest("[data-workspace-add]");
+    const select = event.target.closest("[data-workspace-select]");
+    const relink = event.target.closest("[data-workspace-relink]");
+    const remove = event.target.closest("[data-workspace-remove]");
+    if (add) {
+      await openWorkspacePicker();
+      return;
+    }
+    if (relink) {
+      await openWorkspacePicker(relink.dataset.workspaceRelink);
+      return;
+    }
+    if (remove) {
+      await removeWorkspace(remove.dataset.workspaceRemove);
+      return;
+    }
+    if (select) {
+      try {
+        await persistWorkspaceSelection(select.dataset.workspaceSelect);
+      } catch (error) {
+        showToast(humanizeError(error), "error");
+      }
+    }
+  });
 
   $("toggle-inspector-btn").addEventListener("click", () => {
     setInspectorVisible(document.body.classList.contains("inspector-hidden"));
@@ -3847,15 +4373,6 @@ function bindEvents() {
   $("view-all-sessions-btn").addEventListener("click", () => {
     switchView("sessions");
     listSessions(false).catch((error) => showToast(humanizeError(error), "error"));
-  });
-  $("load-session-btn").addEventListener("click", async () => {
-    try {
-      await loadSession();
-      closeSettings();
-      showToast("会话已加载");
-    } catch (error) {
-      showToast(humanizeError(error), "error");
-    }
   });
   $("list-sessions-btn").addEventListener("click", async () => {
     try {
@@ -4010,6 +4527,8 @@ function bindEvents() {
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);
+  $("new-knowledge-base-btn").addEventListener("click", beginCreateKnowledgeBase);
+  $("knowledge-base-search-input").addEventListener("input", renderKnowledgeBases);
   $("refresh-knowledge-bases-btn").addEventListener("click", () => {
     listKnowledgeBases().catch((error) => showToast(humanizeError(error), "error"));
   });
@@ -4025,51 +4544,113 @@ function bindEvents() {
       state.knowledgeBases.find((item) => item.id === row.dataset.knowledgeBaseId),
     );
   });
-  $("kb-id-input").addEventListener("change", (event) => {
+  $("mobile-knowledge-base-select").addEventListener("change", (event) => {
     selectKnowledgeBase(
       state.knowledgeBases.find((item) => item.id === event.target.value),
     );
   });
+  document.querySelectorAll("[data-rag-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => setKnowledgeTab(tab.dataset.ragTab));
+    tab.addEventListener("keydown", (event) => {
+      if (!new Set(["ArrowLeft", "ArrowRight", "Home", "End"]).has(event.key)) return;
+      const tabs = [...document.querySelectorAll("[data-rag-tab]:not(:disabled)")];
+      const current = tabs.indexOf(event.currentTarget);
+      const target = event.key === "Home"
+        ? tabs[0]
+        : event.key === "End"
+          ? tabs.at(-1)
+          : tabs[(current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+      if (target) {
+        event.preventDefault();
+        setKnowledgeTab(target.dataset.ragTab, { focus: true });
+      }
+    });
+  });
+  let documentSearchTimer = null;
+  $("document-search-input").addEventListener("input", () => {
+    window.clearTimeout(documentSearchTimer);
+    documentSearchTimer = window.setTimeout(() => {
+      state.knowledgeDocumentPage = 1;
+      listKnowledgeDocuments().catch((error) => showToast(humanizeError(error), "error"));
+    }, 240);
+  });
+  ["document-status-filter", "document-sort-input"].forEach((id) => {
+    $(id).addEventListener("change", () => {
+      state.knowledgeDocumentPage = 1;
+      listKnowledgeDocuments().catch((error) => showToast(humanizeError(error), "error"));
+    });
+  });
+  $("previous-document-page").addEventListener("click", () => {
+    if (state.knowledgeDocumentPage <= 1) return;
+    state.knowledgeDocumentPage -= 1;
+    listKnowledgeDocuments().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("next-document-page").addEventListener("click", () => {
+    state.knowledgeDocumentPage += 1;
+    listKnowledgeDocuments().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("knowledge-document-rows").addEventListener("click", (event) => {
+    const openButton = event.target.closest("[data-open-document]");
+    if (!openButton) return;
+    openDocumentDrawer(openButton.dataset.openDocument, openButton)
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("knowledge-document-rows").addEventListener("change", (event) => {
+    const checkbox = event.target.closest(".document-select");
+    const row = checkbox?.closest("[data-document-id]");
+    if (!checkbox || !row) return;
+    if (checkbox.checked) state.selectedDocumentIds.add(row.dataset.documentId);
+    else state.selectedDocumentIds.delete(row.dataset.documentId);
+    renderKnowledgeDocuments();
+  });
+  $("select-all-documents").addEventListener("change", (event) => {
+    for (const documentItem of state.knowledgeDocuments) {
+      if (event.target.checked) state.selectedDocumentIds.add(documentItem.id);
+      else state.selectedDocumentIds.delete(documentItem.id);
+    }
+    renderKnowledgeDocuments();
+  });
+  $("bulk-delete-documents-btn").addEventListener("click", bulkDeleteKnowledgeDocuments);
+  $("close-document-drawer").addEventListener("click", () => closeDocumentDrawer());
+  $("document-drawer-backdrop").addEventListener("click", () => closeDocumentDrawer());
+  $("save-document-btn").addEventListener("click", saveKnowledgeDocument);
+  $("replace-document-btn").addEventListener("click", replaceKnowledgeDocument);
+  $("delete-document-btn").addEventListener("click", () => deleteKnowledgeDocument());
+  $("document-drawer").addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDocumentDrawer();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...$("document-drawer").querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    )].filter((item) => !item.hidden);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("rag-rerank-toggle").addEventListener("click", toggleRerank);
-  $("register-workspace-btn").addEventListener("click", registerWorkspace);
-  $("refresh-workspaces-btn").addEventListener("click", () => {
-    listWorkspaces().catch((error) => showToast(humanizeError(error), "error"));
-  });
-  const handleWorkspaceSelection = (event) => {
-    setActiveWorkspace(event.target.value);
-    if (state.currentView === "memory") {
-      refreshProjectMemory();
-    }
-  };
-  $("workspace-select").addEventListener("change", handleWorkspaceSelection);
   $("composer-workspace-select").addEventListener(
     "change",
-    handleWorkspaceSelection,
+    async (event) => {
+      try {
+        await persistWorkspaceSelection(event.target.value, { setDefault: false });
+      } catch (error) {
+        showToast(humanizeError(error), "error");
+        renderWorkspaceSelectOptions();
+      }
+    },
   );
-  $("workspace-catalog-list").addEventListener("click", (event) => {
-    const card = event.target.closest("[data-workspace-id]");
-    const action = event.target.closest("[data-workspace-action]")?.dataset.workspaceAction;
-    if (!card || !action) {
-      return;
-    }
-    const workspace = state.workspaces.find((item) => item.id === card.dataset.workspaceId);
-    if (!workspace) {
-      return;
-    }
-    if (action === "select") {
-      setActiveWorkspace(workspace.id);
-      return;
-    }
-    if (action === "edit" && workspace.can_update) {
-      $("workspace-draft-id-input").value = workspace.id;
-      $("workspace-draft-root-input").value = workspace.root_path;
-      $("workspace-registration-result").hidden = true;
-      updateContextSummary();
-      $("workspace-draft-root-input").focus();
-    }
-  });
 
   $("refresh-memory-btn").addEventListener("click", refreshProjectMemory);
   $("save-memory-mode-btn").addEventListener("click", saveMemoryMode);
@@ -4164,14 +4745,9 @@ function bindEvents() {
   $("conversation-id-input").addEventListener("input", (event) => {
     updateContextSummary();
   });
-  ["user-id-input", "provider-input", "model-input", "thinking-level-input", "workspace-draft-id-input", "workspace-draft-root-input"].forEach((id) => {
+  ["user-id-input", "provider-input", "model-input", "thinking-level-input", "workspace-id-input", "workspace-root-input"].forEach((id) => {
     $(id).addEventListener("input", updateContextSummary);
     $(id).addEventListener("change", updateContextSummary);
-  });
-  ["workspace-draft-id-input", "workspace-draft-root-input"].forEach((id) => {
-    $(id).addEventListener("input", () => {
-      $("workspace-registration-result").hidden = true;
-    });
   });
 
   window.addEventListener("hashchange", () => {
@@ -4220,7 +4796,7 @@ async function restoreInitialSession() {
 
 async function init() {
   const preferences = loadUiPreferences();
-  $("user-id-input").value = preferences.userId || "demo_user";
+  $("user-id-input").value = "demo_user";
   bindEvents();
   const requestedView = location.hash.replace("#", "");
   const preferredView = document.querySelector(`[data-view-panel="${preferences.view}"]`)
@@ -4231,6 +4807,11 @@ async function init() {
     : preferredView;
   state.composerMode = "chat";
   state.rerankEnabled = preferences.rerankEnabled === true;
+  state.preferredKnowledgeBaseId = preferences.knowledgeBaseId || "";
+  state.activeKnowledgeTab = ["documents", "ask", "settings"].includes(preferences.knowledgeTab)
+    ? preferences.knowledgeTab
+    : "documents";
+  setKnowledgeTab(state.activeKnowledgeTab);
   renderRerankControl();
   updateComposerMode(state.composerMode);
   switchView(initialView, !location.hash);

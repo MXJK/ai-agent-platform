@@ -294,11 +294,17 @@ class InMemoryWorkspaceRepository:
                     if existing is not None and existing.root_path != root_path
                     else existing.revision if existing is not None else 1
                 ),
+                removed_at=None,
             )
             self._workspaces[workspace_id] = record
             return record
 
     def get(self, workspace_id: str) -> WorkspaceRecord | None:
+        with self._lock:
+            workspace = self._workspaces.get(workspace_id)
+            return workspace if workspace is not None and workspace.removed_at is None else None
+
+    def get_including_removed(self, workspace_id: str) -> WorkspaceRecord | None:
         with self._lock:
             return self._workspaces.get(workspace_id)
 
@@ -316,9 +322,23 @@ class InMemoryWorkspaceRepository:
     def list(self) -> list[WorkspaceRecord]:
         with self._lock:
             return sorted(
-                self._workspaces.values(),
+                (
+                    workspace
+                    for workspace in self._workspaces.values()
+                    if workspace.removed_at is None
+                ),
                 key=lambda record: record.id,
             )
+
+    def remove(self, workspace_id: str) -> WorkspaceRecord | None:
+        with self._lock:
+            existing = self._workspaces.get(workspace_id)
+            if existing is None or existing.removed_at is not None:
+                return None
+            now = _now()
+            removed = replace(existing, updated_at=now, removed_at=now)
+            self._workspaces[workspace_id] = removed
+            return removed
 
 
 class InMemoryKnowledgeBaseRepository:
@@ -406,6 +426,35 @@ class InMemoryKnowledgeBaseRepository:
         with self._lock:
             if knowledge_base_id in self._knowledge_bases:
                 self._document_ids[knowledge_base_id].add(document_id)
+                existing = self._knowledge_bases[knowledge_base_id]
+                self._knowledge_bases[knowledge_base_id] = replace(
+                    existing,
+                    updated_at=_now(),
+                )
+
+    def forget_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        with self._lock:
+            self._document_ids[knowledge_base_id].discard(document_id)
+            existing = self._knowledge_bases.get(knowledge_base_id)
+            if existing is not None:
+                self._knowledge_bases[knowledge_base_id] = replace(
+                    existing,
+                    updated_at=_now(),
+                )
+
+    def touch(self, knowledge_base_id: str) -> None:
+        with self._lock:
+            existing = self._knowledge_bases.get(knowledge_base_id)
+            if existing is not None:
+                self._knowledge_bases[knowledge_base_id] = replace(
+                    existing,
+                    updated_at=_now(),
+                )
 
     def _with_count(self, record: KnowledgeBaseRecord) -> KnowledgeBaseRecord:
         return KnowledgeBaseRecord(

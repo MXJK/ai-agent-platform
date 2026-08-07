@@ -1,7 +1,7 @@
 from pathlib import Path as FileSystemPath
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
 from ai_agent_platform.project_memory import (
@@ -77,11 +77,7 @@ def create_workspaces_router(
         ),
     ) -> WorkspaceResponse:
         if settings.auth_mode != "disabled" and memory_service is not None:
-            try:
-                workspace_service.get(workspace_id)
-            except WorkspaceNotFoundError:
-                pass
-            else:
+            if workspace_service.get_including_removed(workspace_id) is not None:
                 try:
                     memory_service.authorize(
                         workspace_id=workspace_id,
@@ -104,12 +100,47 @@ def create_workspaces_router(
                 workspace_id=workspace.id,
                 actor_user_id=request_user_id(http_request, settings),
             )
-        return WorkspaceResponse.from_domain(
+        return _workspace_response(
             workspace,
-            status=workspace_service.status(workspace.id),
-            role="admin",
-            can_update=True,
+            actor_user_id=(
+                request_user_id(http_request, settings)
+                if settings.auth_mode != "disabled"
+                else None
+            ),
         )
+
+    @router.delete(
+        "/workspaces/{workspace_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def remove_workspace(
+        http_request: Request,
+        workspace_id: str = Path(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$",
+        ),
+    ) -> None:
+        try:
+            workspace_service.get(workspace_id)
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="workspace not found") from exc
+        if settings.auth_mode != "disabled" and memory_service is not None:
+            try:
+                memory_service.authorize(
+                    workspace_id=workspace_id,
+                    actor_user_id=request_user_id(http_request, settings),
+                    required_role="admin",
+                )
+            except MemoryAccessDeniedError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+        try:
+            workspace_service.remove(workspace_id)
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="workspace not found",
+            ) from exc
 
     @router.get("/workspaces", response_model=WorkspacesResponse)
     def list_workspaces(http_request: Request) -> WorkspacesResponse:
@@ -247,11 +278,13 @@ def create_workspaces_router(
                 workspace_id=workspace.id,
                 actor_user_id=actor_user_id,
             )
+        status_value = workspace_service.status(workspace.id)
         return WorkspaceResponse.from_domain(
             workspace,
-            status=workspace_service.status(workspace.id),
+            status=status_value,
             role=role,
             can_update=role == "admin",
+            available=status_value == "ready",
         )
 
     return router

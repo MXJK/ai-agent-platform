@@ -96,8 +96,9 @@ Token 时才作为后备。
 - 托管知识库目录、多文件上传、混合检索、问答、引用和索引任务状态；
 - 项目记忆治理页，包括模式、状态和类型筛选，证据、置信度、乐观锁编辑、确认、
   拒绝、遗忘和索引修复；
-- 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区目录选择，以及在 Agent 输入区持续可见的
-  工作区 ID、规范路径、可用状态与角色；
+- 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区文件夹管理，可切换当前工作区、设置
+  新会话默认值、重新关联失效路径和安全移除注册；Agent 输入区持续显示当前工作区的
+  可用状态与角色；
 - Agent 运行详情、审批风险、验证产物、错误和指标；
 - 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
 
@@ -123,8 +124,9 @@ Agent 执行都会返回 `409`。
 页面会停留在欢迎页，不会再创建空记录。加载会话时会恢复消息、摘要，以及该会话
 自己的模型、工作区和输入模式。
 
-浏览器 `localStorage` 只保存设备级 UI 状态和未认证本地用户 ID，不重复保存会话
-配置。健康检查接口会暴露 `session_storage` 和 `persistent_sessions`；如果使用内存
+浏览器 `localStorage` 只保存设备级 UI 状态，不保存用户 ID，也不重复保存会话配置。
+本地单用户模式使用内部身份，认证模式由可信网关注入身份。健康检查接口会暴露
+`session_storage` 和 `persistent_sessions`；如果使用内存
 模式，界面会明确标记为临时存储。
 
 ### 全局模型注册中心
@@ -167,9 +169,10 @@ SSE_HEARTBEAT_SECONDS=10
 GOOGLE_API_KEY=your_google_ai_studio_key
 ```
 
-Gemini 3 请求的 `thinking_level` 支持 `minimal`、`low`、`medium` 或 `high`，界面可以
-覆盖服务端默认值。当 Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独
-统计。如果 Gemini 以 `MAX_TOKENS` 结束，接口会返回明确的 `max_output_tokens` 错误，
+Gemini 3 请求的 `thinking_level` 支持 `minimal`、`low`、`medium` 或 `high`；API 请求
+和既有会话配置仍可覆盖服务端默认值，但个人工作区管理界面不提供这个选项。当
+Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独统计。如果 Gemini 以
+`MAX_TOKENS` 结束，接口会返回明确的 `max_output_tokens` 错误，
 而不是把它当作正常完成。
 
 ## 模型路由
@@ -392,6 +395,7 @@ curl -X PUT http://localhost:8000/api/v1/workspaces/project \
 
 curl http://localhost:8000/api/v1/workspaces
 curl http://localhost:8000/api/v1/workspaces/project
+curl -X DELETE http://localhost:8000/api/v1/workspaces/project
 curl http://localhost:8000/api/v1/workspaces/project/token-usage
 curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 ```
@@ -404,9 +408,12 @@ curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 只能引用当前用户至少拥有 viewer 权限的工作区。viewer 可以启动只读分析，但批准包含
 写入或外部副作用工具的计划至少需要 editor 权限，且 Worker 执行前会再次授权。
 
-v1 有意不提供工作区删除接口。更新根目录会递增 `workspaces.revision`，旧 revision 的
-记忆不再参与检索。管理员可以明确确认一条旧记录，把它复制到当前 revision；历史记录
-本身不会变化。每一条 `agent_runs` 都保留运行开始时捕获的 `workspace_root`。
+工作区响应中的 `available` 表示已保存路径当前是否仍可读取。`DELETE` 是软移除：它只
+让工作区退出可选列表，不删除本地文件，也不级联删除历史会话、用量或项目记忆；再次
+以相同 ID 注册即可恢复。相同路径恢复保持原 revision，只有根路径真正变化时才递增
+`workspaces.revision`，旧 revision 的记忆不再参与检索。管理员可以明确确认一条旧
+记录，把它复制到当前 revision；历史记录本身不会变化。每一条 `agent_runs` 都保留
+运行开始时捕获的 `workspace_root`。
 
 启动 Agent 运行：
 
@@ -557,11 +564,23 @@ PUT    /api/v1/knowledge-bases/{knowledge_base_id}
 DELETE /api/v1/knowledge-bases/{knowledge_base_id}
 ```
 
-目录记录包含不可变 ID，以及可编辑的名称、描述和标签。删除时先移除向量，再级联删除
-PostgreSQL 文档与分块。文档 RAG 接口可以独立使用：
+目录记录包含不可变 ID，以及可编辑的名称、描述和标签。工作台左侧选择知识库，右侧
+以“文档 / 检索问答 / 设置”管理当前上下文；设备会记住最近选择和标签页。窄屏改用
+顶部选择器、文档卡片和全屏详情面板。删除非空知识库时，界面要求输入知识库 ID，
+服务端先移除向量，再级联删除 PostgreSQL 文档与分块。
+
+文档记录包含标题、原文件名、描述、标签、MIME、大小、内容哈希、分块数、索引状态
+及创建/更新/索引时间。服务只保留解析结果、分块和上传元数据，不保存或提供原文件
+下载。文档 API 可以独立使用：
 
 ```text
-POST /api/v1/knowledge-bases/{knowledge_base_id}/documents
+GET    /api/v1/knowledge-bases/{knowledge_base_id}/documents
+POST   /api/v1/knowledge-bases/{knowledge_base_id}/documents
+POST   /api/v1/knowledge-bases/{knowledge_base_id}/documents/bulk-delete
+GET    /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
+PATCH  /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
+PUT    /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/content
+DELETE /api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}
 POST /api/v1/knowledge-bases/{knowledge_base_id}/search
 POST /api/v1/knowledge-bases/{knowledge_base_id}/ask
 GET  /api/v1/rag/capabilities
@@ -579,13 +598,19 @@ curl -X POST http://localhost:8000/api/v1/knowledge-bases/product_docs/documents
 支持 PDF、DOCX、Markdown、UTF-8 文本和配置文件，以及已有的 UTF-8 源码格式；不支持
 旧 `.doc` 文件和需要 OCR 的扫描文档。
 
+列表默认按更新时间倒序，每页 20 条，支持标题/文件名搜索、索引状态筛选和排序。
+元数据修改不重新生成向量；内容替换使用显式 `PUT`，保留文档 ID、标题、描述和标签。
+同一知识库出现同名文件时返回 HTTP 409 `document_filename_conflict` 和已有文档 ID，
+不会静默覆盖。批量删除最多 100 条，返回 `deleted_ids` 与逐项 `failures`。
+
 只有文档接口会使用分块、嵌入和配置的向量存储。Agent 的 RAG 路由调用同一套搜索
 实现；检索不可用时会降级为证据警告。
 
 每次上传都会生成可查询的索引任务，状态依次为
 `pending → parsing → embedding → vector_written → active`。任意非终态失败会记录为
-`failed`，并保存长度受控的错误消息。向量替换会先写入新 Point，再删除旧 Point，
-因此嵌入失败不会提前删除上一版可搜索数据。
+`failed`，并保存长度受控的错误消息。替换会在切换前完成解析、分块和 embedding，
+并保存旧文档、分块和向量快照；失败时恢复旧内容并显示“替换失败，仍使用旧版”。
+删除按向量后元数据的顺序执行，后续步骤失败时恢复快照，避免可检索孤儿。
 
 搜索包含两个独立召回通道：
 
@@ -646,6 +671,10 @@ RAG_RERANK_DEFAULT_ENABLED=false
 - `20260804_0014`：添加持久化会话标题、更新时间/归档状态、会话级模型/工作区/模式
   配置、用户偏好、近期会话索引和确定性回填，并为每次 Agent 运行保存不可变模型快照。
 - `20260807_0015`：为规范化工作区根路径添加唯一约束；升级前必须先处理已有重复路径。
+- `20260807_0016`：为知识库文档补充可管理元数据、分块统计和索引时间，回填旧记录，
+  并添加知识库内文件名和更新时间索引；
+- `20260807_0017`：为工作区添加 `removed_at`，支持保留会话、用量和项目记忆的软移除
+  与同路径恢复。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。

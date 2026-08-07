@@ -7,6 +7,7 @@ from ai_agent_platform.integrations import LLMClient, RAGService
 from ai_agent_platform.integrations.rag import (
     IndexJob,
     IngestedDocument,
+    KnowledgeDocument,
     RAGAnswer,
     RAGSearchResult,
     RerankerCapabilities,
@@ -52,6 +53,17 @@ class KnowledgeBaseStore(Protocol):
     ) -> None:
         ...
 
+    def forget_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        ...
+
+    def touch(self, knowledge_base_id: str) -> None:
+        ...
+
 
 class KnowledgeBaseNotFoundError(KeyError):
     pass
@@ -63,6 +75,17 @@ class KnowledgeBaseAlreadyExistsError(ValueError):
 
 class IndexJobNotFoundError(KeyError):
     pass
+
+
+class DocumentNotFoundError(KeyError):
+    pass
+
+
+class DocumentFilenameConflictError(ValueError):
+    def __init__(self, *, filename: str, existing_document_id: str) -> None:
+        super().__init__(filename)
+        self.filename = filename
+        self.existing_document_id = existing_document_id
 
 
 class KnowledgeBaseService:
@@ -130,13 +153,26 @@ class KnowledgeBaseService:
         filename: str,
         content: str,
         source_uri: str | None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
     ) -> IngestedDocument:
         self.get(knowledge_base_id)
+        self._ensure_filename_available(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+        )
         ingested = self._rag_service.ingest_document(
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             content=content,
             source_uri=source_uri,
+            title=title,
+            description=description.strip(),
+            tags=_normalize_tags(tags or []),
+            media_type=media_type,
+            byte_size=len(content.encode("utf-8")),
         )
         self._store.record_document(
             knowledge_base_id=knowledge_base_id,
@@ -151,19 +187,158 @@ class KnowledgeBaseService:
         filename: str,
         content: bytes,
         source_uri: str | None = None,
+        title: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        media_type: str | None = None,
     ) -> IngestedDocument:
         self.get(knowledge_base_id)
+        self._ensure_filename_available(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+        )
         ingested = self._rag_service.ingest_file(
             knowledge_base_id=knowledge_base_id,
             filename=filename,
             content=content,
             source_uri=source_uri,
+            title=title,
+            description=description.strip(),
+            tags=_normalize_tags(tags or []),
+            media_type=media_type,
         )
         self._store.record_document(
             knowledge_base_id=knowledge_base_id,
             document_id=ingested.document_id,
         )
         return ingested
+
+    def list_documents(
+        self,
+        *,
+        knowledge_base_id: str,
+        query: str,
+        status: str | None,
+        sort: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[KnowledgeDocument], int]:
+        self.get(knowledge_base_id)
+        return self._rag_service.list_documents(
+            knowledge_base_id=knowledge_base_id,
+            query=query.strip(),
+            status=status,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+
+    def get_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument:
+        self.get(knowledge_base_id)
+        document = self._rag_service.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+        if document is None:
+            raise DocumentNotFoundError(document_id)
+        return document
+
+    def update_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        title: str,
+        description: str,
+        tags: list[str],
+    ) -> KnowledgeDocument:
+        self.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+        updated = self._rag_service.update_document_metadata(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+            title=title.strip(),
+            description=description.strip(),
+            tags=_normalize_tags(tags),
+        )
+        if updated is None:
+            raise DocumentNotFoundError(document_id)
+        self._store.touch(knowledge_base_id)
+        return updated
+
+    def replace_document_file(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+        filename: str,
+        content: bytes,
+        media_type: str | None,
+    ) -> IngestedDocument:
+        document = self.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+        self._ensure_filename_available(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+            replacing_document_id=document_id,
+        )
+        ingested = self._rag_service.replace_file(
+            document=document,
+            filename=filename,
+            content=content,
+            media_type=media_type,
+        )
+        self._store.record_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+        return ingested
+
+    def delete_document(
+        self,
+        *,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        self.get_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+        if not self._rag_service.delete_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        ):
+            raise DocumentNotFoundError(document_id)
+        self._store.forget_document(
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+        )
+
+    def _ensure_filename_available(
+        self,
+        *,
+        knowledge_base_id: str,
+        filename: str,
+        replacing_document_id: str | None = None,
+    ) -> None:
+        existing = self._rag_service.find_document_by_filename(
+            knowledge_base_id=knowledge_base_id,
+            filename=filename,
+        )
+        if existing is not None and existing.id != replacing_document_id:
+            raise DocumentFilenameConflictError(
+                filename=filename,
+                existing_document_id=existing.id,
+            )
 
     def search(
         self,

@@ -8,6 +8,7 @@ from ai_agent_platform.domain import ConversationSummary
 from ai_agent_platform.integrations.rag import (
     DocumentChunk,
     IndexJob,
+    KnowledgeDocument,
     ParsedDocument,
 )
 from ai_agent_platform.repositories.postgres import (
@@ -159,8 +160,9 @@ class PostgresRepositoryTests(unittest.TestCase):
 
     def test_workspace_upsert_get_and_list_map_rows(self) -> None:
         now = datetime(2026, 7, 23, tzinfo=timezone.utc)
-        row = ("workspace_main", "/workspace/code", now, now)
-        connection = FakeConnection([row, row, [row]])
+        row = ("workspace_main", "/workspace/code", now, now, 1, None)
+        removed_row = ("workspace_main", "/workspace/code", now, now, 1, now)
+        connection = FakeConnection([row, row, [row], removed_row])
         with patch(
             "ai_agent_platform.repositories.postgres._require_psycopg",
             return_value=object(),
@@ -173,10 +175,15 @@ class PostgresRepositoryTests(unittest.TestCase):
             )
             loaded = repository.get("workspace_main")
             listed = repository.list()
+            removed = repository.remove("workspace_main")
         self.assertEqual(created.root_path, "/workspace/code")
         self.assertEqual(loaded.id, "workspace_main")
         self.assertEqual([item.id for item in listed], ["workspace_main"])
+        self.assertEqual(removed.removed_at, now)
         self.assertIn("workspaces", connection.calls[0][0])
+        self.assertIn("removed_at IS NULL", connection.calls[1][0])
+        self.assertIn("UPDATE workspaces", connection.calls[3][0])
+        self.assertNotIn("DELETE FROM workspaces", connection.calls[3][0])
 
     def test_document_repository_persists_lexical_and_provenance_metadata(self) -> None:
         connection = FakeConnection([None, None, None])
@@ -215,6 +222,75 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("start_line", sql)
         self.assertIn("healthcheck", params[9])
         self.assertEqual(params[6:9], (4, 4, ["healthcheck"]))
+
+    def test_document_repository_lists_manageable_metadata(self) -> None:
+        now = datetime(2026, 8, 7, tzinfo=timezone.utc)
+        row = (
+            "doc_1",
+            "docs",
+            "Guide",
+            "guide.md",
+            "Operator guide",
+            ["ops"],
+            "text/markdown",
+            128,
+            "abc123",
+            3,
+            None,
+            now,
+            now,
+            now,
+            "active",
+            None,
+        )
+        connection = FakeConnection([(1,), [row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresDocumentRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            documents, total = repository.list_documents(
+                knowledge_base_id="docs",
+                query="Guide%",
+                status="active",
+                sort="updated_at_desc",
+                page=2,
+                page_size=20,
+            )
+
+        self.assertEqual(total, 1)
+        self.assertEqual(
+            documents,
+            [
+                KnowledgeDocument(
+                    id="doc_1",
+                    knowledge_base_id="docs",
+                    title="Guide",
+                    filename="guide.md",
+                    description="Operator guide",
+                    tags=["ops"],
+                    media_type="text/markdown",
+                    byte_size=128,
+                    content_hash="abc123",
+                    chunk_count=3,
+                    is_searchable=True,
+                    last_index_status="active",
+                    last_index_error=None,
+                    created_at=now,
+                    updated_at=now,
+                    indexed_at=now,
+                )
+            ],
+        )
+        count_sql, count_params = connection.calls[0]
+        list_sql, list_params = connection.calls[1]
+        self.assertIn("latest_job.status", count_sql)
+        self.assertIn("ORDER BY documents.updated_at DESC", list_sql)
+        self.assertEqual(count_params[-1], "active")
+        self.assertEqual(list_params[-2:], (20, 20))
 
     def test_document_repository_maps_index_job_state(self) -> None:
         now = datetime(2026, 7, 27, tzinfo=timezone.utc)

@@ -10,6 +10,7 @@ from ai_agent_platform.agents.coding.planner import RuleBasedAgentPlanner
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.repositories import InMemoryWorkspaceRepository
 from ai_agent_platform.services import (
+    WorkspaceNotFoundError,
     WorkspaceRootConflictError,
     WorkspaceService,
     WorkspaceValidationError,
@@ -66,6 +67,51 @@ class WorkspaceServiceTests(unittest.TestCase):
             )
             with self.assertRaises(WorkspaceValidationError):
                 service.register(workspace_id="outside", root_path=outside_dir)
+
+    def test_remove_hides_workspace_and_reregister_restores_it(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service = WorkspaceService(
+                store=InMemoryWorkspaceRepository(),
+                allowed_roots=(str(root),),
+            )
+            created = service.register(
+                workspace_id="project",
+                root_path=str(workspace),
+            )
+
+            removed = service.remove("project")
+
+            self.assertIsNotNone(removed.removed_at)
+            self.assertEqual(service.list(), [])
+            with self.assertRaises(WorkspaceNotFoundError):
+                service.get("project")
+            with self.assertRaises(WorkspaceNotFoundError):
+                service.resolve_for_run("project")
+
+            restored = service.register(
+                workspace_id="project",
+                root_path=str(workspace),
+            )
+            self.assertIsNone(restored.removed_at)
+            self.assertEqual(restored.created_at, created.created_at)
+            self.assertEqual(restored.revision, created.revision)
+
+    def test_reports_registered_workspace_path_availability(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service = WorkspaceService(
+                store=InMemoryWorkspaceRepository(),
+                allowed_roots=(str(root),),
+            )
+            service.register(workspace_id="project", root_path=str(workspace))
+            self.assertTrue(service.is_available("project"))
+            workspace.rmdir()
+            self.assertFalse(service.is_available("project"))
 
 
 class RepositoryToolTests(unittest.TestCase):
