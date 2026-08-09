@@ -123,6 +123,33 @@ class WorkspaceRecord:
 
 
 @dataclass(frozen=True)
+class ChangeSetRecord:
+    id: str
+    run_id: str
+    conversation_id: str
+    workspace_id: str
+    workspace_root: str
+    workspace_revision: int
+    created_by: str
+    apply_mode: str
+    base_git_head: str | None
+    baseline_file_hashes: dict[str, str | None]
+    changed_files: list[str]
+    patch: str
+    patch_sha256: str
+    validation_status: str
+    validation_summary: dict[str, object]
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    applied_by: str | None = None
+    applied_at: datetime | None = None
+    error: str | None = None
+    branch_name: str | None = None
+    worktree_path: str | None = None
+
+
+@dataclass(frozen=True)
 class KnowledgeBaseRecord:
     id: str
     name: str

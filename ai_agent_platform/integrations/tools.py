@@ -128,6 +128,9 @@ class ToolRegistry:
             Callable[[ToolExecutionContext], Any]
         ] = []
         self._close_callbacks: list[Callable[[], Any]] = []
+        self._context_exporters: dict[
+            str, Callable[[ToolExecutionContext], Any]
+        ] = {}
         self._idempotency_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._idempotency_guards: dict[tuple[str, str], Lock] = {}
         self._idempotency_lock = Lock()
@@ -207,6 +210,22 @@ class ToolRegistry:
 
     def register_close(self, callback: Callable[[], Any]) -> None:
         self._close_callbacks.append(callback)
+
+    def register_context_exporter(
+        self,
+        name: str,
+        callback: Callable[[ToolExecutionContext], Any],
+    ) -> None:
+        if not name or name in self._context_exporters:
+            raise ValueError(f"context exporter already registered: {name}")
+        self._context_exporters[name] = callback
+
+    def export_context(self, name: str, context: ToolExecutionContext) -> Any:
+        try:
+            exporter = self._context_exporters[name]
+        except KeyError as exc:
+            raise ValueError(f"unknown context exporter: {name}") from exc
+        return exporter(context)
 
     def cleanup_context(self, context: ToolExecutionContext) -> list[str]:
         errors: list[str] = []

@@ -89,6 +89,7 @@ class CodingAgentState(TypedDict, total=False):
     changed_files: list[str]
     change_status: str
     change_iteration: int
+    change_set_id: str
     answer: str
     trace: list[dict[str, Any]]
     started_at: float
@@ -205,6 +206,7 @@ class AgentRunResult:
     metrics: AgentRunMetrics = field(default_factory=AgentRunMetrics)
     change_summary: AgentChangeSummary = field(default_factory=AgentChangeSummary)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    change_set_id: str | None = None
     pending_approval: Optional[dict[str, Any]] = None
 
 

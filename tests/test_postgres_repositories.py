@@ -8,7 +8,8 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunRecord,
     AgentToolExecution,
 )
-from ai_agent_platform.domain import ConversationSummary
+from ai_agent_platform.domain import ChangeSetRecord, ConversationSummary
+from ai_agent_platform.repositories.change_sets import PostgresChangeSetRepository
 from ai_agent_platform.integrations.rag import (
     DocumentChunk,
     IndexJob,
@@ -34,6 +35,80 @@ from ai_agent_platform.repositories.project_memory import (
 
 
 class PostgresRepositoryTests(unittest.TestCase):
+    def test_change_set_repository_persists_and_cas_updates_status(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        record = ChangeSetRecord(
+            id="chg_1",
+            run_id="run_1",
+            conversation_id="sess_1",
+            workspace_id="workspace_1",
+            workspace_root="/workspace/project",
+            workspace_revision=2,
+            created_by="alice",
+            apply_mode="direct",
+            base_git_head="a" * 40,
+            baseline_file_hashes={"app.py": "b" * 64},
+            changed_files=["app.py"],
+            patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            patch_sha256="c" * 64,
+            validation_status="passed",
+            validation_summary={"passed": True},
+            status="ready",
+            created_at=now,
+            updated_at=now,
+        )
+        applying = replace(record, status="applying")
+        row = (
+            applying.id,
+            applying.run_id,
+            applying.conversation_id,
+            applying.workspace_id,
+            applying.workspace_root,
+            applying.workspace_revision,
+            applying.created_by,
+            applying.apply_mode,
+            applying.base_git_head,
+            applying.baseline_file_hashes,
+            applying.changed_files,
+            applying.patch,
+            applying.patch_sha256,
+            applying.validation_status,
+            applying.validation_summary,
+            applying.status,
+            applying.created_at,
+            applying.updated_at,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        connection = FakeConnection([("chg_1",), ("chg_1",), row])
+        with patch(
+            "ai_agent_platform.repositories.change_sets._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.change_sets._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresChangeSetRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            created = repository.create(record)
+            updated = repository.compare_and_set(
+                applying,
+                expected_status="ready",
+            )
+            loaded = repository.get(record.id)
+
+        self.assertEqual(created, record)
+        self.assertEqual(updated, applying)
+        self.assertEqual(loaded, applying)
+        self.assertIn("ON CONFLICT (run_id) DO NOTHING", connection.calls[0][0])
+        self.assertIn("WHERE id = %s AND status = %s", connection.calls[1][0])
+        self.assertEqual(connection.calls[1][1][-1], "ready")
+
     def test_session_listing_maps_metadata_search_and_cursor_contract(self) -> None:
         created = datetime(2026, 8, 1, tzinfo=timezone.utc)
         updated = datetime(2026, 8, 2, tzinfo=timezone.utc)

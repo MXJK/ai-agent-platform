@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: null
-next_action: "Apply migration 20260808_0018 only after human approval; otherwise begin the next task."
+active_task: "CODEX-LIKE-CHANGESETS"
+next_action: "Review the pushed ChangeSet branch and explicitly approve migration 20260809_0019 before applying it."
 blockers: []
-last_verified_commit: "897cbad9fa6d1685fcff72220d7a8e0e1be3a604"
-updated_at: "2026-08-09T13:49:09+08:00"
+last_verified_commit: "00608787bf049af856cc5d5f6cd3125269e37eac"
+updated_at: "2026-08-09T20:20:33+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

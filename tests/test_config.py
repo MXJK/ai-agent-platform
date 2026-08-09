@@ -46,6 +46,7 @@ class SettingsTests(unittest.TestCase):
                 ),
                 "SESSION_REPOSITORY": "postgres",
                 "AGENT_RUN_STORE": "postgres",
+                "CHANGE_SET_STORE": "postgres",
                 "DOCUMENT_STORE": "postgres",
                 "WORKSPACE_STORE": "postgres",
                 "WORKSPACE_ALLOWED_ROOTS": "/srv/code:/opt/workspaces",
@@ -125,6 +126,12 @@ class SettingsTests(unittest.TestCase):
                 "PROJECT_MEMORY_IMPORTANCE_WEIGHT": "0.15",
                 "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS": "90",
                 "AUTH_MODE": "trusted_header",
+                "LIVE_WORKSPACE_WRITES_ENABLED": "true",
+                "CHANGE_SET_APPLY_MODE": "direct",
+                "CHANGE_SET_MAX_FILES": "40",
+                "CHANGE_SET_MAX_PATCH_CHARS": "250000",
+                "CHANGE_SET_WORKTREE_PARENT": "/tmp/change-worktrees",
+                "CHANGE_SET_BRANCH_PREFIX": "agent/",
                 "GATEWAY_TRUST_SECRET": "test-trust-secret",
             },
         ):
@@ -136,6 +143,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.session_repository, "postgres")
         self.assertEqual(settings.agent_run_store, "postgres")
+        self.assertEqual(settings.change_set_store, "postgres")
         self.assertEqual(settings.document_store, "postgres")
         self.assertEqual(settings.workspace_store, "postgres")
         self.assertEqual(
@@ -223,6 +231,15 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.project_memory_importance_weight, 0.15)
         self.assertEqual(settings.project_memory_recency_half_life_days, 90)
         self.assertEqual(settings.auth_mode, "trusted_header")
+        self.assertTrue(settings.live_workspace_writes_enabled)
+        self.assertEqual(settings.change_set_apply_mode, "direct")
+        self.assertEqual(settings.change_set_max_files, 40)
+        self.assertEqual(settings.change_set_max_patch_chars, 250000)
+        self.assertEqual(
+            settings.change_set_worktree_parent,
+            "/tmp/change-worktrees",
+        )
+        self.assertEqual(settings.change_set_branch_prefix, "agent/")
         self.assertEqual(settings.gateway_trust_secret, "test-trust-secret")
 
     def test_rejects_overlapping_chunks_larger_than_each_chunk(self) -> None:
@@ -268,6 +285,7 @@ class SettingsTests(unittest.TestCase):
             task_queue_backend="celery",
             session_repository="postgres",
             agent_run_store="postgres",
+            change_set_store="postgres",
             document_store="postgres",
             workspace_store="postgres",
             langgraph_checkpointer="postgres",
@@ -364,6 +382,20 @@ class SettingsTests(unittest.TestCase):
             Settings(agent_soft_tool_calls=73, agent_max_tool_calls=72)
         with self.assertRaisesRegex(ValueError, "agent_approval_policy"):
             Settings(agent_approval_policy="unsafe")
+
+    def test_rejects_unsafe_change_set_write_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "change_set_apply_mode"):
+            Settings(change_set_apply_mode="overwrite")
+        with self.assertRaisesRegex(ValueError, "requires auth_mode"):
+            Settings(live_workspace_writes_enabled=True)
+        with self.assertRaisesRegex(ValueError, "change_set_max_files"):
+            Settings(change_set_max_files=0)
+        for prefix in ("../escape/", "/absolute/", "bad branch/", "refs//bad/"):
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(
+                ValueError,
+                "change_set_branch_prefix",
+            ):
+                Settings(change_set_branch_prefix=prefix)
 
 
 if __name__ == "__main__":

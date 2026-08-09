@@ -68,8 +68,9 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 
 两种响应都会在消息内展示执行过程和用量指标。Chat 使用模型提供方的 SSE 用量；
 Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
-输入、输出、思考和总 Token。Agent cursor SSE（及其轮询 fallback）还会合并实时 LangGraph checkpoint Trace，
-因此即使任务很快完成，前端也能按顺序播放已完成阶段，再展示最终答案。
+输入、输出、思考和总 Token。Agent cursor SSE 会直接驱动实时 LangGraph Trace，只在
+终态读取一次完整 Run 快照；断流时才回退轮询。因此即使任务很快完成，前端也能用
+有界的短暂回放按顺序展示已完成阶段，并稳定保留最终答案和终态。
 
 所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
 Ask 和嵌入调用都会记录：
@@ -316,7 +317,9 @@ setup_workspace
 
 `merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。变更任务继续
 使用人工审批、每次运行独立的沙箱副本、验证、一次有界修复，以及 Diff/测试产物；
-注册的源工作区永远不会被 Agent 直接修改。
+终态会在沙箱清理前把完整补丁持久化为 ChangeSet。默认 `patch_only` 不修改源工作区；
+只有显式启用真实写入、可信身份 editor 二次批准且补丁摘要与逐文件基线哈希均通过时，
+服务才按 `direct` 或 `worktree` 模式应用。
 
 运行中的 Agent 状态同时读取产品运行存储和最近的 LangGraph checkpoint，因此 API
 可以在任务仍执行时暴露已经完成的 Trace 节点。最终指标包括耗时、节点和工具数量、
@@ -453,16 +456,27 @@ POST /api/v1/agent/runs/{run_id}/continue   {"message":"补充方向或问题答
 POST /api/v1/agent/runs/{run_id}/steer      {"message":"新的执行方向"}
 POST /api/v1/agent/runs/{run_id}/cancel
 POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"审批说明"}
+GET  /api/v1/agent/runs/{run_id}/changes
+POST /api/v1/agent/runs/{run_id}/changes/reject {"change_set_id":"chg_xxx"}
+POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patch_sha256":"<64 hex>"}
 ```
 
-事件流使用可恢复游标；浏览器工作台优先消费 SSE，连接失败时回退到状态轮询。终态包括
-`completed`、`partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括
-`waiting_approval`、`waiting_input` 和 `paused`。
+事件流使用可恢复游标；浏览器工作台直接从 SSE 事件增量构造轨迹，在终态读取一次
+完整 Run 快照，连接失败或提前结束时回退到状态轮询。终态包括 `completed`、
+`partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
+`waiting_input` 和 `paused`。
 
 响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
 使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和
 `score` 来源字段。已经移除的 `repository_id` 和 `rag_context` Agent 字段不会被接受
 或返回。
+
+ChangeSet 是模型工具审批之后的独立落盘边界。它保存不可截断补丁、SHA-256、变更文件、
+Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 可查看，editor 才能
+拒绝或应用；apply 还会重新校验登记根、符号链接、敏感/二进制路径、文件并发修改和用户
+确认的摘要。重复应用同一已完成 ChangeSet 返回相同结果；冲突不会覆盖用户的新修改。
+`direct` 失败会恢复原文件，`worktree` 从捕获的 Git HEAD 创建受控 `codex/` 分支和
+工作树，源目录保持不变。应用不会自动 commit、push、建 PR、merge 或部署。
 
 ### 实时源码工具
 
@@ -480,7 +494,21 @@ POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"审批�
 变更任务会把普通、非敏感工作区文件复制到每次运行独立的目录。真实 `.env`、凭据、
 私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件会被跳过，并记录在
 `copy_warnings` 中。完成、失败或拒绝的运行会删除沙箱；启动时还会清理超过
-`SANDBOX_WORKSPACE_TTL_SECONDS` 的目录。
+`SANDBOX_WORKSPACE_TTL_SECONDS` 的目录。发生变更时，清理前会先通过服务端内部导出器
+保存完整 ChangeSet；展示用截断 Diff 不会被用于真实落盘。
+
+真实写入默认关闭。最小配置如下；`LIVE_WORKSPACE_WRITES_ENABLED=true` 只能与
+`AUTH_MODE=trusted_header` 一起使用：
+
+```dotenv
+CHANGE_SET_STORE=postgres
+LIVE_WORKSPACE_WRITES_ENABLED=false
+CHANGE_SET_APPLY_MODE=patch_only  # patch_only | direct | worktree
+CHANGE_SET_MAX_FILES=100
+CHANGE_SET_MAX_PATCH_CHARS=1000000
+CHANGE_SET_WORKTREE_PARENT=
+CHANGE_SET_BRANCH_PREFIX=codex/
+```
 
 `SANDBOX_MODE=local` 只适用于由本地用户拥有并信任的仓库。它在最小环境中执行
 `SANDBOX_ALLOWED_COMMANDS` 里的可执行文件基本名，使用固定最大超时、有界输出捕获和
@@ -706,6 +734,9 @@ RAG_RERANK_DEFAULT_ENABLED=false
   并添加知识库内文件名和更新时间索引；
 - `20260807_0017`：为工作区添加 `removed_at`，支持保留会话、用量和项目记忆的软移除
   与同路径恢复。
+- `20260808_0018`：添加 Agent 运行控制状态、事件与耐久工具调用执行账本。
+- `20260809_0019`：添加每 Run 唯一的 `agent_change_sets`，持久化完整补丁、基线哈希、
+  workspace 快照、验证与 apply/reject 状态。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
@@ -716,6 +747,7 @@ Celery 运行要求 API 和 Worker 使用共享存储、相同挂载及相同允
 TASK_QUEUE_BACKEND=celery
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
+CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
@@ -729,7 +761,7 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 
 | 组件 | 职责 |
 | --- | --- |
-| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行与不可变模型快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
+| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet 与不可变模型快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
 | Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
 | Redis | Celery Broker 和结果后端；不是业务记录的事实来源 |
 | Chroma | 可选的嵌入式/单节点向量存储，用于替代 Qdrant |

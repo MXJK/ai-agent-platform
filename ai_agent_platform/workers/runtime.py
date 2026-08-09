@@ -18,6 +18,7 @@ from ai_agent_platform.project_memory.factory import create_project_memory_servi
 from ai_agent_platform.project_memory.service import ProjectMemoryService
 from ai_agent_platform.main import (
     _create_agent_run_store,
+    _create_change_set_store,
     _create_document_store,
     _create_knowledge_base_store,
     _create_langgraph_checkpointer,
@@ -28,6 +29,7 @@ from ai_agent_platform.main import (
 )
 from ai_agent_platform.services import (
     AgentRunService,
+    ChangeSetService,
     KnowledgeBaseService,
     SessionService,
     UsageLedgerService,
@@ -109,6 +111,19 @@ def _create_worker_services() -> WorkerServices:
             trigger_id=trigger_id,
         )
     )
+    change_set_service = ChangeSetService(
+        repository=_create_change_set_store(settings),
+        workspace_service=workspace_service,
+        authorize=project_memory_service.authorize,
+        live_writes_enabled=settings.live_workspace_writes_enabled,
+        apply_mode=settings.change_set_apply_mode,
+        auth_mode=settings.auth_mode,
+        max_files=settings.change_set_max_files,
+        max_patch_chars=settings.change_set_max_patch_chars,
+        worktree_parent=settings.change_set_worktree_parent,
+        branch_prefix=settings.change_set_branch_prefix,
+        command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+    )
     rag_service = create_rag_service(
         settings,
         document_store=_create_document_store(settings),
@@ -159,6 +174,10 @@ def _create_worker_services() -> WorkerServices:
         knowledge_context_provider=knowledge_base_service,
         project_memory_provider=project_memory_service,
         max_rag_context_chars=settings.rag_max_prompt_chars,
+        change_set_service=change_set_service,
+    )
+    change_set_service.set_audit_callback(
+        coding_runtime.record_change_set_event
     )
     session_service = SessionService(
         repository=session_repository,

@@ -1,4 +1,12 @@
 from .agent_run_service import AgentRunService
+from .change_set_service import (
+    ChangeSetConflictError,
+    ChangeSetInvalidStateError,
+    ChangeSetNotFoundError,
+    ChangeSetPermissionError,
+    ChangeSetService,
+    ChangeSetValidationError,
+)
 from .knowledge_base_service import (
     DocumentFilenameConflictError,
     DocumentNotFoundError,
@@ -33,6 +41,12 @@ from .conversation_compression import (
 
 __all__ = [
     "AgentRunService",
+    "ChangeSetConflictError",
+    "ChangeSetInvalidStateError",
+    "ChangeSetNotFoundError",
+    "ChangeSetPermissionError",
+    "ChangeSetService",
+    "ChangeSetValidationError",
     "DocumentFilenameConflictError",
     "DocumentNotFoundError",
     "KnowledgeBaseAlreadyExistsError",
