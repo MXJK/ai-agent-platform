@@ -603,11 +603,6 @@ function updateContextSummary() {
     : workspace
       ? `${workspaceLabel} · 不可用`
       : "未选择工作区";
-  $("composer-workspace-id").textContent = workspaceLabel;
-  $("composer-workspace-root").textContent = workspaceRoot;
-  $("composer-workspace-status").className = `workspace-status-dot ${
-    workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
-  }`;
   $("agent-workspace-context-id").textContent = workspaceLabel;
   $("agent-workspace-root").textContent = workspaceRoot;
   $("agent-workspace-role").textContent = workspace
@@ -647,12 +642,6 @@ function setActiveWorkspace(workspaceId) {
     !state.workspacesLoaded
     || state.workspaces.some((item) => item.id === normalizedId)
   ) ? normalizedId : "";
-  for (const selectId of ["composer-workspace-select"]) {
-    const select = $(selectId);
-    if (select) {
-      select.value = state.activeWorkspaceId;
-    }
-  }
   $("workspace-id-input").value = state.activeWorkspaceId;
   $("workspace-root-input").value = currentWorkspace()?.root_path || "";
   updateContextSummary();
@@ -675,7 +664,6 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   state.composerMode = mode === "agent" ? "agent" : "chat";
   $("composer-mode-input").value = state.composerMode;
   const isAgent = state.composerMode === "agent";
-  $("workspace-context-strip").hidden = !isAgent;
   $("composer-mode-description").textContent = isAgent
     ? "读取工作区并运行工具；高风险操作等待审批。"
     : "流式回答，不执行代码工具。";
@@ -4214,7 +4202,6 @@ async function listWorkspaces() {
   const body = await fetchJson("/workspaces");
   state.workspaces = body.workspaces || [];
   state.workspacesLoaded = true;
-  renderWorkspaceSelectOptions();
   const preferredId = state.activeWorkspaceId
     || state.currentSession?.workspace_id
     || state.defaultWorkspaceId;
@@ -4225,23 +4212,6 @@ async function listWorkspaces() {
   updateContextSummary();
   await loadWorkspaceTokenUsage();
   renderWorkspaceTokenUsage();
-}
-
-function renderWorkspaceSelectOptions() {
-  for (const selectId of ["composer-workspace-select"]) {
-    const select = $(selectId);
-    select.innerHTML = '<option value="">选择工作区</option>';
-    for (const workspace of state.workspaces) {
-      const option = document.createElement("option");
-      option.value = workspace.id;
-      option.textContent = `${workspaceName(workspace)} · ${
-        workspaceIsReady(workspace) ? workspace.root_path : "路径不可用"
-      }`;
-      option.disabled = !workspaceIsReady(workspace);
-      select.appendChild(option);
-    }
-    select.value = state.activeWorkspaceId;
-  }
 }
 
 function renderWorkspaceCatalog() {
@@ -4404,7 +4374,6 @@ function bindEvents() {
     }
   });
   $("open-workspace-picker-btn").addEventListener("click", () => openWorkspacePicker());
-  $("composer-workspace-settings-btn").addEventListener("click", openSettings);
   $("agent-workspace-settings-btn").addEventListener("click", openSettings);
   $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
   $("workspace-picker-dialog").addEventListener("click", (event) => {
@@ -4746,18 +4715,6 @@ function bindEvents() {
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("rag-rerank-toggle").addEventListener("click", toggleRerank);
-  $("composer-workspace-select").addEventListener(
-    "change",
-    async (event) => {
-      try {
-        await persistWorkspaceSelection(event.target.value, { setDefault: false });
-      } catch (error) {
-        showToast(humanizeError(error), "error");
-        renderWorkspaceSelectOptions();
-      }
-    },
-  );
-
   $("refresh-memory-btn").addEventListener("click", refreshProjectMemory);
   $("save-memory-mode-btn").addEventListener("click", saveMemoryMode);
   $("reindex-memory-btn").addEventListener("click", reindexProjectMemories);

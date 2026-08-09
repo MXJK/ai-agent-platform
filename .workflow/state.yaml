@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "DYNAMIC-MODEL-POLICY"
-next_action: "Restart the backend and confirm a frontend-selected registered model can chat in the ai-agent-platform workspace"
+active_task: null
+next_action: "Apply migration 20260808_0018 only after human approval; otherwise begin the next task."
 blockers: []
 last_verified_commit: "2aff6a4f9be0a410a60cc2415cacfc7727c9df1f"
-updated_at: "2026-08-07T17:30:36+08:00"
+updated_at: "2026-08-09T10:28:25+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

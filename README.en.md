@@ -91,7 +91,9 @@ The browser workspace also includes:
   confidence, optimistic edits, confirm/reject/forget, and index repair;
 - local workspace folder management constrained by `WORKSPACE_ALLOWED_ROOTS`,
   including current/default selection, invalid-path relinking, and safe removal;
-  Agent input keeps the current workspace availability and role visible;
+  the shared composer omits a duplicate code-context strip, while the sidebar
+  and settings manage the current workspace and the dedicated Agent input keeps
+  its availability and role visible;
 - Agent run details, approval risk, validation artifacts, errors, and metrics;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
