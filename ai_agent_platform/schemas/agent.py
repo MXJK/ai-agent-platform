@@ -5,7 +5,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
-from ai_agent_platform.agents.coding.models import ContextSource
+from ai_agent_platform.agents.coding.models import AgentRunEvent, ContextSource
 from ai_agent_platform.schemas.chat import (
     LLMProviderName,
     LLMRoutingPolicy,
@@ -34,6 +34,12 @@ class AgentRunRequest(BaseModel):
 class AgentRunResumeRequest(BaseModel):
     approved: bool = True
     feedback: Optional[str] = Field(default=None, max_length=4000)
+
+
+class AgentRunControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(default="", max_length=4000)
 
 
 class AgentToolCallResponse(BaseModel):
@@ -206,6 +212,8 @@ class AgentRunStatusResponse(BaseModel):
     error: Optional[str]
     pending_approval: Optional[dict[str, Any]]
     errors: list[dict[str, Any]]
+    control_action: Optional[str]
+    steering_message_count: int
     trace: list[AgentTraceStepResponse]
     result: Optional[AgentRunResponse]
 
@@ -223,6 +231,8 @@ class AgentRunStatusResponse(BaseModel):
             error=record.error,
             pending_approval=record.pending_approval,
             errors=record.errors,
+            control_action=record.control_action,
+            steering_message_count=len(record.steering_messages),
             trace=[
                 AgentTraceStepResponse(
                     step=item["step"],
@@ -254,6 +264,27 @@ class AgentRunEventsResponse(BaseModel):
     events: list[AgentRunEventResponse]
 
     @classmethod
+    def from_events(
+        cls,
+        run_id: str,
+        events: list[AgentRunEvent],
+    ) -> "AgentRunEventsResponse":
+        return cls(
+            run_id=run_id,
+            events=[
+                AgentRunEventResponse(
+                    sequence=event.sequence,
+                    type=event.type,
+                    status=event.status,
+                    node=event.node,
+                    summary=event.summary,
+                    output=event.output,
+                )
+                for event in events
+            ],
+        )
+
+    @classmethod
     def from_domain(cls, record: AgentRunRecord) -> "AgentRunEventsResponse":
         events: list[AgentRunEventResponse] = [
             AgentRunEventResponse(
@@ -270,7 +301,7 @@ class AgentRunEventsResponse(BaseModel):
             )
         ]
 
-        if record.status in {"running", "waiting_approval", "completed", "failed"}:
+        if record.status != "queued":
             events.append(
                 AgentRunEventResponse(
                     sequence=len(events) + 1,
@@ -305,7 +336,7 @@ class AgentRunEventsResponse(BaseModel):
                     output=record.pending_approval or {},
                 )
             )
-        elif record.status == "completed":
+        elif record.status in {"completed", "partial", "blocked", "cancelled"}:
             answer = record.result.answer if record.result is not None else ""
             change_summary = (
                 record.result.change_summary if record.result is not None else None
@@ -313,10 +344,10 @@ class AgentRunEventsResponse(BaseModel):
             events.append(
                 AgentRunEventResponse(
                     sequence=len(events) + 1,
-                    type="run_completed",
+                    type=f"run_{record.status}",
                     status=record.status,
                     node=record.latest_node,
-                    summary="Agent run completed.",
+                    summary=f"Agent run ended with status {record.status}.",
                     output={
                         "answer_chars": len(answer),
                         "change_status": (

@@ -68,7 +68,7 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 
 两种响应都会在消息内展示执行过程和用量指标。Chat 使用模型提供方的 SSE 用量；
 Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
-输入、输出、思考和总 Token。Agent 轮询还会合并实时 LangGraph checkpoint Trace，
+输入、输出、思考和总 Token。Agent cursor SSE（及其轮询 fallback）还会合并实时 LangGraph checkpoint Trace，
 因此即使任务很快完成，前端也能按顺序播放已完成阶段，再展示最终答案。
 
 所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
@@ -343,7 +343,9 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 的注册名会转换为 Provider 安全别名，并在执行前映射回原名。Fake Provider 保留
 确定性规则规划，用于离线测试。
 
-只读分析采用有界的“观察—重规划”循环：
+原生模型采用统一、有界的“观察—决策—执行”循环。读文件、写 Sandbox、运行验证、
+获取状态与 Diff 都由同一次模型会话按原顺序选择，不再把读、写、验证拆成彼此看不到
+结果的固定阶段：
 
 ```text
 原生工具调用
@@ -353,10 +355,20 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 → 模型观察后继续调用工具或作答
 ```
 
-默认每次运行最多四轮模型工具调用和十二次调用，可通过 `AGENT_MAX_TOOL_ROUNDS` 和
-`AGENT_MAX_TOOL_CALLS` 配置。重复相同工具名和参数会被视为没有进展。只读调用失败时，
-错误和同轮只读 artifact 结果都会回灌模型再规划；`workspace_status`/`git_diff` 不会在
-仍有分析结果待观察时提前终止循环。
+默认软预算是 12 轮/36 次工具调用，触发后只提示模型尽快收敛；硬预算是 24 轮/72 次，
+另有 900 秒、连续三轮无进展和连续三次失败保护。硬停止会保留一次禁用工具的文本
+最终总结，因此返回 `partial`/`blocked`，不会把预算耗尽误报为 `completed`。相关配置为
+`AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
+`AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
+`AGENT_MAX_CONSECUTIVE_FAILURES`。工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS` 时按完整
+assistant/tool 组压缩旧观察，避免拆断 call/result 对。图的独立保险由
+`AGENT_GRAPH_RECURSION_LIMIT` 控制。
+
+所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
+PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
+事件。模型可调用 `agent.request_user_input` 进入 `waiting_input`。用户也可在安全工具边界
+暂停、继续、取消或发送转向信息。审批策略通过 `AGENT_APPROVAL_POLICY=always|on_request|never`
+配置；`never` 对需要审批的调用是阻断，不是静默授权。
 
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
 和输出。工具规格还声明超时、重试和幂等行为。只有幂等工具遇到可重试失败时才会重试；
@@ -428,6 +440,23 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
     "focus_files":["ai_agent_platform/services/workspace_service.py"]
   }'
 ```
+
+运行创建后可使用以下生命周期接口：
+
+```text
+GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
+GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
+POST /api/v1/agent/runs/{run_id}/pause
+POST /api/v1/agent/runs/{run_id}/continue   {"message":"补充方向或问题答案"}
+POST /api/v1/agent/runs/{run_id}/steer      {"message":"新的执行方向"}
+POST /api/v1/agent/runs/{run_id}/cancel
+POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"审批说明"}
+```
+
+事件流使用可恢复游标；浏览器工作台优先消费 SSE，连接失败时回退到状态轮询。终态包括
+`completed`、`partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括
+`waiting_approval`、`waiting_input` 和 `paused`。
 
 响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
 使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和

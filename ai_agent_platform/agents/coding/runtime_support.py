@@ -18,7 +18,11 @@ from ai_agent_platform.agents.coding.models import (
     ReviewRoute,
     ValidationRoute,
 )
-from ai_agent_platform.agents.coding.change_loop import SANDBOX_LIFECYCLE_TOOLS
+from ai_agent_platform.agents.coding.change_loop import (
+    SANDBOX_LIFECYCLE_TOOLS,
+    SANDBOX_MUTATION_TOOLS,
+    SANDBOX_VALIDATION_TOOLS,
+)
 from ai_agent_platform.agents.coding.text import snippet
 
 MAX_AGENT_HISTORY_MESSAGES = 6
@@ -195,15 +199,21 @@ def unresolved_errors(state: CodingAgentState) -> list[dict[str, Any]]:
 
 
 def route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
-    if state.get("native_tool_answer") and not state.get("analysis_tool_calls"):
-        return "compose_answer"
-    if state.get("native_tool_loop_active") and not any(
-        (
-            state.get("analysis_tool_calls"),
-            state.get("change_tool_calls"),
-            state.get("validation_tool_calls"),
+    if state.get("native_tool_loop_active"):
+        if state.get("native_pending_tool_calls"):
+            return (
+                "review_tool_plan"
+                if state.get("approval_required_tools")
+                else "inspect_repository"
+            )
+        if state.get("native_tool_stop_reason") == "no_progress_retry":
+            return "plan_tools"
+        changed_or_validated = any(
+            call.name in SANDBOX_MUTATION_TOOLS | SANDBOX_VALIDATION_TOOLS
+            for call in state.get("tool_calls", [])
         )
-    ):
+        if changed_or_validated and not state.get("native_artifacts_collected"):
+            return "collect_artifacts"
         return "compose_answer"
     return "review_tool_plan" if state.get("approval_required_tools") else "inspect_repository"
 
@@ -214,6 +224,8 @@ def route_after_tool_plan_review(state: CodingAgentState) -> ReviewRoute:
 
 
 def route_after_inspection(state: CodingAgentState) -> InspectionRoute:
+    if state.get("native_tool_loop_active"):
+        return "plan_tools"
     if state.get("change_tool_calls"):
         return "execute_changes"
     if state.get("validation_tool_calls"):

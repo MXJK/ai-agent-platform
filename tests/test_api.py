@@ -22,7 +22,16 @@ from ai_agent_platform.usage_ledger import current_model_usage_context
 def wait_for_run(client: TestClient, run_id: str) -> dict:
     for _ in range(200):
         body = client.get(f"/api/v1/agent/runs/{run_id}").json()
-        if body["status"] in {"completed", "failed", "waiting_approval"}:
+        if body["status"] in {
+            "completed",
+            "partial",
+            "blocked",
+            "cancelled",
+            "failed",
+            "waiting_input",
+            "waiting_approval",
+            "paused",
+        }:
             return body
         time.sleep(0.01)
     raise AssertionError("agent run did not finish")
@@ -308,6 +317,27 @@ class ApiTests(unittest.TestCase):
                     )
                 )
                 self.assertNotIn("rag_context", result["result"])
+                events = client.get(
+                    f"/api/v1/agent/runs/{first.json()['run_id']}/events"
+                ).json()["events"]
+                self.assertEqual(events[0]["type"], "run_queued")
+                self.assertEqual(events[-1]["type"], "run_completed")
+                cursor_events = client.get(
+                    f"/api/v1/agent/runs/{first.json()['run_id']}/events",
+                    params={"after": events[-2]["sequence"]},
+                ).json()["events"]
+                self.assertEqual(cursor_events[-1]["type"], "run_completed")
+                with client.stream(
+                    "GET",
+                    f"/api/v1/agent/runs/{first.json()['run_id']}/events/stream",
+                ) as event_stream:
+                    stream_text = "".join(event_stream.iter_text())
+                self.assertIn("event: run_completed", stream_text)
+                completed_control = client.post(
+                    f"/api/v1/agent/runs/{first.json()['run_id']}/cancel",
+                    json={"message": "too late"},
+                )
+                self.assertEqual(completed_control.status_code, 409)
 
                 source.write_text("VALUE = 'second'\n", encoding="utf-8")
                 second = client.post(

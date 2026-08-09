@@ -37,6 +37,29 @@ def create_coding_tool_registry(
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
     registry.register(
+        "agent.request_user_input",
+        request_user_input_tool,
+        description=(
+            "Pause the active run and ask the user one concise question when a "
+            "material choice cannot be inferred safely."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "context": {"type": "string", "maxLength": 2000},
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    )
+    registry.register(
         "file_symbol_locator",
         file_symbol_locator_tool,
         description="Suggest file and symbol location commands from retrieved context.",
@@ -127,6 +150,13 @@ def create_coding_tool_registry(
         },
     )
     return registry
+
+
+def request_user_input_tool(*, question: str, context: str = "") -> dict[str, Any]:
+    del question, context
+    raise RuntimeError(
+        "agent.request_user_input must be handled by the Agent checkpoint runtime"
+    )
 
 
 def file_symbol_locator_tool(

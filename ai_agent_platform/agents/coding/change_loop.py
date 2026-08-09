@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from langgraph.types import interrupt
 
-from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.agents.coding.models import (
+    AgentRunStore,
+    AgentToolExecution,
+    CodingAgentState,
+)
 from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
@@ -28,9 +34,16 @@ SANDBOX_LIFECYCLE_TOOLS = (
 class ChangeLoopExecutor:
     """Executes approved Sandbox changes, validation, repair, and artifacts."""
 
-    def __init__(self, *, tools: ToolRegistry, planner: object) -> None:
+    def __init__(
+        self,
+        *,
+        tools: ToolRegistry,
+        planner: object,
+        run_store: AgentRunStore | None = None,
+    ) -> None:
         self._tools = tools
         self._planner = planner
+        self._run_store = run_store
 
     def execute_changes(self, state: CodingAgentState) -> CodingAgentState:
         iteration = state.get("change_iteration", 0)
@@ -214,10 +227,76 @@ class ChangeLoopExecutor:
             workspace_root=state["workspace_root"],
             run_id=state.get("run_id"),
         )
-        return [
-            self._tools.execute(tool_call, context=context).to_response()
-            for tool_call in tool_calls
-        ]
+        return [self._execute_tool_call(tool_call, context) for tool_call in tool_calls]
+
+    def _execute_tool_call(
+        self,
+        tool_call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        run_id = context.run_id
+        arguments_hash = hashlib.sha256(
+            json.dumps(
+                tool_call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        get_execution = getattr(self._run_store, "get_tool_execution", None)
+        save_execution = getattr(self._run_store, "save_tool_execution", None)
+        if run_id and callable(get_execution):
+            previous = get_execution(run_id, tool_call.call_id)
+            if previous is not None:
+                if (
+                    previous.name != tool_call.name
+                    or previous.arguments_hash != arguments_hash
+                ):
+                    return {
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.name,
+                        "ok": False,
+                        "error": "call_id was reused with different arguments",
+                        "error_code": "tool_call_identity_conflict",
+                        "cached": True,
+                    }
+                if previous.status == "completed" and previous.response is not None:
+                    cached = dict(previous.response)
+                    cached["cached"] = True
+                    cached["durable_replay"] = True
+                    return cached
+                return {
+                    "call_id": tool_call.call_id,
+                    "name": tool_call.name,
+                    "ok": False,
+                    "error": "tool call has an unfinished durable execution record",
+                    "error_code": "tool_execution_in_progress",
+                    "cached": True,
+                }
+        if run_id and callable(save_execution):
+            save_execution(
+                AgentToolExecution(
+                    run_id=run_id,
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    arguments_hash=arguments_hash,
+                    status="started",
+                )
+            )
+        response = self._tools.execute(tool_call, context=context).to_response()
+        if run_id and callable(save_execution):
+            save_execution(
+                AgentToolExecution(
+                    run_id=run_id,
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    arguments_hash=arguments_hash,
+                    status="completed",
+                    response=response,
+                )
+            )
+        return response
 
 
 def partition_tool_calls(

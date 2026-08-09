@@ -59,7 +59,8 @@ The shared composer offers:
 Both response modes render an in-message execution process and response
 metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
 usage across structured planning and answer generation. The UI shows input,
-output, thinking, and total tokens per response. Agent polling also merges live
+output, thinking, and total tokens per response. Agent cursor SSE, with a polling
+fallback, also merges live
 LangGraph checkpoint trace so fast runs still play completed stages in order
 before the final answer appears.
 
@@ -374,7 +375,9 @@ ID; dotted registry names receive provider-safe aliases and are mapped back
 before execution. The fake provider retains deterministic rule planning for
 offline tests.
 
-Read-only analysis follows a bounded observe/replan loop:
+Native models use one bounded observe/decide/act loop. Repository reads,
+Sandbox mutations, validation commands, status, and diffs are selected in model
+order inside the same tool transcript instead of isolated fixed phases:
 
 ```text
 native tool call
@@ -384,11 +387,24 @@ native tool call
 → model observes and either calls another tool or answers
 ```
 
-The default limits are four model tool rounds and twelve calls per run,
-configured by `AGENT_MAX_TOOL_ROUNDS` and `AGENT_MAX_TOOL_CALLS`. Repeating an
-identical tool name and arguments is treated as no progress. A failed read-only
-call and same-round artifact results are fed back before replanning;
-`workspace_status` or `git_diff` cannot preempt pending analysis observations.
+The default soft budget is 12 rounds/36 calls; it asks the model to converge but
+does not stop execution. Hard limits are 24 rounds/72 calls, 900 seconds, three
+no-progress rounds, and three consecutive failures. A hard stop reserves one
+tool-disabled text finalization, so exhaustion becomes `partial` or `blocked`
+instead of a false `completed`. Configure these with
+`AGENT_SOFT_TOOL_ROUNDS`, `AGENT_MAX_TOOL_ROUNDS`, `AGENT_SOFT_TOOL_CALLS`,
+`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ELAPSED_SECONDS`,
+`AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Older complete
+assistant/tool groups are compacted above `AGENT_NATIVE_CONTEXT_MAX_CHARS`, and
+`AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.
+
+Every successful or failed result is returned under its call ID. Completed
+`(run_id, call_id)` executions can be replayed from the memory or PostgreSQL
+ledger; changed argument hashes are rejected. PostgreSQL also stores append-only
+Run events. The model can invoke `agent.request_user_input` to enter
+`waiting_input`, while users can pause, continue, cancel, or steer at safe tool
+boundaries. `AGENT_APPROVAL_POLICY=always|on_request|never` controls approvals;
+`never` blocks approval-requiring calls rather than silently authorizing them.
 
 `ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
 validates both input and output at execution. Tool specs also declare timeout,
@@ -479,6 +495,24 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
     "focus_files":["ai_agent_platform/services/workspace_service.py"]
   }'
 ```
+
+The Run lifecycle APIs are:
+
+```text
+GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
+GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
+POST /api/v1/agent/runs/{run_id}/pause
+POST /api/v1/agent/runs/{run_id}/continue   {"message":"direction or answer"}
+POST /api/v1/agent/runs/{run_id}/steer      {"message":"new direction"}
+POST /api/v1/agent/runs/{run_id}/cancel
+POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"review"}
+```
+
+The event stream uses resumable cursors; the browser workbench prefers SSE and
+falls back to status polling. Final statuses are `completed`, `partial`,
+`blocked`, `cancelled`, and `failed`; suspended interaction states are
+`waiting_approval`, `waiting_input`, and `paused`.
 
 Responses expose `context_route`, `selected_knowledge_base_ids`, and
 `context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include

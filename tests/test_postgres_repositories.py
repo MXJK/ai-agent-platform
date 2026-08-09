@@ -3,7 +3,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from ai_agent_platform.agents.coding.models import AgentRunRecord
+from ai_agent_platform.agents.coding.models import (
+    AgentRunEvent,
+    AgentRunRecord,
+    AgentToolExecution,
+)
 from ai_agent_platform.domain import ConversationSummary
 from ai_agent_platform.integrations.rag import (
     DocumentChunk,
@@ -351,6 +355,68 @@ class PostgresRepositoryTests(unittest.TestCase):
         sql, params = connection.calls[0]
         self.assertIn("workspace_root", sql)
         self.assertIn("/workspace/code", params)
+
+    def test_agent_runtime_events_and_tool_identity_use_durable_tables(self) -> None:
+        connection = FakeConnection(
+            [
+                [
+                    (41, "run_started", "running", "setup_workspace", "started", {}),
+                    (42, "run_paused", "paused", "plan_tools", "paused", {"safe": True}),
+                ],
+                (43,),
+                (
+                    "run_1",
+                    "call_1",
+                    "repo.read_file",
+                    "args-hash",
+                    "completed",
+                    {"ok": True},
+                ),
+                None,
+            ]
+        )
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.postgres._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresAgentRunRepository(database_url="postgresql://test")
+            repository._connect = lambda: connection
+            events = repository.list_events("run_1", after=40)
+            appended = repository.append_event(
+                "run_1",
+                AgentRunEvent(
+                    sequence=0,
+                    type="control_pause_requested",
+                    status="running",
+                    node="plan_tools",
+                    summary="pause requested",
+                ),
+            )
+            execution = repository.get_tool_execution("run_1", "call_1")
+            repository.save_tool_execution(
+                AgentToolExecution(
+                    run_id="run_1",
+                    call_id="call_1",
+                    name="repo.read_file",
+                    arguments_hash="args-hash",
+                    status="completed",
+                    response={"ok": True},
+                )
+            )
+
+        self.assertEqual([event.sequence for event in events], [41, 42])
+        self.assertEqual(events[1].output, {"safe": True})
+        self.assertEqual(appended.sequence, 43)
+        assert execution is not None
+        self.assertEqual(execution.arguments_hash, "args-hash")
+        self.assertIn("id > %s", connection.calls[0][0])
+        self.assertEqual(connection.calls[0][1], ("run_1", 40))
+        self.assertIn("agent_run_events", connection.calls[1][0])
+        self.assertIn("agent_tool_executions", connection.calls[2][0])
+        self.assertIn("ON CONFLICT (run_id, call_id)", connection.calls[3][0])
 
     def test_legacy_result_json_is_adapted_only_at_storage_boundary(self) -> None:
         result = _agent_result_from_json(

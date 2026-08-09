@@ -159,6 +159,18 @@ class LLMStructuredAgentPlanner:
             raise RuntimeError("LLM client does not support native tool calling")
         return decide(messages, tool_specs)
 
+    def finalize_tool_session(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        reason: str,
+        tool_specs: list[ToolSpec] | None = None,
+    ) -> LLMToolDecision:
+        finalize = getattr(self._llm_client, "finalize_tools", None)
+        if not callable(finalize):
+            raise RuntimeError("LLM client does not support tool-session finalization")
+        return finalize(messages, reason=reason, tools=tool_specs or [])
+
     def plan_repair_tool_calls(
         self,
         state: CodingAgentState,

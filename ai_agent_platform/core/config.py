@@ -131,8 +131,17 @@ class Settings:
     agent_max_context_files: int = 12
     agent_max_context_chars: int = 32000
     agent_max_instruction_chars: int = 16000
-    agent_max_tool_rounds: int = 4
-    agent_max_tool_calls: int = 12
+    agent_soft_tool_rounds: int = 12
+    agent_max_tool_rounds: int = 24
+    agent_soft_tool_calls: int = 36
+    agent_max_tool_calls: int = 72
+    agent_max_elapsed_seconds: int = 900
+    agent_no_progress_rounds: int = 3
+    agent_max_consecutive_failures: int = 3
+    agent_native_context_max_chars: int = 48000
+    agent_native_context_keep_messages: int = 10
+    agent_graph_recursion_limit: int = 128
+    agent_approval_policy: str = "on_request"
     auth_mode: str = "disabled"
     gateway_trust_secret: str | None = None
 
@@ -164,6 +173,11 @@ class Settings:
             "llm_routing_policy",
             self.llm_routing_policy,
             {"smart", "quality", "cost", "latency"},
+        )
+        _require_choice(
+            "agent_approval_policy",
+            self.agent_approval_policy,
+            {"always", "on_request", "never"},
         )
         if self.llm_model_catalog_json:
             _validate_model_catalog_json(self.llm_model_catalog_json)
@@ -366,10 +380,35 @@ class Settings:
             ("agent_max_context_files", self.agent_max_context_files),
             ("agent_max_context_chars", self.agent_max_context_chars),
             ("agent_max_instruction_chars", self.agent_max_instruction_chars),
+            ("agent_soft_tool_rounds", self.agent_soft_tool_rounds),
             ("agent_max_tool_rounds", self.agent_max_tool_rounds),
+            ("agent_soft_tool_calls", self.agent_soft_tool_calls),
             ("agent_max_tool_calls", self.agent_max_tool_calls),
+            ("agent_max_elapsed_seconds", self.agent_max_elapsed_seconds),
+            ("agent_no_progress_rounds", self.agent_no_progress_rounds),
+            (
+                "agent_max_consecutive_failures",
+                self.agent_max_consecutive_failures,
+            ),
+            (
+                "agent_native_context_max_chars",
+                self.agent_native_context_max_chars,
+            ),
+            (
+                "agent_native_context_keep_messages",
+                self.agent_native_context_keep_messages,
+            ),
+            ("agent_graph_recursion_limit", self.agent_graph_recursion_limit),
         ):
             _require_positive(name, value)
+        if self.agent_soft_tool_rounds > self.agent_max_tool_rounds:
+            raise ValueError(
+                "agent_soft_tool_rounds must not exceed agent_max_tool_rounds"
+            )
+        if self.agent_soft_tool_calls > self.agent_max_tool_calls:
+            raise ValueError(
+                "agent_soft_tool_calls must not exceed agent_max_tool_calls"
+            )
         if self.llm_max_retries < 0:
             raise ValueError("llm_max_retries must be greater than or equal to 0")
         if (
@@ -852,14 +891,59 @@ class Settings:
                 cls.agent_max_instruction_chars,
                 dotenv,
             ),
+            agent_soft_tool_rounds=_int_env(
+                "AGENT_SOFT_TOOL_ROUNDS",
+                cls.agent_soft_tool_rounds,
+                dotenv,
+            ),
             agent_max_tool_rounds=_int_env(
                 "AGENT_MAX_TOOL_ROUNDS",
                 cls.agent_max_tool_rounds,
                 dotenv,
             ),
+            agent_soft_tool_calls=_int_env(
+                "AGENT_SOFT_TOOL_CALLS",
+                cls.agent_soft_tool_calls,
+                dotenv,
+            ),
             agent_max_tool_calls=_int_env(
                 "AGENT_MAX_TOOL_CALLS",
                 cls.agent_max_tool_calls,
+                dotenv,
+            ),
+            agent_max_elapsed_seconds=_int_env(
+                "AGENT_MAX_ELAPSED_SECONDS",
+                cls.agent_max_elapsed_seconds,
+                dotenv,
+            ),
+            agent_no_progress_rounds=_int_env(
+                "AGENT_NO_PROGRESS_ROUNDS",
+                cls.agent_no_progress_rounds,
+                dotenv,
+            ),
+            agent_max_consecutive_failures=_int_env(
+                "AGENT_MAX_CONSECUTIVE_FAILURES",
+                cls.agent_max_consecutive_failures,
+                dotenv,
+            ),
+            agent_native_context_max_chars=_int_env(
+                "AGENT_NATIVE_CONTEXT_MAX_CHARS",
+                cls.agent_native_context_max_chars,
+                dotenv,
+            ),
+            agent_native_context_keep_messages=_int_env(
+                "AGENT_NATIVE_CONTEXT_KEEP_MESSAGES",
+                cls.agent_native_context_keep_messages,
+                dotenv,
+            ),
+            agent_graph_recursion_limit=_int_env(
+                "AGENT_GRAPH_RECURSION_LIMIT",
+                cls.agent_graph_recursion_limit,
+                dotenv,
+            ),
+            agent_approval_policy=_env(
+                "AGENT_APPROVAL_POLICY",
+                cls.agent_approval_policy,
                 dotenv,
             ),
             auth_mode=_env("AUTH_MODE", cls.auth_mode, dotenv),

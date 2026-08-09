@@ -66,10 +66,19 @@ class CodingAgentState(TypedDict, total=False):
     native_tool_messages: list[dict[str, Any]]
     native_tool_round: int
     native_tool_call_count: int
+    native_pending_tool_calls: list[ToolCall]
     native_tool_signatures: list[str]
     native_tool_loop_active: bool
     native_tool_answer: str
     native_tool_stop_reason: str
+    native_soft_limit_warned: bool
+    native_no_progress_rounds: int
+    native_consecutive_failures: int
+    native_context_compactions: int
+    native_context_chars: int
+    native_artifacts_collected: bool
+    terminal_status: str
+    terminal_reason: str
     exploration_results: list[dict[str, Any]]
     validation_results: list[dict[str, Any]]
     validation_history: list[dict[str, Any]]
@@ -90,7 +99,13 @@ class CodingAgentState(TypedDict, total=False):
 
 
 AgentRoute = Literal["plan_exploration", "compose_answer"]
-PlanRoute = Literal["review_tool_plan", "inspect_repository", "compose_answer"]
+PlanRoute = Literal[
+    "plan_tools",
+    "review_tool_plan",
+    "inspect_repository",
+    "collect_artifacts",
+    "compose_answer",
+]
 ReviewRoute = Literal["inspect_repository", "compose_answer"]
 ContextRoute = Literal["plan_exploration", "merge_evidence"]
 AnswerRoute = Literal["handle_error", "end"]
@@ -104,7 +119,18 @@ InspectionRoute = Literal[
 ValidationRoute = Literal["review_repair_plan", "collect_artifacts"]
 RepairReviewRoute = Literal["execute_changes", "collect_artifacts"]
 ChangeExecutionRoute = Literal["validate_changes", "collect_artifacts"]
-AgentRunStatus = Literal["queued", "running", "waiting_approval", "completed", "failed"]
+AgentRunStatus = Literal[
+    "queued",
+    "running",
+    "waiting_input",
+    "waiting_approval",
+    "paused",
+    "completed",
+    "partial",
+    "blocked",
+    "cancelled",
+    "failed",
+]
 MAX_NODE_RETRIES = 2
 
 
@@ -198,6 +224,28 @@ class AgentRunRecord:
     error: Optional[str] = None
     pending_approval: Optional[dict[str, Any]] = None
     errors: list[dict[str, Any]] = field(default_factory=list)
+    control_action: Optional[str] = None
+    steering_messages: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentRunEvent:
+    sequence: int
+    type: str
+    status: str
+    node: Optional[str]
+    summary: str
+    output: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AgentToolExecution:
+    run_id: str
+    call_id: str
+    name: str
+    arguments_hash: str
+    status: str
+    response: Optional[dict[str, Any]] = None
 
 
 class AgentRunNotFoundError(Exception):
@@ -216,6 +264,20 @@ class AgentRunStore(Protocol):
         ...
 
     def get(self, run_id: str) -> AgentRunRecord:
+        ...
+
+    def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
+        ...
+
+    def append_event(self, run_id: str, event: AgentRunEvent) -> AgentRunEvent:
+        ...
+
+    def get_tool_execution(
+        self, run_id: str, call_id: str
+    ) -> Optional[AgentToolExecution]:
+        ...
+
+    def save_tool_execution(self, execution: AgentToolExecution) -> None:
         ...
 
 

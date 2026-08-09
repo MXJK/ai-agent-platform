@@ -297,6 +297,16 @@
                   <p>Agent 的可写操作会暂停并等待你的审批。</p>
                   <button id="run-agent-btn" class="button primary" type="button">开始运行</button>
                 </div>
+                <div id="agent-control-bar" class="agent-control-bar hidden">
+                  <label for="agent-steering-input">运行中转向 <span>在下一个安全边界生效</span></label>
+                  <input id="agent-steering-input" maxlength="4000" placeholder="例如：先不要改 API，优先补回归测试" />
+                  <div class="button-row">
+                    <button id="steer-run-btn" class="button ghost" type="button">发送转向</button>
+                    <button id="pause-run-btn" class="button ghost" type="button">暂停</button>
+                    <button id="continue-run-btn" class="button primary hidden" type="button">继续</button>
+                    <button id="cancel-run-btn" class="button danger" type="button">取消</button>
+                  </div>
+                </div>
               </article>
 
               <article id="approval-card" class="surface approval-card hidden" aria-live="assertive">

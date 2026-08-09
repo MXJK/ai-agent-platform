@@ -1,6 +1,8 @@
 const API_BASE = "/api/v1";
 const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
-const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "waiting_approval"]);
+const FINAL_RUN_STATUSES = new Set(["completed", "partial", "blocked", "cancelled", "failed"]);
+const SUSPENDED_RUN_STATUSES = new Set(["waiting_approval", "waiting_input", "paused"]);
+const TERMINAL_RUN_STATUSES = new Set([...FINAL_RUN_STATUSES, ...SUSPENDED_RUN_STATUSES]);
 const responseTimers = new WeakMap();
 
 const state = {
@@ -397,7 +399,12 @@ function humanizeStatus(value) {
     queued: "排队中",
     running: "运行中",
     waiting_approval: "等待审批",
+    waiting_input: "等待输入",
+    paused: "已暂停",
     completed: "已完成",
+    partial: "部分完成",
+    blocked: "受阻",
+    cancelled: "已取消",
     completed_with_errors: "完成，有警告",
     failed: "失败",
     pending: "等待中",
@@ -409,7 +416,7 @@ function statusClass(value) {
   if (value === "completed_with_errors") {
     return "warning";
   }
-  if (["completed", "failed", "waiting_approval", "running", "queued"].includes(value)) {
+  if (["completed", "partial", "blocked", "cancelled", "failed", "waiting_approval", "waiting_input", "paused", "running", "queued"].includes(value)) {
     return value;
   }
   return "neutral";
@@ -1944,12 +1951,14 @@ function renderAgentChatResponse(
       : "Agent 正在运行 LangGraph 工作流。",
   });
 
-  if (!holdAnswer && actualStatus === "completed") {
+  if (!holdAnswer && ["completed", "partial", "blocked", "cancelled"].includes(actualStatus)) {
     contentNode.innerHTML = result.answer
       ? renderMarkdown(result.answer)
       : "<p>Agent 已完成，但没有返回文本内容。</p>";
   } else if (!holdAnswer && actualStatus === "waiting_approval") {
     contentNode.innerHTML = "<p>Agent 已暂停并等待审批。请前往代码 Agent 页面查看工具计划。</p>";
+  } else if (!holdAnswer && ["paused", "waiting_input"].includes(actualStatus)) {
+    contentNode.innerHTML = "<p>Agent 已在安全边界暂停，可补充方向后继续。</p>";
   } else if (!holdAnswer && actualStatus === "failed") {
     contentNode.innerHTML = `<p>${escapeHtml(body.error || "Agent 运行失败，请查看运行详情。")}</p>`;
   } else {
@@ -2050,6 +2059,8 @@ async function runAgentFromComposer() {
     }
     if (state.latestRunStatus === "completed") {
       setChatStatus("Agent 已完成", "completed");
+    } else if (["partial", "blocked", "cancelled"].includes(state.latestRunStatus)) {
+      setChatStatus(`Agent ${humanizeStatus(state.latestRunStatus)}`, state.latestRunStatus);
     } else if (state.latestRunStatus === "waiting_approval") {
       setChatStatus("Agent 等待审批", "waiting_approval");
       showToast("Agent 正在等待审批，请前往代码 Agent 页面处理", "warning");
@@ -2434,7 +2445,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     if (onSubmitted) {
       onSubmitted(body);
     }
-    const finalBody = await pollRunUntilTerminal({
+    const finalBody = await watchRunUntilTerminal({
       onProgress,
       preserveChat: Boolean(onProgress),
     });
@@ -2461,6 +2472,7 @@ function renderAgentRun(body) {
   const result = body.result || {};
   state.latestRunId = body.run_id || result.run_id || "";
   state.latestRunStatus = body.status || result.status || "";
+  const actualStatus = state.latestRunStatus;
   setAgentStatus(state.latestRunStatus, state.latestRunId);
 
   const answer = result.answer || body.error || "";
@@ -2468,7 +2480,11 @@ function renderAgentRun(body) {
   if (answer) {
     answerNode.className = "rich-output";
     answerNode.innerHTML = renderMarkdown(answer);
-  } else if (body.pending_approval) {
+  } else if (actualStatus === "waiting_input" && body.pending_approval?.type === "input_required") {
+    answerNode.className = "rich-output empty-output";
+    answerNode.textContent = body.pending_approval.question || "Agent 需要你补充一项信息后才能继续。";
+    $("agent-steering-input").placeholder = body.pending_approval.question || "补充信息后点击继续";
+  } else if (actualStatus === "waiting_approval" && body.pending_approval) {
     answerNode.className = "rich-output empty-output";
     answerNode.textContent = "执行计划已生成，请完成下方审批。";
   } else {
@@ -2476,7 +2492,10 @@ function renderAgentRun(body) {
     answerNode.textContent = "Agent 正在运行，结果会在完成后显示。";
   }
 
-  renderApproval(body.pending_approval);
+  renderApproval(
+    state.latestRunStatus === "waiting_approval" ? body.pending_approval : null,
+  );
+  renderAgentControls(state.latestRunStatus);
   renderAgentMetrics(result.metrics);
   renderArtifacts(result.artifacts || []);
   setTrace(body.trace || result.trace || []);
@@ -2484,9 +2503,24 @@ function renderAgentRun(body) {
   renderOverview();
 }
 
+function renderAgentControls(status) {
+  const bar = $("agent-control-bar");
+  if (!state.latestRunId || FINAL_RUN_STATUSES.has(status)) {
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  const isRunning = ["queued", "running"].includes(status);
+  const canContinue = ["paused", "waiting_input"].includes(status);
+  $("pause-run-btn").classList.toggle("hidden", !isRunning);
+  $("steer-run-btn").classList.toggle("hidden", !(isRunning || canContinue));
+  $("continue-run-btn").classList.toggle("hidden", !canContinue);
+  $("cancel-run-btn").classList.toggle("hidden", status === "cancelled");
+}
+
 function renderApproval(approval) {
   const card = $("approval-card");
-  if (!approval) {
+  if (!approval || approval.type === "input_required" || approval.type === "run_pause") {
     card.classList.add("hidden");
     return;
   }
@@ -2614,7 +2648,7 @@ async function resumeRun(approved) {
     });
     renderAgentRun(body);
     showToast(approved ? "执行计划已批准" : "执行计划已拒绝", approved ? "success" : "warning");
-    await pollRunUntilTerminal();
+    await watchRunUntilTerminal();
   } catch (error) {
     showToast(humanizeError(error), "error");
   } finally {
@@ -2622,6 +2656,74 @@ async function resumeRun(approved) {
     rejectButton.disabled = false;
     approveButton.removeAttribute("aria-busy");
   }
+}
+
+async function controlRun(action) {
+  if (!state.latestRunId) return;
+  const input = $("agent-steering-input");
+  const message = input.value.trim();
+  if (action === "steer" && !message) {
+    showToast("请先输入需要转向的方向", "warning");
+    input.focus();
+    return;
+  }
+  const endpoint = action === "continue" ? "continue" : action;
+  try {
+    const body = await fetchJson(
+      `/agent/runs/${encodeURIComponent(state.latestRunId)}/${endpoint}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      },
+    );
+    renderAgentRun(body);
+    if (["steer", "continue"].includes(action)) input.value = "";
+    showToast({
+      pause: "暂停请求已发送，将在安全边界生效",
+      cancel: "取消请求已发送",
+      steer: "转向信息已加入当前运行",
+      continue: "Agent 已继续运行",
+    }[action] || "运行状态已更新", action === "cancel" ? "warning" : "success");
+    if (action === "continue") await watchRunUntilTerminal();
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function watchRunUntilTerminal(options = {}) {
+  const generation = ++state.agentPollGeneration;
+  let cursor = 0;
+  try {
+    const response = await fetch(
+      `${API_BASE}/agent/runs/${encodeURIComponent(state.latestRunId)}/events/stream?cursor=${cursor}`,
+      {
+        headers: { "X-User-ID": $("user-id-input")?.value.trim() || "demo_user" },
+      },
+    );
+    if (!response.ok || !response.body) throw new Error(`event stream returned ${response.status}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (generation === state.agentPollGeneration) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+      for (const chunk of chunks) {
+        const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        const event = JSON.parse(dataLine.slice(6));
+        cursor = Math.max(cursor, Number(event.sequence) || 0);
+        if (event.status) state.latestRunStatus = event.status;
+        const latestBody = await refreshRun();
+        if (options.onProgress) await options.onProgress(latestBody);
+      }
+    }
+  } catch (error) {
+    console.warn("Agent event stream unavailable; falling back to polling", error);
+  }
+  return pollRunUntilTerminal(options);
 }
 
 async function pollRunUntilTerminal({ onProgress = null, preserveChat = false } = {}) {
@@ -4524,6 +4626,10 @@ function bindEvents() {
   });
   $("approve-run-btn").addEventListener("click", () => resumeRun(true));
   $("reject-run-btn").addEventListener("click", () => resumeRun(false));
+  $("pause-run-btn").addEventListener("click", () => controlRun("pause"));
+  $("cancel-run-btn").addEventListener("click", () => controlRun("cancel"));
+  $("steer-run-btn").addEventListener("click", () => controlRun("steer"));
+  $("continue-run-btn").addEventListener("click", () => controlRun("continue"));
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);

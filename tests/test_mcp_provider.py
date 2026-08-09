@@ -23,7 +23,16 @@ from ai_agent_platform.main import create_app
 def wait_for_agent_run(
     client: TestClient,
     run_id: str,
-    terminal_statuses: tuple[str, ...] = ("completed", "failed", "waiting_approval"),
+    terminal_statuses: tuple[str, ...] = (
+        "completed",
+        "partial",
+        "blocked",
+        "cancelled",
+        "failed",
+        "waiting_input",
+        "waiting_approval",
+        "paused",
+    ),
 ) -> dict:
     for _ in range(100):
         response = client.get(f"/api/v1/agent/runs/{run_id}")

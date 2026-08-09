@@ -257,6 +257,10 @@ class AgentRunService:
                     routing_policy=None,
                 ),
             )
+        mark_resume_queued = getattr(self._runtime, "mark_resume_queued", None)
+        queued_record = (
+            mark_resume_queued(run_id) if callable(mark_resume_queued) else record
+        )
         try:
             self._task_queue.submit(
                 "agent_resume",
@@ -268,10 +272,13 @@ class AgentRunService:
                 model_selection=selection.__dict__,
             )
         except TaskQueueError:
+            restore_record = getattr(self._runtime, "restore_record", None)
+            if callable(restore_record):
+                restore_record(record)
             self._metrics.increment("agent_run_resumes_rejected_total")
             raise
         self._metrics.increment("agent_run_resumes_submitted_total")
-        return record
+        return queued_record
 
     def get_run(self, run_id: str) -> AgentRunRecord:
         return self._runtime.get_run(run_id)
@@ -282,6 +289,82 @@ class AgentRunService:
         record = self.get_run(run_id)
         self._assert_actor(record, actor_user_id)
         return record
+
+    def list_events_for_actor(
+        self,
+        run_id: str,
+        actor_user_id: str | None,
+        *,
+        after: int = 0,
+    ):
+        record = self.get_run_for_actor(run_id, actor_user_id)
+        list_events = getattr(self._runtime, "list_events", None)
+        if not callable(list_events):
+            return record, []
+        return record, list_events(run_id, after=after)
+
+    def control_run(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        message: str = "",
+        actor_user_id: str | None = None,
+    ) -> AgentRunRecord:
+        record = self.get_run_for_actor(run_id, actor_user_id)
+        request_control = getattr(self._runtime, "request_control", None)
+        if not callable(request_control):
+            raise RuntimeError("Agent runtime does not support lifecycle controls")
+        updated = request_control(run_id=run_id, action=action, message=message)
+        self._metrics.increment(f"agent_run_control_{action}_total")
+        return updated
+
+    def continue_run(
+        self,
+        *,
+        run_id: str,
+        message: str = "",
+        actor_user_id: str | None = None,
+    ) -> AgentRunRecord:
+        record = self.get_run_for_actor(run_id, actor_user_id)
+        if record.status not in {"paused", "waiting_input"}:
+            raise AgentRunInvalidStateError(run_id, record.status)
+        if self._model_registry is not None:
+            selection = self._model_registry.selection_for_run(
+                run_id,
+                record.conversation_id,
+            )
+        else:
+            selection = self._run_model_selections.get(
+                run_id,
+                self._model_selection(
+                    provider=None,
+                    model=None,
+                    thinking_level=None,
+                    routing_policy=None,
+                ),
+            )
+        mark_resume_queued = getattr(self._runtime, "mark_resume_queued", None)
+        queued_record = (
+            mark_resume_queued(run_id) if callable(mark_resume_queued) else record
+        )
+        try:
+            self._task_queue.submit(
+                "agent_resume",
+                self.execute_resume_task,
+                run_id=run_id,
+                approved=True,
+                feedback=message,
+                actor_user_id=actor_user_id,
+                model_selection=selection.__dict__,
+            )
+        except TaskQueueError:
+            restore_record = getattr(self._runtime, "restore_record", None)
+            if callable(restore_record):
+                restore_record(record)
+            raise
+        self._metrics.increment("agent_run_continues_submitted_total")
+        return queued_record
 
     def close(self) -> None:
         if self._owns_task_queue:
@@ -402,7 +485,17 @@ class AgentRunService:
     ) -> None:
         started_at = perf_counter()
         record = self.get_run(run_id)
-        if broker_redelivered and record.status == "waiting_approval":
+        resume_pending = (
+            record.status == "running" and record.control_action == "resume"
+        )
+        if broker_redelivered and (
+            resume_pending
+            or record.status in {
+                "waiting_approval",
+                "waiting_input",
+                "paused",
+            }
+        ):
             self._metrics.increment("agent_resume_worker_lost_total")
             self.fail_run_task(
                 run_id=run_id,
@@ -414,7 +507,10 @@ class AgentRunService:
                 max_attempts=1,
             )
             return
-        if record.status != "waiting_approval":
+        if (
+            record.status not in {"waiting_approval", "waiting_input", "paused"}
+            and not resume_pending
+        ):
             self._metrics.increment("agent_resume_duplicate_deliveries_total")
             logger.info(
                 "agent resume delivery skipped",
@@ -521,7 +617,7 @@ class AgentRunService:
         user_message: str | None = None,
         actor_user_id: str | None = None,
     ) -> None:
-        if result.status != "completed" or not result.answer:
+        if result.status not in {"completed", "partial", "blocked"} or not result.answer:
             return
         assistant_messages = self._session_service.add_message(
             session_id=result.conversation_id,

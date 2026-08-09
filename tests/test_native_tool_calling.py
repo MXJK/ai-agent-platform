@@ -1,4 +1,6 @@
 from pathlib import Path
+import shlex
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -167,6 +169,65 @@ class NativeProviderMappingTests(unittest.TestCase):
         )
         self.assertEqual(result_item["call_id"], "call_1")
         self.assertEqual(second.text, "app.py contains value=1")
+
+    def test_openai_finalization_preserves_tool_transcript_and_disables_tools(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="openai",
+                llm_model="test-openai",
+                openai_api_key="test-key",
+            )
+        )
+        captured: dict[str, object] = {}
+
+        def fake_post(url, *, headers, payload):
+            del headers
+            if url.endswith("/input_tokens"):
+                return {"input_tokens": 12}
+            captured.update(payload)
+            return {
+                "model": "test-openai",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Grounded final answer."}
+                        ],
+                    }
+                ],
+            }
+
+        messages = [
+            {"role": "user", "content": "read app.py"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "call_final",
+                        "name": "repo.read_file",
+                        "arguments": {"path": "app.py"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "call_id": "call_final",
+                "name": "repo.read_file",
+                "content": {"ok": True, "result": {"content": "value=1"}},
+            },
+        ]
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            decision = client.finalize_tools(messages, reason="hard_tool_round_budget")
+
+        self.assertEqual(decision.text, "Grounded final answer.")
+        self.assertNotIn("tools", captured)
+        self.assertNotIn("tool_choice", captured)
+        self.assertTrue(
+            any(item.get("type") == "function_call_output" for item in captured["input"])
+        )
 
     def test_anthropic_maps_tool_use_and_usage(self) -> None:
         client = LLMClient(
@@ -417,7 +478,163 @@ class RecoveringArtifactNativePlanner(ScriptedNativePlanner):
         )
 
 
+class HardBudgetNativePlanner(ScriptedNativePlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalizations = 0
+        self.finalized_with_results = False
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del messages, tool_specs
+        self.decisions += 1
+        path = "app.py" if self.decisions == 1 else "other.py"
+        return LLMToolDecision(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    call_id=f"hard_{self.decisions}",
+                    name="repo.read_file",
+                    arguments={"path": path},
+                    source="test_native",
+                )
+            ],
+            model="scripted",
+            provider="test",
+            stop_reason="tool_use",
+        )
+
+    def finalize_tool_session(self, messages, *, reason):
+        self.finalizations += 1
+        self.finalized_with_results = sum(
+            message.get("role") == "tool" and message.get("content", {}).get("ok")
+            for message in messages
+        ) == 2
+        return LLMToolDecision(
+            text=f"Partial grounded answer after {reason}.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
+class UnifiedChangeNativePlanner(ScriptedNativePlanner):
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+        self.observed_order: list[str] = []
+
+    def classify_intent(self, user_input: str) -> dict[str, object]:
+        return {
+            "intent": "change_planning",
+            "reason": "unified native change test",
+            "confidence": 1.0,
+            "source": "test",
+        }
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="write_1",
+                        name="sandbox.write_file",
+                        arguments={"path": "app.py", "content": "value = 43\n"},
+                        source="test_native",
+                    ),
+                    ToolCall(
+                        call_id="validate_1",
+                        name="sandbox.run_command",
+                        arguments={"command": self.command},
+                        source="test_native",
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.observed_order = [
+            str(message.get("name"))
+            for message in messages
+            if message.get("role") == "tool"
+        ]
+        return LLMToolDecision(
+            text="Changed and validated app.py after observing all tool results.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class NativeToolLoopTests(unittest.TestCase):
+    def test_hard_budget_reserves_text_only_finalization_and_returns_partial(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = 42\n", encoding="utf-8")
+            (root / "other.py").write_text("other = 1\n", encoding="utf-8")
+            planner = HardBudgetNativePlanner()
+            runtime = CodingAgentRuntime(
+                planner=planner,
+                max_tool_rounds=2,
+                max_tool_calls=4,
+            )
+
+            result = runtime.run(
+                conversation_id="sess_hard_budget",
+                user_input="read both files until the hard budget",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(
+            result.answer,
+            "Partial grounded answer after hard_tool_round_budget.",
+        )
+        self.assertEqual(planner.decisions, 2)
+        self.assertEqual(planner.finalizations, 1)
+        self.assertTrue(planner.finalized_with_results)
+
+    def test_native_loop_executes_change_and_validation_in_model_order(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "app.py"
+            source.write_text("value = 42\n", encoding="utf-8")
+            validation = (
+                "compile(open('app.py', encoding='utf-8').read(), "
+                "'app.py', 'exec')"
+            )
+            planner = UnifiedChangeNativePlanner(
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(validation)}"
+            )
+            runtime = CodingAgentRuntime(planner=planner)
+
+            waiting = runtime.run(
+                conversation_id="sess_unified_change",
+                user_input="change app.py and validate it",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            result = runtime.resume(run_id=waiting.run_id, approved=True)
+            original_source = source.read_text(encoding="utf-8")
+
+        self.assertEqual(waiting.status, "waiting_approval")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            planner.observed_order[:2],
+            ["sandbox.write_file", "sandbox.run_command"],
+        )
+        self.assertIn("sandbox.workspace_status", planner.observed_order)
+        self.assertIn("sandbox.git_diff", planner.observed_order)
+        self.assertTrue(result.change_summary.validation_passed)
+        self.assertEqual(original_source, "value = 42\n")
+
     def test_tool_result_is_fed_back_before_final_answer(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

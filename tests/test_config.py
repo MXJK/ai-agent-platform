@@ -19,6 +19,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sentence_transformer_reranker_device, "cpu")
         self.assertFalse(settings.rag_rerank_default_enabled)
         self.assertTrue(settings.workspace_allowed_roots)
+        self.assertEqual(settings.agent_soft_tool_rounds, 12)
+        self.assertEqual(settings.agent_max_tool_rounds, 24)
+        self.assertEqual(settings.agent_soft_tool_calls, 36)
+        self.assertEqual(settings.agent_max_tool_calls, 72)
+        self.assertEqual(settings.agent_approval_policy, "on_request")
 
     def test_blank_allowed_roots_falls_back_to_startup_directory(self) -> None:
         with patch.dict(
@@ -351,6 +356,14 @@ class SettingsTests(unittest.TestCase):
                 conversation_summary_trigger_messages=6,
                 conversation_summary_keep_recent_messages=6,
             )
+
+    def test_rejects_invalid_agent_runtime_budgets_and_approval_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "agent_soft_tool_rounds"):
+            Settings(agent_soft_tool_rounds=25, agent_max_tool_rounds=24)
+        with self.assertRaisesRegex(ValueError, "agent_soft_tool_calls"):
+            Settings(agent_soft_tool_calls=73, agent_max_tool_calls=72)
+        with self.assertRaisesRegex(ValueError, "agent_approval_policy"):
+            Settings(agent_approval_policy="unsafe")
 
 
 if __name__ == "__main__":

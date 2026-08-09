@@ -443,6 +443,10 @@ p {
 }
 
 .status-pill.waiting_approval,
+.status-pill.waiting_input,
+.status-pill.paused,
+.status-pill.partial,
+.status-pill.blocked,
 .status-pill.warning {
   border-color: rgba(228, 185, 110, 0.18);
   background: var(--amber-soft);
@@ -450,7 +454,8 @@ p {
 }
 
 .status-pill.error,
-.status-pill.failed {
+.status-pill.failed,
+.status-pill.cancelled {
   border-color: rgba(245, 138, 157, 0.18);
   background: var(--red-soft);
   color: var(--red);
@@ -2351,6 +2356,14 @@ textarea:focus {
   box-shadow: 0 0 0 2px var(--success-soft);
 }
 
+.timeline-item.partial::before,
+.timeline-item.blocked::before,
+.timeline-item.paused::before,
+.timeline-item.waiting_input::before {
+  background: var(--amber);
+  box-shadow: 0 0 0 2px var(--amber-soft);
+}
+
 .timeline-item.failed::before {
   background: var(--red);
   box-shadow: 0 0 0 2px var(--red-soft);
@@ -2360,6 +2373,14 @@ textarea:focus {
 .timeline-item.warning::before {
   background: var(--amber);
   box-shadow: 0 0 0 2px var(--amber-soft);
+}
+
+.agent-control-bar {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
 }
 
 .timeline-heading {

@@ -288,6 +288,7 @@ class LLMClient:
         routing_policy: RoutingPolicy | None = None,
         structured_output: bool = False,
         min_context_tokens: int = 0,
+        alias_tools: list[ToolSpec] | None = None,
     ) -> LLMToolDecision:
         (
             provider,
@@ -336,7 +337,7 @@ class LLMClient:
                 code="no_eligible_model",
                 route_trace=trace.to_dict(),
             )
-        aliases = _tool_aliases(tools)
+        aliases = _tool_aliases(alias_tools if alias_tools is not None else tools)
         last_error: LLMProviderError | None = None
         for routed_candidate in candidates:
             try:
@@ -692,6 +693,36 @@ class LLMClient:
             last_error.route_trace = trace.to_dict()
             raise last_error
 
+    def finalize_tools(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        reason: str,
+        tools: list[ToolSpec] | None = None,
+    ) -> LLMToolDecision:
+        """Produce one final, text-only turn over the complete tool transcript."""
+        final_messages = list(messages) + [
+            {
+                "role": "system",
+                "content": (
+                    "Tool execution is now closed. Return the best grounded final "
+                    "answer from the observed results. State incomplete work and "
+                    f"the stopping reason explicitly. Stopping reason: {reason}."
+                ),
+            }
+        ]
+        decision = self.decide_tools(
+            final_messages,
+            [],
+            alias_tools=tools or [],
+        )
+        if decision.tool_calls:
+            raise LLMProviderError(
+                "provider returned a tool call during text-only finalization",
+                code="invalid_finalization_tool_call",
+            )
+        return decision
+
     def prepare_chat_request(
         self,
         messages: list[dict[str, str]],
@@ -912,7 +943,11 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": model,
             "input": _openai_tool_input(messages, reverse_aliases),
-            "tools": [
+            "max_output_tokens": max_output_tokens,
+        }
+        if tools:
+            payload.update({
+                "tools": [
                 {
                     "type": "function",
                     "name": reverse_aliases[spec.name],
@@ -920,11 +955,10 @@ class LLMClient:
                     "parameters": spec.input_schema,
                 }
                 for spec in tools
-            ],
-            "tool_choice": "auto",
-            "parallel_tool_calls": True,
-            "max_output_tokens": max_output_tokens,
-        }
+                ],
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+            })
         body = self._post_json(
             "https://api.openai.com/v1/responses",
             headers={
@@ -988,17 +1022,20 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": model,
             "messages": _anthropic_tool_messages(messages, reverse_aliases),
-            "tools": [
+            "max_tokens": max_output_tokens,
+        }
+        if tools:
+            payload.update({
+                "tools": [
                 {
                     "name": reverse_aliases[spec.name],
                     "description": spec.description,
                     "input_schema": spec.input_schema,
                 }
                 for spec in tools
-            ],
-            "tool_choice": {"type": "auto"},
-            "max_tokens": max_output_tokens,
-        }
+                ],
+                "tool_choice": {"type": "auto"},
+            })
         if system:
             payload["system"] = "\n\n".join(system)
         body = self._post_json(
@@ -1056,7 +1093,12 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": model,
             "messages": _deepseek_tool_messages(messages, reverse_aliases),
-            "tools": [
+            "max_tokens": max_output_tokens,
+            "stream": False,
+        }
+        if tools:
+            payload.update({
+                "tools": [
                 {
                     "type": "function",
                     "function": {
@@ -1066,11 +1108,9 @@ class LLMClient:
                     },
                 }
                 for spec in tools
-            ],
-            "tool_choice": "auto",
-            "max_tokens": max_output_tokens,
-            "stream": False,
-        }
+                ],
+                "tool_choice": "auto",
+            })
         body = self._post_json(
             "https://api.deepseek.com/chat/completions",
             headers={
@@ -1138,10 +1178,11 @@ class LLMClient:
             )
             for spec in tools
         ]
-        config_kwargs: dict[str, Any] = {
-            "max_output_tokens": max_output_tokens,
-            "tools": [types.Tool(function_declarations=declarations)],
-        }
+        config_kwargs: dict[str, Any] = {"max_output_tokens": max_output_tokens}
+        if declarations:
+            config_kwargs["tools"] = [
+                types.Tool(function_declarations=declarations)
+            ]
         system_instruction = _google_system_instruction_any(messages)
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction

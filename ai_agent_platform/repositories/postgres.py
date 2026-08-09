@@ -8,11 +8,14 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from ai_agent_platform.agents.coding.models import (
     AgentChangeSummary,
+    AgentRunEvent,
     AgentRunMetrics,
     AgentRunRecord,
     AgentRunResult,
+    AgentToolExecution,
     ContextSource,
 )
+from ai_agent_platform.agents.coding.store import events_for_record
 from ai_agent_platform.domain import (
     ConversationSummary,
     KnowledgeBaseRecord,
@@ -599,10 +602,14 @@ class PostgresAgentRunRepository:
                     error,
                     pending_approval,
                     errors,
+                    control_action,
+                    steering_messages,
                     created_at,
                     updated_at
                 )
                 VALUES (
+                    %s,
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -634,6 +641,8 @@ class PostgresAgentRunRepository:
                     error = EXCLUDED.error,
                     pending_approval = EXCLUDED.pending_approval,
                     errors = EXCLUDED.errors,
+                    control_action = EXCLUDED.control_action,
+                    steering_messages = EXCLUDED.steering_messages,
                     updated_at = NOW()
                 """,
                 (
@@ -651,8 +660,29 @@ class PostgresAgentRunRepository:
                     record.error,
                     Jsonb(record.pending_approval),
                     Jsonb(record.errors),
+                    record.control_action,
+                    Jsonb(record.steering_messages),
                 ),
             )
+            for event_key, event in events_for_record(record):
+                conn.execute(
+                    """
+                    INSERT INTO agent_run_events (
+                        run_id, event_key, type, status, node, summary, output
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id, event_key) DO NOTHING
+                    """,
+                    (
+                        record.run_id,
+                        event_key,
+                        event.type,
+                        event.status,
+                        event.node,
+                        event.summary,
+                        Jsonb(event.output),
+                    ),
+                )
 
     def get(self, run_id: str) -> AgentRunRecord:
         with self._connect() as conn:
@@ -672,7 +702,9 @@ class PostgresAgentRunRepository:
                     result,
                     error,
                     pending_approval,
-                    errors
+                    errors,
+                    control_action,
+                    steering_messages
                 FROM agent_runs
                 WHERE id = %s
                 """,
@@ -681,6 +713,109 @@ class PostgresAgentRunRepository:
         if row is None:
             raise KeyError(run_id)
         return _agent_run_from_row(row)
+
+    def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, type, status, node, summary, output
+                FROM agent_run_events
+                WHERE run_id = %s AND id > %s
+                ORDER BY id ASC
+                """,
+                (run_id, after),
+            ).fetchall()
+        return [
+            AgentRunEvent(
+                sequence=int(row[0]),
+                type=str(row[1]),
+                status=str(row[2]),
+                node=str(row[3]) if row[3] is not None else None,
+                summary=str(row[4]),
+                output=dict(row[5] or {}),
+            )
+            for row in rows
+        ]
+
+    def append_event(self, run_id: str, event: AgentRunEvent) -> AgentRunEvent:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO agent_run_events (
+                    run_id, event_key, type, status, node, summary, output
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    run_id,
+                    f"manual:{uuid4().hex}",
+                    event.type,
+                    event.status,
+                    event.node,
+                    event.summary,
+                    Jsonb(event.output),
+                ),
+            ).fetchone()
+        return AgentRunEvent(
+            sequence=int(row[0]),
+            type=event.type,
+            status=event.status,
+            node=event.node,
+            summary=event.summary,
+            output=event.output,
+        )
+
+    def get_tool_execution(
+        self, run_id: str, call_id: str
+    ) -> AgentToolExecution | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, call_id, name, arguments_hash, status, response
+                FROM agent_tool_executions
+                WHERE run_id = %s AND call_id = %s
+                """,
+                (run_id, call_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return AgentToolExecution(
+            run_id=str(row[0]),
+            call_id=str(row[1]),
+            name=str(row[2]),
+            arguments_hash=str(row[3]),
+            status=str(row[4]),
+            response=dict(row[5]) if row[5] is not None else None,
+        )
+
+    def save_tool_execution(self, execution: AgentToolExecution) -> None:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_tool_executions (
+                    run_id, call_id, name, arguments_hash, status, response,
+                    created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (run_id, call_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    arguments_hash = EXCLUDED.arguments_hash,
+                    status = EXCLUDED.status,
+                    response = EXCLUDED.response,
+                    updated_at = NOW()
+                """,
+                (
+                    execution.run_id,
+                    execution.call_id,
+                    execution.name,
+                    execution.arguments_hash,
+                    execution.status,
+                    Jsonb(execution.response),
+                ),
+            )
 
     def _connect(self):
         psycopg = _require_psycopg()
@@ -1659,6 +1794,8 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
         error=row[11],
         pending_approval=row[12],
         errors=list(row[13] or []),
+        control_action=row[14] if len(row) > 14 else None,
+        steering_messages=list(row[15] or []) if len(row) > 15 else [],
     )
 
 
