@@ -317,13 +317,30 @@
                 </div>
                 <div id="agent-answer" class="rich-output empty-output">运行 Agent 后，结果会显示在这里。</div>
                 <div id="agent-artifacts" class="artifact-list"></div>
+                <article id="change-set-card" class="change-set-card hidden" aria-live="polite">
+                  <div class="surface-heading">
+                    <div><span class="step-kicker">03 · 审阅</span><h2>ChangeSet</h2></div>
+                    <span id="change-set-status" class="meta-badge">等待生成</span>
+                  </div>
+                  <p id="change-set-summary" class="context-note"></p>
+                  <dl id="change-set-meta" class="metric-list compact"></dl>
+                  <details open>
+                    <summary>查看完整补丁</summary>
+                    <pre id="change-set-patch" class="change-set-patch"></pre>
+                  </details>
+                  <p id="change-set-error" class="context-note danger-text" hidden></p>
+                  <div class="button-row change-set-actions">
+                    <button id="reject-change-set-btn" class="button danger" type="button">拒绝变更</button>
+                    <button id="apply-change-set-btn" class="button primary" type="button">应用到工作区</button>
+                  </div>
+                </article>
               </article>
             </div>
 
             <aside class="stack">
               <article class="surface">
                 <div class="surface-heading"><h2>运行进度</h2><button id="refresh-events-btn" class="text-button" type="button">刷新</button></div>
-                <div id="agent-events" class="timeline"><div class="empty-state">暂无运行事件</div></div>
+                <div id="agent-events" class="timeline" aria-live="polite" aria-atomic="false" aria-relevant="additions text"><div class="empty-state">暂无运行事件</div></div>
               </article>
               <article class="surface">
                 <div class="surface-heading"><h2>运行指标</h2></div>
@@ -805,7 +822,7 @@
             <button id="raw-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="raw-panel">原始数据</button>
           </div>
           <section id="trace-panel" class="inspector-content" role="tabpanel" aria-labelledby="trace-tab">
-            <div id="trace-list" class="trace-list"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
+            <div id="trace-list" class="trace-list" aria-live="polite" aria-atomic="false" aria-relevant="additions text"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
           </section>
           <section id="raw-panel" class="inspector-content" role="tabpanel" aria-labelledby="raw-tab" hidden>
             <pre id="raw-output" class="raw-output">等待响应…</pre>

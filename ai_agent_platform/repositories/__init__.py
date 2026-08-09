@@ -5,6 +5,11 @@ from .memory import (
     SessionArchivedError,
     SessionNotFoundError,
 )
+from .change_sets import (
+    ChangeSetRepository,
+    InMemoryChangeSetRepository,
+    PostgresChangeSetRepository,
+)
 from .postgres import (
     PostgresAgentRunRepository,
     PostgresDependencyError,
@@ -20,10 +25,13 @@ from .project_memory import (
 
 __all__ = [
     "InMemorySessionRepository",
+    "ChangeSetRepository",
+    "InMemoryChangeSetRepository",
     "InMemoryKnowledgeBaseRepository",
     "InMemoryWorkspaceRepository",
     "InMemoryProjectMemoryRepository",
     "PostgresAgentRunRepository",
+    "PostgresChangeSetRepository",
     "PostgresDependencyError",
     "PostgresDocumentRepository",
     "PostgresKnowledgeBaseRepository",

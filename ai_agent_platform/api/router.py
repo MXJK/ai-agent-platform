@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from ai_agent_platform.api.routes import (
     create_agent_runs_router,
+    create_change_sets_router,
     create_chat_router,
     create_health_router,
     create_knowledge_bases_router,
@@ -17,6 +18,7 @@ from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.services import (
     AgentRunService,
+    ChangeSetService,
     KnowledgeBaseService,
     SessionService,
     WorkspaceService,
@@ -29,6 +31,7 @@ def create_api_router(
     llm_client: LLMClient,
     knowledge_base_service: KnowledgeBaseService,
     agent_run_service: AgentRunService,
+    change_set_service: ChangeSetService,
     workspace_service: WorkspaceService,
     project_memory_service: ProjectMemoryService,
     settings: Settings,
@@ -68,6 +71,7 @@ def create_api_router(
         )
     )
     router.include_router(create_agent_runs_router(agent_run_service, settings))
+    router.include_router(create_change_sets_router(change_set_service, settings))
     router.include_router(
         create_workspaces_router(
             workspace_service,

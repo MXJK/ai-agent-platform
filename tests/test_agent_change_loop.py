@@ -10,7 +10,12 @@ from ai_agent_platform.agents.coding_agent import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
+from ai_agent_platform.repositories import (
+    InMemoryChangeSetRepository,
+    InMemoryWorkspaceRepository,
+)
 from ai_agent_platform.schemas import AgentRunResponse
+from ai_agent_platform.services import ChangeSetService, WorkspaceService
 
 
 class SuccessfulChangePlanner:
@@ -227,6 +232,55 @@ class AgentChangeLoopTests(unittest.TestCase):
                     if item["name"] == "sandbox.write_file"
                 ),
                 1,
+            )
+
+    def test_terminal_run_persists_change_set_before_sandbox_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_file = root / "app.py"
+            source_file.write_text("value = 'old'\n", encoding="utf-8")
+            workspace_service = WorkspaceService(
+                store=InMemoryWorkspaceRepository(),
+                allowed_roots=(str(root),),
+            )
+            workspace_service.register(
+                workspace_id="workspace_main",
+                root_path=str(root),
+            )
+            change_sets = ChangeSetService(
+                repository=InMemoryChangeSetRepository(),
+                workspace_service=workspace_service,
+            )
+            runtime = CodingAgentRuntime(
+                tool_registry=create_coding_tool_registry(),
+                planner=SuccessfulChangePlanner(_compile_command()),
+                change_set_service=change_sets,
+            )
+            change_sets.set_audit_callback(runtime.record_change_set_event)
+
+            waiting = runtime.run(
+                conversation_id="sess_changeset",
+                user_input="修改 app.py 并保存可审阅补丁",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+                actor_user_id="author-1",
+            )
+            result = runtime.resume(run_id=waiting.run_id, approved=True)
+            persisted = change_sets.get_for_run(
+                result.run_id,
+                actor_user_id=None,
+            )
+
+            self.assertEqual(result.change_set_id, persisted.id)
+            self.assertEqual(persisted.status, "ready")
+            self.assertEqual(persisted.created_by, "author-1")
+            self.assertIn("+value = 'new'", persisted.patch)
+            self.assertEqual(source_file.read_text(encoding="utf-8"), "value = 'old'\n")
+            self.assertEqual(result.artifacts[-1]["type"], "change_set")
+            self.assertIn(
+                "change_set_captured",
+                [event.type for event in runtime.list_events(result.run_id)],
             )
 
     @staticmethod

@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class Settings:
     database_url: str = "postgresql://localhost:5432/ai_agent_platform"
     session_repository: str = "memory"
     agent_run_store: str = "memory"
+    change_set_store: str = "memory"
     document_store: str = "memory"
     workspace_store: str = "memory"
     workspace_allowed_roots: tuple[str, ...] = field(
@@ -142,6 +144,12 @@ class Settings:
     agent_native_context_keep_messages: int = 10
     agent_graph_recursion_limit: int = 128
     agent_approval_policy: str = "on_request"
+    live_workspace_writes_enabled: bool = False
+    change_set_apply_mode: str = "patch_only"
+    change_set_max_files: int = 100
+    change_set_max_patch_chars: int = 1_000_000
+    change_set_worktree_parent: str | None = None
+    change_set_branch_prefix: str = "codex/"
     auth_mode: str = "disabled"
     gateway_trust_secret: str | None = None
 
@@ -214,6 +222,7 @@ class Settings:
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
+            ("change_set_store", self.change_set_store),
             ("document_store", self.document_store),
             ("workspace_store", self.workspace_store),
         ):
@@ -260,6 +269,11 @@ class Settings:
             "auth_mode",
             self.auth_mode,
             {"disabled", "trusted_header"},
+        )
+        _require_choice(
+            "change_set_apply_mode",
+            self.change_set_apply_mode,
+            {"patch_only", "direct", "worktree"},
         )
         _require_choice("sandbox_mode", self.sandbox_mode, {"local", "docker"})
         if not self.sandbox_allowed_commands:
@@ -399,6 +413,8 @@ class Settings:
                 self.agent_native_context_keep_messages,
             ),
             ("agent_graph_recursion_limit", self.agent_graph_recursion_limit),
+            ("change_set_max_files", self.change_set_max_files),
+            ("change_set_max_patch_chars", self.change_set_max_patch_chars),
         ):
             _require_positive(name, value)
         if self.agent_soft_tool_rounds > self.agent_max_tool_rounds:
@@ -471,6 +487,35 @@ class Settings:
             raise ValueError(
                 "gateway_trust_secret is required when auth_mode=trusted_header"
             )
+        if self.live_workspace_writes_enabled and self.auth_mode == "disabled":
+            raise ValueError(
+                "live_workspace_writes_enabled requires auth_mode=trusted_header"
+            )
+        branch_candidate = f"{self.change_set_branch_prefix.strip()}run"
+        invalid_branch_tokens = (
+            "..",
+            "//",
+            "@{",
+            "\\",
+            " ",
+            "~",
+            "^",
+            ":",
+            "?",
+            "*",
+            "[",
+        )
+        if (
+            not self.change_set_branch_prefix.strip()
+            or self.change_set_branch_prefix.startswith(("/", "."))
+            or any(token in branch_candidate for token in invalid_branch_tokens)
+            or re.fullmatch(r"[A-Za-z0-9._/-]+", branch_candidate) is None
+            or any(
+                not part or part.startswith(".") or part.endswith((".", ".lock"))
+                for part in branch_candidate.split("/")
+            )
+        ):
+            raise ValueError("change_set_branch_prefix must be a safe non-empty prefix")
         if self.background_task_queue_capacity < 0:
             raise ValueError(
                 "background_task_queue_capacity must be greater than or equal to 0"
@@ -585,6 +630,11 @@ class Settings:
                 "SESSION_REPOSITORY", cls.session_repository, dotenv
             ),
             agent_run_store=_env("AGENT_RUN_STORE", cls.agent_run_store, dotenv),
+            change_set_store=_env(
+                "CHANGE_SET_STORE",
+                _env("AGENT_RUN_STORE", cls.change_set_store, dotenv),
+                dotenv,
+            ),
             document_store=_env("DOCUMENT_STORE", cls.document_store, dotenv),
             workspace_store=_env(
                 "WORKSPACE_STORE", cls.workspace_store, dotenv
@@ -946,6 +996,36 @@ class Settings:
                 cls.agent_approval_policy,
                 dotenv,
             ),
+            live_workspace_writes_enabled=_bool_env(
+                "LIVE_WORKSPACE_WRITES_ENABLED",
+                cls.live_workspace_writes_enabled,
+                dotenv,
+            ),
+            change_set_apply_mode=_env(
+                "CHANGE_SET_APPLY_MODE",
+                cls.change_set_apply_mode,
+                dotenv,
+            ),
+            change_set_max_files=_int_env(
+                "CHANGE_SET_MAX_FILES",
+                cls.change_set_max_files,
+                dotenv,
+            ),
+            change_set_max_patch_chars=_int_env(
+                "CHANGE_SET_MAX_PATCH_CHARS",
+                cls.change_set_max_patch_chars,
+                dotenv,
+            ),
+            change_set_worktree_parent=_env(
+                "CHANGE_SET_WORKTREE_PARENT",
+                None,
+                dotenv,
+            ),
+            change_set_branch_prefix=_env(
+                "CHANGE_SET_BRANCH_PREFIX",
+                cls.change_set_branch_prefix,
+                dotenv,
+            ),
             auth_mode=_env("AUTH_MODE", cls.auth_mode, dotenv),
             gateway_trust_secret=_env("GATEWAY_TRUST_SECRET", None, dotenv),
         )
@@ -954,6 +1034,7 @@ class Settings:
         required_values = {
             "session_repository": (self.session_repository, "postgres"),
             "agent_run_store": (self.agent_run_store, "postgres"),
+            "change_set_store": (self.change_set_store, "postgres"),
             "document_store": (self.document_store, "postgres"),
             "workspace_store": (
                 self.workspace_store,

@@ -3,6 +3,8 @@ const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
 const FINAL_RUN_STATUSES = new Set(["completed", "partial", "blocked", "cancelled", "failed"]);
 const SUSPENDED_RUN_STATUSES = new Set(["waiting_approval", "waiting_input", "paused"]);
 const TERMINAL_RUN_STATUSES = new Set([...FINAL_RUN_STATUSES, ...SUSPENDED_RUN_STATUSES]);
+const TRACE_STEP_REVEAL_DELAY_MS = 16;
+const MAX_TRACE_REPLAY_MS = 1200;
 const responseTimers = new WeakMap();
 
 const state = {
@@ -71,6 +73,8 @@ const state = {
   composerMode: "chat",
   chatController: null,
   agentPollGeneration: 0,
+  changeSetRequestGeneration: 0,
+  currentChangeSet: null,
   ragRequestController: null,
   ragRequestGeneration: 0,
 };
@@ -81,8 +85,12 @@ function iconMarkup(name) {
   return `<svg class="app-icon" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
 }
 
+function prefersReducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 function preferredScrollBehavior() {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+  return prefersReducedMotion() ? "auto" : "smooth";
 }
 
 function jsonPretty(value) {
@@ -408,6 +416,11 @@ function humanizeStatus(value) {
     completed_with_errors: "完成，有警告",
     failed: "失败",
     pending: "等待中",
+    ready: "待审阅",
+    applying: "应用中",
+    applied: "已应用",
+    rejected: "已拒绝",
+    conflicted: "存在冲突",
   };
   return labels[value] || value || "未知";
 }
@@ -416,6 +429,11 @@ function statusClass(value) {
   if (value === "completed_with_errors") {
     return "warning";
   }
+  if (value === "ready") return "pending";
+  if (value === "applying") return "running";
+  if (value === "applied") return "completed";
+  if (value === "rejected") return "cancelled";
+  if (value === "conflicted") return "warning";
   if (["completed", "partial", "blocked", "cancelled", "failed", "waiting_approval", "waiting_input", "paused", "running", "queued"].includes(value)) {
     return value;
   }
@@ -1981,13 +1999,21 @@ function createAgentProgressPresenter(contentNode, startedAt) {
         const result = body?.result || {};
         const fullTrace = body?.trace || result.trace || [];
         const newSteps = fullTrace.slice(visibleTrace.length);
+        const revealDelayMs = prefersReducedMotion()
+          ? 0
+          : Math.min(
+              TRACE_STEP_REVEAL_DELAY_MS,
+              Math.floor(MAX_TRACE_REPLAY_MS / Math.max(1, newSteps.length)),
+            );
         for (const step of newSteps) {
           visibleTrace.push(step);
           renderAgentChatResponse(contentNode, body, startedAt, {
             visibleTrace,
             holdAnswer: true,
           });
-          await new Promise((resolve) => window.setTimeout(resolve, 240));
+          if (revealDelayMs > 0) {
+            await new Promise((resolve) => window.setTimeout(resolve, revealDelayMs));
+          }
         }
         renderAgentChatResponse(contentNode, body, startedAt, { visibleTrace });
       });
@@ -2414,6 +2440,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
   $("agent-answer").className = "rich-output empty-output";
   $("agent-answer").textContent = "Agent 正在理解任务并规划下一步…";
   $("agent-events").innerHTML = '<div class="empty-state">正在等待第一个运行事件…</div>';
+  resetChangeSetCard();
   $("approval-card").classList.add("hidden");
   try {
     const conversationId = await ensureSession();
@@ -2486,6 +2513,14 @@ function renderAgentRun(body) {
   renderAgentControls(state.latestRunStatus);
   renderAgentMetrics(result.metrics);
   renderArtifacts(result.artifacts || []);
+  const changeSetId = result.change_set_id || body.change_set_id || "";
+  if (changeSetId && FINAL_RUN_STATUSES.has(actualStatus)) {
+    loadChangeSet(state.latestRunId).catch((error) => {
+      showToast(`ChangeSet 加载失败：${humanizeError(error)}`, "error");
+    });
+  } else if (!changeSetId) {
+    resetChangeSetCard();
+  }
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
@@ -2570,6 +2605,103 @@ function renderArtifacts(artifacts) {
   }
 }
 
+function resetChangeSetCard() {
+  state.changeSetRequestGeneration += 1;
+  state.currentChangeSet = null;
+  $("change-set-card").classList.add("hidden");
+  $("change-set-patch").textContent = "";
+}
+
+async function loadChangeSet(runId) {
+  const generation = ++state.changeSetRequestGeneration;
+  const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/changes`);
+  if (generation !== state.changeSetRequestGeneration || runId !== state.latestRunId) {
+    return null;
+  }
+  state.currentChangeSet = body;
+  renderChangeSet(body);
+  return body;
+}
+
+function renderChangeSet(changeSet) {
+  const card = $("change-set-card");
+  card.classList.remove("hidden");
+  $("change-set-status").textContent = humanizeStatus(changeSet.status);
+  $("change-set-status").className = `meta-badge ${statusClass(changeSet.status)}`;
+  $("change-set-summary").textContent = changeSet.apply_mode === "patch_only"
+    ? "当前为 patch-only：补丁可审阅和拒绝，但不会写入真实工作区。"
+    : "应用会再次校验补丁摘要、工作区登记版本与每个目标文件的基线哈希。";
+  $("change-set-meta").innerHTML = [
+    ["文件", (changeSet.changed_files || []).length],
+    ["模式", changeSet.apply_mode],
+    ["校验", changeSet.validation_status],
+    ["SHA-256", truncate(changeSet.patch_sha256, 18)],
+  ]
+    .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`)
+    .join("");
+  $("change-set-patch").textContent = changeSet.patch || "没有可显示的补丁";
+  const errorNode = $("change-set-error");
+  errorNode.hidden = !changeSet.error;
+  errorNode.textContent = changeSet.error || "";
+  const ready = changeSet.status === "ready";
+  $("reject-change-set-btn").disabled = !ready;
+  $("apply-change-set-btn").disabled = !ready || changeSet.apply_mode === "patch_only";
+  $("apply-change-set-btn").textContent = changeSet.apply_mode === "patch_only"
+    ? "真实写入未启用"
+    : "确认并应用到工作区";
+}
+
+async function applyCurrentChangeSet() {
+  const changeSet = state.currentChangeSet;
+  if (!changeSet || changeSet.status !== "ready") return;
+  const confirmed = window.confirm(
+    `确认应用 ${changeSet.changed_files.length} 个文件？\n补丁摘要：${changeSet.patch_sha256}`,
+  );
+  if (!confirmed) return;
+  const button = $("apply-change-set-btn");
+  button.disabled = true;
+  try {
+    const updated = await fetchJson(
+      `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/apply`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          change_set_id: changeSet.id,
+          patch_sha256: changeSet.patch_sha256,
+        }),
+      },
+    );
+    state.currentChangeSet = updated;
+    renderChangeSet(updated);
+    showToast("ChangeSet 已应用", "success");
+  } catch (error) {
+    await loadChangeSet(changeSet.run_id).catch(() => null);
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function rejectCurrentChangeSet() {
+  const changeSet = state.currentChangeSet;
+  if (!changeSet || changeSet.status !== "ready") return;
+  const button = $("reject-change-set-btn");
+  button.disabled = true;
+  try {
+    const updated = await fetchJson(
+      `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify({ change_set_id: changeSet.id }),
+      },
+    );
+    state.currentChangeSet = updated;
+    renderChangeSet(updated);
+    showToast("ChangeSet 已拒绝", "success");
+  } catch (error) {
+    button.disabled = false;
+    showToast(humanizeError(error), "error");
+  }
+}
+
 async function refreshRun() {
   if (!state.latestRunId) {
     showToast("还没有可刷新的 Agent 运行", "warning");
@@ -2613,6 +2745,35 @@ function renderAgentEvents(events) {
     `;
     list.appendChild(item);
   }
+}
+
+function agentProgressBodyFromEvents(events) {
+  const trace = events
+    .filter((event) => event.type === "node_completed")
+    .map((event, index) => ({
+      step: index + 1,
+      node: event.node || "step",
+      summary: event.summary || "",
+      output: event.output || {},
+    }));
+  const latestEvent = events.at(-1) || {};
+  return {
+    run_id: state.latestRunId,
+    status: latestEvent.status || state.latestRunStatus || "running",
+    latest_node: latestEvent.node || trace.at(-1)?.node || null,
+    trace,
+  };
+}
+
+function renderStreamedAgentProgress(events) {
+  const body = agentProgressBodyFromEvents(events);
+  state.latestRunStatus = body.status;
+  setAgentStatus(body.status, state.latestRunId);
+  renderAgentControls(body.status);
+  renderAgentEvents(events);
+  setTrace(body.trace);
+  renderOverview();
+  return body;
 }
 
 async function resumeRun(approved) {
@@ -2681,6 +2842,13 @@ async function controlRun(action) {
 async function watchRunUntilTerminal(options = {}) {
   const generation = ++state.agentPollGeneration;
   let cursor = 0;
+  let latestBody = null;
+  let progressUpdates = Promise.resolve();
+  const streamedEvents = [];
+  const publishProgress = (body) => {
+    if (!options.onProgress || !body) return;
+    progressUpdates = progressUpdates.then(() => options.onProgress(body));
+  };
   try {
     const response = await fetch(
       `${API_BASE}/agent/runs/${encodeURIComponent(state.latestRunId)}/events/stream?cursor=${cursor}`,
@@ -2692,6 +2860,7 @@ async function watchRunUntilTerminal(options = {}) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let stopped = false;
     while (generation === state.agentPollGeneration) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -2703,20 +2872,34 @@ async function watchRunUntilTerminal(options = {}) {
         if (!dataLine) continue;
         const event = JSON.parse(dataLine.slice(6));
         cursor = Math.max(cursor, Number(event.sequence) || 0);
-        if (event.status) state.latestRunStatus = event.status;
-        const latestBody = await refreshRun();
-        if (options.onProgress) await options.onProgress(latestBody);
+        streamedEvents.push(event);
+        const progressBody = renderStreamedAgentProgress(streamedEvents);
+        if (event.type === "node_completed") {
+          publishProgress(progressBody);
+        }
+        if (TERMINAL_RUN_STATUSES.has(progressBody.status)) {
+          latestBody = await refreshRun();
+          publishProgress(latestBody);
+          stopped = true;
+          break;
+        }
       }
+      if (stopped) break;
     }
+    await progressUpdates;
   } catch (error) {
     console.warn("Agent event stream unavailable; falling back to polling", error);
   }
-  return pollRunUntilTerminal(options);
+  const polledBody = await pollRunUntilTerminal(options, latestBody);
+  return polledBody || latestBody;
 }
 
-async function pollRunUntilTerminal({ onProgress = null, preserveChat = false } = {}) {
+async function pollRunUntilTerminal(
+  { onProgress = null, preserveChat = false } = {},
+  initialBody = null,
+) {
   const generation = ++state.agentPollGeneration;
-  let latestBody = null;
+  let latestBody = initialBody;
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (
       generation !== state.agentPollGeneration ||
@@ -2732,6 +2915,16 @@ async function pollRunUntilTerminal({ onProgress = null, preserveChat = false } 
     }
     if (attempt % 3 === 0) {
       await refreshEvents(false);
+    }
+  }
+  if (
+    !latestBody
+    && state.latestRunId
+    && TERMINAL_RUN_STATUSES.has(state.latestRunStatus)
+  ) {
+    latestBody = await refreshRun();
+    if (onProgress) {
+      await onProgress(latestBody);
     }
   }
   await refreshEvents(false);
@@ -4599,6 +4792,8 @@ function bindEvents() {
   $("cancel-run-btn").addEventListener("click", () => controlRun("cancel"));
   $("steer-run-btn").addEventListener("click", () => controlRun("steer"));
   $("continue-run-btn").addEventListener("click", () => controlRun("continue"));
+  $("apply-change-set-btn").addEventListener("click", applyCurrentChangeSet);
+  $("reject-change-set-btn").addEventListener("click", rejectCurrentChangeSet);
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);

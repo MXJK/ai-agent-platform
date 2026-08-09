@@ -1,6 +1,8 @@
 import os
+import hashlib
 from pathlib import Path
 import shlex
+import subprocess
 from tempfile import TemporaryDirectory
 import sys
 import time
@@ -82,6 +84,69 @@ class SandboxToolTests(unittest.TestCase):
             self.assertIn("-print('old')", diff_result.result["diff"])
             self.assertIn("+print('new')", diff_result.result["diff"])
             self.assertEqual(diff_result.result["changed_files"], ["app.py"])
+
+    def test_context_export_keeps_full_patch_and_baseline_before_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_file = root / "app.py"
+            source_file.write_text("print('old')\n", encoding="utf-8")
+            registry = self._registry()
+            context = _context(root, run_id="run_export")
+            registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "print('new')\n",
+                    },
+                ),
+                context=context,
+            )
+
+            exported = registry.export_context("sandbox", context)
+
+            self.assertEqual(exported["source_root"], str(root.resolve()))
+            self.assertEqual(exported["changed_files"], ["app.py"])
+            self.assertIn("+print('new')", exported["patch"])
+            self.assertEqual(
+                exported["baseline_file_hashes"]["app.py"],
+                hashlib.sha256(b"print('old')\n").hexdigest(),
+            )
+            self.assertEqual(exported["binary_files"], [])
+            self.assertEqual(registry.cleanup_context(context), [])
+
+    def test_exported_patch_applies_files_without_terminal_newlines(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_file = root / "app.py"
+            source_file.write_bytes(b"value = 'old'")
+            registry = self._registry()
+            context = _context(root, run_id="run_no_terminal_newline")
+            registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={"path": "app.py", "content": "value = 'new'"},
+                ),
+                context=context,
+            )
+            exported = registry.export_context("sandbox", context)
+
+            result = subprocess.run(
+                ["git", "apply", "-"],
+                cwd=root,
+                input=exported["patch"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(source_file.read_bytes(), b"value = 'new'")
+            self.assertEqual(
+                exported["patch"].count("\\ No newline at end of file"),
+                2,
+            )
+            self.assertEqual(registry.cleanup_context(context), [])
 
     def test_sandbox_blocks_path_escape_and_denied_command(self) -> None:
         with TemporaryDirectory() as temp_dir:

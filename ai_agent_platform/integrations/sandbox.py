@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import difflib
+import hashlib
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -97,6 +99,9 @@ SHELL_WRAPPER_COMMANDS = {
     "zsh",
 }
 SANDBOX_DIRECTORY_PREFIX = "agent-sandbox-"
+_DIFF_HUNK_POSITION = re.compile(
+    r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@"
+)
 
 
 @dataclass(frozen=True)
@@ -305,6 +310,43 @@ class SandboxRuntime:
         current = _snapshot_files(workspace.path)
         paths = sorted(set(workspace.baseline) | set(current))
         return [path for path in paths if workspace.baseline.get(path) != current.get(path)]
+
+    def export_change_set(
+        self,
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        """Return the untruncated, server-side snapshot used for promotion."""
+        workspace = self._workspace_for(context)
+        current = _snapshot_files(workspace.path)
+        changed_files = sorted(set(workspace.baseline) | set(current))
+        changed_files = [
+            path
+            for path in changed_files
+            if workspace.baseline.get(path) != current.get(path)
+        ]
+        binary_files = [
+            path
+            for path in changed_files
+            if _decode_for_diff(workspace.baseline.get(path)) is None
+            or _decode_for_diff(current.get(path)) is None
+        ]
+        return {
+            "source_root": str(workspace.source_root),
+            "changed_files": changed_files,
+            "patch": _workspace_diff(workspace),
+            "baseline_file_hashes": {
+                path: (
+                    hashlib.sha256(workspace.baseline[path]).hexdigest()
+                    if path in workspace.baseline
+                    else None
+                )
+                for path in changed_files
+            },
+            "binary_files": binary_files,
+            "copy_warnings": list(workspace.copy_warnings),
+            "base_git_head": _git_head(workspace.source_root),
+            "base_git_dirty": _git_dirty(workspace.source_root),
+        }
 
     def cleanup(
         self,
@@ -574,14 +616,81 @@ def _workspace_diff(workspace: SandboxWorkspace) -> str:
             )
             continue
         lines.extend(
-            difflib.unified_diff(
-                before_text.splitlines(keepends=True),
-                after_text.splitlines(keepends=True),
+            _git_compatible_unified_diff(
+                before_text,
+                after_text,
                 fromfile=f"a/{relative_path}" if before is not None else "/dev/null",
                 tofile=f"b/{relative_path}" if after is not None else "/dev/null",
             )
         )
     return "".join(lines)
+
+
+def _git_compatible_unified_diff(
+    before_text: str,
+    after_text: str,
+    *,
+    fromfile: str,
+    tofile: str,
+) -> list[str]:
+    before_lines = before_text.splitlines(keepends=True)
+    after_lines = after_text.splitlines(keepends=True)
+    before_missing_newline = bool(before_lines) and not before_lines[-1].endswith("\n")
+    after_missing_newline = bool(after_lines) and not after_lines[-1].endswith("\n")
+    normalized_before = [
+        line if line.endswith("\n") else f"{line}\n"
+        for line in before_lines
+    ]
+    normalized_after = [
+        line if line.endswith("\n") else f"{line}\n"
+        for line in after_lines
+    ]
+    raw = difflib.unified_diff(
+        normalized_before,
+        normalized_after,
+        fromfile=fromfile,
+        tofile=tofile,
+    )
+    output: list[str] = []
+    old_line = 0
+    new_line = 0
+    in_hunk = False
+    for line in raw:
+        if line.startswith("@@ "):
+            match = _DIFF_HUNK_POSITION.match(line)
+            if match is None:
+                return []
+            old_line = int(match.group(1))
+            new_line = int(match.group(2))
+            in_hunk = True
+            output.append(line)
+            continue
+        output.append(line)
+        if not in_hunk or not line:
+            continue
+        prefix = line[0]
+        missing_newline = False
+        if prefix == " ":
+            missing_newline = (
+                before_missing_newline and old_line == len(before_lines)
+            ) or (
+                after_missing_newline and new_line == len(after_lines)
+            )
+            old_line += 1
+            new_line += 1
+        elif prefix == "-":
+            missing_newline = (
+                before_missing_newline and old_line == len(before_lines)
+            )
+            old_line += 1
+        elif prefix == "+":
+            missing_newline = (
+                after_missing_newline and new_line == len(after_lines)
+            )
+            new_line += 1
+        if missing_newline:
+            output.append("\\ No newline at end of file\n")
+    return output
 
 
 def _decode_for_diff(value: bytes | None) -> str | None:
@@ -591,6 +700,35 @@ def _decode_for_diff(value: bytes | None) -> str | None:
         return value.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _git_head(root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
+def _git_dirty(root: Path) -> bool | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
 
 
 def _command_args(command: str | list[str]) -> list[str]:

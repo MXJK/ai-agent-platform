@@ -127,6 +127,7 @@ class AgentRunResponse(BaseModel):
     metrics: AgentRunMetricsResponse
     change_summary: AgentChangeSummaryResponse
     artifacts: list[dict[str, Any]]
+    change_set_id: Optional[str]
     pending_approval: Optional[dict[str, Any]]
 
     @classmethod
@@ -196,6 +197,7 @@ class AgentRunResponse(BaseModel):
                 validation_passed=result.change_summary.validation_passed,
             ),
             artifacts=result.artifacts,
+            change_set_id=result.change_set_id,
             pending_approval=result.pending_approval,
         )
 

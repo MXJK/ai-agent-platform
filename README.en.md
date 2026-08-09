@@ -59,10 +59,11 @@ The shared composer offers:
 Both response modes render an in-message execution process and response
 metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
 usage across structured planning and answer generation. The UI shows input,
-output, thinking, and total tokens per response. Agent cursor SSE, with a polling
-fallback, also merges live
-LangGraph checkpoint trace so fast runs still play completed stages in order
-before the final answer appears.
+output, thinking, and total tokens per response. Agent cursor SSE events drive
+the live LangGraph trace directly, with one full Run snapshot fetched at a
+terminal state and polling used only after a disconnect. Fast runs use a
+bounded short replay to preserve stage order without losing the final answer or
+terminal presentation.
 
 All model use is persisted in one ledger. Chat, Agent model turns, semantic
 conversation compression, RAG Ask, and embedding calls carry an `operation`,
@@ -343,7 +344,10 @@ project manifests, and entry points instead of filling a live-evidence gap with
 unrelated managed documents. `merge_evidence` preserves all provenance types before
 tool/change planning or answer generation. Change runs retain human approval,
 per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
-artifacts. The registered source workspace is never modified directly.
+artifacts. Before sandbox cleanup, a terminal run persists the complete patch as
+a ChangeSet. The default `patch_only` mode never changes the source workspace;
+`direct` or `worktree` promotion additionally requires explicitly enabled live
+writes, a trusted editor approval, the approved digest, and unchanged file hashes.
 
 Running Agent status is read from both the product run store and the latest
 LangGraph checkpoint. The API therefore exposes already-completed trace nodes
@@ -509,18 +513,34 @@ POST /api/v1/agent/runs/{run_id}/continue   {"message":"direction or answer"}
 POST /api/v1/agent/runs/{run_id}/steer      {"message":"new direction"}
 POST /api/v1/agent/runs/{run_id}/cancel
 POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"review"}
+GET  /api/v1/agent/runs/{run_id}/changes
+POST /api/v1/agent/runs/{run_id}/changes/reject {"change_set_id":"chg_xxx"}
+POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patch_sha256":"<64 hex>"}
 ```
 
-The event stream uses resumable cursors; the browser workbench prefers SSE and
-falls back to status polling. Final statuses are `completed`, `partial`,
-`blocked`, `cancelled`, and `failed`; suspended interaction states are
-`waiting_approval`, `waiting_input`, and `paused`.
+The event stream uses resumable cursors. The browser workbench builds the trace
+incrementally from SSE events, fetches one complete Run snapshot at a terminal
+state, and falls back to status polling if the stream fails or ends early.
+Final statuses are `completed`, `partial`, `blocked`, `cancelled`, and `failed`;
+suspended interaction states are `waiting_approval`, `waiting_input`, and
+`paused`.
 
 Responses expose `context_route`, `selected_knowledge_base_ids`, and
 `context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
 optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
 The removed `repository_id` and `rag_context` Agent fields are not accepted or
 returned.
+
+A ChangeSet is a separate promotion boundary after tool-plan approval. It stores
+the untruncated patch, SHA-256, changed paths, sandbox baseline hashes, workspace
+root/revision, validation summary, and lifecycle status. Viewers may inspect it;
+only editors may reject or apply it. Apply revalidates the registered root,
+symlinks, sensitive/binary paths, concurrent file edits, and the user-approved
+digest. Reapplying the same completed ChangeSet is idempotent and conflicts never
+overwrite newer user edits. `direct` restores original files on failure;
+`worktree` creates a controlled `codex/` branch from the captured Git HEAD while
+leaving the source directory untouched. No commit, push, PR, merge, or deployment
+is performed automatically.
 
 ### Live source tools
 
@@ -542,7 +562,22 @@ directory. Real `.env` files, credentials, private keys, symbolic links,
 unreadable paths, sockets, FIFOs, and other special files are skipped and
 reported in `copy_warnings`. Completed, failed, or rejected runs remove their
 Sandbox; startup also prunes directories older than
-`SANDBOX_WORKSPACE_TTL_SECONDS`.
+`SANDBOX_WORKSPACE_TTL_SECONDS`. If files changed, a server-internal exporter
+persists the full ChangeSet before cleanup; a truncated display Diff is never
+used for workspace promotion.
+
+Live writes are disabled by default. `LIVE_WORKSPACE_WRITES_ENABLED=true`
+requires `AUTH_MODE=trusted_header`:
+
+```dotenv
+CHANGE_SET_STORE=postgres
+LIVE_WORKSPACE_WRITES_ENABLED=false
+CHANGE_SET_APPLY_MODE=patch_only  # patch_only | direct | worktree
+CHANGE_SET_MAX_FILES=100
+CHANGE_SET_MAX_PATCH_CHARS=1000000
+CHANGE_SET_WORKTREE_PARENT=
+CHANGE_SET_BRANCH_PREFIX=codex/
+```
 
 `SANDBOX_MODE=local` is intended only for repositories owned and trusted by the
 local user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
@@ -820,6 +855,13 @@ filename and update-order indexes.
 Revision `20260807_0017` adds `workspaces.removed_at` for soft removal and
 same-path restoration without deleting sessions, usage, or project memories.
 
+Revision `20260808_0018` adds Agent runtime-control state, append-only events,
+and the durable tool-call execution ledger.
+
+Revision `20260809_0019` adds one `agent_change_sets` row per Run with the full
+patch, file baselines, workspace snapshot, validation result, and apply/reject
+state.
+
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
@@ -831,6 +873,7 @@ API and workers:
 TASK_QUEUE_BACKEND=celery
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
+CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
@@ -844,7 +887,7 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs and immutable model snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
+| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets and immutable model snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |

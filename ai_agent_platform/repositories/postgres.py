@@ -1774,6 +1774,7 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
     if isinstance(change_summary, dict):
         payload["change_summary"] = AgentChangeSummary(**change_summary)
     payload.setdefault("artifacts", [])
+    payload.setdefault("change_set_id", None)
     payload.setdefault("errors", [])
     return AgentRunResult(**payload)
 

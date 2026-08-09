@@ -40,10 +40,12 @@ from ai_agent_platform.model_registry import (
     PostgresModelRegistryRepository,
 )
 from ai_agent_platform.repositories import (
+    InMemoryChangeSetRepository,
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
     InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
+    PostgresChangeSetRepository,
     PostgresDocumentRepository,
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
@@ -51,6 +53,7 @@ from ai_agent_platform.repositories import (
 )
 from ai_agent_platform.services import (
     AgentRunService,
+    ChangeSetService,
     KnowledgeBaseService,
     SessionService,
     UsageLedgerService,
@@ -120,6 +123,19 @@ def create_app(
             trigger_id=trigger_id,
         )
     )
+    change_set_service = ChangeSetService(
+        repository=_create_change_set_store(settings),
+        workspace_service=workspace_service,
+        authorize=project_memory_service.authorize,
+        live_writes_enabled=settings.live_workspace_writes_enabled,
+        apply_mode=settings.change_set_apply_mode,
+        auth_mode=settings.auth_mode,
+        max_files=settings.change_set_max_files,
+        max_patch_chars=settings.change_set_max_patch_chars,
+        worktree_parent=settings.change_set_worktree_parent,
+        branch_prefix=settings.change_set_branch_prefix,
+        command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+    )
     rag_service = rag_service or create_rag_service(
         settings,
         document_store=_create_document_store(settings),
@@ -174,7 +190,15 @@ def create_app(
             knowledge_context_provider=knowledge_base_service,
             project_memory_provider=project_memory_service,
             max_rag_context_chars=settings.rag_max_prompt_chars,
+            change_set_service=change_set_service,
         )
+    change_set_event_recorder = getattr(
+        coding_agent_runtime,
+        "record_change_set_event",
+        None,
+    )
+    if callable(change_set_event_recorder):
+        change_set_service.set_audit_callback(change_set_event_recorder)
     session_service = SessionService(
         repository=repository,
         agent_runtime=agent_runtime,
@@ -229,6 +253,7 @@ def create_app(
     app.state.mcp_providers = mcp_providers
     app.state.tool_registry = tool_registry
     app.state.agent_run_service = agent_run_service
+    app.state.change_set_service = change_set_service
     app.state.session_service = session_service
     app.state.usage_ledger = usage_ledger
     app.state.workspace_service = workspace_service
@@ -244,6 +269,7 @@ def create_app(
             llm_client=llm_client,
             knowledge_base_service=knowledge_base_service,
             agent_run_service=agent_run_service,
+            change_set_service=change_set_service,
             workspace_service=workspace_service,
             project_memory_service=project_memory_service,
             settings=settings,
@@ -287,6 +313,14 @@ def _create_agent_run_store(settings: Settings):
     if settings.agent_run_store == "postgres":
         return PostgresAgentRunRepository(database_url=settings.database_url)
     raise ValueError(f"unsupported agent run store: {settings.agent_run_store}")
+
+
+def _create_change_set_store(settings: Settings):
+    if settings.change_set_store == "memory":
+        return InMemoryChangeSetRepository()
+    if settings.change_set_store == "postgres":
+        return PostgresChangeSetRepository(database_url=settings.database_url)
+    raise ValueError(f"unsupported change set store: {settings.change_set_store}")
 
 
 def _create_document_store(settings: Settings):

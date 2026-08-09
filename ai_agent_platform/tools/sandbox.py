@@ -86,6 +86,7 @@ def register_sandbox_tools(
     registry.register_context_cleanup(
         lambda context: runtime.cleanup(context=context)
     )
+    registry.register_context_exporter("sandbox", runtime.export_change_set)
     registry.register_close(runtime.cleanup_all)
     toolkit = SandboxToolKit(runtime)
     registry.register(

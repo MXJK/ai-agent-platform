@@ -181,6 +181,7 @@ class CodingAgentRuntime:
         knowledge_context_provider: KnowledgeContextProvider | None = None,
         project_memory_provider: ProjectMemoryContextProvider | None = None,
         max_rag_context_chars: int = 6000,
+        change_set_service: Any = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -208,6 +209,7 @@ class CodingAgentRuntime:
         self._knowledge_context_provider = knowledge_context_provider
         self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
+        self._change_set_service = change_set_service
         self._change_loop = ChangeLoopExecutor(
             tools=self._tools,
             planner=self._planner,
@@ -302,6 +304,7 @@ class CodingAgentRuntime:
             "context_stop_reason": "not_started",
             "change_iteration": 0,
             "changed_files": [],
+            "change_set_id": "",
             "validation_history": [],
             "started_at": perf_counter(),
         }
@@ -311,6 +314,13 @@ class CodingAgentRuntime:
             state = _merge_llm_usage(state, llm_usage)
         except Exception as exc:
             snapshot = self._snapshot_for(config)
+            self._capture_snapshot_change_set(
+                snapshot,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+            )
             self._run_store.save(
                 AgentRunRecord(
                     run_id=run_id,
@@ -478,6 +488,13 @@ class CodingAgentRuntime:
             )
         except Exception as exc:
             snapshot = self._snapshot_for(config)
+            self._capture_snapshot_change_set(
+                snapshot,
+                run_id=record.run_id,
+                conversation_id=record.conversation_id,
+                workspace_id=record.workspace_id,
+                workspace_root=record.workspace_root,
+            )
             self._run_store.save(
                 AgentRunRecord(
                     run_id=record.run_id,
@@ -586,8 +603,31 @@ class CodingAgentRuntime:
             "waiting_input",
             "paused",
         }:
+            snapshot = self._snapshot_for(
+                {"configurable": {"thread_id": record.thread_id}}
+            )
+            captured_state = self._capture_snapshot_change_set(
+                snapshot,
+                run_id=record.run_id,
+                conversation_id=record.conversation_id,
+                workspace_id=record.workspace_id,
+                workspace_root=record.workspace_root,
+            )
             result = (
-                replace(record.result, status="cancelled")
+                replace(
+                    record.result,
+                    status="cancelled",
+                    artifacts=(
+                        captured_state.get("artifacts", record.result.artifacts)
+                        if captured_state is not None
+                        else record.result.artifacts
+                    ),
+                    change_set_id=(
+                        captured_state.get("change_set_id") or None
+                        if captured_state is not None
+                        else record.result.change_set_id
+                    ),
+                )
                 if record.result is not None
                 else None
             )
@@ -651,6 +691,35 @@ class CodingAgentRuntime:
     def restore_record(self, record: AgentRunRecord) -> None:
         self._run_store.save(record)
 
+    def record_change_set_event(
+        self,
+        *,
+        record: Any,
+        action: str,
+        actor_user_id: str | None,
+    ) -> None:
+        append_event = getattr(self._run_store, "append_event", None)
+        if not callable(append_event):
+            return
+        append_event(
+            record.run_id,
+            AgentRunEvent(
+                sequence=0,
+                type=f"change_set_{action}",
+                status=record.status,
+                node="change_set",
+                summary=f"ChangeSet {action}.",
+                output={
+                    "change_set_id": record.id,
+                    "patch_sha256": record.patch_sha256,
+                    "changed_file_count": len(record.changed_files),
+                    "apply_mode": record.apply_mode,
+                    "actor_user_id": actor_user_id,
+                    "error": record.error,
+                },
+            ),
+        )
+
     def _finish_invocation(
         self,
         *,
@@ -680,6 +749,14 @@ class CodingAgentRuntime:
                 in {"completed", "partial", "blocked", "cancelled", "failed"}
                 else "completed"
             )  # type: ignore[assignment]
+        if status in {"completed", "partial", "blocked", "cancelled", "failed"}:
+            state = self._capture_change_set(
+                state,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+            )
         result = self._build_result(
             run_id=run_id,
             thread_id=thread_id,
@@ -719,6 +796,85 @@ class CodingAgentRuntime:
                 workspace_root=workspace_root,
             )
         return result
+
+    def _capture_change_set(
+        self,
+        state: CodingAgentState,
+        *,
+        run_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        workspace_root: str,
+    ) -> CodingAgentState:
+        if self._change_set_service is None or not state.get("changed_files"):
+            return state
+        context = ToolExecutionContext(
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            run_id=run_id,
+        )
+        try:
+            snapshot = self._tools.export_context("sandbox", context)
+            validation_results = state.get("validation_results", [])
+            record = self._change_set_service.capture(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                workspace_root=workspace_root,
+                created_by=state.get("actor_user_id", "demo_user"),
+                snapshot=snapshot,
+                validation_status=state.get("change_status", "changes_ready"),
+                validation_summary={
+                    "passed": bool(validation_results)
+                    and all(is_validation_success(item) for item in validation_results),
+                    "command_count": len(validation_results),
+                    "iteration_count": state.get("change_iteration", 0),
+                },
+            )
+        except Exception as exc:
+            updated = dict(state)
+            updated["errors"] = _append_errors(
+                state,
+                [_error_from_exception("capture_change_set", exc, attempt=1, max_attempts=1)],
+            )
+            return updated  # type: ignore[return-value]
+        if record is None:
+            return state
+        updated = dict(state)
+        updated["change_set_id"] = record.id
+        updated["artifacts"] = list(state.get("artifacts", [])) + [
+            {
+                "type": "change_set",
+                "id": record.id,
+                "status": record.status,
+                "apply_mode": record.apply_mode,
+                "patch_sha256": record.patch_sha256,
+                "changed_files": record.changed_files,
+                "error": record.error,
+            }
+        ]
+        return updated  # type: ignore[return-value]
+
+    def _capture_snapshot_change_set(
+        self,
+        snapshot: Any,
+        *,
+        run_id: str,
+        conversation_id: str,
+        workspace_id: str,
+        workspace_root: str,
+    ) -> CodingAgentState | None:
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, dict):
+            return None
+        return self._capture_change_set(
+            values,  # type: ignore[arg-type]
+            run_id=run_id,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+        )
 
     def _cleanup_run_workspace(
         self,
@@ -813,6 +969,7 @@ class CodingAgentRuntime:
             metrics=_build_run_metrics(state),
             change_summary=_build_change_summary(state),
             artifacts=state.get("artifacts", []),
+            change_set_id=state.get("change_set_id") or None,
             pending_approval=pending_approval,
         )
 

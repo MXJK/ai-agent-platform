@@ -12,6 +12,11 @@ from .agent import (
     ContextSourceResponse,
 )
 from .chat import ChatStreamRequest
+from .change_set import (
+    ChangeSetApplyRequest,
+    ChangeSetRejectRequest,
+    ChangeSetResponse,
+)
 from .health import HealthResponse, MetricsResponse, TimingMetricResponse
 from .message import AddMessageRequest, MessageResponse, MessagesResponse
 from .model_registry import (
@@ -103,6 +108,9 @@ __all__ = [
     "AgentTraceStepResponse",
     "ContextSourceResponse",
     "ChatStreamRequest",
+    "ChangeSetApplyRequest",
+    "ChangeSetRejectRequest",
+    "ChangeSetResponse",
     "ContextTokenUsageResponse",
     "CreateSessionRequest",
     "DocumentIngestResponse",

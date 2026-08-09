@@ -493,6 +493,18 @@ class ApiTests(unittest.TestCase):
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)
         self.assertIn("await onProgress", script_response.text)
+        self.assertIn("agentProgressBodyFromEvents", script_response.text)
+        self.assertIn("renderStreamedAgentProgress", script_response.text)
+        self.assertIn("return polledBody || latestBody", script_response.text)
+        self.assertNotIn("const latestBody = await refreshRun();", script_response.text)
+        self.assertIn(
+            'id="agent-events" class="timeline" aria-live="polite"',
+            response.text,
+        )
+        self.assertIn(
+            'id="trace-list" class="trace-list" aria-live="polite"',
+            response.text,
+        )
         self.assertIn("workspace_id", script_response.text)
         self.assertIn("browseWorkspaceDirectories", script_response.text)
         self.assertIn("/workspace-directories", script_response.text)
