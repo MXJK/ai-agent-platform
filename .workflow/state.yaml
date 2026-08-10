@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "CODEX-LIKE-CHANGESETS"
-next_action: "Review the pushed ChangeSet branch and explicitly approve migration 20260809_0019 before applying it."
+status: "active"
+active_task: "LOCAL-WORKSPACE-FOLDER-PICKER"
+next_action: "Complete the rebase, rerun repository and interview-handbook verification, then close and push the Finder workspace picker task."
 blockers: []
 last_verified_commit: "00608787bf049af856cc5d5f6cd3125269e37eac"
-updated_at: "2026-08-09T20:20:33+08:00"
+updated_at: "2026-08-10T10:50:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

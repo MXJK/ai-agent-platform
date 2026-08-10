@@ -27,7 +27,7 @@ class Settings:
     document_store: str = "memory"
     workspace_store: str = "memory"
     workspace_allowed_roots: tuple[str, ...] = field(
-        default_factory=lambda: (str(Path.cwd().resolve()),)
+        default_factory=lambda: (str(Path.home().resolve()),)
     )
     langgraph_checkpointer: str = "memory"
     llm_timeout_seconds: float = 30.0
@@ -641,7 +641,7 @@ class Settings:
             ),
             workspace_allowed_roots=_paths_env(
                 "WORKSPACE_ALLOWED_ROOTS",
-                (str(Path.cwd().resolve()),),
+                (str(Path.home().resolve()),),
                 dotenv,
             ),
             langgraph_checkpointer=_env(

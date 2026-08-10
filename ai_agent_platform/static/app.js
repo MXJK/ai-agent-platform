@@ -4319,14 +4319,19 @@ async function browseWorkspaceDirectories(path = null) {
   chooseButton.disabled = true;
   try {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
-    const body = await fetchJson(`/workspace-directories${query}`);
+    let body = await fetchJson(`/workspace-directories${query}`);
+    if (!path && body.directories?.length === 1) {
+      body = await fetchJson(
+        `/workspace-directories?path=${encodeURIComponent(body.directories[0].path)}`,
+      );
+    }
     renderWorkspaceDirectories(body);
   } finally {
     list.removeAttribute("aria-busy");
   }
 }
 
-async function openWorkspacePicker(workspaceId = null) {
+function configureWorkspacePicker(workspaceId = null) {
   state.workspaceRelinkId = typeof workspaceId === "string" ? workspaceId : null;
   const relinkWorkspace = state.workspaces.find(
     (item) => item.id === state.workspaceRelinkId,
@@ -4336,20 +4341,25 @@ async function openWorkspacePicker(workspaceId = null) {
     : "添加工作区文件夹";
   $("workspace-picker-description").textContent = relinkWorkspace
     ? "选择新的文件夹位置；历史会话和项目记忆仍与这个工作区关联。"
-    : "仅显示服务端允许访问的位置。";
+    : "系统窗口不可用时，可在这里选择服务允许访问的项目文件夹。";
   $("choose-workspace-directory-btn").textContent = relinkWorkspace
     ? "使用此位置"
     : "添加此文件夹";
-  const dialog = $("workspace-picker-dialog");
-  if (!dialog.open) {
-    dialog.showModal();
-  }
   const activeWorkspace = currentWorkspace();
   const currentValue = workspaceIsReady(relinkWorkspace)
     ? relinkWorkspace.root_path
     : workspaceIsReady(activeWorkspace)
       ? activeWorkspace.root_path
       : "";
+  return { currentValue, relinkWorkspace };
+}
+
+async function openWorkspaceBrowserPicker(workspaceId = null) {
+  const { currentValue } = configureWorkspacePicker(workspaceId);
+  const dialog = $("workspace-picker-dialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
   try {
     await browseWorkspaceDirectories(currentValue || null);
   } catch (error) {
@@ -4368,21 +4378,57 @@ async function openWorkspacePicker(workspaceId = null) {
   }
 }
 
+async function applyWorkspaceDirectory(path) {
+  const relinking = Boolean(state.workspaceRelinkId);
+  const workspaceId = state.workspaceRelinkId || workspaceIdForPath(path);
+  const workspace = await registerWorkspace(workspaceId, path);
+  await persistWorkspaceSelection(workspace.id, { announce: false });
+  closeWorkspacePicker();
+  showToast(`${relinking ? "已重新关联" : "已添加"} ${workspaceName(workspace)}`);
+}
+
+async function openWorkspacePicker(workspaceId = null, triggerButton = null) {
+  const { currentValue } = configureWorkspacePicker(workspaceId);
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.setAttribute("aria-busy", "true");
+  }
+  try {
+    const body = await fetchJson("/workspace-directory-picker", {
+      method: "POST",
+      body: JSON.stringify({ initial_path: currentValue || null }),
+    });
+    if (body.cancelled || !body.path) {
+      state.workspaceRelinkId = null;
+      return;
+    }
+    await applyWorkspaceDirectory(body.path);
+  } catch (error) {
+    if (error.status === 501 || error.status === 503) {
+      showToast("系统文件夹窗口不可用，已打开备用选择器", "warning");
+      await openWorkspaceBrowserPicker(workspaceId);
+    } else {
+      state.workspaceRelinkId = null;
+      showToast(humanizeError(error), "error");
+    }
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.removeAttribute("aria-busy");
+    }
+  }
+}
+
 async function chooseWorkspaceDirectory() {
   const path = state.workspaceDirectoryPath;
   if (!path) {
     return;
   }
   const chooseButton = $("choose-workspace-directory-btn");
-  const relinking = Boolean(state.workspaceRelinkId);
-  const workspaceId = state.workspaceRelinkId || workspaceIdForPath(path);
   chooseButton.disabled = true;
   chooseButton.setAttribute("aria-busy", "true");
   try {
-    const workspace = await registerWorkspace(workspaceId, path);
-    await persistWorkspaceSelection(workspace.id, { announce: false });
-    closeWorkspacePicker();
-    showToast(`${relinking ? "已重新关联" : "已添加"} ${workspaceName(workspace)}`);
+    await applyWorkspaceDirectory(path);
   } catch (error) {
     showToast(humanizeError(error), "error");
   } finally {
@@ -4566,7 +4612,9 @@ function bindEvents() {
       closeSettings();
     }
   });
-  $("open-workspace-picker-btn").addEventListener("click", () => openWorkspacePicker());
+  $("open-workspace-picker-btn").addEventListener("click", (event) => {
+    openWorkspacePicker(null, event.currentTarget);
+  });
   $("agent-workspace-settings-btn").addEventListener("click", openSettings);
   $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
   $("workspace-picker-dialog").addEventListener("click", (event) => {
@@ -4600,11 +4648,11 @@ function bindEvents() {
     const relink = event.target.closest("[data-workspace-relink]");
     const remove = event.target.closest("[data-workspace-remove]");
     if (add) {
-      await openWorkspacePicker();
+      await openWorkspacePicker(null, add);
       return;
     }
     if (relink) {
-      await openWorkspacePicker(relink.dataset.workspaceRelink);
+      await openWorkspacePicker(relink.dataset.workspaceRelink, relink);
       return;
     }
     if (remove) {

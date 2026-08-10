@@ -1,15 +1,24 @@
 from pathlib import Path as FileSystemPath
 from collections import defaultdict
+from ipaddress import ip_address
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.integrations import (
+    DirectoryPicker,
+    DirectoryPickerBusyError,
+    DirectoryPickerError,
+    DirectoryPickerUnavailableError,
+)
 from ai_agent_platform.project_memory import (
     MemoryAccessDeniedError,
     ProjectMemoryService,
 )
 from ai_agent_platform.schemas import (
     WorkspaceDirectoryBrowseResponse,
+    WorkspaceDirectoryPickRequest,
+    WorkspaceDirectoryPickResponse,
     WorkspaceDirectoryResponse,
     WorkspaceResponse,
     WorkspaceTokenUsageResponse,
@@ -34,9 +43,52 @@ def create_workspaces_router(
     memory_service: ProjectMemoryService | None = None,
     session_service: SessionService | None = None,
     settings: Settings | None = None,
+    directory_picker: DirectoryPicker | None = None,
 ) -> APIRouter:
     router = APIRouter()
     settings = settings or Settings()
+
+    @router.post(
+        "/workspace-directory-picker",
+        response_model=WorkspaceDirectoryPickResponse,
+    )
+    def pick_workspace_directory(
+        request: WorkspaceDirectoryPickRequest,
+        http_request: Request,
+    ) -> WorkspaceDirectoryPickResponse:
+        if settings.auth_mode != "disabled" or not _is_loopback_request(http_request):
+            raise HTTPException(
+                status_code=403,
+                detail="native directory picker is only available for local mode",
+            )
+        if directory_picker is None:
+            raise HTTPException(
+                status_code=501,
+                detail="native directory picker is unavailable",
+            )
+        initial_path = workspace_service.directory_picker_initial_path(
+            request.initial_path
+        )
+        try:
+            selected_path = directory_picker.pick_directory(
+                initial_path=initial_path
+            )
+        except DirectoryPickerUnavailableError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except DirectoryPickerBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except DirectoryPickerError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if selected_path is None:
+            return WorkspaceDirectoryPickResponse(path=None, cancelled=True)
+        try:
+            selected_path = workspace_service.validate_directory(selected_path)
+        except WorkspaceValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return WorkspaceDirectoryPickResponse(
+            path=selected_path,
+            cancelled=False,
+        )
 
     @router.get(
         "/workspace-directories",
@@ -292,3 +344,12 @@ def create_workspaces_router(
 
 def _directory_name(directory: FileSystemPath) -> str:
     return directory.name or str(directory)
+
+
+def _is_loopback_request(request: Request) -> bool:
+    if request.client is None:
+        return False
+    try:
+        return ip_address(request.client.host).is_loopback
+    except ValueError:
+        return request.client.host == "localhost"

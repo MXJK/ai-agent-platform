@@ -118,6 +118,8 @@ class WorkspaceService:
         try:
             children = current.iterdir()
             for child in children:
+                if child.name.startswith("."):
+                    continue
                 try:
                     resolved = child.resolve()
                     if resolved.is_dir() and self._is_allowed_root(resolved):
@@ -136,6 +138,20 @@ class WorkspaceService:
             parent_path,
             sorted(directories, key=lambda item: (item.name.casefold(), str(item))),
         )
+
+    def directory_picker_initial_path(self, root_path: str | None = None) -> str | None:
+        if root_path:
+            try:
+                return str(self._resolve_allowed_root(root_path))
+            except WorkspaceValidationError:
+                pass
+        for allowed in self._allowed_roots:
+            if allowed.exists() and allowed.is_dir():
+                return str(allowed)
+        return None
+
+    def validate_directory(self, root_path: str) -> str:
+        return str(self._resolve_allowed_root(root_path))
 
     def resolve_for_run(self, workspace_id: str) -> str:
         workspace = self.get(workspace_id)

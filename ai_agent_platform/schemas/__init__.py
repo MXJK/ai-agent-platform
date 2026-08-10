@@ -75,6 +75,8 @@ from .session import (
 from .summary import SessionSummaryResponse
 from .workspace import (
     WorkspaceDirectoryBrowseResponse,
+    WorkspaceDirectoryPickRequest,
+    WorkspaceDirectoryPickResponse,
     WorkspaceDirectoryResponse,
     WorkspaceResponse,
     WorkspacesResponse,
@@ -165,6 +167,8 @@ __all__ = [
     "UserPreferencesPatchRequest",
     "UserPreferencesResponse",
     "WorkspaceDirectoryBrowseResponse",
+    "WorkspaceDirectoryPickRequest",
+    "WorkspaceDirectoryPickResponse",
     "WorkspaceDirectoryResponse",
     "WorkspaceResponse",
     "WorkspacesResponse",

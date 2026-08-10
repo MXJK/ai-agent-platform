@@ -215,6 +215,7 @@ class ApiTests(unittest.TestCase):
             alpha.mkdir()
             nested.mkdir()
             beta.mkdir()
+            (allowed / ".hidden").mkdir()
             (allowed / "notes.txt").write_text("not a directory", encoding="utf-8")
             (allowed / "escape").symlink_to(
                 Path(outside_dir),
@@ -262,6 +263,107 @@ class ApiTests(unittest.TestCase):
                 outside.json()["detail"],
                 "workspace root is outside WORKSPACE_ALLOWED_ROOTS",
             )
+
+    def test_native_workspace_directory_picker_is_local_and_validated(self) -> None:
+        class StubDirectoryPicker:
+            def __init__(self, selections):
+                self.selections = list(selections)
+                self.initial_paths = []
+
+            def pick_directory(self, *, initial_path=None):
+                self.initial_paths.append(initial_path)
+                return self.selections.pop(0)
+
+        with TemporaryDirectory() as allowed_dir, TemporaryDirectory() as outside_dir:
+            allowed = Path(allowed_dir).resolve()
+            project = allowed / "project"
+            project.mkdir()
+            picker = StubDirectoryPicker([str(project), None, outside_dir])
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(allowed),),
+                background_task_workers=2,
+            )
+            app = create_app(settings=settings, directory_picker=picker)
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
+                selected = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": str(allowed)},
+                )
+                cancelled = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": None},
+                )
+                outside = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": str(allowed)},
+                )
+
+            self.assertEqual(selected.status_code, 200)
+            self.assertEqual(
+                selected.json(),
+                {"path": str(project), "cancelled": False},
+            )
+            self.assertEqual(
+                cancelled.json(),
+                {"path": None, "cancelled": True},
+            )
+            self.assertEqual(outside.status_code, 400)
+            self.assertEqual(
+                outside.json()["detail"],
+                "workspace root is outside WORKSPACE_ALLOWED_ROOTS",
+            )
+            self.assertEqual(picker.initial_paths, [str(allowed)] * 3)
+
+    def test_native_workspace_directory_picker_rejects_remote_and_auth_modes(self) -> None:
+        class FailingDirectoryPicker:
+            called = False
+
+            def pick_directory(self, *, initial_path=None):
+                self.called = True
+                raise AssertionError("remote request must not open a system dialog")
+
+        with TemporaryDirectory() as allowed_dir:
+            allowed = Path(allowed_dir).resolve()
+            picker = FailingDirectoryPicker()
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(allowed),),
+                background_task_workers=2,
+            )
+            app = create_app(settings=settings, directory_picker=picker)
+            with TestClient(app, client=("203.0.113.10", 50000)) as client:
+                remote_response = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": None},
+                )
+
+            trusted_settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(allowed),),
+                background_task_workers=2,
+                auth_mode="trusted_header",
+                gateway_trust_secret="test-secret",
+            )
+            trusted_app = create_app(
+                settings=trusted_settings,
+                directory_picker=picker,
+            )
+            with TestClient(
+                trusted_app,
+                client=("127.0.0.1", 50000),
+            ) as client:
+                trusted_response = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": None},
+                )
+
+            self.assertEqual(remote_response.status_code, 403)
+            self.assertEqual(trusted_response.status_code, 403)
+            self.assertFalse(picker.called)
 
     def test_agent_uses_workspace_contract_and_live_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -508,6 +610,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("workspace_id", script_response.text)
         self.assertIn("browseWorkspaceDirectories", script_response.text)
         self.assertIn("/workspace-directories", script_response.text)
+        self.assertIn("body.directories?.length === 1", script_response.text)
+        self.assertIn("系统窗口不可用时", response.text)
+        self.assertIn("/workspace-directory-picker", script_response.text)
+        self.assertIn("系统文件夹窗口不可用，已打开备用选择器", script_response.text)
         self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)

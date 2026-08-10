@@ -94,7 +94,11 @@ The browser workspace also includes:
   including current/default selection, invalid-path relinking, and safe removal;
   the shared composer omits a duplicate code-context strip, while the sidebar
   and settings manage the current workspace and the dedicated Agent input keeps
-  its availability and role visible;
+  its availability and role visible; on local macOS, Add Folder opens the Finder
+  system folder dialog and falls back to the web directory browser only when the
+  system dialog is unavailable; when unset locally, the allowed root defaults to
+  the current user's home directory, while deployments should set explicit
+  minimal roots;
 - Agent run details, approval risk, validation artifacts, errors, and metrics;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
@@ -452,7 +456,19 @@ canonical absolute paths and must remain under `WORKSPACE_ALLOWED_ROOTS` after
 symbolic links are resolved. One canonical root can belong to only one
 workspace; registering the same root under another ID returns `409`. List and
 detail responses also expose `status`, `role`, and `can_update` so clients can
-render path availability and the current user's capability.
+render path availability and the current user's capability. When
+`WORKSPACE_ALLOWED_ROOTS` is unset or blank for local use, it defaults to the
+current user's home directory so the folder picker can reach Desktop, Documents,
+and other projects below it; dot-directories are hidden from the picker by
+default. Container, multi-user, and remote deployments should configure narrower
+roots explicitly.
+
+When `AUTH_MODE=disabled` and the request comes from loopback, the frontend calls
+`POST /api/v1/workspace-directory-picker`, allowing the same-host service to open
+the macOS Finder folder dialog. Cancelling makes no changes, and a selected path
+must still pass `WORKSPACE_ALLOWED_ROOTS` validation. Authenticated or remote
+requests cannot trigger a server desktop dialog; when the native capability is
+unavailable, the frontend falls back to the constrained web directory browser.
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/workspaces/project \

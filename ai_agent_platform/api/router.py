@@ -14,7 +14,7 @@ from ai_agent_platform.api.routes import (
     create_project_memories_router,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueue
-from ai_agent_platform.integrations import LLMClient
+from ai_agent_platform.integrations import DirectoryPicker, LLMClient
 from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.services import (
     AgentRunService,
@@ -38,6 +38,7 @@ def create_api_router(
     metrics: MetricsRegistry,
     task_queue: TaskQueue,
     model_registry: ModelRegistryService,
+    directory_picker: DirectoryPicker,
 ) -> APIRouter:
     router = APIRouter()
     router.include_router(
@@ -78,6 +79,7 @@ def create_api_router(
             memory_service=project_memory_service,
             session_service=session_service,
             settings=settings,
+            directory_picker=directory_picker,
         )
     )
     router.include_router(

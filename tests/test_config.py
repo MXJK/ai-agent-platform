@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ai_agent_platform.core import Settings, validate_bind_host
@@ -19,13 +20,17 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.sentence_transformer_reranker_device, "cpu")
         self.assertFalse(settings.rag_rerank_default_enabled)
         self.assertTrue(settings.workspace_allowed_roots)
+        self.assertEqual(
+            settings.workspace_allowed_roots,
+            (str(Path.home().resolve()),),
+        )
         self.assertEqual(settings.agent_soft_tool_rounds, 12)
         self.assertEqual(settings.agent_max_tool_rounds, 24)
         self.assertEqual(settings.agent_soft_tool_calls, 36)
         self.assertEqual(settings.agent_max_tool_calls, 72)
         self.assertEqual(settings.agent_approval_policy, "on_request")
 
-    def test_blank_allowed_roots_falls_back_to_startup_directory(self) -> None:
+    def test_blank_allowed_roots_falls_back_to_user_home_directory(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -35,6 +40,10 @@ class SettingsTests(unittest.TestCase):
         ):
             settings = Settings.from_env()
         self.assertEqual(len(settings.workspace_allowed_roots), 1)
+        self.assertEqual(
+            settings.workspace_allowed_roots,
+            (str(Path.home().resolve()),),
+        )
         self.assertIsNone(settings.llm_model_catalog_json)
 
     def test_reads_database_and_qdrant_settings_from_environment(self) -> None:

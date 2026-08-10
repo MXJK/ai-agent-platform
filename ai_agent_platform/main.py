@@ -25,9 +25,11 @@ from ai_agent_platform.core import (
     configure_logging,
 )
 from ai_agent_platform.integrations import (
+    DirectoryPicker,
     LLMClient,
     MCPToolProvider,
     RAGService,
+    SystemDirectoryPicker,
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
@@ -67,9 +69,11 @@ def create_app(
     llm_client: LLMClient | None = None,
     rag_service: RAGService | None = None,
     coding_agent_runtime: CodingAgentRuntime | None = None,
+    directory_picker: DirectoryPicker | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     configure_logging(level=settings.log_level, log_format=settings.log_format)
+    directory_picker = directory_picker or SystemDirectoryPicker()
     metrics = MetricsRegistry()
     if settings.task_queue_backend == "celery":
         task_queue = CeleryTaskQueue(
@@ -106,7 +110,7 @@ def create_app(
         store=_create_workspace_store(settings),
         allowed_roots=(
             settings.workspace_allowed_roots
-            or (str(Path.cwd().resolve()),)
+            or (str(Path.home().resolve()),)
         ),
     )
     project_memory_service = create_project_memory_service(
@@ -276,6 +280,7 @@ def create_app(
             metrics=metrics,
             task_queue=task_queue,
             model_registry=model_registry,
+            directory_picker=directory_picker,
         ),
         prefix=settings.api_prefix,
     )

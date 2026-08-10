@@ -10,6 +10,13 @@ from .llm import (
     LLMUsageAccumulator,
     collect_llm_usage,
 )
+from .directory_picker import (
+    DirectoryPicker,
+    DirectoryPickerBusyError,
+    DirectoryPickerError,
+    DirectoryPickerUnavailableError,
+    SystemDirectoryPicker,
+)
 from .model_router import (
     ModelCapabilities,
     ModelConfig,
@@ -57,6 +64,10 @@ from .tools import (
 )
 
 __all__ = [
+    "DirectoryPicker",
+    "DirectoryPickerBusyError",
+    "DirectoryPickerError",
+    "DirectoryPickerUnavailableError",
     "LLMClient",
     "LLMProviderAdapter",
     "LLMProviderError",
@@ -89,6 +100,7 @@ __all__ = [
     "RoutePlan",
     "RoutingPolicy",
     "RoutingRequirements",
+    "SystemDirectoryPicker",
     "ToolCall",
     "ToolExecutionContext",
     "ToolRegistry",

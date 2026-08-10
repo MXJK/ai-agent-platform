@@ -64,6 +64,15 @@ class WorkspaceDirectoryBrowseResponse(BaseModel):
     directories: list[WorkspaceDirectoryResponse]
 
 
+class WorkspaceDirectoryPickRequest(BaseModel):
+    initial_path: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class WorkspaceDirectoryPickResponse(BaseModel):
+    path: str | None
+    cancelled: bool
+
+
 class WorkspaceTokenUsageResponse(BaseModel):
     workspace_id: str
     input_tokens: int
