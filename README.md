@@ -103,7 +103,9 @@ Token 时才作为后备。
   与角色；本机 macOS 点击“添加文件夹”会打开 Finder 系统文件夹窗口，系统窗口不可用
   时才回退网页目录浏览器；未配置该变量时默认从当前用户主目录选择，部署环境应显式
   配置最小允许根目录；
-- Agent 运行详情、审批风险、验证产物、错误和指标；
+- Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
+  要求；运行详情继续提供完整风险、验证产物、错误和指标；刷新或重新进入会话时会恢复
+  该会话最近一次未完成 Run，避免把 `waiting_approval` 误认为卡死；
 - 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
 
 ### 持久化会话与重启恢复
@@ -460,6 +462,7 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
 
 ```text
 GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
 POST /api/v1/agent/runs/{run_id}/pause
@@ -475,7 +478,9 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 事件流使用可恢复游标；浏览器工作台直接从 SSE 事件增量构造轨迹，在终态读取一次
 完整 Run 快照，连接失败或提前结束时回退到状态轮询。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
-`waiting_input` 和 `paused`。
+`waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
+一次运行，并把审批、追问或暂停控件重新挂回原助手消息；生命周期观察器绑定 Run 和
+会话 ID，切换会话不会让旧 Run 的晚到事件覆盖当前页面。
 
 响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
 使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和
@@ -814,6 +819,20 @@ Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独�
 消费任务。运行开始时捕获的根目录无法访问时，任务会以结构化
 `workspace_unavailable` 消息失败。失败的记忆抽取任务保留尝试次数，Celery 可以重试
 同一个来源；已完成的 `source_type + source_id` 保持幂等。
+
+### 运行时装配与生命周期
+
+FastAPI `create_app()` 与 Celery Worker 进程单例都通过
+`build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
+Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
+checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
+可构建角色，没有新增命令或改变配置优先级。
+
+返回的 `RuntimeContainer` 显式持有服务和资源，并按顺序记录 `config_loaded`、
+`stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
+lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按
+创建登记的逆序执行且每个资源最多关闭一次。测试仍可向 `create_app()` 注入 LLM、RAG、
+Agent runtime 和目录选择器，也可覆写 `ApplicationFactory` 的组件构造器。
 
 ## 可选 Go 网关
 

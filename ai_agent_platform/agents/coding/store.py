@@ -41,6 +41,20 @@ class InMemoryAgentRunStore:
         with self._lock:
             return self._runs[run_id]
 
+    def get_latest_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> AgentRunRecord | None:
+        with self._lock:
+            return next(
+                (
+                    record
+                    for record in reversed(self._runs.values())
+                    if record.conversation_id == conversation_id
+                ),
+                None,
+            )
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         with self._lock:
             if run_id not in self._runs:

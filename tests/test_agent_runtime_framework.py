@@ -125,6 +125,30 @@ class InputPlanner(SteeringPlanner):
 
 
 class AgentRuntimeFrameworkTests(unittest.TestCase):
+    def test_in_memory_store_loads_latest_run_for_conversation(self) -> None:
+        store = InMemoryAgentRunStore()
+        base = AgentRunRecord(
+            run_id="run_first",
+            thread_id="run_first",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/workspace",
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup_workspace"],
+            trace=[],
+        )
+        store.save(base)
+        store.save(replace(base, run_id="run_other", conversation_id="session_2"))
+        store.save(replace(base, run_id="run_latest", thread_id="run_latest"))
+
+        latest = store.get_latest_for_conversation("session_1")
+
+        assert latest is not None
+        self.assertEqual(latest.run_id, "run_latest")
+        self.assertIsNone(store.get_latest_for_conversation("missing"))
+
     def test_model_can_pause_for_input_and_receive_answer_as_tool_result(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

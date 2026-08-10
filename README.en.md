@@ -99,7 +99,11 @@ The browser workspace also includes:
   system dialog is unavailable; when unset locally, the allowed root defaults to
   the current user's home directory, while deployments should set explicit
   minimal roots;
-- Agent run details, approval risk, validation artifacts, errors, and metrics;
+- approval, input, and pause checkpoints rendered inside the matching assistant
+  message, with inline approve, reject, feedback, and continue actions; the Run
+  inspector still exposes full risk, validation artifacts, errors, and metrics;
+  reopening a session restores its latest unfinished Run so `waiting_approval`
+  is not mistaken for a stalled conversation;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
 
@@ -522,6 +526,7 @@ The Run lifecycle APIs are:
 
 ```text
 GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
 POST /api/v1/agent/runs/{run_id}/pause
@@ -539,7 +544,11 @@ incrementally from SSE events, fetches one complete Run snapshot at a terminal
 state, and falls back to status polling if the stream fails or ends early.
 Final statuses are `completed`, `partial`, `blocked`, `cancelled`, and `failed`;
 suspended interaction states are `waiting_approval`, `waiting_input`, and
-`paused`.
+`paused`. When a saved session is opened, the frontend uses the conversation-level
+latest-Run endpoint to restore the most recent run and reattach approval, input,
+or pause controls to its assistant message. Run observers capture both Run and
+conversation IDs so late events from a previously viewed session cannot overwrite
+the active one.
 
 Responses expose `context_route`, `selected_knowledge_base_ids`, and
 `context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
@@ -953,6 +962,25 @@ inaccessible captured root fails with the structured
 `workspace_unavailable` message.
 Failed memory-extraction jobs retain their attempt count; Celery can retry the
 same source, while a completed `source_type + source_id` remains idempotent.
+
+### Runtime assembly and lifecycle
+
+FastAPI `create_app()` and the process-local Celery Worker singleton both enter
+the same `ApplicationFactory` through
+`build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
+registry, Workspace, RAG, MCP, Tool Registry, LangGraph checkpointer, Agent
+runtime, and business services therefore share one dependency graph. `cli` is
+only a buildable role reserved for future use; this change adds no command and
+does not alter configuration precedence.
+
+The returned `RuntimeContainer` explicitly owns its services and resources and
+records `config_loaded`, `stores_ready`, `mcp_ready`, `tools_ready`, and
+`agent_ready` startup checkpoints in order. FastAPI lifespan shutdown, Worker
+shutdown, and partial-startup rollback use the same idempotent `close()`;
+cleanup callbacks run strictly in reverse registration order and each resource
+is closed at most once. Tests can still inject the LLM, RAG service, Agent
+runtime, and directory picker into `create_app()`, or override component
+builders on `ApplicationFactory`.
 
 ## Optional Go gateway
 

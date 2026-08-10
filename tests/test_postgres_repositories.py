@@ -431,6 +431,44 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("workspace_root", sql)
         self.assertIn("/workspace/code", params)
 
+    def test_agent_run_repository_loads_latest_run_for_conversation(self) -> None:
+        row = (
+            "run_latest",
+            "run_latest",
+            "session_1",
+            "workspace_main",
+            "/workspace/code",
+            "waiting_approval",
+            "checkpoint_1",
+            "review_tool_plan",
+            ["review_tool_plan"],
+            [],
+            None,
+            None,
+            {"type": "tool_plan_review"},
+            [],
+            None,
+            [],
+        )
+        connection = FakeConnection([row])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresAgentRunRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            latest = repository.get_latest_for_conversation("session_1")
+
+        assert latest is not None
+        self.assertEqual(latest.run_id, "run_latest")
+        self.assertEqual(latest.status, "waiting_approval")
+        sql, params = connection.calls[0]
+        self.assertIn("WHERE conversation_id = %s", sql)
+        self.assertIn("ORDER BY created_at DESC, id DESC", sql)
+        self.assertEqual(params, ("session_1",))
+
     def test_agent_runtime_events_and_tool_identity_use_durable_tables(self) -> None:
         connection = FakeConnection(
             [

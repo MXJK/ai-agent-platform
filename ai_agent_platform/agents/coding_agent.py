@@ -563,6 +563,13 @@ class CodingAgentRuntime:
         self._run_store.save(updated)
         return updated
 
+    def get_latest_run(self, conversation_id: str) -> AgentRunRecord | None:
+        get_latest = getattr(self._run_store, "get_latest_for_conversation", None)
+        if not callable(get_latest):
+            return None
+        record = get_latest(conversation_id)
+        return self.get_run(record.run_id) if record is not None else None
+
     def list_events(self, run_id: str, *, after: int = 0):
         self.get_run(run_id)
         list_events = getattr(self._run_store, "list_events", None)

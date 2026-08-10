@@ -11,6 +11,7 @@ const state = {
   conversationId: "",
   latestRunId: "",
   latestRunStatus: "",
+  latestRunConversationId: "",
   healthStatus: "checking",
   sessionStorageMode: "unknown",
   sessions: [],
@@ -423,6 +424,22 @@ function humanizeStatus(value) {
     conflicted: "存在冲突",
   };
   return labels[value] || value || "未知";
+}
+
+function humanizeApprovalReason(value) {
+  if (value === "one or more planned tools require human approval before execution") {
+    return "以下操作可能产生变更，需要你确认后才能执行。";
+  }
+  return value || "以下操作需要在执行前获得你的确认。";
+}
+
+function humanizePermissionLevel(value) {
+  const labels = {
+    read_only: "只读",
+    write_safe: "沙箱内可写",
+    external_side_effect: "外部副作用",
+  };
+  return labels[value] || value || "需确认";
 }
 
 function statusClass(value) {
@@ -1421,6 +1438,88 @@ function resetChatView() {
   setChatStatus("等待输入");
 }
 
+function resetLatestAgentRunState() {
+  state.agentPollGeneration += 1;
+  state.latestRunId = "";
+  state.latestRunStatus = "";
+  state.latestRunConversationId = "";
+  const statusNode = $("agent-status");
+  statusNode.className = "status-pill neutral";
+  statusNode.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>尚未运行</span>';
+  $("approval-card").classList.add("hidden");
+  $("agent-control-bar").classList.add("hidden");
+  $("agent-answer").className = "rich-output empty-output";
+  $("agent-answer").textContent = "运行 Agent 后，结果会显示在这里。";
+  $("agent-events").innerHTML = '<div class="empty-state">暂无运行事件</div>';
+  renderAgentMetrics(null);
+  renderArtifacts([]);
+  resetChangeSetCard();
+}
+
+function normalizedMessageText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function runAnswerAlreadyPersisted(body, messages) {
+  const answer = normalizedMessageText(body?.result?.answer);
+  return Boolean(answer) && messages.some(
+    (message) => message.role === "assistant"
+      && normalizedMessageText(message.content) === answer,
+  );
+}
+
+async function restoreLatestAgentRun(conversationId, messages = []) {
+  let body;
+  try {
+    body = await fetchJson(
+      `/sessions/${encodeURIComponent(conversationId)}/agent/runs/latest`,
+    );
+  } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+  if (conversationId !== state.conversationId) return null;
+
+  renderAgentRun(body, { scrollApproval: false });
+  setChatStatusFromRun(body);
+  const runId = agentRunId(body);
+  const status = agentRunStatus(body);
+  const answerPersisted = runAnswerAlreadyPersisted(body, messages);
+  const shouldRestoreMessage = !answerPersisted;
+  if (!shouldRestoreMessage) return body;
+
+  let contentNode = chatContentForRun(runId);
+  if (!contentNode) {
+    contentNode = appendChatMessage("assistant", "", null, { runId });
+    const timestamp = contentNode.closest(".chat-bubble")?.querySelector(".message-label span");
+    if (timestamp) timestamp.textContent = "已恢复运行";
+  }
+  const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
+  renderAgentChatResponse(contentNode, body, startedAt);
+  if (!["queued", "running"].includes(status)) return body;
+
+  const presenter = createAgentProgressPresenter(contentNode, startedAt, {
+    initialTrace: agentRunTrace(body),
+  });
+  startResponseTimer(contentNode, startedAt);
+  watchRunUntilTerminal({
+    runId,
+    conversationId,
+    preserveChat: true,
+    onProgress: (latestBody) => presenter.update(latestBody),
+  }).then(async (finalBody) => {
+    if (finalBody && conversationId === state.conversationId) {
+      await presenter.update(finalBody);
+      setChatStatusFromRun(finalBody);
+    }
+    stopResponseTimer(contentNode);
+  }).catch((error) => {
+    stopResponseTimer(contentNode);
+    showToast(`Agent 运行恢复失败：${humanizeError(error)}`, "error");
+  });
+  return body;
+}
+
 async function createSession() {
   $("session-status").textContent = "正在创建会话…";
   try {
@@ -1430,6 +1529,7 @@ async function createSession() {
     });
     state.currentSession = body;
     state.conversationId = body.id;
+    resetLatestAgentRunState();
     $("conversation-id-input").value = body.id;
     $("session-status").textContent = "会话已就绪";
     resetChatView();
@@ -1638,6 +1738,7 @@ async function loadSession(showRaw = true, requestedSessionId = null, options = 
       body: JSON.stringify({ last_active_session_id: session.id }),
     });
   }
+  resetLatestAgentRunState();
   state.currentSession = session;
   state.conversationId = session.id;
   $("conversation-id-input").value = session.id;
@@ -1655,6 +1756,11 @@ async function loadSession(showRaw = true, requestedSessionId = null, options = 
   updateContextSummary();
   if (options.navigate !== false) {
     switchView("chat");
+  }
+  try {
+    await restoreLatestAgentRun(session.id, messages.messages || []);
+  } catch (error) {
+    showToast(`Agent 状态恢复失败：${humanizeError(error)}`, "warning");
   }
   if (showRaw) {
     setRaw({ session, summary, messages, usage });
@@ -1900,7 +2006,7 @@ async function addMessage() {
   }
 }
 
-function appendChatMessage(role, content = "", createdAt = null) {
+function appendChatMessage(role, content = "", createdAt = null, { runId = "" } = {}) {
   const output = $("chat-output");
   const welcome = output.querySelector(".welcome-state");
   if (welcome) {
@@ -1917,9 +2023,268 @@ function appendChatMessage(role, content = "", createdAt = null) {
       <div class="message-content rich-output">${content ? renderMarkdown(content) : '<span class="typing-indicator" aria-label="正在生成"><span></span><span></span><span></span></span>'}</div>
     </div>
   `;
+  if (runId) {
+    item.dataset.agentRunId = runId;
+  }
   output.appendChild(item);
   item.scrollIntoView({ behavior: preferredScrollBehavior(), block: "nearest" });
   return item.querySelector(".message-content");
+}
+
+function agentRunId(body) {
+  return body?.run_id || body?.result?.run_id || "";
+}
+
+function agentRunStatus(body) {
+  return body?.status || body?.result?.status || "";
+}
+
+function agentRunConversationId(body) {
+  return body?.conversation_id || body?.result?.conversation_id || "";
+}
+
+function agentRunTrace(body) {
+  return body?.trace || body?.result?.trace || [];
+}
+
+function chatContentForRun(runId) {
+  const message = [...document.querySelectorAll("[data-agent-run-id]")]
+    .find((item) => item.dataset.agentRunId === runId);
+  return message?.querySelector(".message-content") || null;
+}
+
+function setInlineCheckpointBusy(card, busy) {
+  card.classList.toggle("is-busy", busy);
+  card.setAttribute("aria-busy", String(busy));
+  card.querySelectorAll("button, textarea").forEach((control) => {
+    control.disabled = busy;
+  });
+}
+
+function inlineApprovalTools(approval) {
+  const calls = approval?.tool_calls
+    || (approval?.planned_tools || []).map((name) => ({ name, arguments: {} }));
+  const callByName = new Map(calls.map((call) => [call.name, call]));
+  const required = approval?.approval_required_tools || [];
+  if (required.length) {
+    return required.map((risk) => ({
+      ...callByName.get(risk.name),
+      ...risk,
+      arguments: risk.arguments_summary || callByName.get(risk.name)?.arguments || {},
+    }));
+  }
+  return calls;
+}
+
+function renderInlineAgentCheckpoint(contentNode, body) {
+  const bubble = contentNode.closest(".chat-bubble");
+  if (!bubble) return;
+  const status = agentRunStatus(body);
+  let card = bubble.querySelector(".inline-agent-checkpoint");
+  const shouldFocusCheckpoint = !card || card.dataset.status !== status;
+  if (!SUSPENDED_RUN_STATUSES.has(status)) {
+    if (!card?.dataset.decision) {
+      card?.remove();
+      return;
+    }
+    const decision = card.dataset.decision;
+    const previousStatus = card.dataset.status;
+    const rejected = decision === "reject";
+    const resolvedTitle = rejected
+      ? "已拒绝执行"
+      : previousStatus === "waiting_input"
+        ? "已提交补充信息"
+        : previousStatus === "paused"
+          ? "已继续运行"
+          : "已确认执行计划";
+    const finished = FINAL_RUN_STATUSES.has(status);
+    card.className = `inline-agent-checkpoint resolved ${rejected ? "rejected" : "approved"}`;
+    card.removeAttribute("aria-busy");
+    card.innerHTML = `
+      <div class="inline-checkpoint-resolved-mark" aria-hidden="true">${rejected ? "×" : "✓"}</div>
+      <div>
+        <strong>${resolvedTitle}</strong>
+        <p>${finished ? `Run ${humanizeStatus(status)}` : "Agent 正在按你的决定继续处理。"}</p>
+      </div>
+    `;
+    return;
+  }
+
+  if (!card) {
+    card = document.createElement("section");
+    contentNode.insertAdjacentElement("afterend", card);
+  }
+  delete card.dataset.decision;
+  card.className = `inline-agent-checkpoint ${statusClass(status)}`;
+  card.dataset.runId = agentRunId(body);
+  card.dataset.status = status;
+  card.setAttribute("role", "group");
+
+  const pending = body?.pending_approval || body?.result?.pending_approval || {};
+  if (status === "waiting_approval") {
+    const tools = inlineApprovalTools(pending);
+    card.setAttribute("aria-label", "Agent 执行审批");
+    card.innerHTML = `
+      <div class="inline-checkpoint-heading">
+        <span class="inline-checkpoint-mark" aria-hidden="true">!</span>
+        <div>
+          <span>执行检查点</span>
+          <h3>需要你确认后继续</h3>
+        </div>
+        <code>${escapeHtml(agentRunId(body))}</code>
+      </div>
+      <p class="inline-checkpoint-reason">${escapeHtml(humanizeApprovalReason(pending.reason))}</p>
+      <div class="inline-checkpoint-tools">
+        ${tools.map((tool) => `
+          <details class="approval-tool">
+            <summary><strong>${escapeHtml(tool.name || "待审批工具")}</strong><span>${escapeHtml(humanizePermissionLevel(tool.permission_level))}</span></summary>
+            <p>${escapeHtml(tool.risk_summary || "请确认此操作及参数符合你的预期。")}</p>
+            <pre>${escapeHtml(jsonPretty(tool.arguments || {}))}</pre>
+          </details>
+        `).join("") || '<p class="inline-checkpoint-empty">执行计划需要你的确认。</p>'}
+      </div>
+      <label class="inline-checkpoint-feedback">
+        <span>补充要求 <small>可选</small></span>
+        <textarea rows="2" maxlength="4000" placeholder="例如：不要安装新依赖，优先使用原生浏览器 API"></textarea>
+      </label>
+      <p class="inline-checkpoint-error" role="alert" hidden></p>
+      <div class="inline-checkpoint-actions">
+        <button class="button danger" type="button" data-inline-agent-action="reject">拒绝执行</button>
+        <button class="button primary" type="button" data-inline-agent-action="approve">确认并继续</button>
+      </div>
+    `;
+  } else {
+    const needsInput = status === "waiting_input";
+    const question = pending.question
+      || (needsInput ? "Agent 需要你补充信息后才能继续。" : "Agent 已在安全边界暂停。你可以补充新的方向后继续。")
+    card.setAttribute("aria-label", needsInput ? "Agent 等待输入" : "Agent 已暂停");
+    card.innerHTML = `
+      <div class="inline-checkpoint-heading">
+        <span class="inline-checkpoint-mark" aria-hidden="true">${needsInput ? "?" : "Ⅱ"}</span>
+        <div>
+          <span>${needsInput ? "需要你的输入" : "安全暂停"}</span>
+          <h3>${escapeHtml(question)}</h3>
+        </div>
+        <code>${escapeHtml(agentRunId(body))}</code>
+      </div>
+      <label class="inline-checkpoint-feedback">
+        <span>${needsInput ? "回复 Agent" : "继续时的补充要求"}</span>
+        <textarea rows="3" maxlength="4000" placeholder="${escapeHtml(question)}"></textarea>
+      </label>
+      <p class="inline-checkpoint-error" role="alert" hidden></p>
+      <div class="inline-checkpoint-actions">
+        <button class="button primary" type="button" data-inline-agent-action="continue">继续运行</button>
+      </div>
+    `;
+  }
+
+  card.querySelectorAll("[data-inline-agent-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleInlineAgentAction(contentNode, body, button.dataset.inlineAgentAction, card);
+    });
+  });
+  if (shouldFocusCheckpoint) {
+    window.requestAnimationFrame(() => {
+      card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
+    });
+  }
+}
+
+function setChatStatusFromRun(body) {
+  const status = agentRunStatus(body);
+  if (status === "completed") {
+    setChatStatus("Agent 已完成", status);
+  } else if (status === "waiting_approval") {
+    setChatStatus("Agent 等待你的确认", status);
+  } else if (status === "waiting_input") {
+    setChatStatus("Agent 等待你的输入", status);
+  } else if (status === "paused") {
+    setChatStatus("Agent 已暂停", status);
+  } else if (["queued", "running"].includes(status)) {
+    setChatStatus("Agent 运行中", status);
+  } else {
+    setChatStatus(`Agent ${humanizeStatus(status)}`, statusClass(status));
+  }
+}
+
+async function handleInlineAgentAction(contentNode, body, action, card) {
+  const runId = agentRunId(body);
+  const conversationId = agentRunConversationId(body);
+  if (!runId || conversationId !== state.conversationId) {
+    showToast("这条审批不属于当前会话，请重新打开对应会话", "warning");
+    return;
+  }
+  const feedback = card.querySelector("textarea")?.value.trim() || "";
+  const errorNode = card.querySelector(".inline-checkpoint-error");
+  setInlineCheckpointBusy(card, true);
+  if (errorNode) errorNode.hidden = true;
+  try {
+    const isApproval = action === "approve" || action === "reject";
+    const nextBody = await fetchJson(
+      isApproval
+        ? `/agent/runs/${encodeURIComponent(runId)}/resume`
+        : `/agent/runs/${encodeURIComponent(runId)}/continue`,
+      {
+        method: "POST",
+        body: JSON.stringify(isApproval
+          ? {
+              approved: action === "approve",
+              feedback: feedback || (action === "approve"
+                ? "用户已在对话中确认执行计划"
+                : "用户已在对话中拒绝执行计划"),
+            }
+          : { message: feedback }),
+      },
+    );
+    if (
+      conversationId !== state.conversationId
+      || runId !== state.latestRunId
+    ) {
+      return;
+    }
+    card.dataset.decision = action;
+    renderAgentRun(nextBody, { scrollApproval: false });
+    const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
+    const presenter = createAgentProgressPresenter(contentNode, startedAt, {
+      initialTrace: agentRunTrace(body),
+    });
+    startResponseTimer(contentNode, startedAt);
+    await presenter.update(nextBody);
+    const finalBody = await watchRunUntilTerminal({
+      runId,
+      conversationId,
+      preserveChat: true,
+      onProgress: (latestBody) => presenter.update(latestBody),
+    });
+    if (
+      conversationId !== state.conversationId
+      || runId !== state.latestRunId
+    ) {
+      stopResponseTimer(contentNode);
+      return;
+    }
+    if (finalBody) await presenter.update(finalBody);
+    setChatStatusFromRun(finalBody || nextBody);
+    if (TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
+      stopResponseTimer(contentNode);
+    }
+    await Promise.allSettled([
+      refreshCurrentSessionMetadata(),
+      refreshRecentSessions(),
+    ]);
+  } catch (error) {
+    setInlineCheckpointBusy(card, false);
+    if (errorNode) {
+      errorNode.textContent = humanizeError(error);
+      errorNode.hidden = false;
+    }
+    if (
+      conversationId === state.conversationId
+      && runId === state.latestRunId
+    ) {
+      showToast(humanizeError(error), "error");
+    }
+  }
 }
 
 function stopChat() {
@@ -1962,9 +2327,9 @@ function renderAgentChatResponse(
       ? renderMarkdown(result.answer)
       : "<p>Agent 已完成，但没有返回文本内容。</p>";
   } else if (!holdAnswer && actualStatus === "waiting_approval") {
-    contentNode.innerHTML = "<p>Agent 已暂停并等待审批。请前往代码 Agent 页面查看工具计划。</p>";
+    contentNode.innerHTML = "<p>Agent 已在执行前暂停。请检查下方计划并决定是否继续。</p>";
   } else if (!holdAnswer && ["paused", "waiting_input"].includes(actualStatus)) {
-    contentNode.innerHTML = "<p>Agent 已在安全边界暂停，可补充方向后继续。</p>";
+    contentNode.innerHTML = "<p>Agent 已在安全边界暂停，请在下方补充信息或继续。</p>";
   } else if (!holdAnswer && actualStatus === "failed") {
     contentNode.innerHTML = `<p>${escapeHtml(body.error || "Agent 运行失败，请查看运行详情。")}</p>`;
   } else {
@@ -1987,10 +2352,17 @@ function renderAgentChatResponse(
       total_tokens: result.metrics.total_tokens,
     });
   }
+  if (!holdAnswer) {
+    renderInlineAgentCheckpoint(contentNode, body);
+  }
 }
 
-function createAgentProgressPresenter(contentNode, startedAt) {
-  const visibleTrace = [];
+function createAgentProgressPresenter(
+  contentNode,
+  startedAt,
+  { initialTrace = [] } = {},
+) {
+  const visibleTrace = [...initialTrace];
   let pending = Promise.resolve();
 
   return {
@@ -2050,7 +2422,9 @@ async function runAgentFromComposer() {
       onSubmitted: (body) => {
         submitted = true;
         appendChatMessage("user", message);
-        assistantContent = appendChatMessage("assistant");
+        assistantContent = appendChatMessage("assistant", "", null, {
+          runId: agentRunId(body),
+        });
         progressPresenter = createAgentProgressPresenter(assistantContent, startedAt);
         progressPresenter.update(body);
         startResponseTimer(assistantContent, startedAt);
@@ -2063,6 +2437,10 @@ async function runAgentFromComposer() {
         }
       },
     });
+    if (run && agentRunConversationId(run) !== state.conversationId) {
+      if (assistantContent) stopResponseTimer(assistantContent);
+      return;
+    }
     if (!run && !submitted) {
       input.value = message;
       setChatStatus("Agent 提交失败", "failed");
@@ -2071,17 +2449,11 @@ async function runAgentFromComposer() {
     if (progressPresenter && run) {
       await progressPresenter.update(run);
     }
-    if (state.latestRunStatus === "completed") {
-      setChatStatus("Agent 已完成", "completed");
-    } else if (["partial", "blocked", "cancelled"].includes(state.latestRunStatus)) {
-      setChatStatus(`Agent ${humanizeStatus(state.latestRunStatus)}`, state.latestRunStatus);
-    } else if (state.latestRunStatus === "waiting_approval") {
-      setChatStatus("Agent 等待审批", "waiting_approval");
-      showToast("Agent 正在等待审批，请前往代码 Agent 页面处理", "warning");
-    } else if (state.latestRunStatus === "failed") {
-      setChatStatus("Agent 运行失败", "failed");
-    } else {
-      setChatStatus("Agent 在后台运行", "running");
+    setChatStatusFromRun({ status: state.latestRunStatus });
+    if (state.latestRunStatus === "waiting_approval") {
+      showToast("Agent 需要你的确认，已在对话中显示执行检查点", "warning");
+    } else if (["waiting_input", "paused"].includes(state.latestRunStatus)) {
+      showToast("Agent 已在对话中等待你的补充", "warning");
     }
   } finally {
     if (assistantContent && TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
@@ -2432,6 +2804,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     return null;
   }
   let submittedRun = null;
+  let conversationId = "";
   const button = $("run-agent-btn");
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
@@ -2443,7 +2816,7 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
   resetChangeSetCard();
   $("approval-card").classList.add("hidden");
   try {
-    const conversationId = await ensureSession();
+    conversationId = await ensureSession();
     const payload = {
       conversation_id: conversationId,
       message,
@@ -2456,6 +2829,9 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
       body: JSON.stringify(payload),
     });
     submittedRun = body;
+    if (conversationId !== state.conversationId) {
+      return body;
+    }
     renderAgentRun(body);
     if (onSubmitted) {
       onSubmitted(body);
@@ -2470,10 +2846,12 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     ]);
     return finalBody || body;
   } catch (error) {
-    setAgentStatus("failed");
-    $("agent-answer").className = "rich-output";
-    $("agent-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
-    showToast(humanizeError(error), "error");
+    if (!conversationId || conversationId === state.conversationId) {
+      setAgentStatus("failed");
+      $("agent-answer").className = "rich-output";
+      $("agent-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
+      showToast(humanizeError(error), "error");
+    }
     return submittedRun;
   } finally {
     button.disabled = false;
@@ -2483,10 +2861,11 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
   }
 }
 
-function renderAgentRun(body) {
+function renderAgentRun(body, { scrollApproval = true } = {}) {
   const result = body.result || {};
   state.latestRunId = body.run_id || result.run_id || "";
   state.latestRunStatus = body.status || result.status || "";
+  state.latestRunConversationId = agentRunConversationId(body);
   const actualStatus = state.latestRunStatus;
   setAgentStatus(state.latestRunStatus, state.latestRunId);
 
@@ -2509,6 +2888,7 @@ function renderAgentRun(body) {
 
   renderApproval(
     state.latestRunStatus === "waiting_approval" ? body.pending_approval : null,
+    { scroll: scrollApproval },
   );
   renderAgentControls(state.latestRunStatus);
   renderAgentMetrics(result.metrics);
@@ -2541,32 +2921,29 @@ function renderAgentControls(status) {
   $("cancel-run-btn").classList.toggle("hidden", status === "cancelled");
 }
 
-function renderApproval(approval) {
+function renderApproval(approval, { scroll = true } = {}) {
   const card = $("approval-card");
   if (!approval || approval.type === "input_required" || approval.type === "run_pause") {
     card.classList.add("hidden");
     return;
   }
   card.classList.remove("hidden");
-  $("approval-reason").textContent = approval.reason || "一个或多个工具需要在执行前确认。";
+  $("approval-reason").textContent = humanizeApprovalReason(approval.reason);
   const tools = $("approval-tools");
   tools.innerHTML = "";
-  const requiredByName = new Map(
-    (approval.approval_required_tools || []).map((item) => [item.name, item]),
-  );
-  const calls = approval.tool_calls || (approval.planned_tools || []).map((name) => ({ name, arguments: {} }));
-  for (const call of calls) {
-    const risk = requiredByName.get(call.name) || {};
+  for (const call of inlineApprovalTools(approval)) {
     const item = document.createElement("details");
     item.className = "approval-tool";
     item.innerHTML = `
-      <summary><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(risk.permission_level || "计划工具")}</span></summary>
-      <p>${escapeHtml(risk.risk_summary || "只读或低风险工具；请确认参数符合预期。")}</p>
-      <pre>${escapeHtml(jsonPretty(risk.arguments_summary || call.arguments || {}))}</pre>
+      <summary><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(humanizePermissionLevel(call.permission_level))}</span></summary>
+      <p>${escapeHtml(call.risk_summary || "请确认此操作及参数符合你的预期。")}</p>
+      <pre>${escapeHtml(jsonPretty(call.arguments || {}))}</pre>
     `;
     tools.appendChild(item);
   }
-  card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
+  if (scroll) {
+    card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
+  }
 }
 
 function renderAgentMetrics(metrics) {
@@ -2702,24 +3079,42 @@ async function rejectCurrentChangeSet() {
   }
 }
 
-async function refreshRun() {
-  if (!state.latestRunId) {
+async function refreshRun(
+  runId = state.latestRunId,
+  { conversationId = state.conversationId, render = true } = {},
+) {
+  if (!runId) {
     showToast("还没有可刷新的 Agent 运行", "warning");
     return null;
   }
-  const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}`);
-  renderAgentRun(body);
+  const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}`);
+  if (
+    render
+    && runId === state.latestRunId
+    && conversationId === state.conversationId
+  ) {
+    renderAgentRun(body, { scrollApproval: state.currentView === "agent" });
+  }
   return body;
 }
 
-async function refreshEvents(showRaw = true) {
-  if (!state.latestRunId) {
+async function refreshEvents(
+  showRaw = true,
+  runId = state.latestRunId,
+  {
+    render = true,
+    conversationId = state.latestRunConversationId || state.conversationId,
+  } = {},
+) {
+  if (!runId) {
     $("agent-events").innerHTML = '<div class="empty-state">暂无运行事件</div>';
     return null;
   }
-  const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/events`);
-  renderAgentEvents(body.events || []);
-  if (showRaw) {
+  const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/events`);
+  const isCurrentRun = runId === state.latestRunId
+    && conversationId === state.conversationId;
+  if (render && isCurrentRun) renderAgentEvents(body.events || []);
+  if (showRaw && isCurrentRun) {
     setRaw(body);
   }
   return body;
@@ -2747,7 +3142,7 @@ function renderAgentEvents(events) {
   }
 }
 
-function agentProgressBodyFromEvents(events) {
+function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
   const trace = events
     .filter((event) => event.type === "node_completed")
     .map((event, index) => ({
@@ -2758,17 +3153,17 @@ function agentProgressBodyFromEvents(events) {
     }));
   const latestEvent = events.at(-1) || {};
   return {
-    run_id: state.latestRunId,
+    run_id: runId,
     status: latestEvent.status || state.latestRunStatus || "running",
     latest_node: latestEvent.node || trace.at(-1)?.node || null,
     trace,
   };
 }
 
-function renderStreamedAgentProgress(events) {
-  const body = agentProgressBodyFromEvents(events);
+function renderStreamedAgentProgress(events, runId = state.latestRunId) {
+  const body = agentProgressBodyFromEvents(events, runId);
   state.latestRunStatus = body.status;
-  setAgentStatus(body.status, state.latestRunId);
+  setAgentStatus(body.status, runId);
   renderAgentControls(body.status);
   renderAgentEvents(events);
   setTrace(body.trace);
@@ -2780,6 +3175,9 @@ async function resumeRun(approved) {
   if (!state.latestRunId) {
     return;
   }
+  const runId = state.latestRunId;
+  const conversationId = state.latestRunConversationId || state.conversationId;
+  const chatContent = chatContentForRun(runId);
   const approveButton = $("approve-run-btn");
   const rejectButton = $("reject-run-btn");
   approveButton.disabled = true;
@@ -2788,18 +3186,53 @@ async function resumeRun(approved) {
   setAgentStatus("running", state.latestRunId);
   try {
     const feedback = $("approval-feedback-input").value.trim();
-    const body = await fetchJson(`/agent/runs/${encodeURIComponent(state.latestRunId)}/resume`, {
+    const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/resume`, {
       method: "POST",
       body: JSON.stringify({
         approved,
         feedback: feedback || (approved ? "用户已在产品界面确认执行计划" : "用户拒绝执行计划"),
       }),
     });
+    if (
+      conversationId !== state.conversationId
+      || runId !== state.latestRunId
+    ) {
+      return;
+    }
     renderAgentRun(body);
+    let presenter = null;
+    if (chatContent) {
+      const checkpoint = chatContent.closest(".chat-bubble")
+        ?.querySelector(".inline-agent-checkpoint");
+      if (checkpoint) checkpoint.dataset.decision = approved ? "approve" : "reject";
+      const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
+      presenter = createAgentProgressPresenter(chatContent, startedAt, {
+        initialTrace: agentRunTrace(body),
+      });
+      await presenter.update(body);
+    }
     showToast(approved ? "执行计划已批准" : "执行计划已拒绝", approved ? "success" : "warning");
-    await watchRunUntilTerminal();
+    const finalBody = await watchRunUntilTerminal({
+      runId,
+      conversationId,
+      preserveChat: Boolean(chatContent),
+      onProgress: presenter ? (latestBody) => presenter.update(latestBody) : null,
+    });
+    if (
+      conversationId !== state.conversationId
+      || runId !== state.latestRunId
+    ) {
+      return;
+    }
+    if (presenter && finalBody) await presenter.update(finalBody);
+    if (finalBody) setChatStatusFromRun(finalBody);
   } catch (error) {
-    showToast(humanizeError(error), "error");
+    if (
+      conversationId === state.conversationId
+      && runId === state.latestRunId
+    ) {
+      showToast(humanizeError(error), "error");
+    }
   } finally {
     approveButton.disabled = false;
     rejectButton.disabled = false;
@@ -2809,6 +3242,8 @@ async function resumeRun(approved) {
 
 async function controlRun(action) {
   if (!state.latestRunId) return;
+  const runId = state.latestRunId;
+  const conversationId = state.latestRunConversationId || state.conversationId;
   const input = $("agent-steering-input");
   const message = input.value.trim();
   if (action === "steer" && !message) {
@@ -2819,12 +3254,18 @@ async function controlRun(action) {
   const endpoint = action === "continue" ? "continue" : action;
   try {
     const body = await fetchJson(
-      `/agent/runs/${encodeURIComponent(state.latestRunId)}/${endpoint}`,
+      `/agent/runs/${encodeURIComponent(runId)}/${endpoint}`,
       {
         method: "POST",
         body: JSON.stringify({ message }),
       },
     );
+    if (
+      conversationId !== state.conversationId
+      || runId !== state.latestRunId
+    ) {
+      return;
+    }
     renderAgentRun(body);
     if (["steer", "continue"].includes(action)) input.value = "";
     showToast({
@@ -2833,13 +3274,44 @@ async function controlRun(action) {
       steer: "转向信息已加入当前运行",
       continue: "Agent 已继续运行",
     }[action] || "运行状态已更新", action === "cancel" ? "warning" : "success");
-    if (action === "continue") await watchRunUntilTerminal();
+    if (action === "continue") {
+      const chatContent = chatContentForRun(runId);
+      let presenter = null;
+      if (chatContent) {
+        const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
+        presenter = createAgentProgressPresenter(chatContent, startedAt, {
+          initialTrace: agentRunTrace(body),
+        });
+        await presenter.update(body);
+      }
+      const finalBody = await watchRunUntilTerminal({
+        runId,
+        conversationId,
+        preserveChat: Boolean(chatContent),
+        onProgress: presenter ? (latestBody) => presenter.update(latestBody) : null,
+      });
+      if (
+        conversationId !== state.conversationId
+        || runId !== state.latestRunId
+      ) {
+        return;
+      }
+      if (presenter && finalBody) await presenter.update(finalBody);
+      if (finalBody) setChatStatusFromRun(finalBody);
+    }
   } catch (error) {
-    showToast(humanizeError(error), "error");
+    if (
+      conversationId === state.conversationId
+      && runId === state.latestRunId
+    ) {
+      showToast(humanizeError(error), "error");
+    }
   }
 }
 
 async function watchRunUntilTerminal(options = {}) {
+  const runId = options.runId || state.latestRunId;
+  const conversationId = options.conversationId || state.conversationId;
   const generation = ++state.agentPollGeneration;
   let cursor = 0;
   let latestBody = null;
@@ -2851,7 +3323,7 @@ async function watchRunUntilTerminal(options = {}) {
   };
   try {
     const response = await fetch(
-      `${API_BASE}/agent/runs/${encodeURIComponent(state.latestRunId)}/events/stream?cursor=${cursor}`,
+      `${API_BASE}/agent/runs/${encodeURIComponent(runId)}/events/stream?cursor=${cursor}`,
       {
         headers: { "X-User-ID": $("user-id-input")?.value.trim() || "demo_user" },
       },
@@ -2861,9 +3333,21 @@ async function watchRunUntilTerminal(options = {}) {
     const decoder = new TextDecoder();
     let buffer = "";
     let stopped = false;
-    while (generation === state.agentPollGeneration) {
+    while (
+      generation === state.agentPollGeneration
+      && runId === state.latestRunId
+      && conversationId === state.conversationId
+    ) {
       const { value, done } = await reader.read();
       if (done) break;
+      if (
+        generation !== state.agentPollGeneration
+        || runId !== state.latestRunId
+        || conversationId !== state.conversationId
+      ) {
+        await reader.cancel();
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
       const chunks = buffer.split("\n\n");
       buffer = chunks.pop() || "";
@@ -2873,12 +3357,12 @@ async function watchRunUntilTerminal(options = {}) {
         const event = JSON.parse(dataLine.slice(6));
         cursor = Math.max(cursor, Number(event.sequence) || 0);
         streamedEvents.push(event);
-        const progressBody = renderStreamedAgentProgress(streamedEvents);
+        const progressBody = renderStreamedAgentProgress(streamedEvents, runId);
         if (event.type === "node_completed") {
           publishProgress(progressBody);
         }
         if (TERMINAL_RUN_STATUSES.has(progressBody.status)) {
-          latestBody = await refreshRun();
+          latestBody = await refreshRun(runId, { conversationId });
           publishProgress(latestBody);
           stopped = true;
           break;
@@ -2890,12 +3374,27 @@ async function watchRunUntilTerminal(options = {}) {
   } catch (error) {
     console.warn("Agent event stream unavailable; falling back to polling", error);
   }
-  const polledBody = await pollRunUntilTerminal(options, latestBody);
+  if (
+    generation !== state.agentPollGeneration
+    || runId !== state.latestRunId
+    || conversationId !== state.conversationId
+  ) {
+    return latestBody;
+  }
+  const polledBody = await pollRunUntilTerminal(
+    { ...options, runId, conversationId },
+    latestBody,
+  );
   return polledBody || latestBody;
 }
 
 async function pollRunUntilTerminal(
-  { onProgress = null, preserveChat = false } = {},
+  {
+    onProgress = null,
+    preserveChat = false,
+    runId = state.latestRunId,
+    conversationId = state.conversationId,
+  } = {},
   initialBody = null,
 ) {
   const generation = ++state.agentPollGeneration;
@@ -2903,31 +3402,42 @@ async function pollRunUntilTerminal(
   for (let attempt = 0; attempt < 200; attempt += 1) {
     if (
       generation !== state.agentPollGeneration ||
-      !state.latestRunId ||
+      !runId ||
+      runId !== state.latestRunId ||
+      conversationId !== state.conversationId ||
       TERMINAL_RUN_STATUSES.has(state.latestRunStatus)
     ) {
       break;
     }
     await new Promise((resolve) => window.setTimeout(resolve, 300));
-    latestBody = await refreshRun();
+    latestBody = await refreshRun(runId, { conversationId });
     if (onProgress) {
       await onProgress(latestBody);
     }
     if (attempt % 3 === 0) {
-      await refreshEvents(false);
+      await refreshEvents(false, runId);
     }
   }
   if (
     !latestBody
-    && state.latestRunId
+    && runId
+    && runId === state.latestRunId
+    && conversationId === state.conversationId
     && TERMINAL_RUN_STATUSES.has(state.latestRunStatus)
   ) {
-    latestBody = await refreshRun();
+    latestBody = await refreshRun(runId, { conversationId });
     if (onProgress) {
       await onProgress(latestBody);
     }
   }
-  await refreshEvents(false);
+  if (
+    generation !== state.agentPollGeneration
+    || runId !== state.latestRunId
+    || conversationId !== state.conversationId
+  ) {
+    return latestBody;
+  }
+  await refreshEvents(false, runId);
   try {
     await refreshMessages(false, !preserveChat);
   } catch (error) {

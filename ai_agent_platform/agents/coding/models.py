@@ -268,6 +268,12 @@ class AgentRunStore(Protocol):
     def get(self, run_id: str) -> AgentRunRecord:
         ...
 
+    def get_latest_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> Optional[AgentRunRecord]:
+        ...
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         ...
 

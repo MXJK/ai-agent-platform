@@ -714,6 +714,39 @@ class PostgresAgentRunRepository:
             raise KeyError(run_id)
         return _agent_run_from_row(row)
 
+    def get_latest_for_conversation(
+        self,
+        conversation_id: str,
+    ) -> AgentRunRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id,
+                    thread_id,
+                    conversation_id,
+                    workspace_id,
+                    workspace_root,
+                    status,
+                    checkpoint_id,
+                    latest_node,
+                    next_nodes,
+                    trace,
+                    result,
+                    error,
+                    pending_approval,
+                    errors,
+                    control_action,
+                    steering_messages
+                FROM agent_runs
+                WHERE conversation_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+        return _agent_run_from_row(row) if row is not None else None
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         with self._connect() as conn:
             rows = conn.execute(

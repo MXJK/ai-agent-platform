@@ -290,6 +290,21 @@ class AgentRunService:
         self._assert_actor(record, actor_user_id)
         return record
 
+    def get_latest_run_for_actor(
+        self,
+        conversation_id: str,
+        actor_user_id: str | None,
+    ) -> AgentRunRecord:
+        session = self._session_service.get_session(session_id=conversation_id)
+        if actor_user_id is not None and session.user_id != actor_user_id:
+            raise PermissionError("agent run access denied")
+        get_latest = getattr(self._runtime, "get_latest_run", None)
+        record = get_latest(conversation_id) if callable(get_latest) else None
+        if record is None:
+            raise AgentRunNotFoundError(conversation_id)
+        self._assert_actor(record, actor_user_id)
+        return record
+
     def list_events_for_actor(
         self,
         run_id: str,

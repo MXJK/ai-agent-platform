@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "LOCAL-WORKSPACE-FOLDER-PICKER"
-next_action: "Review the pushed Finder workspace picker; apply migration 20260809_0019 only after separate human approval."
+active_task: "RUNTIME-BOOTSTRAP"
+next_action: "Review the verified RUNTIME-BOOTSTRAP changes together with the preserved INLINE-AGENT-APPROVAL work, then commit when ready."
 blockers: []
 last_verified_commit: "7a026d511f0d8b5e11bdde5839d188e97722574a"
-updated_at: "2026-08-10T10:51:30+08:00"
+updated_at: "2026-08-10T12:42:29+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

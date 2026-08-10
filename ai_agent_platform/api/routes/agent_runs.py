@@ -139,6 +139,29 @@ def create_agent_runs_router(
         return AgentRunStatusResponse.from_domain(record)
 
     @router.get(
+        "/sessions/{conversation_id}/agent/runs/latest",
+        response_model=AgentRunStatusResponse,
+    )
+    def get_latest_agent_run(
+        conversation_id: str,
+        request: Request,
+    ) -> AgentRunStatusResponse:
+        try:
+            record = agent_run_service.get_latest_run_for_actor(
+                conversation_id,
+                (
+                    request_user_id(request, settings)
+                    if settings.auth_mode != "disabled"
+                    else None
+                ),
+            )
+        except (AgentRunNotFoundError, SessionNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return AgentRunStatusResponse.from_domain(record)
+
+    @router.get(
         "/agent/runs/{run_id}/events",
         response_model=AgentRunEventsResponse,
     )

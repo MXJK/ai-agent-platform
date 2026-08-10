@@ -1531,6 +1531,175 @@ body.inspector-hidden .app-shell {
   color: var(--ink-soft);
 }
 
+.inline-agent-checkpoint {
+  width: min(640px, 100%);
+  margin-top: 14px;
+  scroll-margin-block: 120px 250px;
+  padding: 14px;
+  border: 1px solid rgba(228, 185, 110, 0.34);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(228, 185, 110, 0.08), transparent 42%),
+    var(--surface-soft);
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+
+.inline-checkpoint-heading {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.inline-checkpoint-mark,
+.inline-checkpoint-resolved-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.inline-checkpoint-heading span:not(.inline-checkpoint-mark) {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.inline-checkpoint-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.inline-checkpoint-heading > code {
+  max-width: 130px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-checkpoint-reason {
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.inline-checkpoint-tools {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0;
+}
+
+.inline-checkpoint-tools .approval-tool {
+  border-color: rgba(228, 185, 110, 0.24);
+}
+
+.inline-checkpoint-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.inline-checkpoint-feedback {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.inline-checkpoint-feedback > span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.inline-checkpoint-feedback small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.inline-checkpoint-feedback textarea {
+  min-height: 64px;
+  resize: vertical;
+  background: var(--canvas-deep);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.inline-checkpoint-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.inline-checkpoint-error {
+  margin: 9px 0 0;
+  color: var(--red);
+  font-size: 10px;
+}
+
+.inline-agent-checkpoint.is-busy .inline-checkpoint-mark {
+  animation: status-pulse 1.1s ease-in-out infinite;
+}
+
+.inline-agent-checkpoint.resolved {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-color: rgba(98, 214, 194, 0.22);
+  background: var(--signal-soft);
+  box-shadow: inset 3px 0 0 var(--signal);
+}
+
+.inline-agent-checkpoint.resolved.rejected {
+  border-color: rgba(245, 138, 157, 0.24);
+  background: var(--red-soft);
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.inline-agent-checkpoint.resolved .inline-checkpoint-resolved-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--signal-soft);
+  color: var(--signal);
+  font-size: 12px;
+}
+
+.inline-agent-checkpoint.resolved.rejected .inline-checkpoint-resolved-mark {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.inline-agent-checkpoint.resolved strong {
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.inline-agent-checkpoint.resolved p {
+  margin: 1px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .execution-process {
   width: auto;
   min-width: min(260px, 100%);
@@ -4414,6 +4583,33 @@ body.inspector-hidden .inspector {
 
   .chat-bubble {
     padding: 11px 12px;
+  }
+
+  .inline-agent-checkpoint {
+    padding: 11px;
+    scroll-margin-block: 96px 340px;
+  }
+
+  .inline-checkpoint-heading {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .inline-checkpoint-heading > code {
+    display: none;
+  }
+
+  .inline-checkpoint-mark {
+    width: 30px;
+    height: 30px;
+  }
+
+  .inline-checkpoint-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .inline-checkpoint-actions .button {
+    width: 100%;
   }
 
   .composer-tool span,

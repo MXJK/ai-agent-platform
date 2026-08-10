@@ -458,6 +458,11 @@ class ApiTests(unittest.TestCase):
                         for item in second_result["result"]["context_sources"]
                     )
                 )
+                latest_run = client.get(
+                    f"/api/v1/sessions/{session_id}/agent/runs/latest"
+                )
+                self.assertEqual(latest_run.status_code, 200)
+                self.assertEqual(latest_run.json()["run_id"], second.json()["run_id"])
                 conversation_usage = client.get(
                     f"/api/v1/sessions/{session_id}/token-usage"
                 ).json()
@@ -495,6 +500,19 @@ class ApiTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 404)
 
+    def test_session_without_agent_run_has_no_latest_run(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session_id = client.post(
+                "/api/v1/sessions",
+                json={"user_id": "tester"},
+            ).json()["id"]
+            response = client.get(
+                f"/api/v1/sessions/{session_id}/agent/runs/latest"
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "agent run not found")
+
     def test_serves_unified_chat_and_workspace_agent_frontend(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
             response = client.get("/")
@@ -504,7 +522,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260807-document-toolbar-2',
+            '/static/styles.css?v=20260810-inline-agent-approval-1',
+            response.text,
+        )
+        self.assertIn(
+            '/static/app.js?v=20260810-inline-agent-approval-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -552,6 +574,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("new AbortController()", script_response.text)
         self.assertIn('fetchJson("/users/me/preferences"', script_response.text)
         self.assertIn("restoreInitialSession", script_response.text)
+        self.assertIn("restoreLatestAgentRun", script_response.text)
+        self.assertIn("inline-agent-checkpoint", script_response.text)
+        self.assertIn("data-inline-agent-action", script_response.text)
+        self.assertIn("已提交补充信息", script_response.text)
+        self.assertIn("已继续运行", script_response.text)
+        self.assertIn("await reader.cancel()", script_response.text)
         self.assertIn("空会话不参与启动恢复", script_response.text)
         self.assertIn("session.message_count > 0", script_response.text)
         self.assertIn("隐藏会话与运行详情", script_response.text)
@@ -561,6 +589,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("document_filename_conflict", script_response.text)
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
+        self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)
+        self.assertIn("scroll-margin-block: 96px 340px", stylesheet_response.text)
         self.assertIn("flex: 1 1 440px", stylesheet_response.text)
         self.assertIn(".document-name-cell::before", stylesheet_response.text)
         self.assertIn("isCurrentRagRequest", script_response.text)

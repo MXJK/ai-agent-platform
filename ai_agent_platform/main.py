@@ -9,59 +9,15 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ai_agent_platform.agents import (
-    CodingAgentRuntime,
-    GameAgentRuntime,
-    LLMStructuredAgentPlanner,
-    create_coding_tool_registry,
-)
+from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.api import create_api_router
-from ai_agent_platform.core import (
-    CeleryTaskQueue,
-    InProcessTaskQueue,
-    MetricsRegistry,
-    RequestObservabilityMiddleware,
-    Settings,
-    configure_logging,
-)
+from ai_agent_platform.core import RequestObservabilityMiddleware, Settings
 from ai_agent_platform.integrations import (
     DirectoryPicker,
     LLMClient,
-    MCPToolProvider,
     RAGService,
-    SystemDirectoryPicker,
-    create_mcp_providers_from_config_file,
-    create_rag_service,
 )
-from ai_agent_platform.project_memory.factory import create_project_memory_service
-from ai_agent_platform.model_registry import (
-    InMemoryModelRegistryRepository,
-    InMemorySecretStore,
-    KeyringSecretStore,
-    ModelRegistryService,
-    PostgresModelRegistryRepository,
-)
-from ai_agent_platform.repositories import (
-    InMemoryChangeSetRepository,
-    InMemoryKnowledgeBaseRepository,
-    InMemorySessionRepository,
-    InMemoryWorkspaceRepository,
-    PostgresAgentRunRepository,
-    PostgresChangeSetRepository,
-    PostgresDocumentRepository,
-    PostgresKnowledgeBaseRepository,
-    PostgresSessionRepository,
-    PostgresWorkspaceRepository,
-)
-from ai_agent_platform.services import (
-    AgentRunService,
-    ChangeSetService,
-    KnowledgeBaseService,
-    SessionService,
-    UsageLedgerService,
-    WorkspaceService,
-    create_conversation_compressor,
-)
+from ai_agent_platform.runtime import ApplicationFactory, build_runtime
 
 
 def create_app(
@@ -70,172 +26,17 @@ def create_app(
     rag_service: RAGService | None = None,
     coding_agent_runtime: CodingAgentRuntime | None = None,
     directory_picker: DirectoryPicker | None = None,
+    application_factory: ApplicationFactory | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
-    configure_logging(level=settings.log_level, log_format=settings.log_format)
-    directory_picker = directory_picker or SystemDirectoryPicker()
-    metrics = MetricsRegistry()
-    if settings.task_queue_backend == "celery":
-        task_queue = CeleryTaskQueue(
-            broker_url=settings.redis_url,
-            result_backend_url=settings.celery_result_backend_url,
-            visibility_timeout_seconds=(
-                settings.celery_visibility_timeout_seconds
-            ),
-            publish_max_retries=settings.celery_task_max_retries,
-            publish_retry_backoff_seconds=(
-                settings.celery_task_retry_backoff_seconds
-            ),
-            publish_retry_backoff_max_seconds=(
-                settings.celery_task_retry_backoff_max_seconds
-            ),
-            metrics=metrics,
-        )
-    else:
-        task_queue = InProcessTaskQueue(
-            max_workers=settings.background_task_workers,
-            max_queue_size=settings.background_task_queue_capacity,
-            metrics=metrics,
-        )
-
-    repository = _create_session_repository(settings)
-    usage_ledger = UsageLedgerService(repository, settings)
-    agent_runtime = GameAgentRuntime()
-    llm_client = llm_client or LLMClient(settings)
-    set_usage_ledger = getattr(llm_client, "set_usage_ledger", None)
-    if callable(set_usage_ledger):
-        set_usage_ledger(usage_ledger)
-    model_registry = _create_model_registry(settings, llm_client)
-    workspace_service = WorkspaceService(
-        store=_create_workspace_store(settings),
-        allowed_roots=(
-            settings.workspace_allowed_roots
-            or (str(Path.home().resolve()),)
-        ),
-    )
-    project_memory_service = create_project_memory_service(
+    runtime = build_runtime(
         settings,
-        workspace_service=workspace_service,
+        role="api",
+        factory=application_factory,
         llm_client=llm_client,
-        metrics=metrics,
-        usage_ledger=usage_ledger,
-    )
-    project_memory_service.set_index_outbox_submitter(
-        lambda trigger_id: task_queue.submit(
-            "memory_index_outbox",
-            project_memory_service.process_index_outbox,
-            trigger_id=trigger_id,
-        )
-    )
-    change_set_service = ChangeSetService(
-        repository=_create_change_set_store(settings),
-        workspace_service=workspace_service,
-        authorize=project_memory_service.authorize,
-        live_writes_enabled=settings.live_workspace_writes_enabled,
-        apply_mode=settings.change_set_apply_mode,
-        auth_mode=settings.auth_mode,
-        max_files=settings.change_set_max_files,
-        max_patch_chars=settings.change_set_max_patch_chars,
-        worktree_parent=settings.change_set_worktree_parent,
-        branch_prefix=settings.change_set_branch_prefix,
-        command_timeout_seconds=settings.sandbox_command_timeout_seconds,
-    )
-    rag_service = rag_service or create_rag_service(
-        settings,
-        document_store=_create_document_store(settings),
-        usage_ledger=usage_ledger,
-    )
-    knowledge_base_service = KnowledgeBaseService(
-        store=_create_knowledge_base_store(settings),
         rag_service=rag_service,
-    )
-    mcp_providers = _create_mcp_providers(settings)
-    tool_registry = create_coding_tool_registry(
-        mcp_providers=mcp_providers,
-        sandbox_mode=settings.sandbox_mode,
-        sandbox_docker_image=settings.sandbox_docker_image,
-        sandbox_command_timeout_seconds=settings.sandbox_command_timeout_seconds,
-        sandbox_command_output_max_chars=(
-            settings.sandbox_command_output_max_chars
-        ),
-        sandbox_workspace_parent=settings.sandbox_workspace_parent,
-        sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
-        sandbox_allowed_commands=settings.sandbox_allowed_commands,
-    )
-    close_checkpointer = None
-    if coding_agent_runtime is None:
-        checkpointer, close_checkpointer = _create_langgraph_checkpointer(settings)
-        coding_agent_runtime = CodingAgentRuntime(
-            tool_registry=tool_registry,
-            run_store=_create_agent_run_store(settings),
-            checkpointer=checkpointer,
-            planner=LLMStructuredAgentPlanner(llm_client),
-            max_exploration_rounds=settings.agent_max_exploration_rounds,
-            max_read_tools_per_round=settings.agent_max_read_tools_per_round,
-            max_context_files=settings.agent_max_context_files,
-            max_context_chars=settings.agent_max_context_chars,
-            max_instruction_chars=settings.agent_max_instruction_chars,
-            soft_tool_rounds=settings.agent_soft_tool_rounds,
-            max_tool_rounds=settings.agent_max_tool_rounds,
-            soft_tool_calls=settings.agent_soft_tool_calls,
-            max_tool_calls=settings.agent_max_tool_calls,
-            max_elapsed_seconds=settings.agent_max_elapsed_seconds,
-            no_progress_rounds=settings.agent_no_progress_rounds,
-            max_consecutive_failures=(
-                settings.agent_max_consecutive_failures
-            ),
-            native_context_max_chars=settings.agent_native_context_max_chars,
-            native_context_keep_messages=(
-                settings.agent_native_context_keep_messages
-            ),
-            graph_recursion_limit=settings.agent_graph_recursion_limit,
-            approval_policy=settings.agent_approval_policy,
-            max_history_messages=settings.llm_max_context_messages,
-            knowledge_context_provider=knowledge_base_service,
-            project_memory_provider=project_memory_service,
-            max_rag_context_chars=settings.rag_max_prompt_chars,
-            change_set_service=change_set_service,
-        )
-    change_set_event_recorder = getattr(
-        coding_agent_runtime,
-        "record_change_set_event",
-        None,
-    )
-    if callable(change_set_event_recorder):
-        change_set_service.set_audit_callback(change_set_event_recorder)
-    session_service = SessionService(
-        repository=repository,
-        agent_runtime=agent_runtime,
-        compressor=create_conversation_compressor(
-            llm_provider=settings.llm_provider,
-            llm_client=llm_client,
-        ),
-        summary_enabled=settings.conversation_summary_enabled,
-        summary_trigger_messages=settings.conversation_summary_trigger_messages,
-        summary_keep_recent_messages=(
-            settings.conversation_summary_keep_recent_messages
-        ),
-        summary_max_chars=settings.conversation_summary_max_chars,
-        summary_max_source_chars=(
-            settings.conversation_summary_max_source_chars
-        ),
-        metrics=metrics,
-        usage_ledger=usage_ledger,
-        default_provider=settings.llm_provider,
-        default_model=settings.llm_model,
-        default_thinking_level=settings.llm_thinking_level,
-    )
-    agent_run_service = AgentRunService(
-        runtime=coding_agent_runtime,
-        session_service=session_service,
-        workspace_service=workspace_service,
-        project_memory_service=project_memory_service,
-        metrics=metrics,
-        task_queue=task_queue,
-        max_context_messages=settings.llm_max_context_messages,
-        llm_provider=settings.llm_provider,
-        llm_model=settings.llm_model,
-        model_registry=model_registry,
+        coding_agent_runtime=coding_agent_runtime,
+        directory_picker=directory_picker,
     )
 
     @asynccontextmanager
@@ -243,196 +44,57 @@ def create_app(
         try:
             yield
         finally:
-            app.state.agent_run_service.close()
-            app.state.task_queue.close()
-            app.state.tool_registry.close()
-            if close_checkpointer is not None:
-                close_checkpointer()
-            for provider in app.state.mcp_providers:
-                provider.close()
+            app.state.runtime.close()
 
-    app = FastAPI(title=settings.app_name, lifespan=lifespan)
-    app.add_middleware(RequestObservabilityMiddleware, metrics=metrics)
-    app.state.metrics = metrics
-    app.state.mcp_providers = mcp_providers
-    app.state.tool_registry = tool_registry
-    app.state.agent_run_service = agent_run_service
-    app.state.change_set_service = change_set_service
-    app.state.session_service = session_service
-    app.state.usage_ledger = usage_ledger
-    app.state.workspace_service = workspace_service
-    app.state.knowledge_base_service = knowledge_base_service
-    app.state.project_memory_service = project_memory_service
-    app.state.task_queue = task_queue
-    app.state.model_registry = model_registry
-    static_dir = Path(__file__).parent / "static"
-
-    app.include_router(
-        create_api_router(
-            session_service=session_service,
-            llm_client=llm_client,
-            knowledge_base_service=knowledge_base_service,
-            agent_run_service=agent_run_service,
-            change_set_service=change_set_service,
-            workspace_service=workspace_service,
-            project_memory_service=project_memory_service,
-            settings=settings,
-            metrics=metrics,
-            task_queue=task_queue,
-            model_registry=model_registry,
-            directory_picker=directory_picker,
-        ),
-        prefix=settings.api_prefix,
-    )
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-
-    @app.get("/", include_in_schema=False)
-    def frontend() -> FileResponse:
-        return FileResponse(static_dir / "index.html")
-
-    return app
-
-
-def _create_mcp_providers(settings: Settings) -> list[MCPToolProvider]:
-    if not settings.mcp_enabled:
-        return []
-    if not settings.mcp_config_path:
-        raise ValueError("MCP_CONFIG_PATH is required when MCP_ENABLED=true")
-    return create_mcp_providers_from_config_file(
-        settings.mcp_config_path,
-        request_timeout_seconds=settings.mcp_request_timeout_seconds,
-    )
-
-
-def _create_session_repository(settings: Settings):
-    if settings.session_repository == "memory":
-        return InMemorySessionRepository()
-    if settings.session_repository == "postgres":
-        return PostgresSessionRepository(database_url=settings.database_url)
-    raise ValueError(f"unsupported session repository: {settings.session_repository}")
-
-
-def _create_agent_run_store(settings: Settings):
-    if settings.agent_run_store == "memory":
-        return None
-    if settings.agent_run_store == "postgres":
-        return PostgresAgentRunRepository(database_url=settings.database_url)
-    raise ValueError(f"unsupported agent run store: {settings.agent_run_store}")
-
-
-def _create_change_set_store(settings: Settings):
-    if settings.change_set_store == "memory":
-        return InMemoryChangeSetRepository()
-    if settings.change_set_store == "postgres":
-        return PostgresChangeSetRepository(database_url=settings.database_url)
-    raise ValueError(f"unsupported change set store: {settings.change_set_store}")
-
-
-def _create_document_store(settings: Settings):
-    if settings.document_store == "memory":
-        return None
-    if settings.document_store == "postgres":
-        return PostgresDocumentRepository(database_url=settings.database_url)
-    raise ValueError(f"unsupported document store: {settings.document_store}")
-
-
-def _create_knowledge_base_store(settings: Settings):
-    if settings.document_store == "memory":
-        return InMemoryKnowledgeBaseRepository()
-    if settings.document_store == "postgres":
-        return PostgresKnowledgeBaseRepository(database_url=settings.database_url)
-    raise ValueError(
-        f"unsupported knowledge-base store: {settings.document_store}"
-    )
-
-
-def _create_workspace_store(settings: Settings):
-    if settings.workspace_store == "memory":
-        return InMemoryWorkspaceRepository()
-    if settings.workspace_store == "postgres":
-        return PostgresWorkspaceRepository(database_url=settings.database_url)
-    raise ValueError(
-        f"unsupported workspace store: {settings.workspace_store}"
-    )
-
-
-def _create_model_registry(
-    settings: Settings,
-    llm_client: LLMClient,
-) -> ModelRegistryService:
-    if settings.model_registry_store == "memory":
-        repository = InMemoryModelRegistryRepository()
-    elif settings.model_registry_store == "postgres":
-        repository = PostgresModelRegistryRepository(
-            database_url=settings.database_url
+    try:
+        app = FastAPI(title=settings.app_name, lifespan=lifespan)
+        app.add_middleware(
+            RequestObservabilityMiddleware,
+            metrics=runtime.metrics,
         )
-    else:
-        raise ValueError(
-            f"unsupported model registry store: {settings.model_registry_store}"
-        )
-    secret_store = (
-        InMemorySecretStore()
-        if settings.model_secret_backend == "memory"
-        else KeyringSecretStore(service_name=settings.app_name)
-    )
-    runtime_router = getattr(llm_client, "model_router", None)
-    initial_models = (
-        runtime_router.models
-        if runtime_router is not None
-        else LLMClient(settings).model_router.models
-    )
-    registry = ModelRegistryService(
-        repository,
-        secret_store,
-        initial_models=initial_models,
-        environment_secret_refs={
-            "openai": "env:OPENAI_API_KEY",
-            "deepseek": "env:DEEPSEEK_API_KEY",
-            "anthropic": "env:ANTHROPIC_API_KEY",
-            "google": "env:GOOGLE_API_KEY",
-        },
-    )
-    set_model_registry = getattr(llm_client, "set_model_registry", None)
-    if callable(set_model_registry):
-        set_model_registry(registry)
-    replace_model_catalog = getattr(llm_client, "replace_model_catalog", None)
-    test_connection = getattr(llm_client, "test_connection", None)
-    if (
-        runtime_router is not None
-        and callable(replace_model_catalog)
-        and callable(test_connection)
-    ):
-        registry.bind_runtime(
-            router=runtime_router,
-            catalog_changed=replace_model_catalog,
-            test_connection=test_connection,
-        )
-    return registry
+        app.state.runtime = runtime
+        app.state.startup_timeline = runtime.startup_timeline
+        app.state.metrics = runtime.metrics
+        app.state.mcp_providers = runtime.mcp_providers
+        app.state.tool_registry = runtime.tool_registry
+        app.state.agent_run_service = runtime.agent_run_service
+        app.state.change_set_service = runtime.change_set_service
+        app.state.session_service = runtime.session_service
+        app.state.usage_ledger = runtime.usage_ledger
+        app.state.workspace_service = runtime.workspace_service
+        app.state.knowledge_base_service = runtime.knowledge_base_service
+        app.state.project_memory_service = runtime.project_memory_service
+        app.state.task_queue = runtime.task_queue
+        app.state.model_registry = runtime.model_registry
+        static_dir = Path(__file__).parent / "static"
 
-
-def _create_langgraph_checkpointer(settings: Settings):
-    if settings.langgraph_checkpointer == "memory":
-        return None, None
-    if settings.langgraph_checkpointer == "postgres":
-        try:
-            from langgraph.checkpoint.postgres import PostgresSaver
-            from psycopg_pool import ConnectionPool
-        except ImportError as exc:
-            raise RuntimeError(
-                "langgraph-checkpoint-postgres and psycopg-pool are required "
-                "for LANGGRAPH_CHECKPOINTER=postgres"
-            ) from exc
-
-        pool = ConnectionPool(
-            conninfo=settings.database_url,
-            kwargs={"autocommit": True},
+        app.include_router(
+            create_api_router(
+                session_service=runtime.session_service,
+                llm_client=runtime.llm_client,
+                knowledge_base_service=runtime.knowledge_base_service,
+                agent_run_service=runtime.agent_run_service,
+                change_set_service=runtime.change_set_service,
+                workspace_service=runtime.workspace_service,
+                project_memory_service=runtime.project_memory_service,
+                settings=settings,
+                metrics=runtime.metrics,
+                task_queue=runtime.task_queue,
+                model_registry=runtime.model_registry,
+                directory_picker=runtime.directory_picker,
+            ),
+            prefix=settings.api_prefix,
         )
-        checkpointer = PostgresSaver(pool)
-        checkpointer.setup()
-        return checkpointer, pool.close
-    raise ValueError(
-        f"unsupported LangGraph checkpointer: {settings.langgraph_checkpointer}"
-    )
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+        @app.get("/", include_in_schema=False)
+        def frontend() -> FileResponse:
+            return FileResponse(static_dir / "index.html")
+
+        return app
+    except BaseException:
+        runtime.close()
+        raise
 
 
 class LazyASGIApp:
