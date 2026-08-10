@@ -72,7 +72,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.text import extract_paths, unique
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
-from ai_agent_platform.domain import Message
+from ai_agent_platform.domain import Message, RunContextSnapshot
 from ai_agent_platform.integrations.llm import LLMUsageAccumulator, collect_llm_usage
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext, ToolRegistry
 
@@ -229,7 +229,46 @@ class CodingAgentRuntime:
         focus_files: Optional[list[str]] = None,
         run_id: Optional[str] = None,
         actor_user_id: str = "demo_user",
+        run_context: RunContextSnapshot | None = None,
     ) -> AgentRunResult:
+        snapshot_instructions: list[ContextSource] = []
+        additional_directories: list[dict[str, Any]] = []
+        cwd = workspace_root
+        if run_context is not None:
+            run_id = run_context.metadata.run_id
+            conversation_id = run_context.session.conversation_id
+            user_input = run_context.session.user_message
+            workspace_id = run_context.project.workspace_id
+            workspace_root = run_context.project.workspace_root
+            cwd = run_context.project.cwd
+            actor_user_id = run_context.identity.actor_user_id
+            focus_files = list(run_context.instructions.focus_files)
+            history = [
+                {"role": item.role, "content": item.content}
+                for item in run_context.session.controlled_history
+            ]
+            snapshot_instructions = [
+                ContextSource(
+                    kind=item.kind,
+                    path=item.path,
+                    start_line=item.start_line,
+                    end_line=item.end_line,
+                    text=item.text,
+                    reason=item.reason,
+                    content_hash=item.content_hash,
+                    truncated=item.truncated,
+                )
+                for item in run_context.instructions.sources
+            ]
+            additional_directories = [
+                {
+                    "workspace_id": item.workspace_id,
+                    "workspace_root": item.workspace_root,
+                    "workspace_revision": item.workspace_revision,
+                    "workspace_role": item.workspace_role,
+                }
+                for item in run_context.additional_directories
+            ]
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = {
@@ -243,6 +282,7 @@ class CodingAgentRuntime:
             workspace_root=workspace_root,
             status="running",
             next_nodes=["setup_workspace"],
+            context_snapshot=run_context,
         )
         initial_state: CodingAgentState = {
             "conversation_id": conversation_id,
@@ -251,6 +291,9 @@ class CodingAgentRuntime:
             "workspace_id": workspace_id,
             "workspace_root": workspace_root,
             "actor_user_id": actor_user_id,
+            "cwd": cwd,
+            "additional_directories": additional_directories,
+            "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [
                 {
@@ -293,7 +336,7 @@ class CodingAgentRuntime:
             "context_route": "repo",
             "route_reason": "",
             "catalog_truncated": False,
-            "project_instructions": [],
+            "project_instructions": snapshot_instructions,
             "context_chars": 0,
             "context_files": [],
             "seen_context_keys": [],
@@ -336,6 +379,7 @@ class CodingAgentRuntime:
                     error=str(exc),
                     errors=_snapshot_errors(snapshot)
                     + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
+                    context_snapshot=run_context,
                 )
             )
             self._cleanup_run_workspace(
@@ -361,8 +405,15 @@ class CodingAgentRuntime:
         conversation_id: str,
         workspace_id: str,
         workspace_root: str,
+        run_id: str | None = None,
+        context_snapshot: RunContextSnapshot | None = None,
     ) -> AgentRunRecord:
-        run_id = f"run_{uuid4().hex[:12]}"
+        run_id = run_id or f"run_{uuid4().hex[:12]}"
+        if (
+            context_snapshot is not None
+            and context_snapshot.metadata.run_id != run_id
+        ):
+            raise ValueError("Run context ID does not match queued Run ID")
         return self._save_record(
             run_id=run_id,
             conversation_id=conversation_id,
@@ -370,6 +421,7 @@ class CodingAgentRuntime:
             workspace_root=workspace_root,
             status="queued",
             next_nodes=["setup_workspace"],
+            context_snapshot=context_snapshot,
         )
 
     def mark_queued_run_failed(self, *, run_id: str, error: str) -> AgentRunRecord:
@@ -420,6 +472,7 @@ class CodingAgentRuntime:
                     max_attempts=max_attempts,
                 )
             ],
+            context_snapshot=record.context_snapshot,
         )
         self._run_store.save(failed_record)
         self._cleanup_run_workspace(
@@ -510,6 +563,7 @@ class CodingAgentRuntime:
                     error=str(exc),
                     errors=_snapshot_errors(snapshot)
                     + [_error_from_exception("runtime", exc, attempt=1, max_attempts=1)],
+                    context_snapshot=record.context_snapshot,
                 )
             )
             self._cleanup_run_workspace(
@@ -559,6 +613,7 @@ class CodingAgentRuntime:
             errors=_snapshot_errors(snapshot) or record.errors,
             control_action=record.control_action,
             steering_messages=record.steering_messages,
+            context_snapshot=record.context_snapshot,
         )
         self._run_store.save(updated)
         return updated
@@ -793,6 +848,7 @@ class CodingAgentRuntime:
                 result=result,
                 pending_approval=pending,
                 errors=result.errors,
+                context_snapshot=self._context_snapshot_for_run(run_id),
             )
         )
         if status in {"completed", "partial", "blocked", "cancelled", "failed"}:
@@ -909,6 +965,7 @@ class CodingAgentRuntime:
         workspace_root: str,
         status: AgentRunStatus,
         next_nodes: list[str],
+        context_snapshot: RunContextSnapshot | None = None,
     ) -> AgentRunRecord:
         try:
             existing = self._run_store.get(run_id)
@@ -929,9 +986,24 @@ class CodingAgentRuntime:
             steering_messages=(
                 list(existing.steering_messages) if existing is not None else []
             ),
+            context_snapshot=(
+                context_snapshot
+                if context_snapshot is not None
+                else existing.context_snapshot
+                if existing is not None
+                else None
+            ),
         )
         self._run_store.save(record)
         return record
+
+    def _context_snapshot_for_run(
+        self, run_id: str
+    ) -> RunContextSnapshot | None:
+        try:
+            return self._run_store.get(run_id).context_snapshot
+        except KeyError:
+            return None
 
     def _build_result(
         self,
@@ -1151,23 +1223,29 @@ class CodingAgentRuntime:
     def _load_project_instructions(
         self, state: CodingAgentState
     ) -> CodingAgentState:
-        instructions = load_project_instructions(
-            workspace_root=state["workspace_root"],
-            focus_files=unique(
-                state.get("focus_files", []) + extract_paths(state["user_input"])
-            ),
-            max_chars=self._max_instruction_chars,
-        )
+        if state.get("instructions_snapshotted"):
+            instructions = list(state.get("project_instructions", []))
+            source = "RunContextSnapshot"
+        else:
+            instructions = load_project_instructions(
+                workspace_root=state["workspace_root"],
+                focus_files=unique(
+                    state.get("focus_files", []) + extract_paths(state["user_input"])
+                ),
+                max_chars=self._max_instruction_chars,
+            )
+            source = "workspace"
         return {
             "project_instructions": instructions,
             "trace": _append_trace(
                 state,
                 node="load_project_instructions",
-                summary="按作用域加载 AGENTS 指令链，近层规则覆盖上层规则。",
+                summary="按既有优先级使用提交时冻结的项目指令链。",
                 output={
                     "files": [item.path for item in instructions],
                     "chars": sum(len(item.text) for item in instructions),
                     "limit": self._max_instruction_chars,
+                    "source": source,
                 },
             ),
         }

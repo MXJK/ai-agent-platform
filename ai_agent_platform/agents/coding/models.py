@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, TypedDict
 
-from ai_agent_platform.domain import KnowledgeBaseRecord
+from ai_agent_platform.domain import KnowledgeBaseRecord, RunContextSnapshot
 from ai_agent_platform.integrations.rag import RetrievedDocument
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
@@ -33,6 +33,9 @@ class CodingAgentState(TypedDict, total=False):
     workspace_id: str
     workspace_root: str
     actor_user_id: str
+    cwd: str
+    additional_directories: list[dict[str, Any]]
+    instructions_snapshotted: bool
     history: list[dict[str, str]]
     focus_files: list[str]
     intent: str
@@ -228,6 +231,7 @@ class AgentRunRecord:
     errors: list[dict[str, Any]] = field(default_factory=list)
     control_action: Optional[str] = None
     steering_messages: list[str] = field(default_factory=list)
+    context_snapshot: RunContextSnapshot | None = None
 
 
 @dataclass(frozen=True)

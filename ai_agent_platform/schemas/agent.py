@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
 from ai_agent_platform.agents.coding.models import AgentRunEvent, ContextSource
@@ -25,10 +26,27 @@ class AgentRunRequest(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
     )
     focus_files: list[str] = Field(default_factory=list, max_length=20)
+    cwd: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    additional_workspace_ids: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+    )
     provider: Optional[LLMProviderName] = None
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
     thinking_level: Optional[LLMThinkingLevel] = None
     routing_policy: Optional[LLMRoutingPolicy] = None
+
+    @field_validator("additional_workspace_ids")
+    @classmethod
+    def validate_additional_workspace_ids(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if len(value) > 128 or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*", value
+            ) is None:
+                raise ValueError(
+                    "additional directories must use registered Workspace IDs"
+                )
+        return values
 
 
 class AgentRunResumeRequest(BaseModel):

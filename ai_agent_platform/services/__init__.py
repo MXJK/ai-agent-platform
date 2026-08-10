@@ -1,4 +1,5 @@
 from .agent_run_service import AgentRunService
+from .execution_context import ExecutionContextFactory
 from .change_set_service import (
     ChangeSetConflictError,
     ChangeSetInvalidStateError,
@@ -41,6 +42,7 @@ from .conversation_compression import (
 
 __all__ = [
     "AgentRunService",
+    "ExecutionContextFactory",
     "ChangeSetConflictError",
     "ChangeSetInvalidStateError",
     "ChangeSetNotFoundError",

@@ -61,6 +61,7 @@ from ai_agent_platform.services import (
     SessionService,
     UsageLedgerService,
     WorkspaceService,
+    ExecutionContextFactory,
     create_conversation_compressor,
 )
 
@@ -118,6 +119,7 @@ class RuntimeContainer:
     checkpointer: Any = None
     coding_agent_runtime: CodingAgentRuntime | None = None
     session_service: SessionService | None = None
+    execution_context_factory: ExecutionContextFactory | None = None
     agent_run_service: AgentRunService | None = None
     startup_timeline: list[StartupCheckpoint] = field(default_factory=list)
     close_errors: list[RuntimeCloseError] = field(default_factory=list)
@@ -180,6 +182,7 @@ class ApplicationFactory:
         settings: Settings,
         *,
         role: RuntimeRole = "api",
+        resolved_config: ResolvedConfig | None = None,
         llm_client: LLMClient | None = None,
         rag_service: RAGService | None = None,
         coding_agent_runtime: CodingAgentRuntime | None = None,
@@ -353,6 +356,18 @@ class ApplicationFactory:
                 default_model=settings.llm_model,
                 default_thinking_level=settings.llm_thinking_level,
             )
+            container.execution_context_factory = ExecutionContextFactory(
+                session_service=container.session_service,
+                workspace_service=container.workspace_service,
+                workspace_authorizer=container.project_memory_service,
+                auth_mode=settings.auth_mode,
+                entrypoint_type=role,
+                max_context_messages=settings.llm_max_context_messages,
+                max_instruction_chars=settings.agent_max_instruction_chars,
+                config_snapshot=(
+                    resolved_config or ResolvedConfig.from_settings(settings)
+                ).safe_snapshot(),
+            )
             container.agent_run_service = AgentRunService(
                 runtime=container.coding_agent_runtime,
                 session_service=container.session_service,
@@ -364,6 +379,7 @@ class ApplicationFactory:
                 llm_provider=settings.llm_provider,
                 llm_model=settings.llm_model,
                 model_registry=container.model_registry,
+                execution_context_factory=container.execution_context_factory,
             )
             container.register_cleanup(
                 "agent_run_service",
@@ -680,6 +696,7 @@ def build_runtime(
     container = (factory or ApplicationFactory()).build_runtime(
         resolved_config.settings,
         role=role,
+        resolved_config=resolved_config,
         llm_client=llm_client,
         rag_service=rag_service,
         coding_agent_runtime=coding_agent_runtime,

@@ -433,8 +433,16 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 ### 项目指令
 
 Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md`。同目录下的
-`AGENTS.override.md` 会替代 `AGENTS.md`；越靠近目标文件的规则越晚加载，也更具体。
-涉及多个目录的任务会保留每条规则的适用路径。
+`AGENTS.override.md` 会替代 `AGENTS.md`；只有两者都不存在时才兼容读取 `CLAUDE.md`，
+因此不会改变既有 AGENTS 优先级。越靠近目标文件的规则越晚加载，也更具体；涉及多个
+目录的任务会保留每条规则的适用路径。
+
+`ExecutionContextFactory` 在 Run 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
+Workspace revision/root/cwd/Git 摘要、安全配置版本、项目指令和额外目录，形成可 JSON
+往返的深度不可变 `RunContextSnapshot`。API、Worker、预留 CLI 角色和 Agent Loop 共用
+这一契约；Worker 任务只接收 `run_id`，重启后从 Run store 恢复快照，不重新读取已经
+变化的会话历史、模型偏好或指令文件。Git 缺失、非仓库、无 HEAD 或状态读取失败只记录
+诊断，不会无条件拒绝 Run。
 
 README 文件和目录不会无条件注入上下文；通用项目概览会先列举工作区并优先读取
 README/项目清单，其他任务仍只读取搜索或文件发现选中的路径。
@@ -799,6 +807,8 @@ RAG_RERANK_DEFAULT_ENABLED=false
 - `20260808_0018`：添加 Agent 运行控制状态、事件与耐久工具调用执行账本。
 - `20260809_0019`：添加每 Run 唯一的 `agent_change_sets`，持久化完整补丁、基线哈希、
   workspace 快照、验证与 apply/reject 状态。
+- `20260810_0020`：为 `agent_runs` 添加不可变 `run_context_snapshot` JSONB，持久化身份、
+  会话/摘要/模型、Workspace/Git/配置/指令和已授权额外目录，供 Worker 按 Run ID 恢复。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
@@ -823,7 +833,7 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 
 | 组件 | 职责 |
 | --- | --- |
-| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet 与不可变模型快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
+| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
 | Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
 | Redis | Celery Broker 和结果后端；不是业务记录的事实来源 |
 | Chroma | 可选的嵌入式/单节点向量存储，用于替代 Qdrant |
@@ -862,7 +872,10 @@ Compose 栈包含仅绑定本机的 Adminer Web 界面。启动 `postgres` 和 `
 连接 PostgreSQL。此本机端口绑定只面向开发；未添加适当访问控制前不要公开 Adminer。
 
 Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独立的项目记忆索引 Outbox
-消费任务。运行开始时捕获的根目录无法访问时，任务会以结构化
+消费任务。Agent 启动任务的业务载荷只有持久化 Run ID；Worker 从 Run store 恢复提交时
+已验证且配置字段已脱敏的上下文快照。额外目录只能通过 `additional_workspace_ids` 引用已登记且
+当前 actor 有权查看的 Workspace，不能提交任意路径；`cwd`、focus path 和符号链接的
+真实路径都必须留在主 Workspace 根内。运行开始时捕获的根目录无法访问时，任务会以结构化
 `workspace_unavailable` 消息失败。失败的记忆抽取任务保留尝试次数，Celery 可以重试
 同一个来源；已完成的 `source_type + source_id` 保持幂等。
 
@@ -875,7 +888,8 @@ checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cl
 可构建角色，没有新增命令。启动配置在进入工厂前已由 `ConfigResolver` 固定按五层
 优先级解析。
 
-返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、服务和资源，并按
+返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
+`ExecutionContextFactory`、服务和资源，并按
 顺序记录 `config_loaded`、
 `stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
 lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按

@@ -50,6 +50,8 @@ def create_agent_runs_router(
                 model=request.model,
                 thinking_level=request.thinking_level,
                 routing_policy=request.routing_policy,
+                cwd=request.cwd,
+                additional_workspace_ids=request.additional_workspace_ids,
                 actor_user_id=(
                     request_user_id(http_request, settings)
                     if settings.auth_mode != "disabled"

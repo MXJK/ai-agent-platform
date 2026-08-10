@@ -481,8 +481,19 @@ tool failure instead of a successful payload.
 
 The Agent loads `AGENTS.md` from the workspace root toward focused file
 directories. `AGENTS.override.md` replaces `AGENTS.md` in the same directory;
-nearer directories are later and therefore more specific. Multi-directory
-tasks retain each rule's applicable path.
+`CLAUDE.md` is a compatibility fallback only when neither AGENTS file exists,
+so the existing AGENTS precedence is unchanged. Nearer directories are later
+and therefore more specific. Multi-directory tasks retain each rule's scope.
+
+Before queueing, `ExecutionContextFactory` freezes identity, bounded session
+history/summary/model selection, Workspace revision/root/cwd/Git summary, safe
+configuration version, project instructions, and additional directories into a
+deeply immutable, JSON-round-trippable `RunContextSnapshot`. API, Worker, the
+reserved CLI role, and the Agent Loop share this contract. Worker tasks carry
+only `run_id`; after restart they recover the persisted snapshot instead of
+re-reading changed history, model preferences, or instruction files. Missing
+Git, a non-repository directory, an unborn HEAD, or a status-probe failure is a
+diagnostic rather than an unconditional Run failure.
 
 README files and directories are not injected unconditionally. Generic project
 overviews inventory the workspace and prioritize README/project manifests;
@@ -936,6 +947,11 @@ Revision `20260809_0019` adds one `agent_change_sets` row per Run with the full
 patch, file baselines, workspace snapshot, validation result, and apply/reject
 state.
 
+Revision `20260810_0020` adds the immutable `run_context_snapshot` JSONB column
+to `agent_runs`, persisting identity, session/summary/model, Workspace/Git,
+safe configuration, instructions, and authorized additional directories for
+Run-ID-only Worker recovery.
+
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
@@ -961,7 +977,7 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets and immutable model snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
+| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
@@ -1007,7 +1023,12 @@ access controls.
 
 Workers register Agent run/resume, idempotent conversation compression, memory
 extraction, and independent project-memory index-Outbox consumption tasks. An
-inaccessible captured root fails with the structured
+Agent start task carries only a persisted Run ID; the Worker restores the
+validated submission snapshot, whose configuration fields are redacted, from
+the Run store. Additional
+directories accept registered `additional_workspace_ids`, never raw paths, and
+require the actor's Workspace access. Resolved cwd, focused paths, and symlinks
+must stay inside the primary Workspace root. An inaccessible captured root fails with the structured
 `workspace_unavailable` message.
 Failed memory-extraction jobs retain their attempt count; Celery can retry the
 same source, while a completed `source_type + source_id` remains idempotent.
@@ -1024,7 +1045,7 @@ configuration is resolved through the fixed five-layer precedence before the
 factory is entered.
 
 The returned `RuntimeContainer` explicitly owns its immutable resolved config,
-redacted snapshot, services, and resources and records `config_loaded`,
+redacted snapshot, `ExecutionContextFactory`, services, and resources and records `config_loaded`,
 `stores_ready`, `mcp_ready`, `tools_ready`, and
 `agent_ready` startup checkpoints in order. FastAPI lifespan shutdown, Worker
 shutdown, and partial-startup rollback use the same idempotent `close()`;

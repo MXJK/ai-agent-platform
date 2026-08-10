@@ -604,10 +604,12 @@ class PostgresAgentRunRepository:
                     errors,
                     control_action,
                     steering_messages,
+                    run_context_snapshot,
                     created_at,
                     updated_at
                 )
                 VALUES (
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -643,6 +645,7 @@ class PostgresAgentRunRepository:
                     errors = EXCLUDED.errors,
                     control_action = EXCLUDED.control_action,
                     steering_messages = EXCLUDED.steering_messages,
+                    run_context_snapshot = EXCLUDED.run_context_snapshot,
                     updated_at = NOW()
                 """,
                 (
@@ -662,6 +665,11 @@ class PostgresAgentRunRepository:
                     Jsonb(record.errors),
                     record.control_action,
                     Jsonb(record.steering_messages),
+                    Jsonb(
+                        record.context_snapshot.to_dict()
+                        if record.context_snapshot is not None
+                        else None
+                    ),
                 ),
             )
             for event_key, event in events_for_record(record):
@@ -704,7 +712,8 @@ class PostgresAgentRunRepository:
                     pending_approval,
                     errors,
                     control_action,
-                    steering_messages
+                    steering_messages,
+                    run_context_snapshot
                 FROM agent_runs
                 WHERE id = %s
                 """,
@@ -737,7 +746,8 @@ class PostgresAgentRunRepository:
                     pending_approval,
                     errors,
                     control_action,
-                    steering_messages
+                    steering_messages,
+                    run_context_snapshot
                 FROM agent_runs
                 WHERE conversation_id = %s
                 ORDER BY created_at DESC, id DESC
@@ -1813,6 +1823,8 @@ def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | Non
 
 
 def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
+    from ai_agent_platform.domain import RunContextSnapshot
+
     return AgentRunRecord(
         run_id=str(row[0]),
         thread_id=str(row[1]),
@@ -1830,6 +1842,11 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
         errors=list(row[13] or []),
         control_action=row[14] if len(row) > 14 else None,
         steering_messages=list(row[15] or []) if len(row) > 15 else [],
+        context_snapshot=(
+            RunContextSnapshot.from_dict(row[16])
+            if len(row) > 16 and row[16] is not None
+            else None
+        ),
     )
 
 

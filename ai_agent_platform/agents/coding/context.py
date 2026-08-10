@@ -27,7 +27,14 @@ def load_project_instructions(
         for directory in _path_chain(root, target):
             override = directory / "AGENTS.override.md"
             regular = directory / "AGENTS.md"
-            instruction = override if override.is_file() else regular
+            claude = directory / "CLAUDE.md"
+            instruction = (
+                override
+                if override.is_file()
+                else regular
+                if regular.is_file()
+                else claude
+            )
             if instruction.is_file() and instruction not in seen:
                 seen.add(instruction)
                 selected.append((instruction, directory))

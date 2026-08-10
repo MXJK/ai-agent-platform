@@ -189,6 +189,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
         runtime = build_runtime(self.settings(), role="cli")
         try:
             self.assertEqual(runtime.role, "cli")
+            self.assertEqual(runtime.execution_context_factory.entrypoint_type, "cli")
             self.assertEqual(
                 [item.name for item in runtime.startup_timeline],
                 [
