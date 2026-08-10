@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "LOCAL-WORKSPACE-FOLDER-PICKER"
-next_action: "Complete the rebase, rerun repository and interview-handbook verification, then close and push the Finder workspace picker task."
+next_action: "Review the pushed Finder workspace picker; apply migration 20260809_0019 only after separate human approval."
 blockers: []
-last_verified_commit: "00608787bf049af856cc5d5f6cd3125269e37eac"
-updated_at: "2026-08-10T10:50:00+08:00"
+last_verified_commit: "7a026d511f0d8b5e11bdde5839d188e97722574a"
+updated_at: "2026-08-10T10:51:30+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
