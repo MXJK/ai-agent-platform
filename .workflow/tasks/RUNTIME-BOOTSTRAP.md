@@ -91,4 +91,5 @@
   单例保留；新增容器和启动时间线状态，不改变 HTTP API、数据库记录、SSE、审批/
   恢复、配置优先级或 Agent Graph。
 - README 中英文版、访谈手册入口、Part 06 与 facts 已同步。没有数据库迁移、迁移执行、
-  部署或外部写入；未 commit/push/PR/merge，`last_verified_commit` 保持不变。
+  部署、PR 或 merge；经用户后续明确授权，本任务与 `INLINE-AGENT-APPROVAL` 一并进入
+  已验证功能提交 `67d5661b`，workflow 的 `last_verified_commit` 已同步该提交。

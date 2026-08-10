@@ -72,5 +72,5 @@
   详情页混入只读工具等 UX 问题。
 - 收紧异步观察器的 Run/会话/代次校验，SSE 阻塞读取返回、轮询响应和控制请求晚到时
   都不会覆盖后来打开的会话；补充输入与暂停继续使用各自语义准确的完成回执。
-- README 中英文版及本地 interview handbook/facts 已同步。没有迁移、部署或外部写入；
-  未提交，`last_verified_commit` 不变。
+- README 中英文版及本地 interview handbook/facts 已同步。没有迁移或部署；经用户后续
+  明确授权，本任务与 `RUNTIME-BOOTSTRAP` 一并进入功能提交 `67d5661b`。
