@@ -19,6 +19,7 @@ from ai_agent_platform.core import (
     CeleryTaskQueue,
     InProcessTaskQueue,
     MetricsRegistry,
+    ResolvedConfig,
     Settings,
     configure_logging,
 )
@@ -92,6 +93,8 @@ class RuntimeContainer:
 
     settings: Settings
     role: RuntimeRole
+    resolved_config: ResolvedConfig | None = field(default=None, repr=False)
+    config_snapshot: dict[str, object] | None = field(default=None, repr=False)
     metrics: MetricsRegistry | None = None
     directory_picker: DirectoryPicker | None = None
     task_queue: Any = None
@@ -562,7 +565,7 @@ class ApplicationFactory:
         *,
         mcp_providers: list[MCPToolProvider],
     ) -> ToolRegistry:
-        return create_coding_tool_registry(
+        registry = create_coding_tool_registry(
             mcp_providers=mcp_providers,
             sandbox_mode=settings.sandbox_mode,
             sandbox_docker_image=settings.sandbox_docker_image,
@@ -574,6 +577,14 @@ class ApplicationFactory:
             sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
         )
+        effective_selection = (
+            settings.enabled_tools
+            if settings.enabled_tools is not None
+            else settings.tool_allowlist
+        )
+        if effective_selection is not None:
+            registry.restrict_to(effective_selection)
+        return registry
 
     def create_langgraph_checkpointer(
         self,
@@ -651,7 +662,7 @@ class ApplicationFactory:
 
 
 def build_runtime(
-    settings: Settings,
+    settings: Settings | ResolvedConfig,
     role: RuntimeRole = "api",
     *,
     factory: ApplicationFactory | None = None,
@@ -661,15 +672,22 @@ def build_runtime(
     directory_picker: DirectoryPicker | None = None,
 ) -> RuntimeContainer:
     """Build a complete API, worker, or future CLI runtime."""
-
-    return (factory or ApplicationFactory()).build_runtime(
-        settings,
+    resolved_config = (
+        settings
+        if isinstance(settings, ResolvedConfig)
+        else ResolvedConfig.from_settings(settings)
+    )
+    container = (factory or ApplicationFactory()).build_runtime(
+        resolved_config.settings,
         role=role,
         llm_client=llm_client,
         rag_service=rag_service,
         coding_agent_runtime=coding_agent_runtime,
         directory_picker=directory_picker,
     )
+    container.resolved_config = resolved_config
+    container.config_snapshot = resolved_config.safe_snapshot()
+    return container
 
 
 __all__ = [

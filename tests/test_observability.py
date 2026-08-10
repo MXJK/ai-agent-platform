@@ -56,6 +56,38 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(payload["api_key"], "[REDACTED]")
         self.assertEqual(payload["message"], "run needs attention")
 
+    def test_json_logs_recursively_redact_config_credentials(self) -> None:
+        stream = StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonLogFormatter())
+        logger = logging.Logger("ai_agent_platform.config")
+        logger.addHandler(handler)
+
+        logger.warning(
+            "resolved config",
+            extra={
+                "config": {
+                    "process_security": {
+                        "openai_api_key": "do-not-log-key",
+                        "database_url": "postgresql://user:password@db/app",
+                    }
+                }
+            },
+        )
+
+        payload = json.loads(stream.getvalue())
+        serialized = json.dumps(payload)
+        self.assertNotIn("do-not-log-key", serialized)
+        self.assertNotIn("user:password", serialized)
+        self.assertEqual(
+            payload["config"]["process_security"]["openai_api_key"],
+            "[REDACTED]",
+        )
+        self.assertEqual(
+            payload["config"]["process_security"]["database_url"],
+            "[REDACTED]",
+        )
+
 
 class RequestObservabilityTests(unittest.TestCase):
     def test_propagates_request_id_and_exposes_metrics(self) -> None:

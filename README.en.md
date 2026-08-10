@@ -46,6 +46,55 @@ the fake LLM and local embedding provider, which require no API key.
 When `AUTH_MODE=disabled`, the startup script rejects non-loopback `APP_HOST`
 values instead of relying on an operator warning.
 
+## Layered runtime configuration
+
+`ConfigResolver` resolves configuration in one fixed order: `Settings` defaults,
+user JSON, project JSON, environment/`.env`, then explicit entry-point overrides.
+The conventional files are `~/.config/ai-agent-platform/config.json` and
+`.ai-agent-platform/config.json` under the project root; override their paths with
+`AI_AGENT_PLATFORM_USER_CONFIG` and `AI_AGENT_PLATFORM_PROJECT_CONFIG`. Files use
+standard-library JSON and divide fields into `process_security`, `runtime`, and
+`project_session`. Unknown sections, unknown fields, and wrong native types fail at
+startup.
+
+```json
+{
+  "process_security": {
+    "workspace_allowed_roots": ["/srv/code"],
+    "mcp_allowed": true,
+    "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
+  },
+  "runtime": {
+    "llm_model": "example-model",
+    "sandbox_mode": "docker",
+    "session_token_budget": 50000
+  },
+  "project_session": {
+    "project_instructions": ["Run affected tests first."],
+    "enabled_tools": ["file_symbol_locator"],
+    "mcp_enabled": false
+  }
+}
+```
+
+User files and the process environment establish trusted policy. Project files
+cannot change databases, authentication, API keys/secret backends, allowed roots,
+live-write switches, or the MCP config path. They also cannot weaken Docker to the
+local sandbox, choose the Docker image, reduce approval, expand command/tool/Skill
+allowlists, or bypass
+`mcp_allowed=false`/`skills_allowed=false`; they may select a smaller permission
+set, which is applied to the final Tool Registry.
+
+Legacy unprefixed environment names and `.env` remain supported, including
+`GEMINI_API_KEY` and the old `SESSION_REPOSITORY`/`AGENT_RUN_STORE` fallback chains.
+The new `AI_AGENT_PLATFORM_<FIELD>` namespace rejects unknown names. The immutable
+`ResolvedConfig` exposes a compatible `settings` view, three frozen sections, and
+per-field provenance. `Settings.from_env()` still returns `Settings`. API/Worker
+containers retain `ResolvedConfig.safe_snapshot()` as `config_snapshot`, the
+supported serialization view for logs, Run snapshots, and configuration
+diagnostics. Structured logging also recursively redacts nested keys, secrets,
+tokens, and credential-bearing connection strings.
+
 The shared composer offers:
 
 - `快速对话` for direct SSE model responses;
@@ -971,10 +1020,12 @@ the same `ApplicationFactory` through
 registry, Workspace, RAG, MCP, Tool Registry, LangGraph checkpointer, Agent
 runtime, and business services therefore share one dependency graph. `cli` is
 only a buildable role reserved for future use; this change adds no command and
-does not alter configuration precedence.
+configuration is resolved through the fixed five-layer precedence before the
+factory is entered.
 
-The returned `RuntimeContainer` explicitly owns its services and resources and
-records `config_loaded`, `stores_ready`, `mcp_ready`, `tools_ready`, and
+The returned `RuntimeContainer` explicitly owns its immutable resolved config,
+redacted snapshot, services, and resources and records `config_loaded`,
+`stores_ready`, `mcp_ready`, `tools_ready`, and
 `agent_ready` startup checkpoints in order. FastAPI lifespan shutdown, Worker
 shutdown, and partial-startup rollback use the same idempotent `close()`;
 cleanup callbacks run strictly in reverse registration order and each resource

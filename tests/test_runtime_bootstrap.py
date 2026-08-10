@@ -127,6 +127,8 @@ class RuntimeBootstrapTests(unittest.TestCase):
         try:
             api = app.state.runtime
             self.assertIs(app.state.startup_timeline, api.startup_timeline)
+            self.assertIs(app.state.resolved_config, api.resolved_config)
+            self.assertEqual(app.state.config_snapshot, api.config_snapshot)
             self.assertEqual(factory.roles, ["api", "worker"])
             for field_name in (
                 "metrics",
@@ -199,6 +201,19 @@ class RuntimeBootstrapTests(unittest.TestCase):
             )
         finally:
             runtime.close()
+
+    def test_runtime_applies_resolved_tool_selection(self) -> None:
+        registry = ApplicationFactory().create_tool_registry(
+            self.settings(enabled_tools=("file_symbol_locator",)),
+            mcp_providers=[],
+        )
+        try:
+            self.assertEqual(
+                [spec.name for spec in registry.list_specs()],
+                ["file_symbol_locator"],
+            )
+        finally:
+            registry.close()
 
     def test_runtime_container_closes_resources_once_in_reverse_order(self) -> None:
         events: list[str] = []

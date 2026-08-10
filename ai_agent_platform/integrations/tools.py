@@ -202,6 +202,20 @@ class ToolRegistry:
     def get_spec(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
 
+    def restrict_to(self, allowed_names: tuple[str, ...]) -> None:
+        """Irreversibly narrow the registry to a configured tool selection."""
+        allowed = set(allowed_names)
+        unknown = allowed.difference(self._tools)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"configured tool selection contains unknown tools: {names}")
+        self._tools = {
+            name: tool for name, tool in self._tools.items() if name in allowed
+        }
+        self._specs = {
+            name: spec for name, spec in self._specs.items() if name in allowed
+        }
+
     def register_context_cleanup(
         self,
         callback: Callable[[ToolExecutionContext], Any],

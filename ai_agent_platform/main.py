@@ -11,7 +11,12 @@ from fastapi.staticfiles import StaticFiles
 
 from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.api import create_api_router
-from ai_agent_platform.core import RequestObservabilityMiddleware, Settings
+from ai_agent_platform.core import (
+    ConfigResolver,
+    RequestObservabilityMiddleware,
+    ResolvedConfig,
+    Settings,
+)
 from ai_agent_platform.integrations import (
     DirectoryPicker,
     LLMClient,
@@ -21,16 +26,23 @@ from ai_agent_platform.runtime import ApplicationFactory, build_runtime
 
 
 def create_app(
-    settings: Settings | None = None,
+    settings: Settings | ResolvedConfig | None = None,
     llm_client: LLMClient | None = None,
     rag_service: RAGService | None = None,
     coding_agent_runtime: CodingAgentRuntime | None = None,
     directory_picker: DirectoryPicker | None = None,
     application_factory: ApplicationFactory | None = None,
 ) -> FastAPI:
-    settings = settings or Settings.from_env()
+    if settings is None:
+        resolved_config = ConfigResolver.from_default_locations().resolve()
+        settings = resolved_config.settings
+    elif isinstance(settings, ResolvedConfig):
+        resolved_config = settings
+        settings = resolved_config.settings
+    else:
+        resolved_config = ResolvedConfig.from_settings(settings)
     runtime = build_runtime(
-        settings,
+        resolved_config,
         role="api",
         factory=application_factory,
         llm_client=llm_client,
@@ -53,6 +65,8 @@ def create_app(
             metrics=runtime.metrics,
         )
         app.state.runtime = runtime
+        app.state.resolved_config = resolved_config
+        app.state.config_snapshot = resolved_config.safe_snapshot()
         app.state.startup_timeline = runtime.startup_timeline
         app.state.metrics = runtime.metrics
         app.state.mcp_providers = runtime.mcp_providers

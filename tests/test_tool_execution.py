@@ -13,6 +13,19 @@ from ai_agent_platform.integrations.tools import (
 
 
 class ToolExecutionTests(unittest.TestCase):
+    def test_registry_selection_can_only_remove_known_tools(self) -> None:
+        registry = ToolRegistry()
+        registry.register("read", lambda: {})
+        registry.register("write", lambda: {})
+
+        registry.restrict_to(("read",))
+
+        self.assertEqual([spec.name for spec in registry.list_specs()], ["read"])
+        with self.assertRaisesRegex(ValueError, "unknown tool"):
+            registry.call(ToolCall(name="write", arguments={}))
+        with self.assertRaisesRegex(ValueError, "unknown tools"):
+            registry.restrict_to(("missing",))
+
     def test_rejects_invalid_input_or_output_schema_at_registration(self) -> None:
         registry = ToolRegistry()
 

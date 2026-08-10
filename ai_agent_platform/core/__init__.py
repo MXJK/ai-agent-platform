@@ -1,4 +1,16 @@
 from .config import Settings
+from .config_resolver import (
+    ConfigError,
+    ConfigFieldSource,
+    ConfigResolver,
+    ConfigSchemaError,
+    ConfigSecurityError,
+    ConfigSource,
+    ProcessSecurityConfig,
+    ProjectSessionConfig,
+    ResolvedConfig,
+    RuntimeConfig,
+)
 from .metrics import MetricsRegistry
 from .auth import request_user_id, validate_bind_host
 from .observability import RequestObservabilityMiddleware, configure_logging, log_context
@@ -13,11 +25,21 @@ from .task_queue import (
 
 __all__ = [
     "CeleryTaskQueue",
+    "ConfigError",
+    "ConfigFieldSource",
+    "ConfigResolver",
+    "ConfigSchemaError",
+    "ConfigSecurityError",
+    "ConfigSource",
     "MetricsRegistry",
     "request_user_id",
     "validate_bind_host",
     "InProcessTaskQueue",
     "RequestObservabilityMiddleware",
+    "ProcessSecurityConfig",
+    "ProjectSessionConfig",
+    "ResolvedConfig",
+    "RuntimeConfig",
     "Settings",
     "TaskQueue",
     "TaskQueueClosedError",

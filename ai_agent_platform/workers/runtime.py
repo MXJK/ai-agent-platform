@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from threading import Lock
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import ConfigResolver, ResolvedConfig, Settings
 from ai_agent_platform.runtime import (
     ApplicationFactory,
     RuntimeContainer,
@@ -43,11 +43,12 @@ def close_worker_services() -> None:
 
 def _create_worker_services(
     *,
-    settings: Settings | None = None,
+    settings: Settings | ResolvedConfig | None = None,
     application_factory: ApplicationFactory | None = None,
 ) -> RuntimeContainer:
+    config = settings or ConfigResolver.from_default_locations().resolve()
     return build_runtime(
-        settings or Settings.from_env(),
+        config,
         role="worker",
         factory=application_factory,
     )

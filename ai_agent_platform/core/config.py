@@ -16,11 +16,14 @@ class Settings:
     log_format: str = "json"
     llm_provider: str = "fake"
     llm_model: str = "demo-stream-model"
-    openai_api_key: str | None = None
-    deepseek_api_key: str | None = None
-    anthropic_api_key: str | None = None
-    google_api_key: str | None = None
-    database_url: str = "postgresql://localhost:5432/ai_agent_platform"
+    openai_api_key: str | None = field(default=None, repr=False)
+    deepseek_api_key: str | None = field(default=None, repr=False)
+    anthropic_api_key: str | None = field(default=None, repr=False)
+    google_api_key: str | None = field(default=None, repr=False)
+    database_url: str = field(
+        default="postgresql://localhost:5432/ai_agent_platform",
+        repr=False,
+    )
     session_repository: str = "memory"
     agent_run_store: str = "memory"
     change_set_store: str = "memory"
@@ -60,8 +63,8 @@ class Settings:
     rag_vector_store: str = "memory"
     chroma_persist_directory: str = ".chroma"
     chroma_collection_name: str = "rag_chunks"
-    qdrant_url: str = "http://localhost:6333"
-    qdrant_api_key: str | None = None
+    qdrant_url: str = field(default="http://localhost:6333", repr=False)
+    qdrant_api_key: str | None = field(default=None, repr=False)
     qdrant_collection_name: str = "knowledge_chunks"
     project_memory_enabled: bool = False
     project_memory_mode: str = "off"
@@ -91,8 +94,11 @@ class Settings:
     background_task_workers: int = 4
     background_task_queue_capacity: int = 100
     task_queue_backend: str = "in_process"
-    redis_url: str = "redis://localhost:6379/0"
-    celery_result_backend_url: str = "redis://localhost:6379/1"
+    redis_url: str = field(default="redis://localhost:6379/0", repr=False)
+    celery_result_backend_url: str = field(
+        default="redis://localhost:6379/1",
+        repr=False,
+    )
     celery_visibility_timeout_seconds: int = 3600
     celery_task_max_retries: int = 3
     celery_task_retry_backoff_seconds: int = 2
@@ -102,8 +108,16 @@ class Settings:
     celery_result_expires_seconds: int = 86400
     celery_worker_max_tasks_per_child: int = 100
     mcp_enabled: bool = False
+    mcp_allowed: bool = True
     mcp_config_path: str | None = None
     mcp_request_timeout_seconds: float = 10.0
+    skills_enabled: bool = False
+    skills_allowed: bool = True
+    tool_allowlist: tuple[str, ...] | None = None
+    skill_allowlist: tuple[str, ...] | None = None
+    enabled_tools: tuple[str, ...] | None = None
+    enabled_skills: tuple[str, ...] | None = None
+    project_instructions: tuple[str, ...] = ()
     sandbox_mode: str = "local"
     sandbox_docker_image: str = "python:3.11-slim"
     sandbox_command_timeout_seconds: float = 30.0
@@ -151,7 +165,7 @@ class Settings:
     change_set_worktree_parent: str | None = None
     change_set_branch_prefix: str = "codex/"
     auth_mode: str = "disabled"
-    gateway_trust_secret: str | None = None
+    gateway_trust_secret: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.api_prefix.startswith("/"):
@@ -562,9 +576,37 @@ class Settings:
             self._validate_distributed_task_storage()
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
+        if self.mcp_enabled and not self.mcp_allowed:
+            raise ValueError("mcp_enabled cannot override process-level mcp_allowed=false")
+        if self.skills_enabled and not self.skills_allowed:
+            raise ValueError(
+                "skills_enabled cannot override process-level skills_allowed=false"
+            )
+        _validate_permission_selection(
+            "enabled_tools",
+            self.enabled_tools,
+            self.tool_allowlist,
+        )
+        _validate_permission_selection(
+            "enabled_skills",
+            self.enabled_skills,
+            self.skill_allowlist,
+        )
 
     @classmethod
     def from_env(cls) -> "Settings":
+        """Resolve default config locations and legacy environment variables.
+
+        The return type intentionally remains ``Settings`` for existing callers. New
+        code that needs provenance or safe diagnostics should use ``ConfigResolver``.
+        """
+        from .config_resolver import ConfigResolver
+
+        return ConfigResolver.from_default_locations().resolve().settings
+
+    @classmethod
+    def _legacy_from_env(cls) -> "Settings":
+        """Previous parser retained as an internal compatibility reference."""
         dotenv = _load_dotenv()
         return cls(
             app_name=_env("APP_NAME", cls.app_name, dotenv),
@@ -1055,6 +1097,21 @@ class Settings:
             raise ValueError(
                 "celery task queue requires shared storage: " + ", ".join(invalid)
             )
+
+
+def _validate_permission_selection(
+    name: str,
+    selected: tuple[str, ...] | None,
+    allowed: tuple[str, ...] | None,
+) -> None:
+    if selected is not None and any(not item.strip() for item in selected):
+        raise ValueError(f"{name} must not contain blank names")
+    if allowed is not None and any(not item.strip() for item in allowed):
+        raise ValueError(f"{name} process allowlist must not contain blank names")
+    if selected is not None and allowed is not None:
+        denied = set(selected).difference(allowed)
+        if denied:
+            raise ValueError(f"{name} cannot widen its process-level allowlist")
 
 
 def _require_choice(name: str, value: str, allowed: set[str]) -> None:

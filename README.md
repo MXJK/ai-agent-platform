@@ -14,6 +14,7 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 ## 目录
 
 - [本地启动](#本地启动)
+- [分层运行时配置](#分层运行时配置)
 - [主要能力](#主要能力)
 - [Gemini 流式输出](#gemini-流式输出)
 - [模型路由](#模型路由)
@@ -56,6 +57,51 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 构建前端。示例配置使用 Fake LLM 和本地嵌入提供方，不需要 API Key。
 当 `AUTH_MODE=disabled` 时，启动脚本会直接拒绝非回环地址的 `APP_HOST`，而不是
 只输出运维警告。
+
+## 分层运行时配置
+
+`ConfigResolver` 用固定顺序解析配置：`Settings` 默认值 → 用户 JSON → 项目 JSON →
+环境变量/`.env` → 显式入口覆盖。默认发现路径是
+`~/.config/ai-agent-platform/config.json` 和项目根下的
+`.ai-agent-platform/config.json`；可用 `AI_AGENT_PLATFORM_USER_CONFIG`、
+`AI_AGENT_PLATFORM_PROJECT_CONFIG` 指向其他文件。配置文件只使用 Python 标准库 JSON，
+根对象分为 `process_security`、`runtime`、`project_session`，未知分区、未知字段和错误
+类型都会在启动时失败：
+
+```json
+{
+  "process_security": {
+    "workspace_allowed_roots": ["/srv/code"],
+    "mcp_allowed": true,
+    "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
+  },
+  "runtime": {
+    "llm_model": "example-model",
+    "sandbox_mode": "docker",
+    "session_token_budget": 50000
+  },
+  "project_session": {
+    "project_instructions": ["先运行受影响的测试。"],
+    "enabled_tools": ["file_symbol_locator"],
+    "mcp_enabled": false
+  }
+}
+```
+
+用户文件和进程环境可以建立进程策略；项目文件不能修改数据库、认证、API Key/
+Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也不能把 Docker sandbox
+镜像交给项目选择、把 Docker 降为 local、减少审批、扩张命令/工具/Skill allowlist，
+或越过 `mcp_allowed=false`、
+`skills_allowed=false`。项目层允许选择更小的权限集合，最终 Tool Registry 会按有效
+选择裁剪。环境变量继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
+`SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
+`AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
+
+解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
+最终字段的来源。`Settings.from_env()` 仍返回 `Settings`；需要来源或入口覆盖时直接使用
+`ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
+序列化视图，API/Worker 的 `RuntimeContainer` 将其保存为 `config_snapshot`；结构化日志
+也会递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
 
 ## 主要能力
 
@@ -826,9 +872,11 @@ FastAPI `create_app()` 与 Celery Worker 进程单例都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
 checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
-可构建角色，没有新增命令或改变配置优先级。
+可构建角色，没有新增命令。启动配置在进入工厂前已由 `ConfigResolver` 固定按五层
+优先级解析。
 
-返回的 `RuntimeContainer` 显式持有服务和资源，并按顺序记录 `config_loaded`、
+返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、服务和资源，并按
+顺序记录 `config_loaded`、
 `stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
 lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按
 创建登记的逆序执行且每个资源最多关闭一次。测试仍可向 `create_app()` 注入 LLM、RAG、

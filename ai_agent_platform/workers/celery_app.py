@@ -7,7 +7,7 @@ from typing import Any
 from celery import Celery
 from celery.signals import worker_process_shutdown
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import ConfigResolver
 from ai_agent_platform.workers.runtime import (
     close_worker_services,
     get_worker_services,
@@ -18,7 +18,8 @@ from ai_agent_platform.workers.reliability import (
 )
 
 
-settings = Settings.from_env()
+resolved_config = ConfigResolver.from_default_locations().resolve()
+settings = resolved_config.settings
 celery_app = Celery(
     "ai_agent_platform",
     broker=settings.redis_url,

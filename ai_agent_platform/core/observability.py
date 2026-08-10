@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -20,7 +21,12 @@ _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _SENSITIVE_FIELD_PARTS = {
     "api_key",
     "authorization",
+    "backend_url",
+    "connection_string",
+    "database_url",
+    "dsn",
     "password",
+    "redis_url",
     "secret",
     "token",
 }
@@ -63,9 +69,7 @@ class JsonLogFormatter(logging.Formatter):
             if name.startswith("_") or name in _STANDARD_LOG_ATTRIBUTES:
                 continue
             if _is_json_value(value):
-                payload[name] = (
-                    "[REDACTED]" if _is_sensitive_field(name) else value
-                )
+                payload[name] = _redact_log_value(name, value)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -197,3 +201,16 @@ def _is_json_value(value: object) -> bool:
 def _is_sensitive_field(name: str) -> bool:
     normalized = name.lower()
     return any(part in normalized for part in _SENSITIVE_FIELD_PARTS)
+
+
+def _redact_log_value(name: str, value: object) -> object:
+    if _is_sensitive_field(name):
+        return "[REDACTED]"
+    if isinstance(value, Mapping):
+        return {
+            str(item_name): _redact_log_value(str(item_name), item_value)
+            for item_name, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_log_value(name, item) for item in value]
+    return value
