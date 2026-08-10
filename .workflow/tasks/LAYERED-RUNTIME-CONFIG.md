@@ -90,3 +90,5 @@
 - 中英文 README、`.env.example`、访谈手册入口、Part 05/06/08 与 facts 已同步。
   没有新增第三方依赖、数据库迁移、部署、PR 或 merge；提交与推送由用户在完成验证后
   单独明确授权。
+- 已验证功能提交为 `2784da26031bd43040e4c090ae95c90cec7aae71`；workflow 的
+  `last_verified_commit` 已指向该提交，后续收尾提交只记录任务元数据。
