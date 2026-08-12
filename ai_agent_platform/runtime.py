@@ -367,6 +367,10 @@ class ApplicationFactory:
                 config_snapshot=(
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ).safe_snapshot(),
+                process_config=(
+                    resolved_config or ResolvedConfig.from_settings(settings)
+                ),
+                tool_registry=container.tool_registry,
             )
             container.agent_run_service = AgentRunService(
                 runtime=container.coding_agent_runtime,
@@ -593,13 +597,8 @@ class ApplicationFactory:
             sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
         )
-        effective_selection = (
-            settings.enabled_tools
-            if settings.enabled_tools is not None
-            else settings.tool_allowlist
-        )
-        if effective_selection is not None:
-            registry.restrict_to(effective_selection)
+        if settings.tool_allowlist is not None:
+            registry.restrict_to(settings.tool_allowlist)
         return registry
 
     def create_langgraph_checkpointer(

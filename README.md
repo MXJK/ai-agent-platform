@@ -37,19 +37,20 @@ python3.10 -m venv .venv
 cp -n .env.example .env
 # 将 POSTGRES_PASSWORD 与 DATABASE_URL 中的示例 PostgreSQL 密码
 # 替换为同一个仅供本地使用的随机密码。
-./scripts/start.sh
+./scripts/start.sh --apply-migrations
 ```
 
-首次完成环境初始化后，本地启动只需要运行 `./scripts/start.sh`。脚本会验证持久化
-配置，启动 PostgreSQL、Qdrant 和 Redis，等待服务就绪，执行尚未应用的 Alembic
-迁移，然后同时启动 Celery Worker 与 FastAPI。按 `Ctrl+C` 会停止 API 和 Worker，
-持久化数据库容器仍会继续运行。
+首次完成环境初始化后，先审阅待处理的 Alembic revision，再由操作者用
+`./scripts/start.sh --apply-migrations` 显式授权升级。脚本会验证持久化配置，启动
+PostgreSQL、Qdrant 和 Redis，等待服务就绪，执行迁移，然后同时启动 Celery Worker 与
+FastAPI。未给出该参数时脚本会在迁移和 runtime 启动前停止；按 `Ctrl+C` 会停止 API 和
+Worker，持久化数据库容器仍会继续运行。
 
 常用启动选项：
 
 ```bash
 ./scripts/start.sh --check  # 仅检查依赖和配置，不执行写操作。
-APP_RELOAD=0 ./scripts/start.sh
+APP_RELOAD=0 ./scripts/start.sh --apply-migrations
 APP_PORT=8001 ./scripts/start.sh
 ```
 
@@ -60,13 +61,18 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 
 ## 分层运行时配置
 
-`ConfigResolver` 用固定顺序解析配置：`Settings` 默认值 → 用户 JSON → 项目 JSON →
-环境变量/`.env` → 显式入口覆盖。默认发现路径是
-`~/.config/ai-agent-platform/config.json` 和项目根下的
-`.ai-agent-platform/config.json`；可用 `AI_AGENT_PLATFORM_USER_CONFIG`、
-`AI_AGENT_PLATFORM_PROJECT_CONFIG` 指向其他文件。配置文件只使用 Python 标准库 JSON，
-根对象分为 `process_security`、`runtime`、`project_session`，未知分区、未知字段和错误
-类型都会在启动时失败：
+`ConfigResolver.resolve_process()` 只解析 `Settings` 默认值 → 用户 JSON → 环境变量/
+`.env` → 显式入口覆盖，不从服务进程 cwd 自动发现项目文件。默认用户路径是
+`~/.config/ai-agent-platform/config.json`；`AI_AGENT_PLATFORM_USER_CONFIG` 可改写该路径。
+`AI_AGENT_PLATFORM_PROJECT_CONFIG` 仍兼容，但只表示显式、进程级受控项目输入，不参与
+Workspace 自动发现。
+
+创建 Run 时，`ExecutionContextFactory` 先从 Workspace catalog 取得并鉴权主 Workspace
+root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
+`.ai-agent-platform/config.json`。因此项目配置不会随 API/Worker/CLI 的 cwd 改变，也不会
+泄漏到另一个 Workspace。配置文件只使用 Python 标准库 JSON，根对象分为
+`process_security`、`runtime`、`project_session`；未知分区、未知字段和错误类型会在对应
+进程解析或 Run 创建边界 fail closed：
 
 ```json
 {
@@ -92,16 +98,19 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也不能把 Docker sandbox
 镜像交给项目选择、把 Docker 降为 local、减少审批、扩张命令/工具/Skill allowlist，
 或越过 `mcp_allowed=false`、
-`skills_allowed=false`。项目层允许选择更小的权限集合，最终 Tool Registry 会按有效
-选择裁剪。环境变量继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
+`skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
+时裁剪全局能力上限，项目 `enabled_tools` 会冻结为每 Run 的只读 Registry view，不修改
+源 `ToolRegistry`。未知工具、尝试突破进程上限或非法恢复选择都会 fail closed。环境变量
+继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
 `AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
 
 解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
 最终字段的来源。`Settings.from_env()` 仍返回 `Settings`；需要来源或入口覆盖时直接使用
 `ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
-序列化视图，API/Worker 的 `RuntimeContainer` 将其保存为 `config_snapshot`；结构化日志
-也会递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
+带 schema version、逐字段 source/detail 的序列化视图；Run 再保存配置内容哈希与确切
+工具选择哈希。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
+递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
 
 ## 主要能力
 
@@ -435,10 +444,18 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md`。同目录下的
 `AGENTS.override.md` 会替代 `AGENTS.md`；只有两者都不存在时才兼容读取 `CLAUDE.md`，
 因此不会改变既有 AGENTS 优先级。越靠近目标文件的规则越晚加载，也更具体；涉及多个
-目录的任务会保留每条规则的适用路径。
+目录的任务会保留每条规则的适用路径。配置中的 `project_session.project_instructions`
+作为最低优先级 `config_instruction` 追加，文件指令先消费同一个
+`AGENT_MAX_INSTRUCTION_CHARS` 预算；每个来源冻结 kind/path、priority、完整内容 hash 和
+截断状态。
+
+指令文件通过以可信 Workspace root 为锚的目录描述符读取，目录和文件打开都禁止跟随
+symlink，并要求普通文件；读取前后还会核对 inode、类型、大小和时间元数据以及目录链。
+symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都会阻断 Run，工作区外正文
+不会进入快照。
 
 `ExecutionContextFactory` 在 Run 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、安全配置版本、项目指令和额外目录，形成可 JSON
+Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、确切工具选择和额外目录，形成可 JSON
 往返的深度不可变 `RunContextSnapshot`。API、Worker、预留 CLI 角色和 Agent Loop 共用
 这一契约；Worker 任务只接收 `run_id`，重启后从 Run store 恢复快照，不重新读取已经
 变化的会话历史、模型偏好或指令文件。Git 缺失、非仓库、无 HEAD 或状态读取失败只记录
@@ -808,7 +825,9 @@ RAG_RERANK_DEFAULT_ENABLED=false
 - `20260809_0019`：添加每 Run 唯一的 `agent_change_sets`，持久化完整补丁、基线哈希、
   workspace 快照、验证与 apply/reject 状态。
 - `20260810_0020`：为 `agent_runs` 添加不可变 `run_context_snapshot` JSONB，持久化身份、
-  会话/摘要/模型、Workspace/Git/配置/指令和已授权额外目录，供 Worker 按 Run ID 恢复。
+  会话/摘要/模型、Workspace/Git/配置/指令/工具选择和已授权额外目录，供 Worker 按 Run ID
+  恢复。该 revision 在本任务中**没有执行**；启动 PostgreSQL runtime 前必须先由操作者
+  审阅并显式授权应用。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
@@ -842,7 +861,7 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 被同时写入。仓库示例和当前持久化运行时使用 Qdrant；内存 Repository 只作为显式
 测试替身。
 
-启动 API 和 Celery Worker 前，先启动依赖并应用数据库迁移：
+启动 API 和 Celery Worker 前，先启动依赖；审阅 revision 后由操作者明确授权并应用迁移：
 
 ```bash
 docker compose up -d postgres adminer qdrant redis
@@ -873,7 +892,8 @@ Compose 栈包含仅绑定本机的 Adminer Web 界面。启动 `postgres` 和 `
 
 Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独立的项目记忆索引 Outbox
 消费任务。Agent 启动任务的业务载荷只有持久化 Run ID；Worker 从 Run store 恢复提交时
-已验证且配置字段已脱敏的上下文快照。额外目录只能通过 `additional_workspace_ids` 引用已登记且
+已验证且配置字段已脱敏的上下文快照；项目文件、指令文件和环境不会在 Worker 中重读。
+额外目录只能通过 `additional_workspace_ids` 引用已登记且
 当前 actor 有权查看的 Workspace，不能提交任意路径；`cwd`、focus path 和符号链接的
 真实路径都必须留在主 Workspace 根内。运行开始时捕获的根目录无法访问时，任务会以结构化
 `workspace_unavailable` 消息失败。失败的记忆抽取任务保留尝试次数，Celery 可以重试
@@ -885,8 +905,8 @@ FastAPI `create_app()` 与 Celery Worker 进程单例都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
 checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
-可构建角色，没有新增命令。启动配置在进入工厂前已由 `ConfigResolver` 固定按五层
-优先级解析。
+可构建角色，没有新增命令。启动配置在进入工厂前只解析进程基线；Workspace 项目覆盖、
+配置指令和项目工具选择在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
 
 返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
 `ExecutionContextFactory`、服务和资源，并按
