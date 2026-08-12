@@ -602,7 +602,7 @@ class Settings:
         """
         from .config_resolver import ConfigResolver
 
-        return ConfigResolver.from_default_locations().resolve().settings
+        return ConfigResolver.from_default_locations().resolve_process().settings
 
     @classmethod
     def _legacy_from_env(cls) -> "Settings":

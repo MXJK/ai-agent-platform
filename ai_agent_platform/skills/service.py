@@ -16,6 +16,9 @@ from .models import (
 )
 
 
+_DEFAULT_SELECTION = object()
+
+
 class SkillService:
     """Selects instructions only; it never changes a tool or permission registry."""
 
@@ -40,8 +43,14 @@ class SkillService:
     def enabled(self) -> bool:
         return self._enabled
 
-    def discover(self, *, workspace_root: str | Path | None = None) -> SkillCatalog:
-        if not self._enabled:
+    def discover(
+        self,
+        *,
+        workspace_root: str | Path | None = None,
+        enabled: bool | None = None,
+    ) -> SkillCatalog:
+        effective_enabled = self._enabled if enabled is None else enabled
+        if not effective_enabled:
             return SkillCatalog(
                 skills=(),
                 commands=(),
@@ -58,23 +67,43 @@ class SkillService:
         agent: str,
         mode: str,
         max_chars: int,
+        enabled: bool | None = None,
+        enabled_skills: Sequence[str] | None | object = _DEFAULT_SELECTION,
+        available_tools: Sequence[str] | None = None,
     ) -> SkillContextSelection:
-        if not self._enabled or max_chars <= 0:
+        effective_enabled = self._enabled if enabled is None else enabled
+        if not effective_enabled or max_chars <= 0:
             return SkillContextSelection(sources=(), diagnostics=())
-        catalog = self.discover(workspace_root=workspace_root)
+        if enabled_skills is _DEFAULT_SELECTION:
+            effective_selection = self._enabled_skills
+        elif enabled_skills is None:
+            effective_selection = None
+        else:
+            effective_selection = frozenset(
+                item.strip().casefold() for item in enabled_skills
+            )
+        effective_tools = (
+            self._available_tools
+            if available_tools is None
+            else frozenset(available_tools)
+        )
+        catalog = self.discover(
+            workspace_root=workspace_root,
+            enabled=effective_enabled,
+        )
         diagnostics = list(catalog.diagnostics)
         sources: list[SkillContextSource] = []
         remaining = max_chars
         for skill in catalog.skills:
             if not skill.applies_to(agent=agent, mode=mode):
                 continue
-            if self._enabled_skills is not None and not {
+            if effective_selection is not None and not {
                 skill.name,
                 skill.qualified_name,
-            }.intersection(self._enabled_skills):
+            }.intersection(effective_selection):
                 continue
             missing_tools = sorted(
-                set(skill.required_tools).difference(self._available_tools)
+                set(skill.required_tools).difference(effective_tools)
             )
             if missing_tools:
                 diagnostics.append(

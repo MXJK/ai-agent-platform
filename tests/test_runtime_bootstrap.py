@@ -208,18 +208,29 @@ class RuntimeBootstrapTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_runtime_applies_resolved_tool_selection(self) -> None:
+    def test_runtime_only_applies_process_tool_cap_to_global_registry(self) -> None:
         registry = ApplicationFactory().create_tool_registry(
             self.settings(enabled_tools=("file_symbol_locator",)),
             mcp_providers=[],
         )
         try:
+            names = [spec.name for spec in registry.list_specs()]
+            self.assertIn("file_symbol_locator", names)
+            self.assertIn("code_explainer", names)
+        finally:
+            registry.close()
+
+        capped = ApplicationFactory().create_tool_registry(
+            self.settings(tool_allowlist=("file_symbol_locator",)),
+            mcp_providers=[],
+        )
+        try:
             self.assertEqual(
-                [spec.name for spec in registry.list_specs()],
+                [spec.name for spec in capped.list_specs()],
                 ["file_symbol_locator"],
             )
         finally:
-            registry.close()
+            capped.close()
 
     def test_runtime_container_closes_resources_once_in_reverse_order(self) -> None:
         events: list[str] = []

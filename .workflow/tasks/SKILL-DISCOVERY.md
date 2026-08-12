@@ -33,7 +33,7 @@
 - [x] Skill 仅声明所需工具；不会执行代码、注册新工具、提升权限或绕过既有工具策略。
 - [x] slash command 元数据被转换并注册，命令冲突遵循同一确定性规则。
 - [x] 测试覆盖发现、覆盖、重复名、损坏 Markdown、预算、路径逃逸和权限不可提升。
-- [ ] README、访谈手册及 facts 同步；全量 pytest、compileall、手册校验和 diff check 通过。
+- [x] README、访谈手册及 facts 同步；全量 pytest、compileall、手册校验和 diff check 通过。
 
 ## Decisions
 
@@ -56,16 +56,14 @@
 
 ## Verification
 
-- `.venv/bin/python -m pytest -q`：308 passed、38 subtests passed；仅有既有
-  Starlette/httpx 弃用警告。
-- Skill/Run/启动/配置/工具/Sandbox 专项：55 passed、27 subtests passed。
+- `.venv/bin/python -m pytest -q`：326 passed、47 subtests passed。
+- Skill/Run/权限/启动专项：38 passed、8 subtests passed；Skill 声明的所需工具按
+  冻结的 per-Run 工具选择检查，不会扩大 ToolUseContext 或 ToolRegistry。
 - `.venv/bin/python -m compileall -q ai_agent_platform tests evals`：通过。
 - `.venv/bin/python -m json.tool INTERVIEW_NOTES/facts.json`：通过。
 - `git diff --check`：通过。
-- `.venv/bin/python INTERVIEW_NOTES/validate.py`：未通过；当前 `main` 缺少手册已引用的
-  `ai_agent_platform/integrations/permissions.py` 与 `tests/test_permissions.py`。这些前置
-  实现在现有 `codex/run-context-boundary-hardening` 分支提交 `3d3d5b1e` 中；校验报告
-  4 个缺失证据路径，与本任务新增 Skill evidence 无关。
+- `.venv/bin/python INTERVIEW_NOTES/validate.py`：通过，校验 12 个 Markdown 文档和
+  34 项 capability；changed-evidence review 仅为工作树尚未提交时的提示。
 
 ## Result
 
@@ -76,6 +74,7 @@
   检查，不执行 Skill 目录代码、不注册工具、不扩大 allowlist 或权限。
 - 已同步中英文 README 及本机模块化访谈手册/facts，并增加发现、覆盖、重复名、损坏
   Markdown/YAML、预算、symlink/逃逸、适用范围、command 冲突和权限不可提升测试。
-- 当前提交可供审阅，但任务保持 blocked：需要把本分支迁移到已经实现
-  `PermissionResolver/ToolUseContext` 的 `codex/run-context-boundary-hardening` 基线上，
-  解决可能冲突并重新执行完整验证，之后才能把最后一项验收和工作流状态标记完成。
+- 已合并包含 `PermissionResolver/ToolUseContext`、冻结 per-Run 工具选择和 RunContext
+  schema v2 的 `origin/main`。冲突解决后，Skill 使用 Workspace 有效配置启用/筛选，
+  `required_tools` 只对本次 Run 已选择工具做依赖检查，Skill 快照优先级为 50，低于
+  Workspace 指令文件与项目配置指令；全量验证通过，原 blocker 已解除。

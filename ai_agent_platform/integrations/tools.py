@@ -15,6 +15,15 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from ai_agent_platform.integrations.permissions import (
+    PermissionDecision,
+    PermissionRequest,
+    PermissionResolver,
+    ToolApproval,
+    ToolExecutionContext,
+    ToolUseContext,
+)
+
 
 SENSITIVE_ARGUMENT_NAMES = {
     "api_key",
@@ -67,6 +76,7 @@ class ToolSpec:
     timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
     max_retries: int = 0
     idempotent: bool = True
+    permission_source: str = "local_policy"
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,7 @@ class ToolResult:
     error_code: str | None = None
     attempts: int = 1
     cached: bool = False
+    permission_decision: dict[str, str] | None = None
 
     def to_response(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -101,6 +112,7 @@ class ToolResult:
             "output_truncated": self.output_truncated,
             "attempts": self.attempts,
             "cached": self.cached,
+            "permission_decision": self.permission_decision,
         }
         if self.ok:
             payload["result"] = self.result
@@ -110,18 +122,13 @@ class ToolResult:
         return payload
 
 
-@dataclass(frozen=True)
-class ToolExecutionContext:
-    conversation_id: str
-    workspace_id: str
-    workspace_root: str
-    run_id: str | None = None
-
-
 class ToolRegistry:
     """Registry for local and future MCP-backed agent tools."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        permission_resolver: PermissionResolver | None = None,
+    ) -> None:
         self._tools: dict[str, Callable[..., Any]] = {}
         self._specs: dict[str, ToolSpec] = {}
         self._context_cleanup_callbacks: list[
@@ -134,6 +141,12 @@ class ToolRegistry:
         self._idempotency_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._idempotency_guards: dict[tuple[str, str], Lock] = {}
         self._idempotency_lock = Lock()
+        self._permission_resolver = permission_resolver
+
+    def attach_permission_resolver(self, resolver: PermissionResolver) -> None:
+        if self._permission_resolver is not None and self._permission_resolver is not resolver:
+            raise ValueError("ToolRegistry already has a different PermissionResolver")
+        self._permission_resolver = resolver
 
     def register(
         self,
@@ -152,6 +165,7 @@ class ToolRegistry:
         timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
         max_retries: int = 0,
         idempotent: bool | None = None,
+        permission_source: str = "local_policy",
     ) -> None:
         if name in self._tools:
             raise ValueError(f"tool already registered: {name}")
@@ -194,16 +208,142 @@ class ToolRegistry:
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             idempotent=resolved_idempotent,
+            permission_source=permission_source,
         )
 
-    def list_specs(self) -> list[ToolSpec]:
-        return list(self._specs.values())
+    def list_specs(
+        self,
+        context: ToolUseContext | None = None,
+    ) -> list[ToolSpec]:
+        specs = list(self._specs.values())
+        if context is None or self._permission_resolver is None:
+            return specs
+        return [
+            spec
+            for spec in specs
+            if self._permission_resolver.resolve(
+                PermissionRequest.from_spec(spec),
+                context.for_display(spec.name),
+                phase="display",
+            ).effect
+            != "deny"
+        ]
 
     def get_spec(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
 
+    def resolve_permission(
+        self,
+        tool_call: ToolCall,
+        context: ToolUseContext,
+        *,
+        phase: str = "execute",
+    ) -> PermissionDecision:
+        spec = self._specs.get(tool_call.name)
+        if spec is None:
+            return PermissionDecision(
+                effect="deny",
+                matched_rule="process.unknown_tool",
+                reason="The requested tool is not registered in this process.",
+                risk_summary="Unknown tool with unbounded behavior.",
+            )
+        if self._permission_resolver is None:
+            needs_approval = bool(
+                spec.requires_approval
+                or spec.permission_level != "read_only"
+                or context.approval_policy == "always"
+            )
+            if needs_approval and context.approval_policy == "never":
+                effect = "deny"
+                rule = "approval_policy.never"
+            elif needs_approval:
+                effect = "ask"
+                rule = "tool_spec.approval_required"
+            else:
+                effect = "allow"
+                rule = "tool_spec.read_only_allow"
+            return PermissionDecision(
+                effect=effect,
+                matched_rule=rule,
+                reason=(
+                    "ToolSpec requires approval before execution."
+                    if effect == "ask"
+                    else (
+                        "The effective approval policy denies this operation."
+                        if effect == "deny"
+                        else "ToolSpec allows this read-only operation."
+                    )
+                ),
+                risk_summary=spec.risk_summary,
+            )
+        bound = context.bind(
+            call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            arguments=tool_call.arguments,
+        )
+        return self._permission_resolver.resolve(
+            PermissionRequest.from_spec(spec),
+            bound,
+            phase=phase,  # type: ignore[arg-type]
+        )
+
+    def issue_approval(
+        self,
+        tool_call: ToolCall,
+        context: ToolUseContext,
+        *,
+        approved_by: str,
+    ) -> ToolApproval:
+        spec = self._specs.get(tool_call.name)
+        if spec is None:
+            raise PermissionError("The requested tool is not registered")
+        bound = context.bind(
+            call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            arguments=tool_call.arguments,
+        )
+        if self._permission_resolver is None:
+            decision = self.resolve_permission(
+                tool_call,
+                context,
+                phase="plan",
+            )
+            if decision.effect == "deny":
+                raise PermissionError(decision.reason)
+            if not all(
+                (
+                    bound.run_id,
+                    bound.call_id,
+                    bound.tool_name,
+                    bound.arguments_hash,
+                    approved_by,
+                )
+            ):
+                raise PermissionError("approval binding is incomplete")
+            return ToolApproval(
+                run_id=str(bound.run_id),
+                call_id=str(bound.call_id),
+                tool_name=str(bound.tool_name),
+                arguments_hash=str(bound.arguments_hash),
+                approved_by=approved_by,
+            )
+        return self._permission_resolver.issue_approval(
+            PermissionRequest.from_spec(spec),
+            bound,
+            approved_by=approved_by,
+        )
+
+    def select(self, allowed_names: tuple[str, ...]) -> "ToolRegistryView":
+        """Return an immutable Run-scoped selection without changing this registry."""
+        selected = tuple(dict.fromkeys(allowed_names))
+        unknown = set(selected).difference(self._tools)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"configured tool selection contains unknown tools: {names}")
+        return ToolRegistryView(self, selected)
+
     def restrict_to(self, allowed_names: tuple[str, ...]) -> None:
-        """Irreversibly narrow the registry to a configured tool selection."""
+        """Irreversibly apply a process-owned capability upper bound."""
         allowed = set(allowed_names)
         unknown = allowed.difference(self._tools)
         if unknown:
@@ -260,6 +400,10 @@ class ToolRegistry:
         return errors
 
     def call(self, tool_call: ToolCall) -> Any:
+        if self._permission_resolver is not None:
+            raise PermissionError(
+                "direct tool calls are disabled when PermissionResolver is active"
+            )
         try:
             tool = self._tools[tool_call.name]
         except KeyError as exc:
@@ -299,9 +443,6 @@ class ToolRegistry:
         arguments_summary = _summarize_arguments(tool_call.arguments)
         fingerprint = _tool_call_fingerprint(tool_call)
         cache_key = _idempotency_key(context, call_id)
-        cached = self._cached_result(cache_key, fingerprint)
-        if cached is not None:
-            return cached
         try:
             tool = self._tools[tool_call.name]
         except KeyError:
@@ -319,6 +460,45 @@ class ToolRegistry:
                 arguments_summary=arguments_summary,
                 error_code="unknown_tool",
             )
+
+        permission_decision: PermissionDecision | None = None
+        if self._permission_resolver is not None:
+            if context is None:
+                permission_decision = PermissionDecision(
+                    effect="deny",
+                    matched_rule="context.required",
+                    reason="Tool execution requires a ToolUseContext.",
+                    risk_summary=spec.risk_summary,
+                )
+            else:
+                permission_decision = self.resolve_permission(
+                    tool_call,
+                    context,
+                    phase="execute",
+                )
+            if permission_decision.effect != "allow":
+                return ToolResult(
+                    call_id=call_id,
+                    name=tool_call.name,
+                    ok=False,
+                    error=permission_decision.reason,
+                    provider=spec.provider,
+                    permission_level=spec.permission_level,
+                    requires_approval=spec.requires_approval,
+                    duration_ms=int((perf_counter() - started_at) * 1000),
+                    risk_summary=permission_decision.risk_summary,
+                    arguments_summary=arguments_summary,
+                    error_code=(
+                        "permission_approval_required"
+                        if permission_decision.effect == "ask"
+                        else "permission_denied"
+                    ),
+                    permission_decision=permission_decision.to_dict(),
+                )
+
+        cached = self._cached_result(cache_key, fingerprint)
+        if cached is not None:
+            return cached
 
         validation_error = _validate_instance(
             tool_call.arguments,
@@ -439,6 +619,11 @@ class ToolRegistry:
                 declared_output_truncated or output_truncated
             ),
             attempts=attempts,
+            permission_decision=(
+                permission_decision.to_dict()
+                if permission_decision is not None
+                else None
+            ),
         )
         self._store_result(cache_key, fingerprint, completed)
         return completed
@@ -481,6 +666,123 @@ class ToolRegistry:
             return
         with self._idempotency_lock:
             self._idempotency_results.setdefault(cache_key, (fingerprint, result))
+
+
+class ToolRegistryView:
+    """Read-only, non-owning view of a process ToolRegistry for one Run."""
+
+    def __init__(self, source: ToolRegistry, allowed_names: tuple[str, ...]) -> None:
+        self._source = source
+        self._allowed_names = frozenset(allowed_names)
+
+    @property
+    def allowed_names(self) -> tuple[str, ...]:
+        return tuple(
+            spec.name
+            for spec in self._source.list_specs()
+            if spec.name in self._allowed_names
+        )
+
+    def list_specs(
+        self,
+        context: ToolUseContext | None = None,
+    ) -> list[ToolSpec]:
+        return [
+            spec
+            for spec in self._source.list_specs(context=context)
+            if spec.name in self._allowed_names
+        ]
+
+    def get_spec(self, name: str) -> ToolSpec | None:
+        if name not in self._allowed_names:
+            return None
+        return self._source.get_spec(name)
+
+    def select(self, allowed_names: tuple[str, ...]) -> "ToolRegistryView":
+        selected = tuple(dict.fromkeys(allowed_names))
+        unknown = set(selected).difference(self._allowed_names)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"configured tool selection contains unknown tools: {names}")
+        return ToolRegistryView(self._source, selected)
+
+    def call(self, tool_call: ToolCall) -> Any:
+        if tool_call.name not in self._allowed_names:
+            raise ValueError(f"unknown tool: {tool_call.name}")
+        return self._source.call(tool_call)
+
+    def execute(
+        self,
+        tool_call: ToolCall,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        if tool_call.name not in self._allowed_names:
+            decision = PermissionDecision(
+                effect="deny",
+                matched_rule="project.tool_selection",
+                reason="The project tool selection excludes this operation.",
+                risk_summary="Tool is outside the frozen Run selection.",
+            )
+            spec = self._source.get_spec(tool_call.name)
+            return ToolResult(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                ok=False,
+                error=decision.reason,
+                error_code="permission_denied",
+                provider=spec.provider if spec is not None else "unknown",
+                permission_level=(
+                    spec.permission_level if spec is not None else "unknown"
+                ),
+                requires_approval=(
+                    spec.requires_approval if spec is not None else False
+                ),
+                risk_summary=decision.risk_summary,
+                arguments_summary=_summarize_arguments(tool_call.arguments),
+                permission_decision=decision.to_dict(),
+            )
+        return self._source.execute(tool_call, context=context)
+
+    def resolve_permission(
+        self,
+        tool_call: ToolCall,
+        context: ToolUseContext,
+        *,
+        phase: str = "execute",
+    ) -> PermissionDecision:
+        if tool_call.name not in self._allowed_names:
+            return PermissionDecision(
+                effect="deny",
+                matched_rule="project.tool_selection",
+                reason="The project tool selection excludes this operation.",
+                risk_summary="Tool is outside the frozen Run selection.",
+            )
+        return self._source.resolve_permission(
+            tool_call,
+            context,
+            phase=phase,
+        )
+
+    def issue_approval(
+        self,
+        tool_call: ToolCall,
+        context: ToolUseContext,
+        *,
+        approved_by: str,
+    ) -> ToolApproval:
+        if tool_call.name not in self._allowed_names:
+            raise PermissionError("The project tool selection excludes this operation")
+        return self._source.issue_approval(
+            tool_call,
+            context,
+            approved_by=approved_by,
+        )
+
+    def export_context(self, name: str, context: ToolExecutionContext) -> Any:
+        return self._source.export_context(name, context)
+
+    def cleanup_context(self, context: ToolExecutionContext) -> list[str]:
+        return self._source.cleanup_context(context)
 
 
 def _accepts_context(tool: Callable[..., Any]) -> bool:

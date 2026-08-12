@@ -1,9 +1,8 @@
 project_id: "ai-agent-platform"
-status: "blocked"
+status: "done"
 active_task: "SKILL-DISCOVERY"
-next_action: "Rebase onto codex/run-context-boundary-hardening, resolve permission integration conflicts, and rerun all required verification."
-blockers:
-  - "Current main lacks the PermissionResolver/ToolUseContext evidence implemented on codex/run-context-boundary-hardening, so INTERVIEW_NOTES validation cannot pass."
-last_verified_commit: "614d7175bf669eea71c9022ddda0ec43ce93c1ab"
-updated_at: "2026-08-12T16:40:20+08:00"
+next_action: "Review and explicitly authorize Alembic 20260810_0020 before starting PostgreSQL runtime."
+blockers: []
+last_verified_commit: "3d3d5b1ef5cb23b1b547a1ec36f990c0579ded64"
+updated_at: "2026-08-12T16:52:24+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -58,9 +58,18 @@ from .tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
+    ToolRegistryView,
     ToolResult,
     ToolSpec,
     summarize_tool_arguments,
+)
+from .permissions import (
+    PermissionDecision,
+    PermissionRequest,
+    PermissionResolver,
+    ToolApproval,
+    ToolUseContext,
+    canonical_arguments_hash,
 )
 
 __all__ = [
@@ -89,6 +98,9 @@ __all__ = [
     "MCPToolProvider",
     "ProviderHealthManager",
     "ProviderHealthSnapshot",
+    "PermissionDecision",
+    "PermissionRequest",
+    "PermissionResolver",
     "RAGConfigurationError",
     "RAGError",
     "RAGProviderError",
@@ -102,10 +114,14 @@ __all__ = [
     "RoutingRequirements",
     "SystemDirectoryPicker",
     "ToolCall",
+    "ToolApproval",
     "ToolExecutionContext",
     "ToolRegistry",
+    "ToolRegistryView",
     "ToolResult",
     "ToolSpec",
+    "ToolUseContext",
+    "canonical_arguments_hash",
     "create_mcp_providers_from_config_file",
     "create_mcp_providers_from_configs",
     "create_rag_service",

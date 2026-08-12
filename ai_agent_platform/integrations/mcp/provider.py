@@ -55,6 +55,7 @@ class MCPToolProvider:
                     f"MCP tool {self.server_name}.{tool.name} requests "
                     f"{tool.permission_level} permission."
                 ),
+                permission_source="mcp_annotation",
             )
 
     def _callable_for(self, tool_name: str):

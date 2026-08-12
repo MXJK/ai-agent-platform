@@ -30,6 +30,7 @@ from ai_agent_platform.integrations import (
     RAGService,
     SystemDirectoryPicker,
     ToolRegistry,
+    PermissionResolver,
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
@@ -117,6 +118,7 @@ class RuntimeContainer:
     game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
     project_memory_service: ProjectMemoryService | None = None
+    permission_resolver: PermissionResolver | None = None
     change_set_service: ChangeSetService | None = None
     rag_service: RAGService | None = None
     knowledge_base_service: KnowledgeBaseService | None = None
@@ -267,6 +269,7 @@ class ApplicationFactory:
                     trigger_id=trigger_id,
                 )
             )
+            container.permission_resolver = PermissionResolver()
             container.change_set_service = ChangeSetService(
                 repository=container.change_set_store,
                 workspace_service=container.workspace_service,
@@ -279,6 +282,8 @@ class ApplicationFactory:
                 worktree_parent=settings.change_set_worktree_parent,
                 branch_prefix=settings.change_set_branch_prefix,
                 command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+                permission_resolver=container.permission_resolver,
+                role_for=container.project_memory_service.role_for,
             )
             container.rag_service = rag_service or self.create_rag_service(
                 settings,
@@ -303,6 +308,13 @@ class ApplicationFactory:
                 settings,
                 mcp_providers=container.mcp_providers,
             )
+            attach_permission_resolver = getattr(
+                container.tool_registry,
+                "attach_permission_resolver",
+                None,
+            )
+            if callable(attach_permission_resolver):
+                attach_permission_resolver(container.permission_resolver)
             container.register_cleanup(
                 "tool_registry",
                 container.tool_registry.close,
@@ -387,6 +399,10 @@ class ApplicationFactory:
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ).safe_snapshot(),
                 skill_service=container.skill_service,
+                process_config=(
+                    resolved_config or ResolvedConfig.from_settings(settings)
+                ),
+                tool_registry=container.tool_registry,
             )
             container.agent_run_service = AgentRunService(
                 runtime=container.coding_agent_runtime,
@@ -400,6 +416,8 @@ class ApplicationFactory:
                 llm_model=settings.llm_model,
                 model_registry=container.model_registry,
                 execution_context_factory=container.execution_context_factory,
+                permission_resolver=container.permission_resolver,
+                tool_registry=container.tool_registry,
             )
             container.register_cleanup(
                 "agent_run_service",
@@ -613,13 +631,8 @@ class ApplicationFactory:
             sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
         )
-        effective_selection = (
-            settings.enabled_tools
-            if settings.enabled_tools is not None
-            else settings.tool_allowlist
-        )
-        if effective_selection is not None:
-            registry.restrict_to(effective_selection)
+        if settings.tool_allowlist is not None:
+            registry.restrict_to(settings.tool_allowlist)
         return registry
 
     def create_skill_service(

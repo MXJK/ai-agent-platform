@@ -170,13 +170,18 @@ load_postgres_compose_env
 docker compose config --quiet
 
 if [[ "${1:-}" == "--check" ]]; then
+  if [[ $# -ne 1 ]]; then
+    echo "用法：./scripts/start.sh --check | --apply-migrations" >&2
+    exit 2
+  fi
   echo "启动脚本检查通过。"
   exit 0
 fi
 
-if [[ $# -gt 0 ]]; then
-  echo "未知参数：$1" >&2
-  echo "用法：./scripts/start.sh [--check]" >&2
+if [[ $# -ne 1 || "${1:-}" != "--apply-migrations" ]]; then
+  echo "启动 PostgreSQL runtime 前必须由操作者显式授权待处理的 Alembic 迁移。" >&2
+  echo "确认迁移计划后运行：./scripts/start.sh --apply-migrations" >&2
+  echo "仅检查依赖和配置：./scripts/start.sh --check" >&2
   exit 2
 fi
 
@@ -184,7 +189,7 @@ echo "正在启动 PostgreSQL、Qdrant 和 Redis..."
 docker compose up -d "${COMPOSE_SERVICES[@]}"
 wait_for_services
 
-echo "正在应用数据库迁移..."
+echo "已收到显式授权，正在应用数据库迁移..."
 "${ALEMBIC}" upgrade head
 
 trap cleanup EXIT INT TERM
