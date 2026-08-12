@@ -8,6 +8,7 @@ from ai_agent_platform.integrations.mcp import (
     MCPToolProvider,
     register_mcp_tools,
 )
+from ai_agent_platform.integrations.permissions import PermissionResolver
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.tools import register_repository_tools, register_sandbox_tools
 
@@ -21,8 +22,9 @@ def create_coding_tool_registry(
     sandbox_workspace_parent: str | None = None,
     sandbox_workspace_ttl_seconds: float = 86400.0,
     sandbox_allowed_commands: tuple[str, ...] | None = None,
+    permission_resolver: PermissionResolver | None = None,
 ) -> ToolRegistry:
-    registry = ToolRegistry()
+    registry = ToolRegistry(permission_resolver=permission_resolver)
     register_repository_tools(registry)
     register_sandbox_tools(
         registry,

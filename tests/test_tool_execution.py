@@ -27,7 +27,11 @@ class ToolExecutionTests(unittest.TestCase):
         )
         denied = view.execute(ToolCall(name="tool.b", arguments={}))
         self.assertFalse(denied.ok)
-        self.assertEqual(denied.error_code, "unknown_tool")
+        self.assertEqual(denied.error_code, "permission_denied")
+        self.assertEqual(
+            denied.permission_decision["matched_rule"],
+            "project.tool_selection",
+        )
         self.assertTrue(registry.execute(ToolCall(name="tool.b", arguments={})).ok)
 
     def test_registry_selection_can_only_remove_known_tools(self) -> None:

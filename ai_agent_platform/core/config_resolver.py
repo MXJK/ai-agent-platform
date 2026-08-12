@@ -879,17 +879,17 @@ def _validate_project_overrides(
                 "project_config sandbox_allowed_commands may only remove commands"
             )
 
-    approval_strength = {"never": 0, "on_request": 1, "always": 2}
     if "agent_approval_policy" in incoming:
         candidate = incoming["agent_approval_policy"]
         baseline = current["agent_approval_policy"]
-        if (
-            candidate in approval_strength
-            and baseline in approval_strength
-            and approval_strength[candidate] < approval_strength[baseline]
-        ):
+        tightening_transitions = {
+            "on_request": {"on_request", "always", "never"},
+            "always": {"always"},
+            "never": {"never"},
+        }
+        if candidate not in tightening_transitions.get(str(baseline), set()):
             raise ConfigSecurityError(
-                "project_config agent_approval_policy may only require more approval"
+                "project_config agent_approval_policy may only tighten permission"
             )
 
     if incoming.get("mcp_enabled") is True and current["mcp_allowed"] is False:

@@ -270,7 +270,7 @@ class MCPProviderTests(unittest.TestCase):
                 "mcp:startup_demo",
             )
 
-    def test_agent_dynamically_executes_read_only_mcp_tool(self) -> None:
+    def test_agent_centrally_approves_mcp_reported_read_only_tool(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _create_app_with_fake_mcp(temp_dir, server_name="dynamic_demo")
 
@@ -295,11 +295,33 @@ class MCPProviderTests(unittest.TestCase):
                 run_status_body = wait_for_agent_run(
                     client,
                     run_response.json()["run_id"],
+                )
+                pending = run_status_body["pending_approval"]
+                approval_item = next(
+                    item
+                    for item in pending["approval_required_tools"]
+                    if item["name"] == "mcp.dynamic_demo.echo"
+                )
+                resume_response = client.post(
+                    f"/api/v1/agent/runs/{run_response.json()['run_id']}/resume",
+                    json={"approved": True, "feedback": "approved for test"},
+                )
+                completed_body = wait_for_agent_run(
+                    client,
+                    run_response.json()["run_id"],
                     terminal_statuses=("completed", "failed"),
                 )
 
             self.assertEqual(run_response.status_code, 202)
-            body = run_status_body["result"]
+            self.assertEqual(run_status_body["status"], "waiting_approval")
+            self.assertEqual(
+                approval_item["matched_rule"],
+                "provider.annotation_requires_central_approval",
+            )
+            self.assertTrue(approval_item["call_id"])
+            self.assertEqual(len(approval_item["arguments_hash"]), 64)
+            self.assertEqual(resume_response.status_code, 202)
+            body = completed_body["result"]
             self.assertEqual(body["status"], "completed")
             tool_names = [tool_call["name"] for tool_call in body["tool_calls"]]
             self.assertIn("mcp.dynamic_demo.echo", tool_names)

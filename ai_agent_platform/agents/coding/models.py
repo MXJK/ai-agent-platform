@@ -33,6 +33,10 @@ class CodingAgentState(TypedDict, total=False):
     workspace_id: str
     workspace_root: str
     actor_user_id: str
+    workspace_role: str
+    authorized_workspace_root: str
+    approval_policy: str
+    tool_approvals: list[dict[str, str]]
     cwd: str
     additional_directories: list[dict[str, Any]]
     enabled_tools: list[str]
@@ -66,6 +70,7 @@ class CodingAgentState(TypedDict, total=False):
     change_tool_calls: list[ToolCall]
     validation_tool_calls: list[ToolCall]
     repair_tool_calls: list[ToolCall]
+    repair_approval_tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     native_tool_messages: list[dict[str, Any]]
     native_tool_round: int

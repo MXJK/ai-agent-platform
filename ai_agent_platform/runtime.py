@@ -30,6 +30,7 @@ from ai_agent_platform.integrations import (
     RAGService,
     SystemDirectoryPicker,
     ToolRegistry,
+    PermissionResolver,
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
@@ -111,6 +112,7 @@ class RuntimeContainer:
     game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
     project_memory_service: ProjectMemoryService | None = None
+    permission_resolver: PermissionResolver | None = None
     change_set_service: ChangeSetService | None = None
     rag_service: RAGService | None = None
     knowledge_base_service: KnowledgeBaseService | None = None
@@ -258,6 +260,7 @@ class ApplicationFactory:
                     trigger_id=trigger_id,
                 )
             )
+            container.permission_resolver = PermissionResolver()
             container.change_set_service = ChangeSetService(
                 repository=container.change_set_store,
                 workspace_service=container.workspace_service,
@@ -270,6 +273,8 @@ class ApplicationFactory:
                 worktree_parent=settings.change_set_worktree_parent,
                 branch_prefix=settings.change_set_branch_prefix,
                 command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+                permission_resolver=container.permission_resolver,
+                role_for=container.project_memory_service.role_for,
             )
             container.rag_service = rag_service or self.create_rag_service(
                 settings,
@@ -294,6 +299,13 @@ class ApplicationFactory:
                 settings,
                 mcp_providers=container.mcp_providers,
             )
+            attach_permission_resolver = getattr(
+                container.tool_registry,
+                "attach_permission_resolver",
+                None,
+            )
+            if callable(attach_permission_resolver):
+                attach_permission_resolver(container.permission_resolver)
             container.register_cleanup(
                 "tool_registry",
                 container.tool_registry.close,
@@ -384,6 +396,8 @@ class ApplicationFactory:
                 llm_model=settings.llm_model,
                 model_registry=container.model_registry,
                 execution_context_factory=container.execution_context_factory,
+                permission_resolver=container.permission_resolver,
+                tool_registry=container.tool_registry,
             )
             container.register_cleanup(
                 "agent_run_service",
