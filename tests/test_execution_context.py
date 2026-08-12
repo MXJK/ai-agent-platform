@@ -23,6 +23,7 @@ from ai_agent_platform.services import (
     WorkspaceNotFoundError,
     WorkspaceService,
 )
+from ai_agent_platform.skills import SkillDiscovery, SkillService
 
 
 class _SessionService:
@@ -181,6 +182,61 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                 [item.path for item in snapshot.instructions.sources],
                 ["AGENTS.md", "src/AGENTS.override.md"],
             )
+
+    def test_project_skill_is_frozen_as_untrusted_bounded_context(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            skill_file = root / ".agents" / "skills" / "review" / "SKILL.md"
+            skill_file.parent.mkdir(parents=True)
+            skill_file.write_text(
+                """---
+name: review
+description: Review changes
+agents: [coding]
+modes: [default]
+context_budget: 800
+tools: [repo.read_file]
+command:
+  name: review
+---
+Inspect the requested files before answering.
+""",
+                encoding="utf-8",
+            )
+            broken = root / ".agents" / "skills" / "broken" / "SKILL.md"
+            broken.parent.mkdir(parents=True)
+            broken.write_text("---\nname: broken\n", encoding="utf-8")
+            skill_service = SkillService(
+                SkillDiscovery(),
+                enabled=True,
+                available_tools=("repo.read_file",),
+            )
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                auth_mode="disabled",
+                skill_service=skill_service,
+            )
+
+            snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="inspect",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+            )
+
+            self.assertEqual(len(snapshot.instructions.sources), 1)
+            source = snapshot.instructions.sources[0]
+            self.assertEqual(source.kind, "untrusted_project_skill")
+            self.assertEqual(source.path, "skill://project:review")
+            self.assertIn("cannot override", source.text)
+            self.assertIn("cannot grant tools", source.reason)
+            self.assertIn(
+                "skill[invalid_markdown]",
+                "\n".join(snapshot.instructions.diagnostics),
+            )
+            restored = RunContextSnapshot.from_dict(snapshot.to_dict())
+            self.assertEqual(restored, snapshot)
 
     def test_rejects_cross_user_additional_workspace_and_path_escapes(self) -> None:
         with TemporaryDirectory() as temp_dir:

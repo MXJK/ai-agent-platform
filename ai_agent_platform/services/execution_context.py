@@ -64,6 +64,7 @@ class ExecutionContextFactory:
         max_context_messages: int = 12,
         max_instruction_chars: int = 16000,
         config_snapshot: Mapping[str, object] | None = None,
+        skill_service: Any = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -74,6 +75,7 @@ class ExecutionContextFactory:
         self._entrypoint_type = entrypoint_type
         self._max_context_messages = max_context_messages
         self._max_instruction_chars = max_instruction_chars
+        self._skill_service = skill_service
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -183,6 +185,20 @@ class ExecutionContextFactory:
             focus_files=unique(instruction_focus),
             max_chars=self._max_instruction_chars,
         )
+        skill_sources = ()
+        skill_diagnostics: tuple[str, ...] = ()
+        if self._skill_service is not None:
+            used_instruction_chars = sum(len(item.text) for item in instructions)
+            selection = self._skill_service.build_context(
+                workspace_root=workspace_root,
+                agent="coding",
+                mode="default",
+                max_chars=max(0, self._max_instruction_chars - used_instruction_chars),
+            )
+            skill_sources = selection.sources
+            skill_diagnostics = tuple(
+                _skill_diagnostic_message(item) for item in selection.diagnostics
+            )
         selection_values = (
             asdict(model_selection)
             if isinstance(model_selection, ModelSelection)
@@ -226,9 +242,23 @@ class ExecutionContextFactory:
                         truncated=item.truncated,
                     )
                     for item in instructions
+                )
+                + tuple(
+                    InstructionSourceSnapshot(
+                        kind=item.kind,
+                        path=item.path,
+                        start_line=1,
+                        end_line=item.text.count("\n") + 1,
+                        text=item.text,
+                        reason=item.reason,
+                        content_hash=item.content_hash,
+                        truncated=item.truncated,
+                    )
+                    for item in skill_sources
                 ),
                 focus_files=normalized_focus,
                 max_chars=self._max_instruction_chars,
+                diagnostics=skill_diagnostics,
             ),
             additional_directories=additional,
             metadata=RunMetadata(
@@ -287,6 +317,13 @@ class ExecutionContextFactory:
                 )
             )
         return tuple(resolved)
+
+
+def _skill_diagnostic_message(value: Any) -> str:
+    code = str(getattr(value, "code", "skill_diagnostic"))
+    path = str(getattr(value, "path", "SKILL.md"))
+    message = str(getattr(value, "message", "Skill could not be loaded"))
+    return f"skill[{code}] {path}: {message}"[:1000]
 
 
 def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:

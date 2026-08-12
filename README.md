@@ -15,6 +15,7 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 
 - [本地启动](#本地启动)
 - [分层运行时配置](#分层运行时配置)
+- [Skill 发现与 slash command](#skill-发现与-slash-command)
 - [主要能力](#主要能力)
 - [Gemini 流式输出](#gemini-流式输出)
 - [模型路由](#模型路由)
@@ -73,6 +74,8 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
   "process_security": {
     "workspace_allowed_roots": ["/srv/code"],
     "mcp_allowed": true,
+    "skills_allowed": true,
+    "skill_allowlist": ["review"],
     "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
   },
   "runtime": {
@@ -83,6 +86,8 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
   "project_session": {
     "project_instructions": ["先运行受影响的测试。"],
     "enabled_tools": ["file_symbol_locator"],
+    "skills_enabled": true,
+    "enabled_skills": ["review"],
     "mcp_enabled": false
   }
 }
@@ -102,6 +107,52 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也�
 `ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
 序列化视图，API/Worker 的 `RuntimeContainer` 将其保存为 `config_snapshot`；结构化日志
 也会递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
+
+## Skill 发现与 slash command
+
+启用 `skills_enabled` 后，运行时只发现以下目录中的 `SKILL.md`：
+
+- bundled：`ai_agent_platform/bundled_skills/<skill>/SKILL.md`；
+- user：`~/.ai-agent-platform/skills/<skill>/SKILL.md`；
+- project：已鉴权 Workspace 下的 `.agents/skills/<skill>/SKILL.md`。
+
+来源优先级固定为 `project > user > bundled`，限定名分别是
+`project:<name>`、`user:<name>` 和 `bundled:<name>`。同一来源的重复名称按相对路径
+字典序选择第一项并产生错误诊断；跨来源覆盖、slash command/alias 冲突也产生稳定
+诊断。最终 Skill 与 command 都按规范化名称排序。项目 Skill 即使覆盖同名用户或
+bundled Skill，仍会标记为 `untrusted_project_skill`，在 Run 入队前以不可信项目
+上下文冻结。
+
+最小 `SKILL.md` 使用严格、无重复键的 YAML frontmatter：
+
+```markdown
+---
+name: review
+description: Review requested code changes
+agents: [coding]
+modes: [default]
+context_budget: 4000
+tools: [repo.search_code, repo.read_file]
+command:
+  name: review
+  description: Review code in the current Workspace
+  usage: "[path]"
+  aliases: [rv]
+---
+Inspect live evidence before giving review findings.
+```
+
+第一版只接受上述字段。每个文件最多 64 KiB，每次发现最多 64 个候选、最多加载
+128 KiB 字符；单个 Skill 的上下文预算上限为 16,000 字符，最终还受 Run 的项目
+指令总预算约束。错误 UTF-8、损坏/重复 YAML、未知字段、超限文件和单个坏 Skill
+只产生诊断，不会终止其余发现。来源根、子目录或 `SKILL.md` 中的 symlink 都不会被
+跟随，真实路径必须留在对应来源根内。
+
+Skill 是纯声明数据：系统不会执行同目录 Python/Shell，也不会从 Markdown 注册函数。
+`tools` 只是所需工具名称；缺少已注册工具时 Skill 不进入上下文，即使工具存在，调用
+仍受既有 `ToolUseContext`、Sandbox 和 allow/ask/deny 规则约束。Skill 不能注册工具、
+降低审批、扩大 allowlist 或授予权限。slash command 注册表也只保存名称、描述、usage、
+alias 与目标 Skill，不直接执行命令。
 
 ## 主要能力
 

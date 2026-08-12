@@ -129,6 +129,7 @@ class InstructionContext:
     sources: tuple[InstructionSourceSnapshot, ...]
     focus_files: tuple[str, ...]
     max_chars: int
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,7 @@ class RunContextSnapshot:
                 ],
                 "focus_files": list(self.instructions.focus_files),
                 "max_chars": self.instructions.max_chars,
+                "diagnostics": list(self.instructions.diagnostics),
             },
             "additional_directories": [
                 {
@@ -355,6 +357,9 @@ class RunContextSnapshot:
                     str(item) for item in instruction_value.get("focus_files", [])
                 ),
                 max_chars=int(instruction_value.get("max_chars", 0)),
+                diagnostics=tuple(
+                    str(item) for item in instruction_value.get("diagnostics", [])
+                ),
             ),
             additional_directories=tuple(
                 AdditionalDirectoryContext(

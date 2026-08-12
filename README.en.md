@@ -62,6 +62,8 @@ startup.
   "process_security": {
     "workspace_allowed_roots": ["/srv/code"],
     "mcp_allowed": true,
+    "skills_allowed": true,
+    "skill_allowlist": ["review"],
     "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
   },
   "runtime": {
@@ -72,6 +74,8 @@ startup.
   "project_session": {
     "project_instructions": ["Run affected tests first."],
     "enabled_tools": ["file_symbol_locator"],
+    "skills_enabled": true,
+    "enabled_skills": ["review"],
     "mcp_enabled": false
   }
 }
@@ -94,6 +98,56 @@ containers retain `ResolvedConfig.safe_snapshot()` as `config_snapshot`, the
 supported serialization view for logs, Run snapshots, and configuration
 diagnostics. Structured logging also recursively redacts nested keys, secrets,
 tokens, and credential-bearing connection strings.
+
+## Skill discovery and slash commands
+
+When `skills_enabled` is true, the runtime discovers only `SKILL.md` files below
+these roots:
+
+- bundled: `ai_agent_platform/bundled_skills/<skill>/SKILL.md`;
+- user: `~/.ai-agent-platform/skills/<skill>/SKILL.md`;
+- project: `.agents/skills/<skill>/SKILL.md` under the authorized Workspace.
+
+The fixed precedence is `project > user > bundled`, with qualified names such as
+`project:review`. Same-source duplicates use the lexicographically first relative
+path and emit an error diagnostic. Cross-source overrides and slash command/alias
+conflicts emit stable diagnostics, and final definitions are sorted by normalized
+name. Project Skills always enter the Run snapshot as `untrusted_project_skill`
+context, including when they override a user or bundled definition.
+
+The first version accepts strict, duplicate-free YAML frontmatter:
+
+```markdown
+---
+name: review
+description: Review requested code changes
+agents: [coding]
+modes: [default]
+context_budget: 4000
+tools: [repo.search_code, repo.read_file]
+command:
+  name: review
+  description: Review code in the current Workspace
+  usage: "[path]"
+  aliases: [rv]
+---
+Inspect live evidence before giving review findings.
+```
+
+Only those fields are accepted. A file is limited to 64 KiB; one discovery pass
+considers at most 64 candidates and loads at most 128 KiB of text. One Skill can
+request at most 16,000 context characters and still shares the Run instruction
+budget. Invalid UTF-8, malformed or duplicate YAML, unknown fields, oversized
+files, and individual bad Skills become diagnostics without aborting discovery.
+Symlink roots, directories, and `SKILL.md` files are not followed, and canonical
+paths must remain below their source root.
+
+Skills are declarative data. Python and shell files are never executed, and
+Markdown cannot register functions. `tools` lists requirements only: a Skill with
+missing registered tools is not injected, while existing tools remain governed by
+`ToolUseContext`, sandbox, and allow/ask/deny policy. Skills cannot register tools,
+reduce approval, expand allowlists, or grant permission. The slash command registry
+stores only metadata and a target Skill; it does not execute a command.
 
 The shared composer offers:
 

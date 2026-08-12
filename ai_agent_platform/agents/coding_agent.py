@@ -330,7 +330,11 @@ class CodingAgentRuntime:
             "context_sources": [],
             "rag_context_sources": [],
             "memory_context_sources": [],
-            "context_warnings": [],
+            "context_warnings": (
+                list(run_context.instructions.diagnostics)
+                if run_context is not None
+                else []
+            ),
             "knowledge_base_catalog": [],
             "selected_knowledge_base_ids": [],
             "context_route": "repo",
