@@ -202,8 +202,17 @@ class ToolRegistry:
     def get_spec(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
 
+    def select(self, allowed_names: tuple[str, ...]) -> "ToolRegistryView":
+        """Return an immutable Run-scoped selection without changing this registry."""
+        selected = tuple(dict.fromkeys(allowed_names))
+        unknown = set(selected).difference(self._tools)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"configured tool selection contains unknown tools: {names}")
+        return ToolRegistryView(self, selected)
+
     def restrict_to(self, allowed_names: tuple[str, ...]) -> None:
-        """Irreversibly narrow the registry to a configured tool selection."""
+        """Irreversibly apply a process-owned capability upper bound."""
         allowed = set(allowed_names)
         unknown = allowed.difference(self._tools)
         if unknown:
@@ -481,6 +490,68 @@ class ToolRegistry:
             return
         with self._idempotency_lock:
             self._idempotency_results.setdefault(cache_key, (fingerprint, result))
+
+
+class ToolRegistryView:
+    """Read-only, non-owning view of a process ToolRegistry for one Run."""
+
+    def __init__(self, source: ToolRegistry, allowed_names: tuple[str, ...]) -> None:
+        self._source = source
+        self._allowed_names = frozenset(allowed_names)
+
+    @property
+    def allowed_names(self) -> tuple[str, ...]:
+        return tuple(
+            spec.name
+            for spec in self._source.list_specs()
+            if spec.name in self._allowed_names
+        )
+
+    def list_specs(self) -> list[ToolSpec]:
+        return [
+            spec
+            for spec in self._source.list_specs()
+            if spec.name in self._allowed_names
+        ]
+
+    def get_spec(self, name: str) -> ToolSpec | None:
+        if name not in self._allowed_names:
+            return None
+        return self._source.get_spec(name)
+
+    def select(self, allowed_names: tuple[str, ...]) -> "ToolRegistryView":
+        selected = tuple(dict.fromkeys(allowed_names))
+        unknown = set(selected).difference(self._allowed_names)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"configured tool selection contains unknown tools: {names}")
+        return ToolRegistryView(self._source, selected)
+
+    def call(self, tool_call: ToolCall) -> Any:
+        if tool_call.name not in self._allowed_names:
+            raise ValueError(f"unknown tool: {tool_call.name}")
+        return self._source.call(tool_call)
+
+    def execute(
+        self,
+        tool_call: ToolCall,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        if tool_call.name not in self._allowed_names:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                ok=False,
+                error=f"unknown tool: {tool_call.name}",
+                error_code="unknown_tool",
+            )
+        return self._source.execute(tool_call, context=context)
+
+    def export_context(self, name: str, context: ToolExecutionContext) -> Any:
+        return self._source.export_context(name, context)
+
+    def cleanup_context(self, context: ToolExecutionContext) -> list[str]:
+        return self._source.cleanup_context(context)
 
 
 def _accepts_context(tool: Callable[..., Any]) -> bool:

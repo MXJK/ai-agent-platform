@@ -13,6 +13,23 @@ from ai_agent_platform.integrations.tools import (
 
 
 class ToolExecutionTests(unittest.TestCase):
+    def test_run_scoped_view_does_not_modify_source_registry(self) -> None:
+        registry = ToolRegistry()
+        registry.register("tool.a", lambda: {})
+        registry.register("tool.b", lambda: {})
+
+        view = registry.select(("tool.a",))
+
+        self.assertEqual([spec.name for spec in view.list_specs()], ["tool.a"])
+        self.assertEqual(
+            [spec.name for spec in registry.list_specs()],
+            ["tool.a", "tool.b"],
+        )
+        denied = view.execute(ToolCall(name="tool.b", arguments={}))
+        self.assertFalse(denied.ok)
+        self.assertEqual(denied.error_code, "unknown_tool")
+        self.assertTrue(registry.execute(ToolCall(name="tool.b", arguments={})).ok)
+
     def test_registry_selection_can_only_remove_known_tools(self) -> None:
         registry = ToolRegistry()
         registry.register("read", lambda: {})

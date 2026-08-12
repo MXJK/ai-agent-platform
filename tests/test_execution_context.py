@@ -1,6 +1,8 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
+import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,8 +11,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.agents.coding import AgentRunRecord, InMemoryAgentRunStore
+from ai_agent_platform.agents.coding.context import InstructionSecurityError
+from ai_agent_platform.core import ConfigResolver, ConfigSecurityError
 from ai_agent_platform.domain import Session, RunContextSnapshot
+from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.model_registry import ModelSelection
 from ai_agent_platform.repositories import (
     InMemoryWorkspaceRepository,
@@ -182,6 +188,240 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                 ["AGENTS.md", "src/AGENTS.override.md"],
             )
 
+    def test_two_workspaces_freeze_isolated_config_instructions_and_tools(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            alpha = parent / "alpha"
+            beta = parent / "beta"
+            for root, tool, instruction, elapsed in (
+                (alpha, "tool.alpha", "alpha config", 101),
+                (beta, "tool.beta", "beta config", 202),
+            ):
+                (root / ".ai-agent-platform").mkdir(parents=True)
+                (root / "AGENTS.md").write_text(
+                    f"{root.name} agents",
+                    encoding="utf-8",
+                )
+                (root / ".ai-agent-platform" / "config.json").write_text(
+                    json.dumps(
+                        {
+                            "runtime": {"agent_max_elapsed_seconds": elapsed},
+                            "project_session": {
+                                "enabled_tools": [tool],
+                                "project_instructions": [instruction],
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            registry = _tool_registry("tool.alpha", "tool.beta")
+            process = ConfigResolver(
+                user_config={
+                    "process_security": {
+                        "tool_allowlist": ["tool.alpha", "tool.beta"]
+                    }
+                },
+                env={},
+            ).resolve_process()
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(
+                    parent,
+                    ("alpha", alpha),
+                    ("beta", beta),
+                ),
+                auth_mode="disabled",
+                process_config=process,
+                tool_registry=registry,
+            )
+
+            alpha_snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="inspect alpha",
+                workspace_id="alpha",
+                model_selection=ModelSelection(),
+            )
+            beta_snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="inspect beta",
+                workspace_id="beta",
+                model_selection=ModelSelection(),
+            )
+
+            self.assertEqual(alpha_snapshot.tools.enabled_tools, ("tool.alpha",))
+            self.assertEqual(beta_snapshot.tools.enabled_tools, ("tool.beta",))
+            self.assertEqual(
+                [spec.name for spec in registry.list_specs()],
+                ["tool.alpha", "tool.beta"],
+            )
+            self.assertEqual(
+                [item.text for item in alpha_snapshot.instructions.sources],
+                ["alpha agents", "alpha config"],
+            )
+            self.assertEqual(
+                [item.text for item in beta_snapshot.instructions.sources],
+                ["beta agents", "beta config"],
+            )
+            self.assertGreater(
+                alpha_snapshot.instructions.sources[0].priority,
+                alpha_snapshot.instructions.sources[1].priority,
+            )
+            self.assertEqual(
+                alpha_snapshot.project.project_config["config"]["runtime"][
+                    "agent_max_elapsed_seconds"
+                ]["value"],
+                101,
+            )
+            self.assertEqual(
+                beta_snapshot.project.project_config["config"]["runtime"][
+                    "agent_max_elapsed_seconds"
+                ]["value"],
+                202,
+            )
+            self.assertNotEqual(
+                alpha_snapshot.metadata.config_version,
+                beta_snapshot.metadata.config_version,
+            )
+
+    def test_config_instruction_shares_budget_and_keeps_provenance(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".ai-agent-platform").mkdir()
+            (root / "AGENTS.override.md").write_text("OVERRIDE", encoding="utf-8")
+            (root / ".ai-agent-platform" / "config.json").write_text(
+                json.dumps(
+                    {
+                        "project_session": {
+                            "project_instructions": ["CONFIGURATION"]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                process_config=ConfigResolver(
+                    env={},
+                    explicit_overrides={"agent_max_instruction_chars": 10},
+                ).resolve_process(),
+                tool_registry=_tool_registry("tool.a"),
+                max_instruction_chars=10,
+            )
+            snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="inspect",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+            )
+
+            file_source, config_source = snapshot.instructions.sources
+            self.assertEqual(file_source.text, "OVERRIDE")
+            self.assertEqual(config_source.text, "CO")
+            self.assertTrue(config_source.truncated)
+            self.assertEqual(config_source.kind, "config_instruction")
+            self.assertTrue(config_source.path.startswith("config://"))
+            self.assertIn("workspace:.ai-agent-platform/config.json", config_source.reason)
+            self.assertEqual(
+                sum(len(item.text) for item in snapshot.instructions.sources),
+                10,
+            )
+
+    def test_instruction_symlinks_nonregular_files_and_replacement_fail_closed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            root = parent / "workspace"
+            outside = parent / "outside"
+            root.mkdir()
+            outside.mkdir()
+            secret = outside / "secret.md"
+            secret.write_text("outside secret content", encoding="utf-8")
+            (root / "AGENTS.md").symlink_to(secret)
+            factory = _factory(root)
+            values = {
+                "conversation_id": "session_1",
+                "user_message": "inspect",
+                "workspace_id": "main",
+                "model_selection": ModelSelection(),
+            }
+            with self.assertRaises(InstructionSecurityError) as symlink_error:
+                factory.create(**values)
+            self.assertNotIn("outside secret content", str(symlink_error.exception))
+
+            (root / "AGENTS.md").unlink()
+            (root / "escaped").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "focus file escapes"):
+                factory.create(**values, focus_files=["escaped/secret.md"])
+
+            (root / "escaped").unlink()
+            fifo = root / "AGENTS.md"
+            os.mkfifo(fifo)
+            try:
+                with self.assertRaisesRegex(InstructionSecurityError, "regular file"):
+                    factory.create(**values)
+            finally:
+                fifo.unlink()
+
+            (root / "AGENTS.md").write_text("stable", encoding="utf-8")
+            with patch(
+                "ai_agent_platform.agents.coding.context._same_stable_file",
+                return_value=False,
+            ), self.assertRaisesRegex(InstructionSecurityError, "changed while"):
+                factory.create(**values)
+
+    def test_project_tool_selection_cannot_widen_cap_or_name_unknown_tool(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".ai-agent-platform").mkdir()
+            config_path = root / ".ai-agent-platform" / "config.json"
+            registry = _tool_registry("tool.a", "tool.b")
+            process = ConfigResolver(
+                user_config={
+                    "process_security": {"tool_allowlist": ["tool.a"]}
+                },
+                env={},
+            ).resolve_process()
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                process_config=process,
+                tool_registry=registry,
+            )
+            config_path.write_text(
+                json.dumps(
+                    {"project_session": {"enabled_tools": ["tool.b"]}}
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigSecurityError, "process allowlist"):
+                factory.create(
+                    conversation_id="session_1",
+                    user_message="inspect",
+                    workspace_id="main",
+                    model_selection=ModelSelection(),
+                )
+
+            unrestricted = ConfigResolver(env={}).resolve_process()
+            unknown_factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                process_config=unrestricted,
+                tool_registry=registry,
+            )
+            config_path.write_text(
+                json.dumps(
+                    {"project_session": {"enabled_tools": ["missing.tool"]}}
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown tools"):
+                unknown_factory.create(
+                    conversation_id="session_1",
+                    user_message="inspect",
+                    workspace_id="main",
+                    model_selection=ModelSelection(),
+                )
+
     def test_rejects_cross_user_additional_workspace_and_path_escapes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             parent = Path(temp_dir)
@@ -321,12 +561,27 @@ class WorkerContextRecoveryTests(unittest.TestCase):
             root = Path(temp_dir)
             instruction = root / "AGENTS.md"
             instruction.write_text("frozen instruction", encoding="utf-8")
+            (root / ".ai-agent-platform").mkdir()
+            project_config = root / ".ai-agent-platform" / "config.json"
+            project_config.write_text(
+                json.dumps(
+                    {
+                        "project_session": {
+                            "enabled_tools": ["tool.a"],
+                            "project_instructions": ["frozen config instruction"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             sessions = _SessionService()
             workspaces = _workspace_service(root, ("main", root))
             factory = ExecutionContextFactory(
                 session_service=sessions,
                 workspace_service=workspaces,
                 auth_mode="disabled",
+                process_config=ConfigResolver(env={}).resolve_process(),
+                tool_registry=_tool_registry("tool.a", "tool.b"),
             )
             store = InMemoryAgentRunStore()
             queued_runtime = _QueuedRuntime(store)
@@ -347,6 +602,17 @@ class WorkerContextRecoveryTests(unittest.TestCase):
 
             sessions.history[0]["content"] = "mutated history"
             instruction.write_text("mutated instruction", encoding="utf-8")
+            project_config.write_text(
+                json.dumps(
+                    {
+                        "project_session": {
+                            "enabled_tools": ["tool.b"],
+                            "project_instructions": ["mutated config instruction"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             worker_runtime = _WorkerRuntime(store)
             worker = AgentRunService(
                 runtime=worker_runtime,
@@ -354,7 +620,14 @@ class WorkerContextRecoveryTests(unittest.TestCase):
                 workspace_service=workspaces,
                 task_queue=_CaptureQueue(),
             )
-            worker.execute_run_task(run_id=record.run_id)
+            different_cwd = root / "worker-cwd"
+            different_cwd.mkdir()
+            previous_cwd = Path.cwd()
+            os.chdir(different_cwd)
+            try:
+                worker.execute_run_task(run_id=record.run_id)
+            finally:
+                os.chdir(previous_cwd)
 
             call = worker_runtime.calls[0]
             self.assertEqual(call["user_input"], "original request")
@@ -365,7 +638,67 @@ class WorkerContextRecoveryTests(unittest.TestCase):
                 context.instructions.sources[0].text,
                 "frozen instruction",
             )
+            self.assertEqual(
+                context.instructions.sources[1].text,
+                "frozen config instruction",
+            )
+            self.assertEqual(context.tools.enabled_tools, ("tool.a",))
             self.assertEqual(call["actor_user_id"], "alice")
+
+    def test_worker_runtime_rejects_illegal_persisted_tool_selection(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = _tool_registry("tool.a")
+            snapshot = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                process_config=ConfigResolver(env={}).resolve_process(),
+                tool_registry=registry,
+            ).create(
+                conversation_id="session_1",
+                user_message="inspect",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+                run_id="run_tampered",
+            )
+            payload = snapshot.to_dict()
+            payload["tools"]["enabled_tools"] = ["missing.tool"]  # type: ignore[index]
+            payload["tools"]["version"] = (  # type: ignore[index]
+                "sha256:"
+                + hashlib.sha256(b'["missing.tool"]').hexdigest()[:16]
+            )
+            restored = RunContextSnapshot.from_dict(payload)
+            runtime = CodingAgentRuntime(tool_registry=registry)
+
+            with self.assertRaisesRegex(ValueError, "unknown tools"):
+                runtime.run(
+                    conversation_id="ignored",
+                    user_input="ignored",
+                    history=[],
+                    workspace_id="ignored",
+                    workspace_root=str(root),
+                    run_context=restored,
+                )
+
+    def test_nullable_legacy_schema_one_snapshot_remains_loadable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = _factory(root).create(
+                conversation_id="session_1",
+                user_message="legacy",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+            )
+            payload = snapshot.to_dict()
+            payload["metadata"]["schema_version"] = 1  # type: ignore[index]
+            payload.pop("tools")
+            for source in payload["instructions"]["sources"]:  # type: ignore[index]
+                source.pop("priority")
+
+            restored = RunContextSnapshot.from_dict(payload)
+
+            self.assertIsNone(restored.tools.enabled_tools)
+            self.assertEqual(restored.metadata.schema_version, 1)
 
     def test_postgres_store_round_trips_the_context_json(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -520,6 +853,13 @@ def _workspace_service(
     for workspace_id, root in workspaces:
         service.register(workspace_id=workspace_id, root_path=str(root))
     return service
+
+
+def _tool_registry(*names: str) -> ToolRegistry:
+    registry = ToolRegistry()
+    for name in names:
+        registry.register(name, lambda: {})
+    return registry
 
 
 def _factory(root: Path) -> ExecutionContextFactory:

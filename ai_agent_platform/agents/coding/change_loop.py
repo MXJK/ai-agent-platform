@@ -17,6 +17,7 @@ from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
+    ToolRegistryView,
     ToolSpec,
     summarize_tool_arguments,
 )
@@ -73,6 +74,7 @@ class ChangeLoopExecutor:
         }
 
     def validate_changes(self, state: CodingAgentState) -> CodingAgentState:
+        tools = self._tools_for_state(state)
         validation_calls = [
             ToolCall(
                 name=call.name,
@@ -104,13 +106,13 @@ class ChangeLoopExecutor:
             if callable(plan_repair):
                 repair_calls = [
                     call
-                    for call in plan_repair(repair_state, self._tools.list_specs())
+                    for call in plan_repair(repair_state, tools.list_specs())
                     if call.name in SANDBOX_MUTATION_TOOLS
                 ]
 
         approval_required_tools = _approval_required_tools(
             repair_calls,
-            self._tools.list_specs(),
+            tools.list_specs(),
         )
         return {
             "tool_calls": list(state.get("tool_calls", [])) + repair_calls,
@@ -227,12 +229,26 @@ class ChangeLoopExecutor:
             workspace_root=state["workspace_root"],
             run_id=state.get("run_id"),
         )
-        return [self._execute_tool_call(tool_call, context) for tool_call in tool_calls]
+        tools = self._tools_for_state(state)
+        return [
+            self._execute_tool_call(tool_call, context, tools)
+            for tool_call in tool_calls
+        ]
+
+    def _tools_for_state(self, state: CodingAgentState) -> ToolRegistryView:
+        selected_values = state.get("enabled_tools")
+        selected = (
+            tuple(selected_values)
+            if selected_values is not None
+            else tuple(spec.name for spec in self._tools.list_specs())
+        )
+        return self._tools.select(selected)
 
     def _execute_tool_call(
         self,
         tool_call: ToolCall,
         context: ToolExecutionContext,
+        tools: ToolRegistryView,
     ) -> dict[str, Any]:
         run_id = context.run_id
         arguments_hash = hashlib.sha256(
@@ -284,7 +300,7 @@ class ChangeLoopExecutor:
                     status="started",
                 )
             )
-        response = self._tools.execute(tool_call, context=context).to_response()
+        response = tools.execute(tool_call, context=context).to_response()
         if run_id and callable(save_execution):
             save_execution(
                 AgentToolExecution(

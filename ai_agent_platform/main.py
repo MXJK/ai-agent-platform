@@ -34,7 +34,7 @@ def create_app(
     application_factory: ApplicationFactory | None = None,
 ) -> FastAPI:
     if settings is None:
-        resolved_config = ConfigResolver.from_default_locations().resolve()
+        resolved_config = ConfigResolver.from_default_locations().resolve_process()
         settings = resolved_config.settings
     elif isinstance(settings, ResolvedConfig):
         resolved_config = settings

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "UNIFIED-RUN-CONTEXT"
-next_action: "No pending implementation; monitor the pushed unified Run context."
+active_task: "RUN-CONTEXT-BOUNDARY-HARDENING"
+next_action: "Review and explicitly authorize Alembic 20260810_0020 before starting the PostgreSQL runtime."
 blockers: []
-last_verified_commit: "614d7175bf669eea71c9022ddda0ec43ce93c1ab"
-updated_at: "2026-08-10T18:23:03+08:00"
+last_verified_commit: "fef2a592c2de859a29f2ac5ac5f538d2d3747dfc"
+updated_at: "2026-08-12T15:25:30+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

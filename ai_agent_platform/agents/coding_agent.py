@@ -233,6 +233,7 @@ class CodingAgentRuntime:
     ) -> AgentRunResult:
         snapshot_instructions: list[ContextSource] = []
         additional_directories: list[dict[str, Any]] = []
+        enabled_tools = [spec.name for spec in self._tools.list_specs()]
         cwd = workspace_root
         if run_context is not None:
             run_id = run_context.metadata.run_id
@@ -269,6 +270,9 @@ class CodingAgentRuntime:
                 }
                 for item in run_context.additional_directories
             ]
+            if run_context.tools.enabled_tools is not None:
+                enabled_tools = list(run_context.tools.enabled_tools)
+            self._tools.select(tuple(enabled_tools))
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = {
@@ -293,6 +297,7 @@ class CodingAgentRuntime:
             "actor_user_id": actor_user_id,
             "cwd": cwd,
             "additional_directories": additional_directories,
+            "enabled_tools": enabled_tools,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [
@@ -1005,6 +1010,15 @@ class CodingAgentRuntime:
         except KeyError:
             return None
 
+    def _tools_for_state(self, state: CodingAgentState):
+        selected_values = state.get("enabled_tools")
+        selected = (
+            tuple(selected_values)
+            if selected_values is not None
+            else tuple(spec.name for spec in self._tools.list_specs())
+        )
+        return self._tools.select(selected)
+
     def _build_result(
         self,
         *,
@@ -1549,7 +1563,7 @@ class CodingAgentRuntime:
         round_number = state.get("exploration_round", 0) + 1
         tool_specs = [
             spec
-            for spec in self._tools.list_specs()
+            for spec in self._tools_for_state(state).list_specs()
             if spec.name in READ_ONLY_REPOSITORY_TOOLS
         ]
         proposed = self._planner.plan_tool_calls(state, tool_specs)
@@ -1708,7 +1722,7 @@ class CodingAgentRuntime:
         )
         calls = state.get("analysis_tool_calls", [])
         results = [
-            self._tools.execute(call, context=context).to_response()
+            self._tools_for_state(state).execute(call, context=context).to_response()
             for call in calls
         ]
         return {
@@ -1913,7 +1927,7 @@ class CodingAgentRuntime:
         }
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
-        tool_specs = self._tools.list_specs()
+        tool_specs = self._tools_for_state(state).list_specs()
         uses_native = bool(
             getattr(self._planner, "uses_native_tool_calling", False)
         )
@@ -2228,7 +2242,7 @@ class CodingAgentRuntime:
                     decision = finalize(
                         native_messages,
                         reason=reason,
-                        tool_specs=self._tools.list_specs(),
+                        tool_specs=self._tools_for_state(state).list_specs(),
                     )
                 else:
                     decision = finalize(native_messages, reason=reason)
