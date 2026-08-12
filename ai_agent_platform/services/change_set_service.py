@@ -18,6 +18,11 @@ from uuid import uuid4
 from ai_agent_platform.domain import ChangeSetRecord
 from ai_agent_platform.repositories import ChangeSetRepository
 from ai_agent_platform.services.workspace_service import WorkspaceService
+from ai_agent_platform.integrations.permissions import (
+    PermissionRequest,
+    PermissionResolver,
+    ToolUseContext,
+)
 
 
 SENSITIVE_FILENAMES = {
@@ -81,6 +86,8 @@ class ChangeSetService:
         branch_prefix: str = "codex/",
         command_timeout_seconds: float = 30.0,
         audit: Callable[..., None] | None = None,
+        permission_resolver: PermissionResolver | None = None,
+        role_for: Callable[..., str | None] | None = None,
     ) -> None:
         if apply_mode not in {"patch_only", "direct", "worktree"}:
             raise ValueError("unsupported ChangeSet apply mode")
@@ -102,6 +109,8 @@ class ChangeSetService:
         self._branch_prefix = branch_prefix
         self._command_timeout_seconds = command_timeout_seconds
         self._audit_callback = audit
+        self._permission_resolver = permission_resolver
+        self._role_for = role_for
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
 
@@ -210,7 +219,12 @@ class ChangeSetService:
         record = self._repository.get_by_run(run_id)
         if record is None:
             raise ChangeSetNotFoundError(run_id)
-        self._authorize_role(record, actor_user_id, "viewer")
+        self._authorize_role(
+            record,
+            actor_user_id,
+            "viewer",
+            action="changeset.read",
+        )
         return record
 
     def get(
@@ -222,7 +236,12 @@ class ChangeSetService:
         record = self._repository.get(change_set_id)
         if record is None:
             raise ChangeSetNotFoundError(change_set_id)
-        self._authorize_role(record, actor_user_id, "viewer")
+        self._authorize_role(
+            record,
+            actor_user_id,
+            "viewer",
+            action="changeset.read",
+        )
         return record
 
     def reject(
@@ -232,7 +251,12 @@ class ChangeSetService:
         actor_user_id: str | None,
     ) -> ChangeSetRecord:
         current = self.get(change_set_id, actor_user_id=actor_user_id)
-        self._authorize_role(current, actor_user_id, "editor")
+        self._authorize_role(
+            current,
+            actor_user_id,
+            "editor",
+            action="changeset.reject",
+        )
         if current.status == "rejected":
             return current
         if current.status != "ready":
@@ -254,7 +278,13 @@ class ChangeSetService:
         actor_user_id: str | None,
     ) -> ChangeSetRecord:
         current = self.get(change_set_id, actor_user_id=actor_user_id)
-        self._authorize_role(current, actor_user_id, "editor")
+        self._authorize_role(
+            current,
+            actor_user_id,
+            "editor",
+            action="changeset.apply",
+            arguments={"patch_sha256": expected_patch_sha256},
+        )
         if current.status == "applied":
             if hmac.compare_digest(current.patch_sha256, expected_patch_sha256):
                 return current
@@ -485,6 +515,9 @@ class ChangeSetService:
         record: ChangeSetRecord,
         actor_user_id: str | None,
         required_role: str,
+        *,
+        action: str,
+        arguments: dict[str, Any] | None = None,
     ) -> None:
         if actor_user_id is None:
             if self._auth_mode == "disabled":
@@ -496,6 +529,65 @@ class ChangeSetService:
                 actor_user_id=actor_user_id,
                 required_role=required_role,
             )
+        if self._permission_resolver is None:
+            return
+        role = required_role
+        if actor_user_id is not None and self._role_for is not None:
+            role = str(
+                self._role_for(
+                    workspace_id=record.workspace_id,
+                    actor_user_id=actor_user_id,
+                )
+                or ""
+            )
+        request = PermissionRequest(
+            name=action,
+            permission_level=(
+                "read_only" if required_role == "viewer" else "write_safe"
+            ),
+            requires_approval=required_role != "viewer",
+            provider="changeset",
+            risk_summary=(
+                "Reads a captured ChangeSet."
+                if required_role == "viewer"
+                else "Changes persistent ChangeSet or Workspace state."
+            ),
+        )
+        call_id = f"{record.id}:{action}"
+        context = ToolUseContext(
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            workspace_root=record.workspace_root,
+            authorized_workspace_root=self._workspace_service.resolve_for_run(
+                record.workspace_id
+            ),
+            run_id=record.run_id,
+            actor_user_id=actor_user_id or "",
+            workspace_role=role,
+            approval_policy="on_request",
+            process_denied_tools=(
+                ("changeset.apply",)
+                if not self._live_writes_enabled or self._apply_mode == "patch_only"
+                else ()
+            ),
+        ).bind(
+            call_id=call_id,
+            tool_name=action,
+            arguments=arguments or {"change_set_id": record.id},
+        )
+        decision = self._permission_resolver.resolve(request, context, phase="plan")
+        if decision.effect == "deny":
+            raise ChangeSetPermissionError(decision.reason)
+        if decision.effect == "ask":
+            approval = self._permission_resolver.issue_approval(
+                request,
+                context,
+                approved_by=actor_user_id or "",
+            )
+            context = context.with_approvals((approval,))
+        final = self._permission_resolver.resolve(request, context, phase="execute")
+        if final.effect != "allow":
+            raise ChangeSetPermissionError(final.reason)
 
     def _workspace_lock(self, workspace_id: str) -> Lock:
         with self._locks_guard:

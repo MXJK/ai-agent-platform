@@ -292,7 +292,12 @@ class ConfigResolverTests(unittest.TestCase):
             (
                 {"runtime": {"agent_approval_policy": "always"}},
                 {"runtime": {"agent_approval_policy": "never"}},
-                "more approval",
+                "tighten permission",
+            ),
+            (
+                {"runtime": {"agent_approval_policy": "never"}},
+                {"runtime": {"agent_approval_policy": "on_request"}},
+                "tighten permission",
             ),
         )
         for user_config, project_config, message in weakening_cases:
@@ -305,6 +310,17 @@ class ConfigResolverTests(unittest.TestCase):
                     project_config=project_config,
                     env={},
                 ).resolve()
+
+        deny_asks = ConfigResolver(
+            user_config={
+                "runtime": {"agent_approval_policy": "on_request"}
+            },
+            project_config={
+                "runtime": {"agent_approval_policy": "never"}
+            },
+            env={},
+        ).resolve()
+        self.assertEqual(deny_asks.agent_approval_policy, "never")
 
     def test_process_denies_mcp_skills_and_tool_expansion(self) -> None:
         cases = (

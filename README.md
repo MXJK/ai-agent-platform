@@ -96,7 +96,7 @@ root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
 
 用户文件和进程环境可以建立进程策略；项目文件不能修改数据库、认证、API Key/
 Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也不能把 Docker sandbox
-镜像交给项目选择、把 Docker 降为 local、减少审批、扩张命令/工具/Skill allowlist，
+镜像交给项目选择、把 Docker 降为 local、放宽审批语义、扩张命令/工具/Skill allowlist，
 或越过 `mcp_allowed=false`、
 `skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
 时裁剪全局能力上限，项目 `enabled_tools` 会冻结为每 Run 的只读 Registry view，不修改
@@ -412,7 +412,8 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 
 ```text
 原生工具调用
-→ ToolRegistry 校验并执行
+→ PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
+→ ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
 → Provider 原生工具结果消息
 → 模型观察后继续调用工具或作答
@@ -427,11 +428,22 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 assistant/tool 组压缩旧观察，避免拆断 call/result 对。图的独立保险由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
+每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
+root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
+`PermissionResolver` 返回 `allow`、`ask` 或 `deny`，并附匹配规则、原因和风险摘要。
+进程 deny、Workspace root 边界和身份 RBAC 是不可覆盖硬拒绝；显式 deny 优先，项目配置
+只能继续收紧。展示给模型的工具可先过滤 deny，但 `ToolRegistry` 执行前仍无条件复判，
+避免展示和执行之间的 TOCTOU。MCP/Skill 的权限注解只作为不可信风险输入，不能自行
+产生最终授权。
+
 所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
 PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
 事件。模型可调用 `agent.request_user_input` 进入 `waiting_input`。用户也可在安全工具边界
 暂停、继续、取消或发送转向信息。审批策略通过 `AGENT_APPROVAL_POLICY=always|on_request|never`
-配置；`never` 对需要审批的调用是阻断，不是静默授权。
+配置；`never` 对需要 `ask` 的调用返回 `deny`，不是静默授权。批准精确绑定
+`run_id + call_id + tool name + canonical arguments SHA-256`，跨 Run/调用/工具重放或参数
+变化都会重新进入审批。项目把 `on_request` 改成 `always` 或 `never` 都可收紧；进程已为
+`always` 或 `never` 时，项目不能切换到另一种策略造成部分调用重新放行。
 
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
 和输出。工具规格还声明超时、重试和幂等行为。只有幂等工具遇到可重试失败时才会重试；
@@ -558,7 +570,9 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 `score` 来源字段。已经移除的 `repository_id` 和 `rag_context` Agent 字段不会被接受
 或返回。
 
-ChangeSet 是模型工具审批之后的独立落盘边界。它保存不可截断补丁、SHA-256、变更文件、
+ChangeSet 是模型工具审批之后的独立落盘边界。读取/拒绝/应用也进入同一
+`PermissionResolver` 的 Workspace role/root 判定，同时保留服务内纵深校验。它保存不可
+截断补丁、SHA-256、变更文件、
 Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 可查看，editor 才能
 拒绝或应用；apply 还会重新校验登记根、符号链接、敏感/二进制路径、文件并发修改和用户
 确认的摘要。重复应用同一已完成 ChangeSet 返回相同结果；冲突不会覆盖用户的新修改。

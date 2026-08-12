@@ -30,6 +30,13 @@ from ai_agent_platform.services.workspace_service import WorkspaceService
 from ai_agent_platform.services.execution_context import ExecutionContextFactory
 from ai_agent_platform.usage_ledger import model_usage_scope
 from ai_agent_platform.project_memory.service import ProjectMemoryService
+from ai_agent_platform.integrations.permissions import (
+    PermissionRequest,
+    PermissionResolver,
+    ToolUseContext,
+    canonical_arguments_hash,
+)
+from ai_agent_platform.integrations.tools import ToolRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +64,8 @@ class AgentRunService:
         llm_model: str = "aggregated",
         model_registry: ModelRegistryService | None = None,
         execution_context_factory: ExecutionContextFactory | None = None,
+        permission_resolver: PermissionResolver | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._runtime = runtime
         self._session_service = session_service
@@ -73,6 +82,8 @@ class AgentRunService:
         self._llm_model = llm_model
         self._model_registry = model_registry
         self._execution_context_factory = execution_context_factory
+        self._permission_resolver = permission_resolver
+        self._tool_registry = tool_registry
         self._run_model_selections: dict[str, ModelSelection] = {}
 
     def submit_run(
@@ -265,6 +276,9 @@ class AgentRunService:
         self._assert_actor(record, actor_user_id)
         if record.status != "waiting_approval":
             raise AgentRunInvalidStateError(run_id, record.status)
+        if approved:
+            self._validate_approval_binding(record)
+            self._authorize_pending_approval(record, actor_user_id)
         if (
             approved
             and actor_user_id is not None
@@ -573,6 +587,9 @@ class AgentRunService:
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
+                if approved:
+                    self._validate_approval_binding(record)
+                    self._authorize_pending_approval(record, actor_user_id)
                 if (
                     approved
                     and actor_user_id is not None
@@ -604,6 +621,7 @@ class AgentRunService:
                             run_id=run_id,
                             approved=approved,
                             feedback=feedback,
+                            approved_by=actor_user_id,
                         )
             except Exception as exc:
                 self._record_execution_metrics(
@@ -636,6 +654,121 @@ class AgentRunService:
             "tool_plan_review",
             "repair_plan_review",
         }
+
+    @staticmethod
+    def _validate_approval_binding(record: AgentRunRecord) -> None:
+        pending = record.pending_approval or {}
+        required = pending.get("approval_required_tools") or []
+        calls = pending.get("tool_calls") or []
+        if not required:
+            return
+        calls_by_id = {
+            str(item.get("call_id") or ""): item
+            for item in calls
+            if isinstance(item, dict) and item.get("call_id")
+        }
+        has_precise_bindings = all(
+            isinstance(item, dict)
+            and item.get("run_id")
+            and item.get("call_id")
+            and item.get("arguments_hash")
+            for item in required
+        )
+        if not has_precise_bindings:
+            if record.context_snapshot is not None:
+                raise PermissionError("tool approval binding is incomplete")
+            return
+        for item in required:
+            if str(item["run_id"]) != record.run_id:
+                raise PermissionError("tool approval is bound to a different run")
+            call_id = str(item["call_id"])
+            call = calls_by_id.get(call_id)
+            if call is None or str(call.get("name") or "") != str(
+                item.get("name") or ""
+            ):
+                raise PermissionError("tool approval binding does not match the plan")
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict) or canonical_arguments_hash(
+                arguments
+            ) != str(item["arguments_hash"]):
+                raise PermissionError("tool approval arguments changed after review")
+
+    def _authorize_pending_approval(
+        self,
+        record: AgentRunRecord,
+        actor_user_id: str | None,
+    ) -> None:
+        if self._permission_resolver is None or self._tool_registry is None:
+            return
+        pending = record.pending_approval or {}
+        required = pending.get("approval_required_tools") or []
+        calls = {
+            str(item.get("call_id") or ""): item
+            for item in pending.get("tool_calls") or []
+            if isinstance(item, dict) and item.get("call_id")
+        }
+        snapshot = record.context_snapshot
+        role = (
+            snapshot.identity.workspace_role
+            if snapshot is not None
+            else "admin"
+        )
+        if actor_user_id is not None and self._project_memory_service is not None:
+            role_for = getattr(self._project_memory_service, "role_for", None)
+            if callable(role_for):
+                role = str(
+                    role_for(
+                        workspace_id=record.workspace_id,
+                        actor_user_id=actor_user_id,
+                    )
+                    or ""
+                )
+        project_tools = (
+            snapshot.tools.enabled_tools if snapshot is not None else None
+        )
+        process_tools = tuple(
+            spec.name for spec in self._tool_registry.list_specs()
+        )
+        approval_policy = (
+            _snapshot_approval_policy(snapshot)
+            if snapshot is not None
+            else "on_request"
+        )
+        base_context = ToolUseContext(
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            workspace_root=record.workspace_root,
+            authorized_workspace_root=self._workspace_service.resolve_for_run(
+                record.workspace_id
+            ),
+            run_id=record.run_id,
+            actor_user_id=actor_user_id or "",
+            workspace_role=role,
+            approval_policy=approval_policy,
+            process_allowed_tools=process_tools,
+            project_allowed_tools=project_tools,
+        )
+        for item in required:
+            if not isinstance(item, dict):
+                raise PermissionError("tool approval entry is invalid")
+            call = calls.get(str(item.get("call_id") or ""))
+            spec = self._tool_registry.get_spec(str(item.get("name") or ""))
+            if call is None or spec is None or not isinstance(
+                call.get("arguments"), dict
+            ):
+                raise PermissionError("tool approval target is unavailable")
+            context = base_context.bind(
+                call_id=str(call["call_id"]),
+                tool_name=spec.name,
+                arguments=call["arguments"],
+            )
+            decision = self._permission_resolver.resolve(
+                PermissionRequest.from_spec(spec),
+                context,
+                phase="plan",
+            )
+            if decision.effect == "deny":
+                raise PermissionError(decision.reason)
 
     def _record_execution_metrics(self, *, status: str, started_at: float) -> None:
         duration_ms = int((perf_counter() - started_at) * 1000)
@@ -791,3 +924,15 @@ class AgentRunService:
         )
         if session.user_id != actor_user_id:
             raise PermissionError("agent run access denied")
+
+
+def _snapshot_approval_policy(snapshot: object) -> str:
+    project = getattr(snapshot, "project", None)
+    config = getattr(project, "project_config", {})
+    if not isinstance(config, dict):
+        return "on_request"
+    sections = config.get("config")
+    runtime = sections.get("runtime") if isinstance(sections, dict) else None
+    field = runtime.get("agent_approval_policy") if isinstance(runtime, dict) else None
+    value = field.get("value") if isinstance(field, dict) else None
+    return str(value) if value in {"always", "on_request", "never"} else "on_request"
