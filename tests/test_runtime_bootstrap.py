@@ -151,6 +151,9 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "knowledge_base_service",
                 "mcp_providers",
                 "tool_registry",
+                "skill_service",
+                "skill_catalog",
+                "command_registry",
                 "checkpointer",
                 "coding_agent_runtime",
                 "session_service",
@@ -171,6 +174,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "stores_ready",
                 "mcp_ready",
                 "tools_ready",
+                "skills_ready",
                 "agent_ready",
             ]
             self.assertEqual(
@@ -197,6 +201,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
                     "stores_ready",
                     "mcp_ready",
                     "tools_ready",
+                    "skills_ready",
                     "agent_ready",
                 ],
             )
