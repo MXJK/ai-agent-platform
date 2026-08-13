@@ -471,6 +471,15 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 → 模型观察后继续调用工具或作答
 ```
 
+Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和边，
+`context_nodes` 负责上下文/检索，`tool_loop_nodes` 负责工具循环，`policies` 负责完成、
+预算与控制策略，`tool_access` 负责每 Run 工具视图与权限投影，
+`run_recorder` 负责 Run/事件/ChangeSet 收尾，
+`checkpoint_coordinator` 负责 invoke/resume 和 checkpoint 查询。
+`CodingAgentRuntime` 保留为兼容 facade；API、Worker、Service 和 Repository 只交换
+`RunContextSnapshot`、`AgentRunRecord` 与 `AgentRunResult`，不接触 LangGraph state。
+拆分由稳定轨迹 golden tests 约束，节点名、边、审批、预算、工具顺序和终态语义不变。
+
 默认软预算是 12 轮/36 次工具调用，触发后只提示模型尽快收敛；硬预算是 24 轮/72 次，
 另有 900 秒、连续三轮无进展和连续三次失败保护。硬停止会保留一次禁用工具的文本
 最终总结，因此返回 `partial`/`blocked`，不会把预算耗尽误报为 `completed`。相关配置为

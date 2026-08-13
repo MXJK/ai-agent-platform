@@ -1,0 +1,86 @@
+{
+  "read_only": {
+    "status": "completed",
+    "trace": [
+      "setup_workspace",
+      "load_project_instructions",
+      "classify_request",
+      "decide_context_source",
+      "retrieve_project_memory",
+      "plan_exploration",
+      "execute_exploration",
+      "assess_context",
+      "merge_evidence",
+      "plan_tools",
+      "inspect_repository",
+      "compose_answer"
+    ]
+  },
+  "native_multi_turn": {
+    "status": "completed",
+    "trace_tail": [
+      "plan_tools",
+      "inspect_repository",
+      "plan_tools",
+      "inspect_repository",
+      "plan_tools",
+      "compose_answer"
+    ],
+    "native_calls": ["native_read_app", "native_read_other"]
+  },
+  "change_repair": {
+    "statuses": ["waiting_approval", "waiting_approval", "completed"],
+    "pending_types": ["tool_plan_review", "repair_plan_review"],
+    "trace_tail": [
+      "plan_tools",
+      "review_tool_plan",
+      "inspect_repository",
+      "execute_changes",
+      "validate_changes",
+      "review_repair_plan",
+      "execute_changes",
+      "validate_changes",
+      "collect_artifacts",
+      "compose_answer"
+    ],
+    "validation_passed": [false, true],
+    "iteration_count": 2
+  },
+  "waiting_input_resume": {
+    "statuses": ["waiting_input", "completed"],
+    "pending_type": "input_required",
+    "waiting_next_nodes": ["inspect_repository"],
+    "trace_tail": [
+      "plan_tools",
+      "inspect_repository",
+      "plan_tools",
+      "compose_answer"
+    ]
+  },
+  "controls": {
+    "pause_statuses": ["paused", "completed"],
+    "cancel_status": "cancelled",
+    "steer_status": "completed",
+    "event_types": [
+      "control_pause_requested",
+      "run_paused",
+      "control_steer_requested",
+      "control_cancel_requested",
+      "run_cancelled"
+    ]
+  },
+  "hard_budget": {
+    "statuses": ["partial", "blocked"],
+    "terminal_reasons": [
+      "hard_tool_round_budget",
+      "max_consecutive_tool_failures"
+    ]
+  },
+  "change_set": {
+    "status": "completed",
+    "persisted_status": "ready",
+    "artifact_types": ["test_report", "code_diff", "change_set"],
+    "event_type": "change_set_captured",
+    "sandbox_cleaned": true
+  }
+}
