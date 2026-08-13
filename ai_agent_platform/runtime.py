@@ -16,6 +16,7 @@ from ai_agent_platform.agents import (
     LLMStructuredAgentPlanner,
     create_coding_tool_registry,
 )
+from ai_agent_platform.agents.coding import InMemoryAgentRunStore
 from ai_agent_platform.core import (
     CeleryTaskQueue,
     InProcessTaskQueue,
@@ -57,11 +58,13 @@ from ai_agent_platform.repositories import (
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
     PostgresWorkspaceRepository,
+    create_query_unit_of_work,
 )
 from ai_agent_platform.services import (
     AgentRunService,
     ChangeSetService,
     KnowledgeBaseService,
+    QueryService,
     SessionService,
     UsageLedgerService,
     WorkspaceService,
@@ -137,6 +140,8 @@ class RuntimeContainer:
     coding_agent_runtime: CodingAgentRuntime | None = None
     session_service: SessionService | None = None
     execution_context_factory: ExecutionContextFactory | None = None
+    query_uow: Any = None
+    query_service: QueryService | None = None
     agent_run_service: AgentRunService | None = None
     startup_timeline: list[StartupCheckpoint] = field(default_factory=list)
     close_errors: list[RuntimeCloseError] = field(default_factory=list)
@@ -442,6 +447,20 @@ class ApplicationFactory:
                 ),
                 tool_registry=container.tool_registry,
             )
+            container.query_uow = create_query_unit_of_work(
+                session_service=container.session_service,
+                session_repository=container.session_repository,
+                run_store=getattr(
+                    container.coding_agent_runtime,
+                    "_run_store",
+                    None,
+                ),
+            )
+            if container.query_uow is None and coding_agent_runtime is None:
+                raise ValueError(
+                    "QueryService requires session and Run stores on the same "
+                    "supported backend for atomic start"
+                )
             container.agent_run_service = AgentRunService(
                 runtime=container.coding_agent_runtime,
                 session_service=container.session_service,
@@ -454,9 +473,11 @@ class ApplicationFactory:
                 llm_model=settings.llm_model,
                 model_registry=container.model_registry,
                 execution_context_factory=container.execution_context_factory,
+                query_uow=container.query_uow,
                 permission_resolver=container.permission_resolver,
                 tool_registry=container.tool_registry,
             )
+            container.query_service = container.agent_run_service
             container.register_cleanup(
                 "agent_run_service",
                 container.agent_run_service.close,
@@ -513,7 +534,7 @@ class ApplicationFactory:
 
     def create_agent_run_store(self, settings: Settings) -> Any:
         if settings.agent_run_store == "memory":
-            return None
+            return InMemoryAgentRunStore()
         if settings.agent_run_store == "postgres":
             return PostgresAgentRunRepository(database_url=settings.database_url)
         raise ValueError(f"unsupported agent run store: {settings.agent_run_store}")

@@ -14,6 +14,7 @@ from .models import (
 )
 from .run_context import (
     RUN_CONTEXT_SCHEMA_VERSION,
+    SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS,
     AdditionalDirectoryContext,
     ConversationMessageSnapshot,
     ConversationSummarySnapshot,
@@ -30,10 +31,20 @@ from .run_context import (
     ToolSelectionContext,
     canonical_project_config,
 )
+from .query import (
+    AgentEvent,
+    QueryCommand,
+    QueryLifecycle,
+    QueryParams,
+    QueryResult,
+    QueryStateError,
+    QueryTransitionError,
+)
 
 __all__ = [
     "AgentDecision",
     "RUN_CONTEXT_SCHEMA_VERSION",
+    "SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS",
     "AdditionalDirectoryContext",
     "ChangeSetRecord",
     "ConversationMessageSnapshot",
@@ -60,4 +71,11 @@ __all__ = [
     "UserPreferences",
     "WorkspaceRecord",
     "canonical_project_config",
+    "AgentEvent",
+    "QueryCommand",
+    "QueryLifecycle",
+    "QueryParams",
+    "QueryResult",
+    "QueryStateError",
+    "QueryTransitionError",
 ]

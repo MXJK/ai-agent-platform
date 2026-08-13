@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 
 RUN_CONTEXT_SCHEMA_VERSION = 2
-_SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2})
+SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,11 @@ class RunMetadata:
     entrypoint_type: str
     config_version: str
     schema_version: int = RUN_CONTEXT_SCHEMA_VERSION
+    _entrypoint_metadata_json: str = "{}"
+
+    @property
+    def entrypoint_metadata(self) -> dict[str, object]:
+        return dict(json.loads(self._entrypoint_metadata_json))
 
 
 @dataclass(frozen=True)
@@ -266,6 +271,7 @@ class RunContextSnapshot:
                 "entrypoint_type": self.metadata.entrypoint_type,
                 "config_version": self.metadata.config_version,
                 "schema_version": self.metadata.schema_version,
+                "entrypoint_metadata": self.metadata.entrypoint_metadata,
             },
         }
 
@@ -274,7 +280,7 @@ class RunContextSnapshot:
         """Rehydrate a snapshot without consulting mutable external state."""
         metadata_value = _mapping(value, "metadata")
         schema_version = int(metadata_value.get("schema_version", 0))
-        if schema_version not in _SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS:
+        if schema_version not in SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported Run context schema version: {schema_version}"
             )
@@ -461,6 +467,9 @@ class RunContextSnapshot:
                 entrypoint_type=str(metadata_value.get("entrypoint_type") or ""),
                 config_version=str(metadata_value.get("config_version") or ""),
                 schema_version=schema_version,
+                _entrypoint_metadata_json=_canonical_json(
+                    metadata_value.get("entrypoint_metadata") or {}
+                ),
             ),
         )
 
@@ -524,6 +533,7 @@ def _optional_int(value: object) -> int | None:
 
 __all__ = [
     "RUN_CONTEXT_SCHEMA_VERSION",
+    "SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS",
     "AdditionalDirectoryContext",
     "ConversationMessageSnapshot",
     "ConversationSummarySnapshot",

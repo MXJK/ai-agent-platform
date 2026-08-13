@@ -243,60 +243,114 @@ class PostgresSessionRepository:
             _user_preferences_values(preferences),
         )
 
-    def add_message(self, session_id: str, role: str, content: str) -> Message:
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        message_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> Message:
+        with self._connect() as conn:
+            message = self.add_message_in_transaction(
+                conn,
+                session_id=session_id,
+                role=role,
+                content=content,
+                message_id=message_id,
+                source_run_id=source_run_id,
+            )
+        if message is None:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, session_id, role, content, created_at, source_run_id
+                    FROM messages
+                    WHERE source_run_id = %s AND role = %s
+                    """,
+                    (source_run_id, role),
+                ).fetchone()
+            if row is None:
+                raise RuntimeError("idempotent message insert returned no row")
+            return _message_from_row(row)
+        return message
+
+    def add_message_in_transaction(
+        self,
+        conn,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        message_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> Message | None:
         now = _now()
         message = Message(
-            id=f"msg_{uuid4().hex[:12]}",
+            id=message_id or f"msg_{uuid4().hex[:12]}",
             session_id=session_id,
             role=role,
             content=content,
             created_at=now,
+            source_run_id=source_run_id,
         )
-        with self._connect() as conn:
-            session_row = conn.execute(
-                """
-                SELECT id, user_id, created_at, title, title_source, updated_at,
-                       archived_at, workspace_id, provider, model,
-                       thinking_level, composer_mode
-                FROM sessions
-                WHERE id = %s
-                FOR UPDATE
-                """,
-                (session_id,),
-            ).fetchone()
-            if session_row is None:
-                raise SessionNotFoundError(session_id)
-            session = _session_from_row(session_row)
-            if session.archived_at is not None:
-                raise SessionArchivedError(session_id)
-            conn.execute(
-                """
-                INSERT INTO messages (id, session_id, role, content, created_at)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    message.id,
-                    message.session_id,
-                    message.role,
-                    message.content,
-                    message.created_at,
-                ),
+        session_row = conn.execute(
+            """
+            SELECT id, user_id, created_at, title, title_source, updated_at,
+                   archived_at, workspace_id, provider, model,
+                   thinking_level, composer_mode
+            FROM sessions
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (session_id,),
+        ).fetchone()
+        if session_row is None:
+            raise SessionNotFoundError(session_id)
+        session = _session_from_row(session_row)
+        if session.archived_at is not None:
+            raise SessionArchivedError(session_id)
+        insert_sql = """
+            INSERT INTO messages (
+                id, session_id, role, content, created_at, source_run_id
             )
-            title = session.title
-            title_source = session.title_source
-            if role == "user" and title_source == "default":
-                title = _derive_session_title(content)
-                title_source = "auto"
-            conn.execute(
-                """
-                UPDATE sessions
-                SET title = %s,
-                    title_source = %s,
-                    updated_at = %s
-                WHERE id = %s
-                """,
-                (title, title_source, now, session_id),
-            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        if source_run_id is not None:
+            insert_sql += """
+                ON CONFLICT (source_run_id, role)
+                WHERE source_run_id IS NOT NULL
+                DO NOTHING
+            """
+        inserted = conn.execute(
+            insert_sql + " RETURNING id",
+            (
+                message.id,
+                message.session_id,
+                message.role,
+                message.content,
+                message.created_at,
+                message.source_run_id,
+            ),
+        ).fetchone()
+        if inserted is None:
+            return None
+        title = session.title
+        title_source = session.title_source
+        if role == "user" and title_source == "default":
+            title = _derive_session_title(content)
+            title_source = "auto"
+        conn.execute(
+            """
+            UPDATE sessions
+            SET title = %s,
+                title_source = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (title, title_source, now, session_id),
+        )
         return message
 
     def list_messages(self, session_id: str) -> list[Message]:
@@ -304,7 +358,7 @@ class PostgresSessionRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, session_id, role, content, created_at
+                SELECT id, session_id, role, content, created_at, source_run_id
                 FROM messages
                 WHERE session_id = %s
                 ORDER BY created_at ASC, id ASC
@@ -1716,6 +1770,9 @@ def _message_from_row(row: tuple[Any, ...]) -> Message:
         role=str(row[2]),
         content=str(row[3]),
         created_at=row[4],
+        source_run_id=(
+            str(row[5]) if len(row) > 5 and row[5] is not None else None
+        ),
     )
 
 

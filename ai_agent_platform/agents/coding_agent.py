@@ -71,7 +71,13 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.text import extract_paths, unique
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
-from ai_agent_platform.domain import Message, RunContextSnapshot
+from ai_agent_platform.domain import (
+    Message,
+    QueryCommand,
+    QueryLifecycle,
+    QueryStateError,
+    RunContextSnapshot,
+)
 from ai_agent_platform.integrations.llm import LLMUsageAccumulator, collect_llm_usage
 from ai_agent_platform.integrations.permissions import (
     PermissionDecision,
@@ -475,13 +481,7 @@ class CodingAgentRuntime:
         max_attempts: int = 1,
     ) -> AgentRunRecord:
         record = self.get_run(run_id)
-        if record.status in {
-            "completed",
-            "partial",
-            "blocked",
-            "cancelled",
-            "failed",
-        }:
+        if record.status in QueryLifecycle.TERMINAL_STATUSES:
             return record
         failed_record = AgentRunRecord(
             run_id=record.run_id,
@@ -534,7 +534,7 @@ class CodingAgentRuntime:
                 and (record.pending_approval or {}).get("type") == "run_pause"
             )
         )
-        if record.status not in {"waiting_approval", "waiting_input", "paused"} and not resume_pending:
+        if record.status not in QueryLifecycle.SUSPENDED_STATUSES and not resume_pending:
             raise AgentRunInvalidStateError(run_id, record.status)
         if resume_pending:
             record = replace(record, control_action=None)
@@ -676,17 +676,10 @@ class CodingAgentRuntime:
         if action not in {"pause", "cancel", "steer"}:
             raise ValueError(f"unsupported agent control action: {action}")
         record = self.get_run(run_id)
-        terminal_statuses = {
-            "completed",
-            "partial",
-            "blocked",
-            "cancelled",
-            "failed",
-        }
-        if record.status in terminal_statuses:
-            raise AgentRunInvalidStateError(run_id, record.status)
-        if action == "pause" and record.status != "running":
-            raise AgentRunInvalidStateError(run_id, record.status)
+        try:
+            QueryLifecycle.assert_command(QueryCommand(action), record.status)
+        except QueryStateError as exc:
+            raise AgentRunInvalidStateError(run_id, record.status) from exc
         steering_messages = list(record.steering_messages)
         if action == "steer":
             if not message.strip():
@@ -761,8 +754,15 @@ class CodingAgentRuntime:
 
     def mark_resume_queued(self, run_id: str) -> AgentRunRecord:
         record = self.get_run(run_id)
-        if record.status not in {"waiting_approval", "waiting_input", "paused"}:
-            raise AgentRunInvalidStateError(run_id, record.status)
+        try:
+            command = (
+                QueryCommand.RESUME
+                if record.status == "waiting_approval"
+                else QueryCommand.CONTINUE
+            )
+            QueryLifecycle.assert_command(command, record.status)
+        except QueryStateError as exc:
+            raise AgentRunInvalidStateError(run_id, record.status) from exc
         updated = replace(
             record,
             status="running",

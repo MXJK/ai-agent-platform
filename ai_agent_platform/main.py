@@ -74,6 +74,7 @@ def create_app(
         app.state.mcp_registry = runtime.mcp_registry
         app.state.tool_registry = runtime.tool_registry
         app.state.agent_run_service = runtime.agent_run_service
+        app.state.query_service = runtime.query_service
         app.state.change_set_service = runtime.change_set_service
         app.state.session_service = runtime.session_service
         app.state.usage_ledger = runtime.usage_ledger
@@ -89,7 +90,7 @@ def create_app(
                 session_service=runtime.session_service,
                 llm_client=runtime.llm_client,
                 knowledge_base_service=runtime.knowledge_base_service,
-                agent_run_service=runtime.agent_run_service,
+                query_service=runtime.query_service,
                 change_set_service=runtime.change_set_service,
                 workspace_service=runtime.workspace_service,
                 project_memory_service=runtime.project_memory_service,

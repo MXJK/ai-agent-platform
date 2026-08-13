@@ -23,9 +23,9 @@ from ai_agent_platform.integrations import (
 )
 from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.services import (
-    AgentRunService,
     ChangeSetService,
     KnowledgeBaseService,
+    QueryService,
     SessionService,
     WorkspaceService,
 )
@@ -36,7 +36,7 @@ def create_api_router(
     session_service: SessionService,
     llm_client: LLMClient,
     knowledge_base_service: KnowledgeBaseService,
-    agent_run_service: AgentRunService,
+    query_service: QueryService,
     change_set_service: ChangeSetService,
     workspace_service: WorkspaceService,
     project_memory_service: ProjectMemoryService,
@@ -81,7 +81,7 @@ def create_api_router(
             model_registry=model_registry,
         )
     )
-    router.include_router(create_agent_runs_router(agent_run_service, settings))
+    router.include_router(create_agent_runs_router(query_service, settings))
     router.include_router(create_change_sets_router(change_set_service, settings))
     router.include_router(
         create_workspaces_router(

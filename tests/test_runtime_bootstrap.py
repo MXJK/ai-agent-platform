@@ -157,6 +157,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "checkpointer",
                 "coding_agent_runtime",
                 "session_service",
+                "query_service",
                 "agent_run_service",
             ):
                 self.assertIs(
@@ -165,10 +166,12 @@ class RuntimeBootstrapTests(unittest.TestCase):
                     field_name,
                 )
             self.assertIs(api.agent_run_service._runtime, api.coding_agent_runtime)
+            self.assertIs(api.query_service, api.agent_run_service)
             self.assertIs(
                 worker.agent_run_service._runtime,
                 worker.coding_agent_runtime,
             )
+            self.assertIs(worker.query_service, worker.agent_run_service)
             expected_timeline = [
                 "config_loaded",
                 "stores_ready",
@@ -207,6 +210,18 @@ class RuntimeBootstrapTests(unittest.TestCase):
             )
         finally:
             runtime.close()
+
+    def test_runtime_rejects_non_atomic_query_store_pair(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "same supported backend for atomic start",
+        ):
+            build_runtime(
+                self.settings(
+                    session_repository="memory",
+                    agent_run_store="postgres",
+                )
+            )
 
     def test_runtime_only_applies_process_tool_cap_to_global_registry(self) -> None:
         registry = ApplicationFactory().create_tool_registry(

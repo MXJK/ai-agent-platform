@@ -256,12 +256,17 @@ class SessionService:
         role: str,
         content: str,
         run_agent: bool = False,
+        *,
+        message_id: str | None = None,
+        source_run_id: str | None = None,
     ) -> list[Message]:
         messages = [
             self._repository.add_message(
                 session_id=session_id,
                 role=role,
                 content=content,
+                message_id=message_id,
+                source_run_id=source_run_id,
             )
         ]
 

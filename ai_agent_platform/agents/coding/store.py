@@ -1,12 +1,13 @@
 """Agent-run storage implementations used by the coding runtime."""
 
-from threading import Lock
+from threading import RLock
 
 from ai_agent_platform.agents.coding.models import (
     AgentRunEvent,
     AgentRunRecord,
     AgentToolExecution,
 )
+from ai_agent_platform.domain import QueryLifecycle
 
 
 class InMemoryAgentRunStore:
@@ -15,7 +16,7 @@ class InMemoryAgentRunStore:
         self._events: dict[str, list[AgentRunEvent]] = {}
         self._event_keys: dict[str, set[str]] = {}
         self._tool_executions: dict[tuple[str, str], AgentToolExecution] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def save(self, record: AgentRunRecord) -> None:
         with self._lock:
@@ -142,17 +143,7 @@ def events_for_record(
                 ),
             )
         )
-    event_types = {
-        "waiting_approval": ("approval_required", "Agent run is waiting for approval."),
-        "waiting_input": ("input_required", "Agent run is waiting for user input."),
-        "paused": ("run_paused", "Agent run paused at a safe boundary."),
-        "completed": ("run_completed", "Agent run completed."),
-        "partial": ("run_partial", "Agent run stopped with a partial result."),
-        "blocked": ("run_blocked", "Agent run is blocked."),
-        "cancelled": ("run_cancelled", "Agent run was cancelled."),
-        "failed": ("run_failed", "Agent run failed."),
-    }
-    terminal = event_types.get(record.status)
+    terminal = QueryLifecycle.status_event(record.status)
     if terminal is not None:
         event_type, summary = terminal
         transition_identity = record.checkpoint_id or f"trace-{len(record.trace)}"

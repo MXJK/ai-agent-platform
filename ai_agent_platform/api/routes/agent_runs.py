@@ -1,4 +1,3 @@
-import json
 import time
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -9,19 +8,21 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunNotFoundError,
 )
 from ai_agent_platform.core import Settings, TaskQueueError, request_user_id
+from ai_agent_platform.domain import QueryCommand, QueryLifecycle, QueryParams
 from ai_agent_platform.repositories import SessionArchivedError, SessionNotFoundError
 from ai_agent_platform.schemas import (
     AgentRunEventsResponse,
+    AgentRunEventResponse,
     AgentRunControlRequest,
     AgentRunRequest,
     AgentRunResumeRequest,
     AgentRunStatusResponse,
 )
-from ai_agent_platform.services import AgentRunService, WorkspaceNotFoundError
+from ai_agent_platform.services import QueryService, WorkspaceNotFoundError
 
 
 def create_agent_runs_router(
-    agent_run_service: AgentRunService,
+    query_service: QueryService,
     settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
@@ -41,22 +42,32 @@ def create_agent_runs_router(
                 detail="message exceeds configured context limit",
             )
         try:
-            record = agent_run_service.submit_run(
-                conversation_id=request.conversation_id,
-                message=request.message,
-                workspace_id=request.workspace_id,
-                focus_files=request.focus_files,
-                provider=request.provider,
-                model=request.model,
-                thinking_level=request.thinking_level,
-                routing_policy=request.routing_policy,
-                cwd=request.cwd,
-                additional_workspace_ids=request.additional_workspace_ids,
-                actor_user_id=(
-                    request_user_id(http_request, settings)
-                    if settings.auth_mode != "disabled"
-                    else None
-                ),
+            record = query_service.start(
+                QueryParams(
+                    conversation_id=request.conversation_id,
+                    message=request.message,
+                    workspace_id=request.workspace_id,
+                    focus_files=tuple(request.focus_files),
+                    provider=request.provider,
+                    model=request.model,
+                    thinking_level=request.thinking_level,
+                    routing_policy=request.routing_policy,
+                    cwd=request.cwd,
+                    additional_workspace_ids=tuple(
+                        request.additional_workspace_ids
+                    ),
+                    actor_user_id=(
+                        request_user_id(http_request, settings)
+                        if settings.auth_mode != "disabled"
+                        else None
+                    ),
+                    entrypoint="api",
+                    entrypoint_metadata={
+                        "transport": "http",
+                        "api_version": "v1",
+                        "route": "/agent/runs",
+                    },
+                )
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="conversation not found") from exc
@@ -89,10 +100,11 @@ def create_agent_runs_router(
         http_request: Request,
     ) -> AgentRunStatusResponse:
         try:
-            record = agent_run_service.resume_run(
+            record = query_service.execute(
+                QueryCommand.RESUME,
                 run_id=run_id,
                 approved=request.approved,
-                feedback=request.feedback,
+                message=request.feedback or "",
                 actor_user_id=(
                     request_user_id(http_request, settings)
                     if settings.auth_mode != "disabled"
@@ -126,7 +138,7 @@ def create_agent_runs_router(
         request: Request,
     ) -> AgentRunStatusResponse:
         try:
-            record = agent_run_service.get_run_for_actor(
+            record = query_service.get_run_for_actor(
                 run_id,
                 (
                     request_user_id(request, settings)
@@ -149,7 +161,7 @@ def create_agent_runs_router(
         request: Request,
     ) -> AgentRunStatusResponse:
         try:
-            record = agent_run_service.get_latest_run_for_actor(
+            record = query_service.get_latest_run_for_actor(
                 conversation_id,
                 (
                     request_user_id(request, settings)
@@ -173,7 +185,7 @@ def create_agent_runs_router(
         after: int = 0,
     ) -> AgentRunEventsResponse:
         try:
-            record, events = agent_run_service.list_events_for_actor(
+            _record, events = query_service.events_for_actor(
                 run_id,
                 (
                     request_user_id(request, settings)
@@ -186,9 +198,7 @@ def create_agent_runs_router(
             raise HTTPException(status_code=404, detail="agent run not found") from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        if events or after > 0:
-            return AgentRunEventsResponse.from_events(run_id, events)
-        return AgentRunEventsResponse.from_domain(record)
+        return _events_response(query_service, run_id, events)
 
     @router.get("/agent/runs/{run_id}/events/stream")
     def stream_agent_run_events(
@@ -202,7 +212,7 @@ def create_agent_runs_router(
             else None
         )
         try:
-            agent_run_service.get_run_for_actor(run_id, actor_user_id)
+            query_service.get_run_for_actor(run_id, actor_user_id)
         except AgentRunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="agent run not found") from exc
         except PermissionError as exc:
@@ -215,38 +225,16 @@ def create_agent_runs_router(
             current = max(0, cursor)
             started_at = time.monotonic()
             last_heartbeat = started_at
-            stopped_statuses = {
-                "waiting_approval",
-                "waiting_input",
-                "paused",
-                "completed",
-                "partial",
-                "blocked",
-                "cancelled",
-                "failed",
-            }
             while time.monotonic() - started_at < settings.agent_max_elapsed_seconds + 60:
-                record, events = agent_run_service.list_events_for_actor(
+                record, events = query_service.events_for_actor(
                     run_id,
                     actor_user_id,
                     after=current,
                 )
                 for event in events:
                     current = max(current, event.sequence)
-                    payload = {
-                        "sequence": event.sequence,
-                        "type": event.type,
-                        "status": event.status,
-                        "node": event.node,
-                        "summary": event.summary,
-                        "output": event.output,
-                    }
-                    yield (
-                        f"id: {event.sequence}\n"
-                        f"event: {event.type}\n"
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
-                if record.status in stopped_statuses:
+                    yield query_service.event_encoder.encode_sse(event)
+                if record.status in QueryLifecycle.STREAM_STOP_STATUSES:
                     break
                 if time.monotonic() - last_heartbeat >= 15:
                     yield ": keep-alive\n\n"
@@ -270,9 +258,9 @@ def create_agent_runs_router(
         action: str,
     ) -> AgentRunStatusResponse:
         try:
-            record = agent_run_service.control_run(
+            record = query_service.execute(
+                QueryCommand(action),
                 run_id=run_id,
-                action=action,
                 message=request.message,
                 actor_user_id=(
                     request_user_id(http_request, settings)
@@ -321,7 +309,8 @@ def create_agent_runs_router(
         http_request: Request,
     ) -> AgentRunStatusResponse:
         try:
-            record = agent_run_service.continue_run(
+            record = query_service.execute(
+                QueryCommand.CONTINUE,
                 run_id=run_id,
                 message=request.message,
                 actor_user_id=(
@@ -346,3 +335,22 @@ def create_agent_runs_router(
         return AgentRunStatusResponse.from_domain(record)
 
     return router
+
+
+def _events_response(
+    query_service: QueryService,
+    run_id: str,
+    events,
+) -> AgentRunEventsResponse:
+    return AgentRunEventsResponse(
+        run_id=run_id,
+        events=[
+            AgentRunEventResponse(
+                **query_service.event_encoder.to_payload(
+                    event,
+                    include_run_id=False,
+                )
+            )
+            for event in events
+        ],
+    )

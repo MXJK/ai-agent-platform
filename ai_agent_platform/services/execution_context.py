@@ -71,7 +71,7 @@ class ExecutionContextFactory:
         process_config: ResolvedConfig | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
-        if entrypoint_type not in {"api", "worker", "cli", "agent_loop"}:
+        if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
         self._session_service = session_service
         self._workspace_service = workspace_service
@@ -110,6 +110,8 @@ class ExecutionContextFactory:
         additional_workspace_ids: Sequence[str] = (),
         run_id: str | None = None,
         created_at: datetime | None = None,
+        entrypoint_type: str | None = None,
+        entrypoint_metadata: Mapping[str, object] | None = None,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
@@ -312,6 +314,9 @@ class ExecutionContextFactory:
         )
         resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
         timestamp = created_at or datetime.now(timezone.utc)
+        resolved_entrypoint = entrypoint_type or self._entrypoint_type
+        if resolved_entrypoint not in {"api", "worker", "cli", "sdk", "agent_loop"}:
+            raise ValueError(f"unsupported Run entrypoint type: {resolved_entrypoint}")
         return RunContextSnapshot(
             identity=IdentityContext(
                 actor_user_id=actor,
@@ -346,8 +351,11 @@ class ExecutionContextFactory:
             metadata=RunMetadata(
                 run_id=resolved_run_id,
                 created_at=timestamp.astimezone(timezone.utc).isoformat(),
-                entrypoint_type=self._entrypoint_type,
+                entrypoint_type=resolved_entrypoint,
                 config_version=config_version,
+                _entrypoint_metadata_json=canonical_project_config(
+                    entrypoint_metadata or {}
+                ),
             ),
         )
 
