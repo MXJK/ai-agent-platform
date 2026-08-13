@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "QUERY-KERNEL"
-next_action: "Review and apply migration 20260813_0021 before starting the PostgreSQL runtime."
+status: "active"
+active_task: "SHELL-ADAPTERS"
+next_action: "Implement thin API, worker, CLI, REPL, and SDK adapters over QueryService."
 blockers: []
 last_verified_commit: "a73aef5d0148fe395d42bb13d5346640273c722c"
-updated_at: "2026-08-13T14:30:21+08:00"
+updated_at: "2026-08-13T17:30:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
