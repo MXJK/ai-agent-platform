@@ -7,7 +7,8 @@ import json
 from typing import Any, Mapping
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 1
+RUN_CONTEXT_SCHEMA_VERSION = 2
+SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 @dataclass(frozen=True)
@@ -140,12 +141,40 @@ class AdditionalDirectoryContext:
 
 
 @dataclass(frozen=True)
+class ToolDefinitionSnapshot:
+    name: str
+    provider: str
+    permission_level: str
+    requires_approval: bool
+    risk_summary: str
+    max_output_chars: int
+    timeout_seconds: float
+    max_retries: int
+    idempotent: bool
+    _input_schema_json: str
+    _output_schema_json: str
+
+    @property
+    def input_schema(self) -> dict[str, object]:
+        return dict(json.loads(self._input_schema_json))
+
+    @property
+    def output_schema(self) -> dict[str, object]:
+        return dict(json.loads(self._output_schema_json))
+
+
+@dataclass(frozen=True)
 class RunMetadata:
     run_id: str
     created_at: str
     entrypoint_type: str
     config_version: str
     schema_version: int = RUN_CONTEXT_SCHEMA_VERSION
+    _entrypoint_metadata_json: str = "{}"
+
+    @property
+    def entrypoint_metadata(self) -> dict[str, object]:
+        return dict(json.loads(self._entrypoint_metadata_json))
 
 
 @dataclass(frozen=True)
@@ -156,6 +185,7 @@ class RunContextSnapshot:
     instructions: InstructionContext
     additional_directories: tuple[AdditionalDirectoryContext, ...]
     metadata: RunMetadata
+    tools: tuple[ToolDefinitionSnapshot, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh JSON-serializable representation of the snapshot."""
@@ -237,12 +267,29 @@ class RunContextSnapshot:
                 }
                 for item in self.additional_directories
             ],
+            "tools": [
+                {
+                    "name": item.name,
+                    "provider": item.provider,
+                    "permission_level": item.permission_level,
+                    "requires_approval": item.requires_approval,
+                    "risk_summary": item.risk_summary,
+                    "max_output_chars": item.max_output_chars,
+                    "timeout_seconds": item.timeout_seconds,
+                    "max_retries": item.max_retries,
+                    "idempotent": item.idempotent,
+                    "input_schema": item.input_schema,
+                    "output_schema": item.output_schema,
+                }
+                for item in self.tools
+            ],
             "metadata": {
                 "run_id": self.metadata.run_id,
                 "created_at": self.metadata.created_at,
                 "entrypoint_type": self.metadata.entrypoint_type,
                 "config_version": self.metadata.config_version,
                 "schema_version": self.metadata.schema_version,
+                "entrypoint_metadata": self.metadata.entrypoint_metadata,
             },
         }
 
@@ -251,7 +298,7 @@ class RunContextSnapshot:
         """Rehydrate a snapshot without consulting mutable external state."""
         metadata_value = _mapping(value, "metadata")
         schema_version = int(metadata_value.get("schema_version", 0))
-        if schema_version != RUN_CONTEXT_SCHEMA_VERSION:
+        if schema_version not in SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported Run context schema version: {schema_version}"
             )
@@ -284,9 +331,15 @@ class RunContextSnapshot:
         history_values = session_value.get("controlled_history") or []
         instruction_sources = instruction_value.get("sources") or []
         additional_values = value.get("additional_directories") or []
+        tool_values = value.get("tools") or []
         if not all(
             isinstance(items, list)
-            for items in (history_values, instruction_sources, additional_values)
+            for items in (
+                history_values,
+                instruction_sources,
+                additional_values,
+                tool_values,
+            )
         ):
             raise ValueError("Run context collection fields must be arrays")
         return cls(
@@ -369,12 +422,43 @@ class RunContextSnapshot:
                 )
                 for item in additional_values
             ),
+            tools=tuple(
+                ToolDefinitionSnapshot(
+                    name=str(_mapping(item).get("name") or ""),
+                    provider=str(_mapping(item).get("provider") or ""),
+                    permission_level=str(
+                        _mapping(item).get("permission_level") or "read_only"
+                    ),
+                    requires_approval=bool(
+                        _mapping(item).get("requires_approval", False)
+                    ),
+                    risk_summary=str(_mapping(item).get("risk_summary") or ""),
+                    max_output_chars=int(
+                        _mapping(item).get("max_output_chars", 0)
+                    ),
+                    timeout_seconds=float(
+                        _mapping(item).get("timeout_seconds", 0.0)
+                    ),
+                    max_retries=int(_mapping(item).get("max_retries", 0)),
+                    idempotent=bool(_mapping(item).get("idempotent", True)),
+                    _input_schema_json=_canonical_json(
+                        _mapping(item).get("input_schema") or {}
+                    ),
+                    _output_schema_json=_canonical_json(
+                        _mapping(item).get("output_schema") or {}
+                    ),
+                )
+                for item in tool_values
+            ),
             metadata=RunMetadata(
                 run_id=str(metadata_value.get("run_id") or ""),
                 created_at=str(metadata_value.get("created_at") or ""),
                 entrypoint_type=str(metadata_value.get("entrypoint_type") or ""),
                 config_version=str(metadata_value.get("config_version") or ""),
                 schema_version=schema_version,
+                _entrypoint_metadata_json=_canonical_json(
+                    metadata_value.get("entrypoint_metadata") or {}
+                ),
             ),
         )
 
@@ -416,6 +500,7 @@ def _optional_int(value: object) -> int | None:
 
 __all__ = [
     "RUN_CONTEXT_SCHEMA_VERSION",
+    "SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS",
     "AdditionalDirectoryContext",
     "ConversationMessageSnapshot",
     "ConversationSummarySnapshot",
@@ -429,5 +514,6 @@ __all__ = [
     "RunContextSnapshot",
     "RunMetadata",
     "SessionContext",
+    "ToolDefinitionSnapshot",
     "canonical_project_config",
 ]

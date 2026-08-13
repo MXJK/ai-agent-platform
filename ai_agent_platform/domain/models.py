@@ -42,6 +42,7 @@ class Message:
     role: str
     content: str
     created_at: datetime
+    source_run_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

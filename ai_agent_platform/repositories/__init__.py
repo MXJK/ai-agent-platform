@@ -22,6 +22,12 @@ from .project_memory import (
     InMemoryProjectMemoryRepository,
     PostgresProjectMemoryRepository,
 )
+from .query import (
+    InMemoryQueryUnitOfWork,
+    PostgresQueryUnitOfWork,
+    QueryUnitOfWork,
+    create_query_unit_of_work,
+)
 
 __all__ = [
     "InMemorySessionRepository",
@@ -40,4 +46,8 @@ __all__ = [
     "PostgresProjectMemoryRepository",
     "SessionArchivedError",
     "SessionNotFoundError",
+    "InMemoryQueryUnitOfWork",
+    "PostgresQueryUnitOfWork",
+    "QueryUnitOfWork",
+    "create_query_unit_of_work",
 ]

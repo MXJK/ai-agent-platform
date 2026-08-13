@@ -1,8 +1,9 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "UNIFIED-RUN-CONTEXT"
-next_action: "No pending implementation; monitor the pushed unified Run context."
-blockers: []
+status: "blocked"
+active_task: "QUERY-KERNEL"
+next_action: "Choose the correct later-stage code baseline or remove unsupported future handbook claims, then rerun INTERVIEW_NOTES/validate.py."
+blockers:
+  - "Required handbook validation reports 18 pre-existing missing evidence paths for approval, ToolPool, MCP lifecycle, and Skill discovery capabilities that are outside QUERY-KERNEL and absent from the current branch."
 last_verified_commit: "614d7175bf669eea71c9022ddda0ec43ce93c1ab"
-updated_at: "2026-08-10T18:23:03+08:00"
+updated_at: "2026-08-13T14:11:41+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

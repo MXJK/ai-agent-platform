@@ -28,6 +28,7 @@ from ai_agent_platform.domain import (
     RunContextSnapshot,
     RunMetadata,
     SessionContext,
+    ToolDefinitionSnapshot,
     canonical_project_config,
 )
 from ai_agent_platform.model_registry import ModelSelection
@@ -64,8 +65,9 @@ class ExecutionContextFactory:
         max_context_messages: int = 12,
         max_instruction_chars: int = 16000,
         config_snapshot: Mapping[str, object] | None = None,
+        tool_registry: Any = None,
     ) -> None:
-        if entrypoint_type not in {"api", "worker", "cli", "agent_loop"}:
+        if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
         self._session_service = session_service
         self._workspace_service = workspace_service
@@ -74,6 +76,7 @@ class ExecutionContextFactory:
         self._entrypoint_type = entrypoint_type
         self._max_context_messages = max_context_messages
         self._max_instruction_chars = max_instruction_chars
+        self._tool_registry = tool_registry
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -101,6 +104,8 @@ class ExecutionContextFactory:
         additional_workspace_ids: Sequence[str] = (),
         run_id: str | None = None,
         created_at: datetime | None = None,
+        entrypoint_type: str | None = None,
+        entrypoint_metadata: Mapping[str, object] | None = None,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
@@ -190,6 +195,9 @@ class ExecutionContextFactory:
         )
         resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
         timestamp = created_at or datetime.now(timezone.utc)
+        resolved_entrypoint = entrypoint_type or self._entrypoint_type
+        if resolved_entrypoint not in {"api", "worker", "cli", "sdk", "agent_loop"}:
+            raise ValueError(f"unsupported Run entrypoint type: {resolved_entrypoint}")
         return RunContextSnapshot(
             identity=IdentityContext(
                 actor_user_id=actor,
@@ -231,12 +239,36 @@ class ExecutionContextFactory:
                 max_chars=self._max_instruction_chars,
             ),
             additional_directories=additional,
+            tools=self._snapshot_tools(),
             metadata=RunMetadata(
                 run_id=resolved_run_id,
                 created_at=timestamp.astimezone(timezone.utc).isoformat(),
-                entrypoint_type=self._entrypoint_type,
+                entrypoint_type=resolved_entrypoint,
                 config_version=self._config_version,
+                _entrypoint_metadata_json=canonical_project_config(
+                    entrypoint_metadata or {}
+                ),
             ),
+        )
+
+    def _snapshot_tools(self) -> tuple[ToolDefinitionSnapshot, ...]:
+        list_specs = getattr(self._tool_registry, "list_specs", None)
+        specs = list_specs() if callable(list_specs) else []
+        return tuple(
+            ToolDefinitionSnapshot(
+                name=str(spec.name),
+                provider=str(spec.provider),
+                permission_level=str(spec.permission_level),
+                requires_approval=bool(spec.requires_approval),
+                risk_summary=str(spec.risk_summary),
+                max_output_chars=int(spec.max_output_chars),
+                timeout_seconds=float(spec.timeout_seconds),
+                max_retries=int(spec.max_retries),
+                idempotent=bool(spec.idempotent),
+                _input_schema_json=canonical_project_config(spec.input_schema),
+                _output_schema_json=canonical_project_config(spec.output_schema),
+            )
+            for spec in sorted(specs, key=lambda item: item.name)
         )
 
     def _resolve_workspace(self, workspace_id: str) -> tuple[Any, str]:

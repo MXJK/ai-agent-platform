@@ -59,12 +59,12 @@ def execute_agent_run(task, **payload: Any) -> None:
         task_name="agent_run",
         task_reference=run_id,
         settings=settings,
-        handler=lambda: get_worker_services().agent_run_service.execute_run_task(
+        handler=lambda: get_worker_services().query_service.execute_run_task(
             **payload,
             broker_redelivered=is_broker_redelivery(task),
         ),
         failure_handler=lambda error, attempt, max_attempts: (
-            get_worker_services().agent_run_service.fail_run_task(
+            get_worker_services().query_service.fail_run_task(
                 run_id=run_id,
                 error=error,
                 attempt=attempt,
@@ -82,12 +82,12 @@ def execute_agent_resume(task, **payload: Any) -> None:
         task_name="agent_resume",
         task_reference=run_id,
         settings=settings,
-        handler=lambda: get_worker_services().agent_run_service.execute_resume_task(
+        handler=lambda: get_worker_services().query_service.execute_resume_task(
             **payload,
             broker_redelivered=is_broker_redelivery(task),
         ),
         failure_handler=lambda error, attempt, max_attempts: (
-            get_worker_services().agent_run_service.fail_run_task(
+            get_worker_services().query_service.fail_run_task(
                 run_id=run_id,
                 error=error,
                 attempt=attempt,

@@ -437,12 +437,19 @@ Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md
 因此不会改变既有 AGENTS 优先级。越靠近目标文件的规则越晚加载，也更具体；涉及多个
 目录的任务会保留每条规则的适用路径。
 
-`ExecutionContextFactory` 在 Run 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、安全配置版本、项目指令和额外目录，形成可 JSON
-往返的深度不可变 `RunContextSnapshot`。API、Worker、预留 CLI 角色和 Agent Loop 共用
-这一契约；Worker 任务只接收 `run_id`，重启后从 Run store 恢复快照，不重新读取已经
-变化的会话历史、模型偏好或指令文件。Git 缺失、非仓库、无 HEAD 或状态读取失败只记录
-诊断，不会无条件拒绝 Run。
+`QueryService` 是 HTTP、CLI/SDK 适配器和 Worker 共用的入口无关命令内核。
+`QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖和入口元数据；
+`QueryCommand` 统一 start/resume/continue/steer/pause/cancel；`AgentEvent` 与 `QueryResult`
+分别固定游标事件和终态/恢复结果。FastAPI 仍在 start/resume/continue 入队后立即返回 `202`，
+不会等待 Agent Loop。
+
+`ExecutionContextFactory` 在 start 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
+Workspace revision/root/cwd/Git 摘要、安全配置版本、项目指令、工具规格和额外目录，形成
+可 JSON 往返的深度不可变 `RunContextSnapshot`。用户消息、queued Run 及其中的模型/配置/
+上下文/工具快照在同一 Query UoW 中提交，提交成功后才派发只含 `run_id` 的 Worker 任务。
+内建运行时要求 Session 与 Run store 使用同一受支持后端，无法建立原子 UoW 时启动即失败。
+Worker 重启后从 Run store 恢复快照，不重新读取已经变化的会话历史、模型偏好或指令文件。
+Git 缺失、非仓库、无 HEAD 或状态读取失败只记录诊断，不会无条件拒绝 Run。
 
 README 文件和目录不会无条件注入上下文；通用项目概览会先列举工作区并优先读取
 README/项目清单，其他任务仍只读取搜索或文件发现选中的路径。
@@ -529,12 +536,16 @@ POST /api/v1/agent/runs/{run_id}/changes/reject {"change_set_id":"chg_xxx"}
 POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patch_sha256":"<64 hex>"}
 ```
 
-事件流使用可恢复游标；浏览器工作台直接从 SSE 事件增量构造轨迹，在终态读取一次
-完整 Run 快照，连接失败或提前结束时回退到状态轮询。终态包括 `completed`、
+轮询、SSE 与 QueryService 的异步迭代器都读取同一个 append-only EventStore，并通过同一
+`AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。浏览器工作台直接从
+SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接失败或提前结束时回退到状态
+轮询。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
 `waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
 一次运行，并把审批、追问或暂停控件重新挂回原助手消息；生命周期观察器绑定 Run 和
-会话 ID，切换会话不会让旧 Run 的晚到事件覆盖当前页面。
+会话 ID，切换会话不会让旧 Run 的晚到事件覆盖当前页面。最终助手消息用持久化
+`source_run_id + role` 唯一键确保只写一次；Worker 重投可补写崩溃窗口内缺失的消息，已写入
+时则安全跳过。
 
 响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
 使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和
@@ -809,6 +820,8 @@ RAG_RERANK_DEFAULT_ENABLED=false
   workspace 快照、验证与 apply/reject 状态。
 - `20260810_0020`：为 `agent_runs` 添加不可变 `run_context_snapshot` JSONB，持久化身份、
   会话/摘要/模型、Workspace/Git/配置/指令和已授权额外目录，供 Worker 按 Run ID 恢复。
+- `20260813_0021`：为消息添加 `source_run_id` 与每 Run/role 唯一约束，使 Query start 的
+  用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。

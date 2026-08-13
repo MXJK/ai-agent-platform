@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Lock, RLock
 from uuid import uuid4
 
 from ai_agent_platform.domain import (
@@ -34,7 +34,7 @@ class InMemorySessionRepository:
         self._conversation_summaries: dict[str, ConversationSummary] = {}
         self._token_usage: dict[str, TokenUsageRecord] = {}
         self._user_preferences: dict[str, UserPreferences] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def create_session(
         self,
@@ -134,7 +134,15 @@ class InMemorySessionRepository:
             self._user_preferences[preferences.user_id] = preferences
             return preferences
 
-    def add_message(self, session_id: str, role: str, content: str) -> Message:
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        message_id: str | None = None,
+        source_run_id: str | None = None,
+    ) -> Message:
         with self._lock:
             if session_id not in self._sessions:
                 raise SessionNotFoundError(session_id)
@@ -145,11 +153,12 @@ class InMemorySessionRepository:
 
             now = _now()
             message = Message(
-                id=f"msg_{uuid4().hex[:12]}",
+                id=message_id or f"msg_{uuid4().hex[:12]}",
                 session_id=session_id,
                 role=role,
                 content=content,
                 created_at=now,
+                source_run_id=source_run_id,
             )
             self._messages[session_id].append(message)
             title = session.title

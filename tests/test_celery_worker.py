@@ -24,7 +24,7 @@ class CeleryWorkerTests(unittest.TestCase):
     def test_agent_handlers_delegate_json_payloads(self) -> None:
         calls: list[tuple[str, dict[str, object]]] = []
         services = SimpleNamespace(
-            agent_run_service=SimpleNamespace(
+            query_service=SimpleNamespace(
                 execute_run_task=lambda **kwargs: calls.append(("run", kwargs)),
                 execute_resume_task=lambda **kwargs: calls.append(("resume", kwargs)),
             )
