@@ -38,7 +38,7 @@
 - [x] 前端完成 MCP Server 注册、编辑、测试、启停、删除及响应式/无障碍状态反馈。
 - [x] 管理 API 只允许本机管理模式，凭据只写 SecretStore，配置文件只保存引用。
 - [x] Server 变更在当前进程动态同步独立连接与 ToolRegistry，并遵守进程 tool allowlist。
-- [ ] ADR、README、访谈手册与 facts 同步；全量验证通过。
+- [x] ADR、README、访谈手册与 facts 同步；全量验证通过。
 
 ## Decisions
 
@@ -55,30 +55,29 @@
   以 `0600` 临时文件 fsync 后原子替换。前端只回显普通字段和 Secret 键名，不回显值。
 - `MCPRegistryService` 串行化管理变更并只替换目标 Server；ToolRegistry 的动态注册/
   移除受注册表锁保护，且继续受进程 `tool_allowlist` 上限约束。
+- 合入 `origin/main` 的 Skill Discovery 后，`RuntimeContainer` 同时持有
+  `MCPRegistryService` 与 `SkillService`；装配顺序保持 MCP、ToolRegistry、Skill，
+  让 Skill 的 `required_tools` 基于含动态 MCP 工具的最终注册表判定。
 - 没有数据库模型或迁移影响。用户可见的配置、健康探针和架构行为已同步到 README、
   本地访谈手册与中央 facts。
 
 ## Verification
 
-- PASS: `.venv/bin/python -m pytest -q` — 332 passed, 47 subtests passed。
+- PASS: `.venv/bin/python -m pytest -q` — 341 passed, 47 subtests passed。
 - PASS: `.venv/bin/python -m compileall ai_agent_platform tests evals`。
-- PASS: MCP/权限/工具/运行时定向回归 — 45 passed, 8 subtests passed。
+- PASS: MCP/Skill/权限/工具/运行时定向回归 — 68 passed, 8 subtests passed。
 - PASS: `.venv/bin/python -m pip check` — No broken requirements found。
 - PASS: `node --check ai_agent_platform/static/app.js`。
 - PASS: `git diff --check`。
+- PASS: `.venv/bin/python INTERVIEW_NOTES/validate.py` — 12 Markdown files、
+  34 capabilities；仅输出需复核证据警告，无校验错误。
 - PASS: 浏览器 QA — 桌面与 800 px 窄屏无横向溢出，stdio/HTTP 字段切换正确，
   禁写状态与空状态正确，控制台无 warning/error。
-- BLOCKED: `.venv/bin/python INTERVIEW_NOTES/validate.py`。MCP 新事实条目本身有效，但
-  既有 `skill_discovery` 条目引用当前分支不存在的
-  `ai_agent_platform/skills/{models,discovery,registry,service}.py` 与
-  `tests/test_skill_discovery.py`，共 5 个缺失证据路径。该功能只存在于未合并的
-  `codex/skill-discovery` 历史，修复或删除它属于本任务之外的产品/文档范围决定。
 
 ## Result
 
 MCP 生命周期、当前协议、本机管理 API、动态 ToolRegistry 同步和响应式前端均已完成；
 fake stdio/HTTP 注册覆盖 Secret 引用、热连接、工具刷新、启停和删除，全量代码测试与
-编译通过。README 和本地访谈手册已同步新注册方式与能力边界。由于仓库要求的访谈手册
-校验被无关的既有 Skill 事实漂移阻断，本任务仍不能按 `codex-close-task` 契约标记 done。
-下一步需要决定是恢复 Skill discovery 实现并合入当前基线，还是从本地访谈手册移除/
-降级相应事实，再重新运行手册校验。
+编译通过。README 和本地访谈手册已同步新注册方式与能力边界。合入最新主线时同时保留
+MCP Registry 和 Skill Discovery 的运行时装配，原 Skill 证据路径阻塞随主线实现合入而
+解除，手册与全量验证均通过，任务可以标记 done。

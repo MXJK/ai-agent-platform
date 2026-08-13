@@ -68,6 +68,12 @@ from ai_agent_platform.services import (
     ExecutionContextFactory,
     create_conversation_compressor,
 )
+from ai_agent_platform.skills import (
+    CommandRegistry,
+    SkillCatalog,
+    SkillDiscovery,
+    SkillService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -124,6 +130,9 @@ class RuntimeContainer:
     mcp_connection_manager: MCPConnectionManager | None = None
     mcp_registry: MCPRegistryService | None = None
     tool_registry: ToolRegistry | None = None
+    skill_service: SkillService | None = None
+    skill_catalog: SkillCatalog | None = None
+    command_registry: CommandRegistry | None = None
     checkpointer: Any = None
     coding_agent_runtime: CodingAgentRuntime | None = None
     session_service: SessionService | None = None
@@ -350,6 +359,16 @@ class ApplicationFactory:
             )
             container.checkpoint("tools_ready")
 
+            container.skill_service = self.create_skill_service(
+                settings,
+                tool_registry=container.tool_registry,
+            )
+            container.skill_catalog = container.skill_service.discover()
+            container.command_registry = CommandRegistry(
+                container.skill_catalog.commands
+            )
+            container.checkpoint("skills_ready")
+
             if coding_agent_runtime is None:
                 (
                     container.checkpointer,
@@ -417,6 +436,7 @@ class ApplicationFactory:
                 config_snapshot=(
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ).safe_snapshot(),
+                skill_service=container.skill_service,
                 process_config=(
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ),
@@ -680,6 +700,35 @@ class ApplicationFactory:
             tool_registry=tool_registry,
             connection_manager=connection_manager,
             tool_allowlist=settings.tool_allowlist,
+        )
+
+    def create_skill_service(
+        self,
+        settings: Settings,
+        *,
+        tool_registry: ToolRegistry,
+    ) -> SkillService:
+        package_root = Path(__file__).resolve().parent
+        discovery = SkillDiscovery(
+            bundled_root=package_root / "bundled_skills",
+            user_root=Path.home() / ".ai-agent-platform" / "skills",
+        )
+        effective_selection = (
+            settings.enabled_skills
+            if settings.enabled_skills is not None
+            else settings.skill_allowlist
+        )
+        list_specs = getattr(tool_registry, "list_specs", None)
+        available_tools = (
+            tuple(spec.name for spec in list_specs())
+            if settings.skills_enabled and callable(list_specs)
+            else ()
+        )
+        return SkillService(
+            discovery,
+            enabled=settings.skills_allowed and settings.skills_enabled,
+            enabled_skills=effective_selection,
+            available_tools=available_tools,
         )
 
     def create_langgraph_checkpointer(

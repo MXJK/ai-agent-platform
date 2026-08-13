@@ -67,6 +67,7 @@ class ExecutionContextFactory:
         max_context_messages: int = 12,
         max_instruction_chars: int = 16000,
         config_snapshot: Mapping[str, object] | None = None,
+        skill_service: Any = None,
         process_config: ResolvedConfig | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
@@ -79,6 +80,7 @@ class ExecutionContextFactory:
         self._entrypoint_type = entrypoint_type
         self._max_context_messages = max_context_messages
         self._max_instruction_chars = max_instruction_chars
+        self._skill_service = skill_service
         self._process_config = process_config
         self._tool_registry = tool_registry
         safe_config = _redact_config(config_snapshot or {})
@@ -258,6 +260,51 @@ class ExecutionContextFactory:
                 0,
                 remaining_instruction_chars - len(clipped),
             )
+        skill_diagnostics: tuple[str, ...] = ()
+        if self._skill_service is not None and remaining_instruction_chars > 0:
+            skill_options: dict[str, object] = {}
+            if effective_config is not None:
+                skill_options["enabled"] = bool(
+                    effective_config.skills_allowed
+                    and effective_config.skills_enabled
+                )
+                skill_options["enabled_skills"] = (
+                    effective_config.enabled_skills
+                    if effective_config.enabled_skills is not None
+                    else effective_config.skill_allowlist
+                )
+            if self._tool_registry is not None:
+                skill_options["available_tools"] = (
+                    tool_selection.enabled_tools or ()
+                )
+            selection = self._skill_service.build_context(
+                workspace_root=workspace_root,
+                agent="coding",
+                mode="default",
+                max_chars=remaining_instruction_chars,
+                **skill_options,
+            )
+            skill_diagnostics = tuple(
+                _skill_diagnostic_message(item) for item in selection.diagnostics
+            )
+            for item in selection.sources:
+                instruction_snapshots.append(
+                    InstructionSourceSnapshot(
+                        kind=item.kind,
+                        path=item.path,
+                        start_line=1,
+                        end_line=item.text.count("\n") + 1,
+                        text=item.text,
+                        reason=item.reason,
+                        content_hash=item.content_hash,
+                        truncated=item.truncated,
+                        priority=50,
+                    )
+                )
+                remaining_instruction_chars = max(
+                    0,
+                    remaining_instruction_chars - len(item.text),
+                )
         selection_values = (
             asdict(model_selection)
             if isinstance(model_selection, ModelSelection)
@@ -292,6 +339,7 @@ class ExecutionContextFactory:
                 sources=tuple(instruction_snapshots),
                 focus_files=normalized_focus,
                 max_chars=instruction_char_limit,
+                diagnostics=skill_diagnostics,
             ),
             additional_directories=additional,
             tools=tool_selection,
@@ -401,6 +449,13 @@ class ExecutionContextFactory:
                 )
             )
         return tuple(resolved)
+
+
+def _skill_diagnostic_message(value: Any) -> str:
+    code = str(getattr(value, "code", "skill_diagnostic"))
+    path = str(getattr(value, "path", "SKILL.md"))
+    message = str(getattr(value, "message", "Skill could not be loaded"))
+    return f"skill[{code}] {path}: {message}"[:1000]
 
 
 def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:
