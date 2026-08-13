@@ -15,6 +15,7 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 
 - [本地启动](#本地启动)
 - [分层运行时配置](#分层运行时配置)
+- [Skill 发现与 slash command](#skill-发现与-slash-command)
 - [主要能力](#主要能力)
 - [Gemini 流式输出](#gemini-流式输出)
 - [模型路由](#模型路由)
@@ -37,19 +38,20 @@ python3.10 -m venv .venv
 cp -n .env.example .env
 # 将 POSTGRES_PASSWORD 与 DATABASE_URL 中的示例 PostgreSQL 密码
 # 替换为同一个仅供本地使用的随机密码。
-./scripts/start.sh
+./scripts/start.sh --apply-migrations
 ```
 
-首次完成环境初始化后，本地启动只需要运行 `./scripts/start.sh`。脚本会验证持久化
-配置，启动 PostgreSQL、Qdrant 和 Redis，等待服务就绪，执行尚未应用的 Alembic
-迁移，然后同时启动 Celery Worker 与 FastAPI。按 `Ctrl+C` 会停止 API 和 Worker，
-持久化数据库容器仍会继续运行。
+首次完成环境初始化后，先审阅待处理的 Alembic revision，再由操作者用
+`./scripts/start.sh --apply-migrations` 显式授权升级。脚本会验证持久化配置，启动
+PostgreSQL、Qdrant 和 Redis，等待服务就绪，执行迁移，然后同时启动 Celery Worker 与
+FastAPI。未给出该参数时脚本会在迁移和 runtime 启动前停止；按 `Ctrl+C` 会停止 API 和
+Worker，持久化数据库容器仍会继续运行。
 
 常用启动选项：
 
 ```bash
 ./scripts/start.sh --check  # 仅检查依赖和配置，不执行写操作。
-APP_RELOAD=0 ./scripts/start.sh
+APP_RELOAD=0 ./scripts/start.sh --apply-migrations
 APP_PORT=8001 ./scripts/start.sh
 ```
 
@@ -60,19 +62,26 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 
 ## 分层运行时配置
 
-`ConfigResolver` 用固定顺序解析配置：`Settings` 默认值 → 用户 JSON → 项目 JSON →
-环境变量/`.env` → 显式入口覆盖。默认发现路径是
-`~/.config/ai-agent-platform/config.json` 和项目根下的
-`.ai-agent-platform/config.json`；可用 `AI_AGENT_PLATFORM_USER_CONFIG`、
-`AI_AGENT_PLATFORM_PROJECT_CONFIG` 指向其他文件。配置文件只使用 Python 标准库 JSON，
-根对象分为 `process_security`、`runtime`、`project_session`，未知分区、未知字段和错误
-类型都会在启动时失败：
+`ConfigResolver.resolve_process()` 只解析 `Settings` 默认值 → 用户 JSON → 环境变量/
+`.env` → 显式入口覆盖，不从服务进程 cwd 自动发现项目文件。默认用户路径是
+`~/.config/ai-agent-platform/config.json`；`AI_AGENT_PLATFORM_USER_CONFIG` 可改写该路径。
+`AI_AGENT_PLATFORM_PROJECT_CONFIG` 仍兼容，但只表示显式、进程级受控项目输入，不参与
+Workspace 自动发现。
+
+创建 Run 时，`ExecutionContextFactory` 先从 Workspace catalog 取得并鉴权主 Workspace
+root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
+`.ai-agent-platform/config.json`。因此项目配置不会随 API/Worker/CLI 的 cwd 改变，也不会
+泄漏到另一个 Workspace。配置文件只使用 Python 标准库 JSON，根对象分为
+`process_security`、`runtime`、`project_session`；未知分区、未知字段和错误类型会在对应
+进程解析或 Run 创建边界 fail closed：
 
 ```json
 {
   "process_security": {
     "workspace_allowed_roots": ["/srv/code"],
     "mcp_allowed": true,
+    "skills_allowed": true,
+    "skill_allowlist": ["review"],
     "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
   },
   "runtime": {
@@ -83,6 +92,8 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
   "project_session": {
     "project_instructions": ["先运行受影响的测试。"],
     "enabled_tools": ["file_symbol_locator"],
+    "skills_enabled": true,
+    "enabled_skills": ["review"],
     "mcp_enabled": false
   }
 }
@@ -90,18 +101,68 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 
 用户文件和进程环境可以建立进程策略；项目文件不能修改数据库、认证、API Key/
 Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也不能把 Docker sandbox
-镜像交给项目选择、把 Docker 降为 local、减少审批、扩张命令/工具/Skill allowlist，
+镜像交给项目选择、把 Docker 降为 local、放宽审批语义、扩张命令/工具/Skill allowlist，
 或越过 `mcp_allowed=false`、
-`skills_allowed=false`。项目层允许选择更小的权限集合，最终 Tool Registry 会按有效
-选择裁剪。环境变量继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
+`skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
+时裁剪全局能力上限，项目 `enabled_tools` 会冻结为每 Run 的只读 Registry view，不修改
+源 `ToolRegistry`。未知工具、尝试突破进程上限或非法恢复选择都会 fail closed。环境变量
+继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
 `AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
 
 解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
 最终字段的来源。`Settings.from_env()` 仍返回 `Settings`；需要来源或入口覆盖时直接使用
 `ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
-序列化视图，API/Worker 的 `RuntimeContainer` 将其保存为 `config_snapshot`；结构化日志
-也会递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
+带 schema version、逐字段 source/detail 的序列化视图；Run 再保存配置内容哈希与确切
+工具选择哈希。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
+递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
+
+## Skill 发现与 slash command
+
+启用 `skills_enabled` 后，运行时只发现以下目录中的 `SKILL.md`：
+
+- bundled：`ai_agent_platform/bundled_skills/<skill>/SKILL.md`；
+- user：`~/.ai-agent-platform/skills/<skill>/SKILL.md`；
+- project：已鉴权 Workspace 下的 `.agents/skills/<skill>/SKILL.md`。
+
+来源优先级固定为 `project > user > bundled`，限定名分别是
+`project:<name>`、`user:<name>` 和 `bundled:<name>`。同一来源的重复名称按相对路径
+字典序选择第一项并产生错误诊断；跨来源覆盖、slash command/alias 冲突也产生稳定
+诊断。最终 Skill 与 command 都按规范化名称排序。项目 Skill 即使覆盖同名用户或
+bundled Skill，仍会标记为 `untrusted_project_skill`，在 Run 入队前以不可信项目
+上下文冻结。
+
+最小 `SKILL.md` 使用严格、无重复键的 YAML frontmatter：
+
+```markdown
+---
+name: review
+description: Review requested code changes
+agents: [coding]
+modes: [default]
+context_budget: 4000
+tools: [repo.search_code, repo.read_file]
+command:
+  name: review
+  description: Review code in the current Workspace
+  usage: "[path]"
+  aliases: [rv]
+---
+Inspect live evidence before giving review findings.
+```
+
+第一版只接受上述字段。每个文件最多 64 KiB，每次发现最多 64 个候选、最多加载
+128 KiB 字符；单个 Skill 的上下文预算上限为 16,000 字符，最终还受 Run 的项目
+指令总预算约束。错误 UTF-8、损坏/重复 YAML、未知字段、超限文件和单个坏 Skill
+只产生诊断，不会终止其余发现。来源根、子目录或 `SKILL.md` 中的 symlink 都不会被
+跟随，真实路径必须留在对应来源根内。
+
+Skill 是纯声明数据：系统不会执行同目录 Python/Shell，也不会从 Markdown 注册函数。
+`tools` 只是所需工具名称；缺少本次 Run 已筛选工具时 Skill 不进入上下文，即使工具
+存在，调用仍受既有 `ToolUseContext`、Sandbox 和 allow/ask/deny 规则约束。Skill
+不能注册工具、降低审批、扩大 allowlist 或授予权限。Skill 指令的快照优先级低于
+Workspace 指令文件和项目配置指令；slash command 注册表也只保存名称、描述、usage、
+alias 与目标 Skill，不直接执行命令。
 
 ## 主要能力
 
@@ -403,7 +464,8 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 
 ```text
 原生工具调用
-→ ToolRegistry 校验并执行
+→ PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
+→ ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
 → Provider 原生工具结果消息
 → 模型观察后继续调用工具或作答
@@ -418,11 +480,22 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 assistant/tool 组压缩旧观察，避免拆断 call/result 对。图的独立保险由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
+每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
+root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
+`PermissionResolver` 返回 `allow`、`ask` 或 `deny`，并附匹配规则、原因和风险摘要。
+进程 deny、Workspace root 边界和身份 RBAC 是不可覆盖硬拒绝；显式 deny 优先，项目配置
+只能继续收紧。展示给模型的工具可先过滤 deny，但 `ToolRegistry` 执行前仍无条件复判，
+避免展示和执行之间的 TOCTOU。MCP/Skill 的权限注解只作为不可信风险输入，不能自行
+产生最终授权。
+
 所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
 PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
 事件。模型可调用 `agent.request_user_input` 进入 `waiting_input`。用户也可在安全工具边界
 暂停、继续、取消或发送转向信息。审批策略通过 `AGENT_APPROVAL_POLICY=always|on_request|never`
-配置；`never` 对需要审批的调用是阻断，不是静默授权。
+配置；`never` 对需要 `ask` 的调用返回 `deny`，不是静默授权。批准精确绑定
+`run_id + call_id + tool name + canonical arguments SHA-256`，跨 Run/调用/工具重放或参数
+变化都会重新进入审批。项目把 `on_request` 改成 `always` 或 `never` 都可收紧；进程已为
+`always` 或 `never` 时，项目不能切换到另一种策略造成部分调用重新放行。
 
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
 和输出。工具规格还声明超时、重试和幂等行为。只有幂等工具遇到可重试失败时才会重试；
@@ -430,12 +503,81 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 契约：优先读取 `structuredContent`，文本块会被标准化，`isError=true` 会变成稳定的
 工具失败，而不是成功载荷。
 
+### MCP 生命周期与传输
+
+MCP 默认通过精确锁定的官方 Python SDK `mcp==2.0.0` 协商当前 `2026-07-28`
+协议。`stdio` 和无会话的 `streamable_http` 是当前路径；原有固定
+`2025-06-18` 客户端仅由 `stdio_2025_06_18` 显式选择，旧 HTTP+SSE 仅由
+`legacy_sse` 加 `legacy_compatibility=true` 启用，不参与默认回退。架构取舍记录在
+[`docs/adr/0001-mcp-official-python-sdk-v2.md`](docs/adr/0001-mcp-official-python-sdk-v2.md)。
+
+`MCPConnectionManager` 为每个 Server 独立拥有连接、事件循环、连接/请求超时、幂等
+重试、指数退避、熔断、缓存、取消、关闭和脱敏状态。启动会隔离单 Server 故障；只有
+`required=true` 且未就绪的 Server 会令 `/api/v1/health` 返回 `503` 和
+`ready=false`，可选 Server 故障只使健康状态降级。`tools/list` 会遍历全部分页、拒绝
+重复 cursor/工具名、按名称确定性排序，遵循 `ttlMs`/`cacheScope` 提示，并支持显式
+refresh。工具调用沿用 ToolRegistry 的稳定 call ID；超时、取消、连接关闭、熔断和远端
+工具失败映射为稳定错误码。
+
+HTTP Server 必须使用显式 host allowlist；HTTPS 是默认要求，重定向和代理环境被禁用，
+解析到私网/本机地址默认拒绝。凭据只能通过共享 `SecretStore` 引用注入
+`header_refs`/`env_refs`，不会进入配置快照、诊断或 repr。Header 控制字符、保留
+MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断。MCP 权限注解始终先
+进入中央 `PermissionResolver`，缺失或高风险提示按外部副作用保守处理，不能直接授权。
+
+本机管理模式可直接打开工作台的「MCP 连接」（`/#mcp`）注册、编辑、测试/刷新、启停
+或删除 Server。前端支持当前 stdio、当前 Streamable HTTP 以及两条显式兼容路径，展示
+独立连接状态、协议版本、重试错误和发现/注册工具数。启用界面写入至少要设置
+`MCP_CONFIG_PATH=/path/to/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
+同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
+否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
+写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。管理写接口仅在
+`AUTH_MODE=disabled` 的 loopback 本机模式开放。
+
+管理 API 为 `GET /api/v1/mcp/servers`、
+`PUT /api/v1/mcp/servers/{name}`、
+`PATCH /api/v1/mcp/servers/{name}/enabled`、
+`POST /api/v1/mcp/servers/{name}/test` 和
+`DELETE /api/v1/mcp/servers/{name}`。这些变更只影响目标 Server；停用或删除会关闭其连接
+并原子移除对应的动态工具，不会重建其他 Server 的生命周期。
+
+最小配置示例：
+
+```json
+{
+  "mcp_servers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "example_mcp_server"],
+      "env_refs": {"EXAMPLE_TOKEN": "keyring:mcp/example"},
+      "required": false
+    },
+    "remote-tools": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "allowed_hosts": ["mcp.example.com"],
+      "header_refs": {"Authorization": "keyring:mcp/remote"},
+      "required": true
+    }
+  }
+}
+```
+
 ### 项目指令
 
 Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md`。同目录下的
 `AGENTS.override.md` 会替代 `AGENTS.md`；只有两者都不存在时才兼容读取 `CLAUDE.md`，
 因此不会改变既有 AGENTS 优先级。越靠近目标文件的规则越晚加载，也更具体；涉及多个
-目录的任务会保留每条规则的适用路径。
+目录的任务会保留每条规则的适用路径。配置中的 `project_session.project_instructions`
+作为最低优先级 `config_instruction` 追加，文件指令先消费同一个
+`AGENT_MAX_INSTRUCTION_CHARS` 预算；每个来源冻结 kind/path、priority、完整内容 hash 和
+截断状态。
+
+指令文件通过以可信 Workspace root 为锚的目录描述符读取，目录和文件打开都禁止跟随
+symlink，并要求普通文件；读取前后还会核对 inode、类型、大小和时间元数据以及目录链。
+symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都会阻断 Run，工作区外正文
+不会进入快照。
 
 `QueryService` 是 HTTP、CLI/SDK 适配器和 Worker 共用的入口无关命令内核。
 `QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖和入口元数据；
@@ -444,7 +586,7 @@ Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md
 不会等待 Agent Loop。
 
 `ExecutionContextFactory` 在 start 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、安全配置版本、项目指令、工具规格和额外目录，形成
+Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、确切工具选择和额外目录，形成
 可 JSON 往返的深度不可变 `RunContextSnapshot`。用户消息、queued Run 及其中的模型/配置/
 上下文/工具快照在同一 Query UoW 中提交，提交成功后才派发只含 `run_id` 的 Worker 任务。
 内建运行时要求 Session 与 Run store 使用同一受支持后端，无法建立原子 UoW 时启动即失败。
@@ -552,7 +694,9 @@ SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接�
 `score` 来源字段。已经移除的 `repository_id` 和 `rag_context` Agent 字段不会被接受
 或返回。
 
-ChangeSet 是模型工具审批之后的独立落盘边界。它保存不可截断补丁、SHA-256、变更文件、
+ChangeSet 是模型工具审批之后的独立落盘边界。读取/拒绝/应用也进入同一
+`PermissionResolver` 的 Workspace role/root 判定，同时保留服务内纵深校验。它保存不可
+截断补丁、SHA-256、变更文件、
 Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 可查看，editor 才能
 拒绝或应用；apply 还会重新校验登记根、符号链接、敏感/二进制路径、文件并发修改和用户
 确认的摘要。重复应用同一已完成 ChangeSet 返回相同结果；冲突不会覆盖用户的新修改。
@@ -819,9 +963,11 @@ RAG_RERANK_DEFAULT_ENABLED=false
 - `20260809_0019`：添加每 Run 唯一的 `agent_change_sets`，持久化完整补丁、基线哈希、
   workspace 快照、验证与 apply/reject 状态。
 - `20260810_0020`：为 `agent_runs` 添加不可变 `run_context_snapshot` JSONB，持久化身份、
-  会话/摘要/模型、Workspace/Git/配置/指令和已授权额外目录，供 Worker 按 Run ID 恢复。
+  会话/摘要/模型、Workspace/Git/配置/指令/工具选择和已授权额外目录，供 Worker 按 Run ID
+  恢复。该 revision 在本任务中**没有执行**；启动 PostgreSQL runtime 前必须先由操作者
+  审阅并显式授权应用。
 - `20260813_0021`：为消息添加 `source_run_id` 与每 Run/role 唯一约束，使 Query start 的
-  用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束。
+  用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束；该迁移同样尚未执行。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
@@ -855,7 +1001,7 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 被同时写入。仓库示例和当前持久化运行时使用 Qdrant；内存 Repository 只作为显式
 测试替身。
 
-启动 API 和 Celery Worker 前，先启动依赖并应用数据库迁移：
+启动 API 和 Celery Worker 前，先启动依赖；审阅 revision 后由操作者明确授权并应用迁移：
 
 ```bash
 docker compose up -d postgres adminer qdrant redis
@@ -886,7 +1032,8 @@ Compose 栈包含仅绑定本机的 Adminer Web 界面。启动 `postgres` 和 `
 
 Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独立的项目记忆索引 Outbox
 消费任务。Agent 启动任务的业务载荷只有持久化 Run ID；Worker 从 Run store 恢复提交时
-已验证且配置字段已脱敏的上下文快照。额外目录只能通过 `additional_workspace_ids` 引用已登记且
+已验证且配置字段已脱敏的上下文快照；项目文件、指令文件和环境不会在 Worker 中重读。
+额外目录只能通过 `additional_workspace_ids` 引用已登记且
 当前 actor 有权查看的 Workspace，不能提交任意路径；`cwd`、focus path 和符号链接的
 真实路径都必须留在主 Workspace 根内。运行开始时捕获的根目录无法访问时，任务会以结构化
 `workspace_unavailable` 消息失败。失败的记忆抽取任务保留尝试次数，Celery 可以重试
@@ -898,11 +1045,11 @@ FastAPI `create_app()` 与 Celery Worker 进程单例都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
 checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
-可构建角色，没有新增命令。启动配置在进入工厂前已由 `ConfigResolver` 固定按五层
-优先级解析。
+可构建角色，没有新增命令。启动配置在进入工厂前只解析进程基线；Workspace 项目覆盖、
+配置指令和项目工具选择在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
 
 返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
-`ExecutionContextFactory`、服务和资源，并按
+共享 `SecretStore`、`MCPConnectionManager`、`ExecutionContextFactory`、服务和资源，并按
 顺序记录 `config_loaded`、
 `stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
 lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按

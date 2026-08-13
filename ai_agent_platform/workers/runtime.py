@@ -46,7 +46,7 @@ def _create_worker_services(
     settings: Settings | ResolvedConfig | None = None,
     application_factory: ApplicationFactory | None = None,
 ) -> RuntimeContainer:
-    config = settings or ConfigResolver.from_default_locations().resolve()
+    config = settings or ConfigResolver.from_default_locations().resolve_process()
     return build_runtime(
         config,
         role="worker",

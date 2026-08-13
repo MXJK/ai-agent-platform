@@ -13,11 +13,16 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import stat
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .config import Settings
+
+
+CONFIG_SNAPSHOT_SCHEMA_VERSION = 2
+WORKSPACE_PROJECT_CONFIG_RELATIVE_PATH = ".ai-agent-platform/config.json"
 
 
 class ConfigError(ValueError):
@@ -156,9 +161,13 @@ class ResolvedConfig:
                 section_values[name] = {
                     "value": _redact_value(name, value),
                     "source": self.sources[name].value,
+                    "detail": self.source_details[name].detail,
                 }
             sections[section_name] = section_values
-        return {"config": sections}
+        return {
+            "schema_version": CONFIG_SNAPSHOT_SCHEMA_VERSION,
+            "config": sections,
+        }
 
     def diagnostics(self) -> dict[str, object]:
         """Alias emphasizing that diagnostics are always redacted."""
@@ -321,7 +330,14 @@ class ConfigResolver:
         dotenv_path: str | Path = ".env",
         project_root: str | Path | None = None,
     ) -> "ConfigResolver":
-        """Discover conventional user/project files without requiring them."""
+        """Discover process-owned inputs without consulting the service cwd.
+
+        ``AI_AGENT_PLATFORM_PROJECT_CONFIG`` remains a supported, explicit
+        process-controlled input. Automatic project discovery only happens later,
+        through :meth:`resolve_workspace`, after a registered Workspace root has
+        been authorized. ``project_root`` is retained as an explicit compatibility
+        input for callers that already possess such a trusted root.
+        """
         environment = dict(os.environ if env is None else env)
         dotenv = _read_dotenv(Path(dotenv_path), required=False)
         selectors = {**dotenv, **environment}
@@ -330,16 +346,23 @@ class ConfigResolver:
             selectors.get("AI_AGENT_PLATFORM_USER_CONFIG")
             or str(Path.home() / ".config" / "ai-agent-platform" / "config.json")
         ).expanduser()
-        root = Path.cwd() if project_root is None else Path(project_root)
-        project_candidate = Path(
-            selectors.get("AI_AGENT_PLATFORM_PROJECT_CONFIG")
-            or str(root / ".ai-agent-platform" / "config.json")
-        ).expanduser()
+        explicit_project_path = selectors.get("AI_AGENT_PLATFORM_PROJECT_CONFIG")
+        project_candidate = (
+            Path(explicit_project_path).expanduser()
+            if explicit_project_path
+            else (
+                Path(project_root) / WORKSPACE_PROJECT_CONFIG_RELATIVE_PATH
+                if project_root is not None
+                else None
+            )
+        )
 
         return cls(
             user_config=user_candidate if user_candidate.is_file() else None,
             project_config=(
-                project_candidate if project_candidate.is_file() else None
+                project_candidate
+                if project_candidate is not None and project_candidate.is_file()
+                else None
             ),
             env=environment,
             explicit_overrides=explicit_overrides,
@@ -351,6 +374,15 @@ class ConfigResolver:
         *,
         explicit_overrides: Mapping[str, object] | None = None,
     ) -> ResolvedConfig:
+        """Compatibility alias for :meth:`resolve_process`."""
+        return self.resolve_process(explicit_overrides=explicit_overrides)
+
+    def resolve_process(
+        self,
+        *,
+        explicit_overrides: Mapping[str, object] | None = None,
+    ) -> ResolvedConfig:
+        """Resolve the immutable process baseline without Workspace discovery."""
         default_settings = Settings()
         values = {
             item.name: _freeze_value(getattr(default_settings, item.name))
@@ -402,6 +434,53 @@ class ConfigResolver:
         except (TypeError, ValueError) as exc:
             raise ConfigSchemaError(f"resolved configuration is invalid: {exc}") from exc
 
+        return _resolved_config(settings, provenance)
+
+    @classmethod
+    def resolve_workspace(
+        cls,
+        process_config: ResolvedConfig,
+        *,
+        workspace_root: str | Path,
+    ) -> ResolvedConfig:
+        """Apply the project file under one already-authorized Workspace root.
+
+        The supplied process snapshot is the only baseline. Environment variables,
+        dotenv files, user configuration, and explicit overrides are not consulted
+        again at Run submission time.
+        """
+        root = Path(workspace_root).resolve(strict=True)
+        if not root.is_dir():
+            raise ConfigSecurityError("registered Workspace root is not a directory")
+        raw = _load_workspace_project_config(root)
+        if raw is None:
+            return process_config
+
+        values = {
+            item.name: _freeze_value(getattr(process_config.settings, item.name))
+            for item in fields(Settings)
+        }
+        provenance = dict(process_config.source_details)
+        flattened = _flatten_config_mapping(
+            raw,
+            source_label=ConfigSource.PROJECT_CONFIG.value,
+            allow_flat=False,
+        )
+        resolver = cls(env={})
+        resolver._merge_values(
+            values,
+            provenance,
+            flattened,
+            source=ConfigSource.PROJECT_CONFIG,
+            detail=f"workspace:{WORKSPACE_PROJECT_CONFIG_RELATIVE_PATH}",
+            project=True,
+        )
+        try:
+            settings = Settings(**values)
+        except (TypeError, ValueError) as exc:
+            raise ConfigSchemaError(
+                f"resolved Workspace configuration is invalid: {exc}"
+            ) from exc
         return _resolved_config(settings, provenance)
 
     def _merge_config_input(
@@ -553,6 +632,95 @@ def _load_config_input(
     return raw, str(path)
 
 
+def _load_workspace_project_config(
+    workspace_root: Path,
+) -> Mapping[str, object] | None:
+    """Read the conventional project JSON without following path symlinks."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    root_fd: int | None = None
+    config_dir_fd: int | None = None
+    config_fd: int | None = None
+    try:
+        root_fd = os.open(workspace_root, directory_flags | nofollow | cloexec)
+        try:
+            config_dir_fd = os.open(
+                ".ai-agent-platform",
+                directory_flags | nofollow | cloexec,
+                dir_fd=root_fd,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ConfigSecurityError(
+                "Workspace project configuration directory is unsafe"
+            ) from exc
+        try:
+            config_fd = os.open(
+                "config.json",
+                os.O_RDONLY | nofollow | cloexec | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=config_dir_fd,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ConfigSecurityError(
+                "Workspace project configuration file is unsafe"
+            ) from exc
+
+        before = os.fstat(config_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ConfigSecurityError(
+                "Workspace project configuration must be a regular file"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(config_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(config_fd)
+        current = os.stat(
+            "config.json",
+            dir_fd=config_dir_fd,
+            follow_symlinks=False,
+        )
+        if not _same_stable_file(before, after, current):
+            raise ConfigSecurityError(
+                "Workspace project configuration changed while being read"
+            )
+        try:
+            raw = json.loads(b"".join(chunks).decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ConfigSchemaError(
+                "project_config must be UTF-8 encoded"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ConfigSchemaError(
+                "project_config must be valid JSON at line "
+                f"{exc.lineno}, column {exc.colno}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise ConfigSchemaError("project_config root must be a JSON object")
+        return raw
+    finally:
+        for descriptor in (config_fd, config_dir_fd, root_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def _same_stable_file(*items: os.stat_result) -> bool:
+    first = items[0]
+    identity = (first.st_dev, first.st_ino, first.st_mode)
+    metadata = (first.st_size, first.st_mtime_ns, first.st_ctime_ns)
+    return all(
+        (item.st_dev, item.st_ino, item.st_mode) == identity
+        and (item.st_size, item.st_mtime_ns, item.st_ctime_ns) == metadata
+        for item in items[1:]
+    )
+
+
 def _resolved_config(
     settings: Settings,
     provenance: Mapping[str, ConfigFieldSource],
@@ -623,6 +791,10 @@ def _coerce_native_value(
         if not all(isinstance(item, str) for item in value):
             raise ConfigSchemaError(
                 f"{source_label}.{field_name} must contain only strings"
+            )
+        if field_name in _OPTIONAL_TUPLE_FIELDS and len(set(value)) != len(value):
+            raise ConfigSchemaError(
+                f"{source_label}.{field_name} must contain unique strings"
             )
         return tuple(value)
 
@@ -707,17 +879,17 @@ def _validate_project_overrides(
                 "project_config sandbox_allowed_commands may only remove commands"
             )
 
-    approval_strength = {"never": 0, "on_request": 1, "always": 2}
     if "agent_approval_policy" in incoming:
         candidate = incoming["agent_approval_policy"]
         baseline = current["agent_approval_policy"]
-        if (
-            candidate in approval_strength
-            and baseline in approval_strength
-            and approval_strength[candidate] < approval_strength[baseline]
-        ):
+        tightening_transitions = {
+            "on_request": {"on_request", "always", "never"},
+            "always": {"always"},
+            "never": {"never"},
+        }
+        if candidate not in tightening_transitions.get(str(baseline), set()):
             raise ConfigSecurityError(
-                "project_config agent_approval_policy may only require more approval"
+                "project_config agent_approval_policy may only tighten permission"
             )
 
     if incoming.get("mcp_enabled") is True and current["mcp_allowed"] is False:

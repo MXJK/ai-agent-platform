@@ -17,8 +17,15 @@ from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
+    ToolRegistryView,
     ToolSpec,
     summarize_tool_arguments,
+)
+from ai_agent_platform.integrations.permissions import (
+    PermissionDecision,
+    ToolApproval,
+    ToolUseContext,
+    canonical_arguments_hash,
 )
 
 
@@ -56,6 +63,7 @@ class ChangeLoopExecutor:
         return {
             "tool_results": list(state.get("tool_results", [])) + results,
             "repair_tool_calls": [],
+            "repair_approval_tool_calls": [],
             "change_iteration": next_iteration,
             "trace": _append_trace(
                 state,
@@ -73,10 +81,12 @@ class ChangeLoopExecutor:
         }
 
     def validate_changes(self, state: CodingAgentState) -> CodingAgentState:
+        tools = self._tools_for_state(state)
         validation_calls = [
             ToolCall(
                 name=call.name,
                 arguments=call.arguments,
+                call_id=call.call_id,
                 source=f"{call.source}:iteration-{state.get('change_iteration', 0)}",
             )
             for call in state.get("validation_tool_calls", [])
@@ -96,6 +106,7 @@ class ChangeLoopExecutor:
             is_validation_success(result) for result in validation_results
         )
         repair_calls: list[ToolCall] = []
+        next_validation_calls: list[ToolCall] = []
         if not passed and state.get("change_iteration", 0) < MAX_CHANGE_ITERATIONS:
             repair_state = dict(state)
             repair_state["validation_results"] = validation_results
@@ -104,14 +115,58 @@ class ChangeLoopExecutor:
             if callable(plan_repair):
                 repair_calls = [
                     call
-                    for call in plan_repair(repair_state, self._tools.list_specs())
+                    for call in plan_repair(repair_state, tools.list_specs())
                     if call.name in SANDBOX_MUTATION_TOOLS
                 ]
 
-        approval_required_tools = _approval_required_tools(
-            repair_calls,
-            self._tools.list_specs(),
-        )
+            next_validation_calls = [
+                ToolCall(
+                    name=call.name,
+                    arguments=call.arguments,
+                    call_id=(
+                        f"{call.call_id}:iteration-"
+                        f"{state.get('change_iteration', 0) + 1}"
+                    ),
+                    source=(
+                        f"{call.source}:iteration-"
+                        f"{state.get('change_iteration', 0) + 1}"
+                    ),
+                )
+                for call in state.get("validation_tool_calls", [])
+            ]
+
+        permission_context = self._tool_use_context(state)
+        repair_approval_calls = repair_calls + next_validation_calls
+        repair_decisions = [
+            (
+                call,
+                tools.resolve_permission(call, permission_context, phase="plan"),
+            )
+            for call in repair_approval_calls
+        ]
+        allowed_repair_call_ids = {
+            call.call_id
+            for call, decision in repair_decisions
+            if decision.effect != "deny"
+        }
+        repair_calls = [
+            call for call in repair_calls if call.call_id in allowed_repair_call_ids
+        ]
+        next_validation_calls = [
+            call
+            for call in next_validation_calls
+            if call.call_id in allowed_repair_call_ids
+        ]
+        approval_required_tools = [
+            _permission_approval_item(
+                call,
+                decision,
+                tools.list_specs(),
+                run_id=state.get("run_id", ""),
+            )
+            for call, decision in repair_decisions
+            if decision.effect == "ask"
+        ]
         return {
             "tool_calls": list(state.get("tool_calls", [])) + repair_calls,
             "tool_results": list(state.get("tool_results", []))
@@ -119,6 +174,12 @@ class ChangeLoopExecutor:
             "validation_results": validation_results,
             "validation_history": validation_history,
             "repair_tool_calls": repair_calls,
+            "repair_approval_tool_calls": repair_calls + next_validation_calls,
+            "validation_tool_calls": (
+                next_validation_calls
+                if next_validation_calls
+                else state.get("validation_tool_calls", [])
+            ),
             "approval_required_tools": approval_required_tools,
             "trace": _append_trace(
                 state,
@@ -147,9 +208,41 @@ class ChangeLoopExecutor:
         else:
             approved = bool(decision)
             feedback = ""
+        approved_by = (
+            str(decision.get("approved_by") or "")
+            if isinstance(decision, dict)
+            else ""
+        ) or state.get("actor_user_id", "")
+        approvals = list(state.get("tool_approvals", []))
+        if approved:
+            required_call_ids = {
+                str(item.get("call_id") or "")
+                for item in state.get("approval_required_tools", [])
+                if isinstance(item, dict)
+            }
+            try:
+                tools = self._tools_for_state(state)
+                permission_context = self._tool_use_context(state)
+                for call in state.get(
+                    "repair_approval_tool_calls",
+                    state.get("repair_tool_calls", []),
+                ):
+                    if call.call_id not in required_call_ids:
+                        continue
+                    approvals.append(
+                        tools.issue_approval(
+                            call,
+                            permission_context,
+                            approved_by=approved_by,
+                        ).to_dict()
+                    )
+            except PermissionError as exc:
+                approved = False
+                feedback = str(exc)
         review_decision = {"approved": approved, "feedback": feedback}
         return {
             "repair_review_decision": review_decision,
+            "tool_approvals": approvals,
             "trace": _append_trace(
                 state,
                 node="review_repair_plan",
@@ -221,18 +314,50 @@ class ChangeLoopExecutor:
         state: CodingAgentState,
         tool_calls: list[ToolCall],
     ) -> list[dict[str, Any]]:
-        context = ToolExecutionContext(
+        context = self._tool_use_context(state)
+        tools = self._tools_for_state(state)
+        return [
+            self._execute_tool_call(tool_call, context, tools)
+            for tool_call in tool_calls
+        ]
+
+    def _tools_for_state(self, state: CodingAgentState) -> ToolRegistryView:
+        selected_values = state.get("enabled_tools")
+        selected = (
+            tuple(selected_values)
+            if selected_values is not None
+            else tuple(spec.name for spec in self._tools.list_specs())
+        )
+        return self._tools.select(selected)
+
+    def _tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
+        selected_values = state.get("enabled_tools")
+        return ToolUseContext(
             conversation_id=state["conversation_id"],
             workspace_id=state["workspace_id"],
             workspace_root=state["workspace_root"],
+            authorized_workspace_root=state.get("authorized_workspace_root"),
             run_id=state.get("run_id"),
+            actor_user_id=state.get("actor_user_id", ""),
+            workspace_role=state.get("workspace_role", "viewer"),
+            approval_policy=state.get("approval_policy", "on_request"),
+            process_allowed_tools=tuple(
+                spec.name for spec in self._tools.list_specs()
+            ),
+            project_allowed_tools=(
+                tuple(selected_values) if selected_values is not None else None
+            ),
+            approvals=tuple(
+                ToolApproval.from_mapping(item)
+                for item in state.get("tool_approvals", [])
+            ),
         )
-        return [self._execute_tool_call(tool_call, context) for tool_call in tool_calls]
 
     def _execute_tool_call(
         self,
         tool_call: ToolCall,
         context: ToolExecutionContext,
+        tools: ToolRegistryView,
     ) -> dict[str, Any]:
         run_id = context.run_id
         arguments_hash = hashlib.sha256(
@@ -274,6 +399,13 @@ class ChangeLoopExecutor:
                     "error_code": "tool_execution_in_progress",
                     "cached": True,
                 }
+        permission = tools.resolve_permission(
+            tool_call,
+            context,
+            phase="execute",
+        )
+        if permission.effect != "allow":
+            return tools.execute(tool_call, context=context).to_response()
         if run_id and callable(save_execution):
             save_execution(
                 AgentToolExecution(
@@ -284,7 +416,7 @@ class ChangeLoopExecutor:
                     status="started",
                 )
             )
-        response = self._tools.execute(tool_call, context=context).to_response()
+        response = tools.execute(tool_call, context=context).to_response()
         if run_id and callable(save_execution):
             save_execution(
                 AgentToolExecution(
@@ -385,34 +517,34 @@ def change_status(
     return "no_changes"
 
 
-def _approval_required_tools(
-    tool_calls: list[ToolCall],
+def _permission_approval_item(
+    tool_call: ToolCall,
+    decision: PermissionDecision,
     tool_specs: list[ToolSpec],
-) -> list[dict[str, Any]]:
-    specs = {spec.name: spec for spec in tool_specs}
-    approval_tools: list[dict[str, Any]] = []
-    for tool_call in tool_calls:
-        spec = specs.get(tool_call.name)
-        if spec is None:
-            continue
-        if spec.requires_approval or spec.permission_level != "read_only":
-            approval_tools.append(
-                {
-                    "name": tool_call.name,
-                    "provider": spec.provider,
-                    "permission_level": spec.permission_level,
-                    "requires_approval": spec.requires_approval,
-                    "risk_summary": spec.risk_summary,
-                    "arguments_summary": summarize_tool_arguments(
-                        tool_call.arguments
-                    ),
-                }
-            )
-    return approval_tools
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    spec = next((item for item in tool_specs if item.name == tool_call.name), None)
+    return {
+        "name": tool_call.name,
+        "run_id": run_id,
+        "call_id": tool_call.call_id,
+        "arguments_hash": canonical_arguments_hash(tool_call.arguments),
+        "provider": spec.provider if spec is not None else "unknown",
+        "permission_level": (
+            spec.permission_level if spec is not None else "unknown"
+        ),
+        "requires_approval": True,
+        "matched_rule": decision.matched_rule,
+        "reason": decision.reason,
+        "risk_summary": decision.risk_summary,
+        "arguments_summary": summarize_tool_arguments(tool_call.arguments),
+    }
 
 
 def _build_repair_approval_request(state: CodingAgentState) -> dict[str, Any]:
     repair_calls = state.get("repair_tool_calls", [])
+    approval_calls = state.get("repair_approval_tool_calls", repair_calls)
     return {
         "type": "repair_plan_review",
         "approval_required": True,
@@ -424,8 +556,12 @@ def _build_repair_approval_request(state: CodingAgentState) -> dict[str, Any]:
         "planned_tools": [call.name for call in repair_calls],
         "approval_required_tools": state.get("approval_required_tools", []),
         "tool_calls": [
-            {"name": call.name, "arguments": call.arguments}
-            for call in repair_calls
+            {
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+            }
+            for call in approval_calls
         ],
     }
 

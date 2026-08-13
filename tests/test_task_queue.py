@@ -18,6 +18,59 @@ from ai_agent_platform.services import AgentRunService
 
 
 class InProcessTaskQueueTests(unittest.TestCase):
+    def test_rejects_approval_when_planned_arguments_were_tampered(self) -> None:
+        record = AgentRunRecord(
+            run_id="run_tampered",
+            thread_id="run_tampered",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/tmp/workspace",
+            status="waiting_approval",
+            checkpoint_id="checkpoint_1",
+            latest_node="review_tool_plan",
+            next_nodes=["review_tool_plan"],
+            trace=[],
+            context_snapshot=object(),  # type: ignore[arg-type]
+            pending_approval={
+                "type": "tool_plan_review",
+                "approval_required_tools": [
+                    {
+                        "name": "sandbox.write_file",
+                        "run_id": "run_tampered",
+                        "call_id": "call_1",
+                        "arguments_hash": "0" * 64,
+                        "permission_level": "write_safe",
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "name": "sandbox.write_file",
+                        "call_id": "call_1",
+                        "arguments": {"path": "app.py", "content": "tampered"},
+                    }
+                ],
+            },
+        )
+
+        class RuntimeStub:
+            def get_run(self, _: str) -> AgentRunRecord:
+                return record
+
+        service = AgentRunService(
+            runtime=RuntimeStub(),
+            session_service=SimpleNamespace(
+                get_session=lambda **_: SimpleNamespace(user_id="editor"),
+            ),
+            workspace_service=SimpleNamespace(),
+        )
+        with self.assertRaisesRegex(PermissionError, "arguments changed"):
+            service.resume_run(
+                run_id=record.run_id,
+                approved=True,
+                actor_user_id="editor",
+            )
+        service.close()
+
     def test_viewer_cannot_approve_workspace_mutation(self) -> None:
         record = AgentRunRecord(
             run_id="run_waiting",

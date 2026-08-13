@@ -18,7 +18,7 @@ from ai_agent_platform.workers.reliability import (
 )
 
 
-resolved_config = ConfigResolver.from_default_locations().resolve()
+resolved_config = ConfigResolver.from_default_locations().resolve_process()
 settings = resolved_config.settings
 celery_app = Celery(
     "ai_agent_platform",

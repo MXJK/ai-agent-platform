@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from typing import Any, Mapping
 
@@ -123,6 +124,7 @@ class InstructionSourceSnapshot:
     reason: str
     content_hash: str
     truncated: bool
+    priority: int
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,7 @@ class InstructionContext:
     sources: tuple[InstructionSourceSnapshot, ...]
     focus_files: tuple[str, ...]
     max_chars: int
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,26 +144,10 @@ class AdditionalDirectoryContext:
 
 
 @dataclass(frozen=True)
-class ToolDefinitionSnapshot:
-    name: str
-    provider: str
-    permission_level: str
-    requires_approval: bool
-    risk_summary: str
-    max_output_chars: int
-    timeout_seconds: float
-    max_retries: int
-    idempotent: bool
-    _input_schema_json: str
-    _output_schema_json: str
-
-    @property
-    def input_schema(self) -> dict[str, object]:
-        return dict(json.loads(self._input_schema_json))
-
-    @property
-    def output_schema(self) -> dict[str, object]:
-        return dict(json.loads(self._output_schema_json))
+class ToolSelectionContext:
+    enabled_tools: tuple[str, ...] | None
+    source: str
+    version: str
 
 
 @dataclass(frozen=True)
@@ -184,8 +171,8 @@ class RunContextSnapshot:
     project: ProjectContext
     instructions: InstructionContext
     additional_directories: tuple[AdditionalDirectoryContext, ...]
+    tools: ToolSelectionContext
     metadata: RunMetadata
-    tools: tuple[ToolDefinitionSnapshot, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh JSON-serializable representation of the snapshot."""
@@ -252,11 +239,13 @@ class RunContextSnapshot:
                         "reason": item.reason,
                         "content_hash": item.content_hash,
                         "truncated": item.truncated,
+                        "priority": item.priority,
                     }
                     for item in self.instructions.sources
                 ],
                 "focus_files": list(self.instructions.focus_files),
                 "max_chars": self.instructions.max_chars,
+                "diagnostics": list(self.instructions.diagnostics),
             },
             "additional_directories": [
                 {
@@ -267,22 +256,15 @@ class RunContextSnapshot:
                 }
                 for item in self.additional_directories
             ],
-            "tools": [
-                {
-                    "name": item.name,
-                    "provider": item.provider,
-                    "permission_level": item.permission_level,
-                    "requires_approval": item.requires_approval,
-                    "risk_summary": item.risk_summary,
-                    "max_output_chars": item.max_output_chars,
-                    "timeout_seconds": item.timeout_seconds,
-                    "max_retries": item.max_retries,
-                    "idempotent": item.idempotent,
-                    "input_schema": item.input_schema,
-                    "output_schema": item.output_schema,
-                }
-                for item in self.tools
-            ],
+            "tools": {
+                "enabled_tools": (
+                    list(self.tools.enabled_tools)
+                    if self.tools.enabled_tools is not None
+                    else None
+                ),
+                "source": self.tools.source,
+                "version": self.tools.version,
+            },
             "metadata": {
                 "run_id": self.metadata.run_id,
                 "created_at": self.metadata.created_at,
@@ -331,17 +313,61 @@ class RunContextSnapshot:
         history_values = session_value.get("controlled_history") or []
         instruction_sources = instruction_value.get("sources") or []
         additional_values = value.get("additional_directories") or []
-        tool_values = value.get("tools") or []
+        raw_tool_value = value.get("tools")
+        if schema_version >= 2 and not isinstance(raw_tool_value, Mapping):
+            raise ValueError("Run context tools must be an object")
+        tool_value = raw_tool_value or {}
+        if not isinstance(tool_value, Mapping):
+            raise ValueError("Run context tools must be an object")
+        enabled_tool_values = tool_value.get("enabled_tools")
+        if enabled_tool_values is not None and not isinstance(
+            enabled_tool_values, list
+        ):
+            raise ValueError("Run context tools.enabled_tools must be an array")
+        if schema_version >= 2 and enabled_tool_values is None:
+            raise ValueError("Run context tools.enabled_tools must be an array")
+        if enabled_tool_values is not None and (
+            not all(isinstance(item, str) and item for item in enabled_tool_values)
+            or len(set(enabled_tool_values)) != len(enabled_tool_values)
+        ):
+            raise ValueError(
+                "Run context tools.enabled_tools must contain unique tool names"
+            )
         if not all(
             isinstance(items, list)
-            for items in (
-                history_values,
-                instruction_sources,
-                additional_values,
-                tool_values,
-            )
+            for items in (history_values, instruction_sources, additional_values)
         ):
             raise ValueError("Run context collection fields must be arrays")
+        if schema_version >= 2:
+            expected_config_version = "sha256:" + hashlib.sha256(
+                _canonical_json(project_config).encode("utf-8")
+            ).hexdigest()[:16]
+            if str(metadata_value.get("config_version") or "") != expected_config_version:
+                raise ValueError("Run context project configuration version mismatch")
+            expected_tool_version = _tool_selection_version(enabled_tool_values or [])
+            if str(tool_value.get("version") or "") != expected_tool_version:
+                raise ValueError("Run context tool selection version mismatch")
+            configured_tools = _config_snapshot_value(
+                project_config,
+                "project_session",
+                "enabled_tools",
+            )
+            process_cap = _config_snapshot_value(
+                project_config,
+                "process_security",
+                "tool_allowlist",
+            )
+            selected_set = set(enabled_tool_values or [])
+            if isinstance(configured_tools, list) and selected_set != set(
+                configured_tools
+            ):
+                raise ValueError(
+                    "Run context tool selection conflicts with project configuration"
+                )
+            if isinstance(process_cap, list) and not selected_set.issubset(process_cap):
+                raise ValueError(
+                    "Run context tool selection exceeds the frozen process cap"
+                )
         return cls(
             identity=IdentityContext(
                 actor_user_id=str(identity_value.get("actor_user_id") or ""),
@@ -401,6 +427,7 @@ class RunContextSnapshot:
                         reason=str(_mapping(item).get("reason") or ""),
                         content_hash=str(_mapping(item).get("content_hash") or ""),
                         truncated=bool(_mapping(item).get("truncated", False)),
+                        priority=int(_mapping(item).get("priority", 0)),
                     )
                     for item in instruction_sources
                 ),
@@ -408,6 +435,9 @@ class RunContextSnapshot:
                     str(item) for item in instruction_value.get("focus_files", [])
                 ),
                 max_chars=int(instruction_value.get("max_chars", 0)),
+                diagnostics=tuple(
+                    str(item) for item in instruction_value.get("diagnostics", [])
+                ),
             ),
             additional_directories=tuple(
                 AdditionalDirectoryContext(
@@ -422,33 +452,14 @@ class RunContextSnapshot:
                 )
                 for item in additional_values
             ),
-            tools=tuple(
-                ToolDefinitionSnapshot(
-                    name=str(_mapping(item).get("name") or ""),
-                    provider=str(_mapping(item).get("provider") or ""),
-                    permission_level=str(
-                        _mapping(item).get("permission_level") or "read_only"
-                    ),
-                    requires_approval=bool(
-                        _mapping(item).get("requires_approval", False)
-                    ),
-                    risk_summary=str(_mapping(item).get("risk_summary") or ""),
-                    max_output_chars=int(
-                        _mapping(item).get("max_output_chars", 0)
-                    ),
-                    timeout_seconds=float(
-                        _mapping(item).get("timeout_seconds", 0.0)
-                    ),
-                    max_retries=int(_mapping(item).get("max_retries", 0)),
-                    idempotent=bool(_mapping(item).get("idempotent", True)),
-                    _input_schema_json=_canonical_json(
-                        _mapping(item).get("input_schema") or {}
-                    ),
-                    _output_schema_json=_canonical_json(
-                        _mapping(item).get("output_schema") or {}
-                    ),
-                )
-                for item in tool_values
+            tools=ToolSelectionContext(
+                enabled_tools=(
+                    tuple(str(item) for item in enabled_tool_values)
+                    if enabled_tool_values is not None
+                    else None
+                ),
+                source=str(tool_value.get("source") or "legacy_process_registry"),
+                version=str(tool_value.get("version") or "legacy:unversioned"),
             ),
             metadata=RunMetadata(
                 run_id=str(metadata_value.get("run_id") or ""),
@@ -477,6 +488,28 @@ def _canonical_json(value: Mapping[str, object]) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("Run context project_config must be JSON serializable") from exc
+
+
+def _tool_selection_version(names: list[object]) -> str:
+    encoded = json.dumps(names, ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _config_snapshot_value(
+    snapshot: Mapping[str, object],
+    section: str,
+    field_name: str,
+) -> object:
+    config = snapshot.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    section_value = config.get(section)
+    if not isinstance(section_value, Mapping):
+        return None
+    field_value = section_value.get(field_name)
+    if not isinstance(field_value, Mapping):
+        return None
+    return field_value.get("value")
 
 
 def _mapping(
@@ -514,6 +547,6 @@ __all__ = [
     "RunContextSnapshot",
     "RunMetadata",
     "SessionContext",
-    "ToolDefinitionSnapshot",
+    "ToolSelectionContext",
     "canonical_project_config",
 ]

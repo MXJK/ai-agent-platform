@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 from queue import Empty, Queue
 from typing import Any, TextIO
 
-from ai_agent_platform.integrations.mcp.client import MCPTool
-from ai_agent_platform.integrations.mcp.config import MCPServerConfig
+from mcp.client.stdio import get_default_environment
+
+from ai_agent_platform.integrations.mcp.client import MCPTool, MCPToolCacheInfo
+from ai_agent_platform.integrations.mcp.config import (
+    CURRENT_STDIO,
+    LEGACY_STDIO_2025_06_18,
+    MCPServerConfig,
+)
+from ai_agent_platform.integrations.permissions import PermissionResolver
+from ai_agent_platform.model_registry.secrets import InMemorySecretStore, SecretStore
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -35,8 +42,10 @@ class MCPStdioClient:
         client_name: str = "ai-agent-platform",
         client_version: str = "0.1.0",
         request_timeout_seconds: float = 10.0,
+        secret_store: SecretStore | None = None,
+        permission_resolver: PermissionResolver | None = None,
     ) -> None:
-        if config.transport != "stdio":
+        if config.transport not in {CURRENT_STDIO, LEGACY_STDIO_2025_06_18}:
             raise MCPStdioClientError(
                 f"MCPStdioClient only supports stdio transport, got {config.transport}"
             )
@@ -46,17 +55,26 @@ class MCPStdioClient:
         self._client_name = client_name
         self._client_version = client_version
         self._request_timeout_seconds = request_timeout_seconds
+        self._secret_store = secret_store or InMemorySecretStore()
+        self._permission_resolver = permission_resolver or PermissionResolver()
         self._process: subprocess.Popen[str] | None = None
-        self._responses: dict[int, dict[str, Any]] = {}
+        self._responses: dict[int | str, dict[str, Any]] = {}
         self._response_queue: Queue[dict[str, Any]] = Queue()
-        self._stderr_lines: Queue[str] = Queue()
         self._request_id = 0
         self._lock = threading.Lock()
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._initialized = False
 
-    def list_tools(self) -> list[MCPTool]:
+    @property
+    def protocol_version(self) -> str | None:
+        return MCP_PROTOCOL_VERSION if self._initialized else None
+
+    @property
+    def cache_info(self) -> MCPToolCacheInfo:
+        return MCPToolCacheInfo(ttl_ms=0, cache_scope="private")
+
+    def list_tools(self, *, refresh: bool = False) -> list[MCPTool]:
         self._ensure_initialized()
         tools: list[MCPTool] = []
         cursor: str | None = None
@@ -66,12 +84,20 @@ class MCPStdioClient:
                 params["cursor"] = cursor
             result = self._request("tools/list", params)
             for raw_tool in result.get("tools", []):
-                tools.append(_mcp_tool_from_response(raw_tool))
+                tools.append(
+                    _mcp_tool_from_response(raw_tool, self._permission_resolver)
+                )
             cursor = result.get("nextCursor")
             if not cursor:
-                return tools
+                return sorted(tools, key=lambda item: (item.name, item.description))
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        call_id: str | None = None,
+    ) -> Any:
         self._ensure_initialized()
         return self._request(
             "tools/call",
@@ -79,7 +105,17 @@ class MCPStdioClient:
                 "name": name,
                 "arguments": arguments,
             },
+            request_id=call_id,
         )
+
+    def cancel(self, call_id: str) -> bool:
+        if not self._initialized:
+            return False
+        self._notify(
+            "notifications/cancelled",
+            {"requestId": call_id, "reason": "cancelled by ai-agent-platform"},
+        )
+        return True
 
     def close(self) -> None:
         process = self._process
@@ -142,8 +178,23 @@ class MCPStdioClient:
     def _start_process(self) -> None:
         if self._process is not None:
             return
-        env = dict(os.environ)
+        env = get_default_environment()
         env.update(self._config.env)
+        for name, secret_ref in self._config.env_refs.items():
+            value = self._secret_store.get(secret_ref)
+            if value is None:
+                raise MCPStdioClientError(
+                    "stdio MCP secret reference is unavailable",
+                    code="mcp_secret_unavailable",
+                    retryable=False,
+                )
+            if any(item in value for item in ("\x00", "\r", "\n")):
+                raise MCPStdioClientError(
+                    "stdio MCP secret contains unsafe control characters",
+                    code="mcp_security_error",
+                    retryable=False,
+                )
+            env[name] = value
         self._process = subprocess.Popen(
             [self._config.command, *self._config.args],
             stdin=subprocess.PIPE,
@@ -169,10 +220,17 @@ class MCPStdioClient:
             )
             self._stderr_thread.start()
 
-    def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            self._request_id += 1
-            request_id = self._request_id
+    def _request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        request_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        if request_id is None:
+            with self._lock:
+                self._request_id += 1
+                request_id = self._request_id
         self._write_message(
             {
                 "jsonrpc": "2.0",
@@ -183,9 +241,10 @@ class MCPStdioClient:
         )
         response = self._wait_for_response(request_id)
         if "error" in response:
-            error = response["error"]
             raise MCPStdioClientError(
-                f"MCP request {method} failed: {error.get('message', error)}"
+                f"MCP request {method} returned a protocol error",
+                code="mcp_protocol_error",
+                retryable=False,
             )
         result = response.get("result", {})
         if not isinstance(result, dict):
@@ -211,7 +270,7 @@ class MCPStdioClient:
         except BrokenPipeError as exc:
             raise MCPStdioClientError("MCP process stdin is closed") from exc
 
-    def _wait_for_response(self, request_id: int) -> dict[str, Any]:
+    def _wait_for_response(self, request_id: int | str) -> dict[str, Any]:
         if request_id in self._responses:
             return self._responses.pop(request_id)
 
@@ -221,10 +280,15 @@ class MCPStdioClient:
                     timeout=self._request_timeout_seconds
                 )
             except Empty as exc:
-                stderr = self._collect_stderr()
-                detail = f"; stderr: {stderr}" if stderr else ""
+                try:
+                    self._notify(
+                        "notifications/cancelled",
+                        {"requestId": request_id, "reason": "client timeout"},
+                    )
+                except MCPStdioClientError:
+                    pass
                 raise MCPStdioClientError(
-                    f"timed out waiting for MCP response id={request_id}{detail}",
+                    f"timed out waiting for MCP response id={request_id}",
                     code="mcp_timeout",
                     retryable=True,
                 ) from exc
@@ -232,7 +296,7 @@ class MCPStdioClient:
             message_id = message.get("id")
             if message_id == request_id:
                 return message
-            if isinstance(message_id, int):
+            if isinstance(message_id, (int, str)):
                 self._responses[message_id] = message
 
     def _read_stdout(self, stdout: TextIO) -> None:
@@ -243,25 +307,14 @@ class MCPStdioClient:
             try:
                 message = json.loads(stripped)
             except json.JSONDecodeError:
-                self._stderr_lines.put(f"invalid stdout JSON: {stripped[:200]}")
                 continue
             if isinstance(message, dict) and "id" in message:
                 self._response_queue.put(message)
 
     def _read_stderr(self, stderr: TextIO) -> None:
-        for line in stderr:
-            stripped = line.strip()
-            if stripped:
-                self._stderr_lines.put(stripped)
-
-    def _collect_stderr(self) -> str:
-        lines: list[str] = []
-        while True:
-            try:
-                lines.append(self._stderr_lines.get_nowait())
-            except Empty:
-                break
-        return "\n".join(lines[-10:])
+        # Drain without retaining Server-controlled text or possible secrets.
+        for _ in stderr:
+            pass
 
 
 def create_stdio_mcp_client(
@@ -275,29 +328,29 @@ def create_stdio_mcp_client(
     )
 
 
-def _mcp_tool_from_response(payload: dict[str, Any]) -> MCPTool:
+def _mcp_tool_from_response(
+    payload: dict[str, Any],
+    permission_resolver: PermissionResolver,
+) -> MCPTool:
     annotations = payload.get("annotations") or {}
+    permission = permission_resolver.resolve_mcp_annotations(
+        name=str(payload["name"]),
+        annotations=annotations,
+    )
     return MCPTool(
         name=str(payload["name"]),
         description=str(payload.get("description") or payload.get("title") or ""),
         input_schema=payload.get("inputSchema") or {"type": "object"},
         output_schema=payload.get("outputSchema") or {"type": "object"},
-        permission_level=_permission_from_annotations(annotations),
-        requires_approval=_requires_approval_from_annotations(annotations),
+        permission_level=permission.permission_level,
+        requires_approval=permission.requires_approval,
+        idempotent=bool(
+            annotations.get("idempotentHint") is True
+            or permission.permission_level == "read_only"
+        ),
     )
 
 
-def _permission_from_annotations(annotations: dict[str, Any]) -> str:
-    if annotations.get("destructiveHint") or annotations.get("openWorldHint"):
-        return "external_side_effect"
-    if annotations.get("readOnlyHint") is False:
-        return "write_safe"
-    return "read_only"
-
-
-def _requires_approval_from_annotations(annotations: dict[str, Any]) -> bool:
-    return bool(
-        annotations.get("destructiveHint")
-        or annotations.get("openWorldHint")
-        or annotations.get("readOnlyHint") is False
-    )
+# Explicit compatibility name: this adapter intentionally remains fixed to
+# protocol revision 2025-06-18 and is not the default stdio implementation.
+MCP20250618StdioAdapter = MCPStdioClient

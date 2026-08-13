@@ -204,8 +204,8 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 "auto",
             )
             self.assertEqual(
-                [tool.name for tool in persisted_run.context_snapshot.tools],
-                ["demo.lookup"],
+                persisted_run.context_snapshot.tools.enabled_tools,
+                ("demo.lookup",),
             )
 
             event = await anext(iterator)

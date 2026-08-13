@@ -9,12 +9,18 @@ from ai_agent_platform.api.routes import (
     create_health_router,
     create_knowledge_bases_router,
     create_model_registry_router,
+    create_mcp_registry_router,
     create_sessions_router,
     create_workspaces_router,
     create_project_memories_router,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueue
-from ai_agent_platform.integrations import DirectoryPicker, LLMClient
+from ai_agent_platform.integrations import (
+    DirectoryPicker,
+    LLMClient,
+    MCPConnectionManager,
+    MCPRegistryService,
+)
 from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.services import (
     ChangeSetService,
@@ -39,6 +45,8 @@ def create_api_router(
     task_queue: TaskQueue,
     model_registry: ModelRegistryService,
     directory_picker: DirectoryPicker,
+    mcp_registry: MCPRegistryService,
+    mcp_connection_manager: MCPConnectionManager | None = None,
 ) -> APIRouter:
     router = APIRouter()
     router.include_router(
@@ -46,6 +54,7 @@ def create_api_router(
             metrics,
             service_name=settings.app_name,
             session_storage=settings.session_repository,
+            mcp_connection_manager=mcp_connection_manager,
         )
     )
     router.include_router(
@@ -60,6 +69,7 @@ def create_api_router(
     router.include_router(
         create_model_registry_router(model_registry, session_service, settings)
     )
+    router.include_router(create_mcp_registry_router(mcp_registry, settings))
     router.include_router(
         create_chat_router(
             session_service,

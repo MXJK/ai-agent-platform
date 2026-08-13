@@ -42,7 +42,6 @@ from ai_agent_platform.agents.coding.models import (
 from ai_agent_platform.agents.coding.planner import (
     LLMStructuredAgentPlanner,
     RuleBasedAgentPlanner,
-    approval_required_tools as collect_approval_required_tools,
     bounded_confidence,
     classify_context_source,
     native_tool_messages,
@@ -80,7 +79,18 @@ from ai_agent_platform.domain import (
     RunContextSnapshot,
 )
 from ai_agent_platform.integrations.llm import LLMUsageAccumulator, collect_llm_usage
-from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext, ToolRegistry
+from ai_agent_platform.integrations.permissions import (
+    PermissionDecision,
+    ToolApproval,
+    ToolUseContext,
+    canonical_arguments_hash,
+)
+from ai_agent_platform.integrations.tools import (
+    ToolCall,
+    ToolExecutionContext,
+    ToolRegistry,
+    summarize_tool_arguments,
+)
 
 
 CHANGE_INTENTS = {"change_planning", "bug_investigation"}
@@ -239,6 +249,9 @@ class CodingAgentRuntime:
     ) -> AgentRunResult:
         snapshot_instructions: list[ContextSource] = []
         additional_directories: list[dict[str, Any]] = []
+        enabled_tools = [spec.name for spec in self._tools.list_specs()]
+        workspace_role = "admin"
+        approval_policy = self._approval_policy
         cwd = workspace_root
         if run_context is not None:
             run_id = run_context.metadata.run_id
@@ -248,6 +261,13 @@ class CodingAgentRuntime:
             workspace_root = run_context.project.workspace_root
             cwd = run_context.project.cwd
             actor_user_id = run_context.identity.actor_user_id
+            workspace_role = run_context.identity.workspace_role
+            approval_policy = _snapshot_config_value(
+                run_context.project.project_config,
+                "runtime",
+                "agent_approval_policy",
+                default=self._approval_policy,
+            )
             focus_files = list(run_context.instructions.focus_files)
             history = [
                 {"role": item.role, "content": item.content}
@@ -275,6 +295,9 @@ class CodingAgentRuntime:
                 }
                 for item in run_context.additional_directories
             ]
+            if run_context.tools.enabled_tools is not None:
+                enabled_tools = list(run_context.tools.enabled_tools)
+            self._tools.select(tuple(enabled_tools))
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = {
@@ -297,8 +320,13 @@ class CodingAgentRuntime:
             "workspace_id": workspace_id,
             "workspace_root": workspace_root,
             "actor_user_id": actor_user_id,
+            "workspace_role": workspace_role,
+            "authorized_workspace_root": workspace_root,
+            "approval_policy": approval_policy,
+            "tool_approvals": [],
             "cwd": cwd,
             "additional_directories": additional_directories,
+            "enabled_tools": enabled_tools,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [
@@ -336,7 +364,11 @@ class CodingAgentRuntime:
             "context_sources": [],
             "rag_context_sources": [],
             "memory_context_sources": [],
-            "context_warnings": [],
+            "context_warnings": (
+                list(run_context.instructions.diagnostics)
+                if run_context is not None
+                else []
+            ),
             "knowledge_base_catalog": [],
             "selected_knowledge_base_ids": [],
             "context_route": "repo",
@@ -489,6 +521,7 @@ class CodingAgentRuntime:
         run_id: str,
         approved: bool,
         feedback: Optional[str] = None,
+        approved_by: str | None = None,
     ) -> AgentRunResult:
         record = self.get_run(run_id)
         resume_pending = (
@@ -528,6 +561,7 @@ class CodingAgentRuntime:
                             "feedback": feedback or "",
                             "message": feedback or "",
                             "action": "continue",
+                            "approved_by": approved_by or "",
                         }
                     ),
                     config,
@@ -1004,6 +1038,43 @@ class CodingAgentRuntime:
             return self._run_store.get(run_id).context_snapshot
         except KeyError:
             return None
+
+    def _tools_for_state(self, state: CodingAgentState):
+        selected_values = state.get("enabled_tools")
+        selected = (
+            tuple(selected_values)
+            if selected_values is not None
+            else tuple(spec.name for spec in self._tools.list_specs())
+        )
+        return self._tools.select(selected)
+
+    def _tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
+        approvals = tuple(
+            ToolApproval.from_mapping(item)
+            for item in state.get("tool_approvals", [])
+        )
+        process_tools = tuple(spec.name for spec in self._tools.list_specs())
+        selected_values = state.get("enabled_tools")
+        return ToolUseContext(
+            conversation_id=state["conversation_id"],
+            workspace_id=state["workspace_id"],
+            workspace_root=state["workspace_root"],
+            authorized_workspace_root=state.get("authorized_workspace_root"),
+            run_id=state.get("run_id"),
+            actor_user_id=state.get("actor_user_id", ""),
+            workspace_role=state.get("workspace_role", "viewer"),
+            approval_policy=state.get("approval_policy", self._approval_policy),
+            process_allowed_tools=process_tools,
+            project_allowed_tools=(
+                tuple(selected_values) if selected_values is not None else None
+            ),
+            approvals=approvals,
+        )
+
+    def _visible_tool_specs(self, state: CodingAgentState) -> list[Any]:
+        return self._tools_for_state(state).list_specs(
+            context=self._tool_use_context(state)
+        )
 
     def _build_result(
         self,
@@ -1549,7 +1620,7 @@ class CodingAgentRuntime:
         round_number = state.get("exploration_round", 0) + 1
         tool_specs = [
             spec
-            for spec in self._tools.list_specs()
+            for spec in self._visible_tool_specs(state)
             if spec.name in READ_ONLY_REPOSITORY_TOOLS
         ]
         proposed = self._planner.plan_tool_calls(state, tool_specs)
@@ -1700,20 +1771,76 @@ class CodingAgentRuntime:
         )
 
     def _execute_exploration(self, state: CodingAgentState) -> CodingAgentState:
-        context = ToolExecutionContext(
-            conversation_id=state["conversation_id"],
-            workspace_id=state["workspace_id"],
-            workspace_root=state["workspace_root"],
-            run_id=state.get("run_id"),
-        )
+        context = self._tool_use_context(state)
         calls = state.get("analysis_tool_calls", [])
+        tools = self._tools_for_state(state)
+        specs = self._visible_tool_specs(state)
+        decisions = [
+            (call, tools.resolve_permission(call, context, phase="plan"))
+            for call in calls
+        ]
+        approval_items = [
+            _permission_approval_item(
+                call,
+                decision,
+                specs,
+                run_id=state.get("run_id", ""),
+            )
+            for call, decision in decisions
+            if decision.effect == "ask"
+        ]
+        approvals = list(state.get("tool_approvals", []))
+        if approval_items:
+            response = interrupt(
+                {
+                    "type": "tool_plan_review",
+                    "approval_required": True,
+                    "reason": "repository exploration tools require approval",
+                    "workspace_id": state["workspace_id"],
+                    "planned_tools": [call.name for call in calls],
+                    "approval_required_tools": approval_items,
+                    "tool_calls": [
+                        {
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }
+                        for call in calls
+                    ],
+                }
+            )
+            approved = (
+                bool(response.get("approved"))
+                if isinstance(response, dict)
+                else bool(response)
+            )
+            approved_by = (
+                str(response.get("approved_by") or "")
+                if isinstance(response, dict)
+                else ""
+            ) or state.get("actor_user_id", "")
+            if approved:
+                for call, decision in decisions:
+                    if decision.effect != "ask":
+                        continue
+                    approvals.append(
+                        tools.issue_approval(
+                            call,
+                            context,
+                            approved_by=approved_by,
+                        ).to_dict()
+                    )
+                context = context.with_approvals(
+                    tuple(ToolApproval.from_mapping(item) for item in approvals)
+                )
         results = [
-            self._tools.execute(call, context=context).to_response()
+            tools.execute(call, context=context).to_response()
             for call in calls
         ]
         return {
             "exploration_results": results,
             "tool_results": list(state.get("tool_results", [])) + results,
+            "tool_approvals": approvals,
             "trace": _append_trace(
                 state,
                 node="execute_exploration",
@@ -1913,7 +2040,7 @@ class CodingAgentRuntime:
         }
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
-        tool_specs = self._tools.list_specs()
+        tool_specs = self._visible_tool_specs(state)
         uses_native = bool(
             getattr(self._planner, "uses_native_tool_calling", False)
         )
@@ -1924,18 +2051,48 @@ class CodingAgentRuntime:
                 for call in self._planner.plan_tool_calls(state, tool_specs)
                 if call.name not in READ_ONLY_REPOSITORY_TOOLS
             ]
+            permission_context = self._tool_use_context(state)
+            permission_decisions = [
+                (
+                    call,
+                    self._tools_for_state(state).resolve_permission(
+                        call,
+                        permission_context,
+                        phase="plan",
+                    ),
+                )
+                for call in tool_calls
+            ]
+            denied_calls = [
+                call for call, item in permission_decisions if item.effect == "deny"
+            ]
+            tool_calls = [
+                call for call, item in permission_decisions if item.effect != "deny"
+            ]
             analysis_calls, change_calls, validation_calls = partition_tool_calls(
                 tool_calls
             )
-            approval_tools = collect_approval_required_tools(tool_calls, tool_specs)
+            approval_tools = [
+                _permission_approval_item(
+                    call,
+                    item,
+                    tool_specs,
+                    run_id=state.get("run_id", ""),
+                )
+                for call, item in permission_decisions
+                if item.effect == "ask"
+            ]
             return {
                 "tool_calls": list(state.get("tool_calls", [])) + tool_calls,
                 "analysis_tool_calls": analysis_calls,
                 "change_tool_calls": change_calls,
                 "validation_tool_calls": validation_calls,
                 "repair_tool_calls": [],
+                "repair_approval_tool_calls": [],
                 "approval_required_tools": approval_tools,
                 "native_tool_loop_active": False,
+                "terminal_status": "blocked" if denied_calls else "",
+                "terminal_reason": "permission_denied" if denied_calls else "",
                 "trace": _append_trace(
                     state,
                     node="plan_tools",
@@ -2085,27 +2242,47 @@ class CodingAgentRuntime:
             for call in tool_calls
             if call.name in SANDBOX_ARTIFACT_TOOLS and call not in analysis_calls
         )
-        approval_specs = tool_specs
-        if self._approval_policy == "always":
-            approval_specs = [replace(spec, requires_approval=True) for spec in tool_specs]
-        approval_tools = collect_approval_required_tools(tool_calls, approval_specs)
+        permission_context = self._tool_use_context(state)
+        permission_decisions = [
+            (
+                call,
+                self._tools_for_state(state).resolve_permission(
+                    call,
+                    permission_context,
+                    phase="plan",
+                ),
+            )
+            for call in tool_calls
+        ]
+        denied_calls = [call for call, item in permission_decisions if item.effect == "deny"]
+        tool_calls = [call for call, item in permission_decisions if item.effect != "deny"]
+        approval_tools = [
+            _permission_approval_item(
+                call,
+                item,
+                tool_specs,
+                run_id=state.get("run_id", ""),
+            )
+            for call, item in permission_decisions
+            if item.effect == "ask"
+        ]
         terminal_status = "completed" if not all_proposed_calls else ""
         terminal_reason = "model_completed" if not all_proposed_calls else ""
         final_errors: list[dict[str, Any]] = []
-        if self._approval_policy == "never" and approval_tools:
+        if denied_calls:
             native_messages.extend(
-                _synthetic_tool_message(call, "approval_policy_denied")
-                for call in tool_calls
+                _synthetic_tool_message(call, "permission_denied")
+                for call in denied_calls
             )
             answer, final_message, final_errors = self._finalize_native_session(
                 state,
                 native_messages,
-                reason="approval_policy_denied",
+                reason="permission_denied",
             )
             native_messages.append(final_message)
             native_answer = answer
             terminal_status = "blocked"
-            terminal_reason = "approval_policy_denied"
+            terminal_reason = "permission_denied"
             tool_calls = []
             analysis_calls = []
             change_calls = []
@@ -2118,6 +2295,7 @@ class CodingAgentRuntime:
             "change_tool_calls": change_calls,
             "validation_tool_calls": validation_calls,
             "repair_tool_calls": [],
+            "repair_approval_tool_calls": [],
             "approval_required_tools": approval_tools,
             "native_tool_messages": native_messages,
             "native_tool_round": native_round,
@@ -2228,7 +2406,7 @@ class CodingAgentRuntime:
                     decision = finalize(
                         native_messages,
                         reason=reason,
-                        tool_specs=self._tools.list_specs(),
+                        tool_specs=self._visible_tool_specs(state),
                     )
                 else:
                     decision = finalize(native_messages, reason=reason)
@@ -2295,6 +2473,7 @@ class CodingAgentRuntime:
             "change_tool_calls": [],
             "validation_tool_calls": [],
             "repair_tool_calls": [],
+            "repair_approval_tool_calls": [],
             "approval_required_tools": [],
             "native_tool_messages": native_messages,
             "native_tool_loop_active": True,
@@ -2350,9 +2529,37 @@ class CodingAgentRuntime:
             if isinstance(decision, dict)
             else ""
         )
+        approved_by = (
+            str(decision.get("approved_by") or "")
+            if isinstance(decision, dict)
+            else ""
+        ) or state.get("actor_user_id", "")
+        approvals = list(state.get("tool_approvals", []))
+        if approved:
+            required_call_ids = {
+                str(item.get("call_id") or "")
+                for item in state.get("approval_required_tools", [])
+                if isinstance(item, dict)
+            }
+            try:
+                tools = self._tools_for_state(state)
+                permission_context = self._tool_use_context(state)
+                for call in state.get("tool_calls", []):
+                    if call.call_id not in required_call_ids:
+                        continue
+                    grant = tools.issue_approval(
+                        call,
+                        permission_context,
+                        approved_by=approved_by,
+                    )
+                    approvals.append(grant.to_dict())
+            except PermissionError as exc:
+                approved = False
+                feedback = str(exc)
         review = {"approved": approved, "feedback": feedback}
         update: CodingAgentState = {
             "review_decision": review,
+            "tool_approvals": approvals,
             "trace": _append_trace(
                 state,
                 node="review_tool_plan",
@@ -2965,6 +3172,51 @@ def _context_sources_from_result(
             )
         )
     return sources
+
+
+def _snapshot_config_value(
+    snapshot: dict[str, object],
+    section: str,
+    field_name: str,
+    *,
+    default: str,
+) -> str:
+    config = snapshot.get("config")
+    if not isinstance(config, dict):
+        return default
+    section_value = config.get(section)
+    if not isinstance(section_value, dict):
+        return default
+    field_value = section_value.get(field_name)
+    if not isinstance(field_value, dict):
+        return default
+    value = str(field_value.get("value") or default)
+    return value if value in {"always", "on_request", "never"} else default
+
+
+def _permission_approval_item(
+    tool_call: ToolCall,
+    decision: PermissionDecision,
+    tool_specs: list[Any],
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    spec = next((item for item in tool_specs if item.name == tool_call.name), None)
+    return {
+        "name": tool_call.name,
+        "run_id": run_id,
+        "call_id": tool_call.call_id,
+        "arguments_hash": canonical_arguments_hash(tool_call.arguments),
+        "provider": spec.provider if spec is not None else "unknown",
+        "permission_level": (
+            spec.permission_level if spec is not None else "unknown"
+        ),
+        "requires_approval": True,
+        "matched_rule": decision.matched_rule,
+        "reason": decision.reason,
+        "risk_summary": decision.risk_summary,
+        "arguments_summary": summarize_tool_arguments(tool_call.arguments),
+    }
 
 
 __all__ = [

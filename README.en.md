@@ -62,6 +62,8 @@ startup.
   "process_security": {
     "workspace_allowed_roots": ["/srv/code"],
     "mcp_allowed": true,
+    "skills_allowed": true,
+    "skill_allowlist": ["review"],
     "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
   },
   "runtime": {
@@ -72,6 +74,8 @@ startup.
   "project_session": {
     "project_instructions": ["Run affected tests first."],
     "enabled_tools": ["file_symbol_locator"],
+    "skills_enabled": true,
+    "enabled_skills": ["review"],
     "mcp_enabled": false
   }
 }
@@ -94,6 +98,56 @@ containers retain `ResolvedConfig.safe_snapshot()` as `config_snapshot`, the
 supported serialization view for logs, Run snapshots, and configuration
 diagnostics. Structured logging also recursively redacts nested keys, secrets,
 tokens, and credential-bearing connection strings.
+
+## Skill discovery and slash commands
+
+When `skills_enabled` is true, the runtime discovers only `SKILL.md` files below
+these roots:
+
+- bundled: `ai_agent_platform/bundled_skills/<skill>/SKILL.md`;
+- user: `~/.ai-agent-platform/skills/<skill>/SKILL.md`;
+- project: `.agents/skills/<skill>/SKILL.md` under the authorized Workspace.
+
+The fixed precedence is `project > user > bundled`, with qualified names such as
+`project:review`. Same-source duplicates use the lexicographically first relative
+path and emit an error diagnostic. Cross-source overrides and slash command/alias
+conflicts emit stable diagnostics, and final definitions are sorted by normalized
+name. Project Skills always enter the Run snapshot as `untrusted_project_skill`
+context, including when they override a user or bundled definition.
+
+The first version accepts strict, duplicate-free YAML frontmatter:
+
+```markdown
+---
+name: review
+description: Review requested code changes
+agents: [coding]
+modes: [default]
+context_budget: 4000
+tools: [repo.search_code, repo.read_file]
+command:
+  name: review
+  description: Review code in the current Workspace
+  usage: "[path]"
+  aliases: [rv]
+---
+Inspect live evidence before giving review findings.
+```
+
+Only those fields are accepted. A file is limited to 64 KiB; one discovery pass
+considers at most 64 candidates and loads at most 128 KiB of text. One Skill can
+request at most 16,000 context characters and still shares the Run instruction
+budget. Invalid UTF-8, malformed or duplicate YAML, unknown fields, oversized
+files, and individual bad Skills become diagnostics without aborting discovery.
+Symlink roots, directories, and `SKILL.md` files are not followed, and canonical
+paths must remain below their source root.
+
+Skills are declarative data. Python and shell files are never executed, and
+Markdown cannot register functions. `tools` lists requirements only: a Skill with
+missing registered tools is not injected, while existing tools remain governed by
+`ToolUseContext`, sandbox, and allow/ask/deny policy. Skills cannot register tools,
+reduce approval, expand allowlists, or grant permission. The slash command registry
+stores only metadata and a target Skill; it does not execute a command.
 
 The shared composer offers:
 
@@ -476,6 +530,79 @@ idempotent tools; the same `run_id + call_id` replays a cached result and reject
 argument changes. MCP tools use the same registry contract: `structuredContent`
 is preferred, text blocks are normalized, and `isError=true` becomes a stable
 tool failure instead of a successful payload.
+
+### MCP lifecycle and transports
+
+MCP uses the exactly pinned official Python SDK `mcp==2.0.0` to negotiate the
+current `2026-07-28` protocol. `stdio` and stateless `streamable_http` are the
+current paths. The fixed `2025-06-18` client is available only as the explicit
+`stdio_2025_06_18` adapter; old HTTP+SSE requires `legacy_sse` plus
+`legacy_compatibility=true` and is never a default fallback. The decision is
+recorded in
+[`docs/adr/0001-mcp-official-python-sdk-v2.md`](docs/adr/0001-mcp-official-python-sdk-v2.md).
+
+`MCPConnectionManager` gives every Server its own connection, event loop,
+connection/request timeouts, idempotent retries, backoff, circuit breaker,
+catalog cache, cancellation, shutdown, and redacted status. One failed Server is
+isolated during startup. Only a failed `required=true` Server makes
+`/api/v1/health` return `503` with `ready=false`; an optional failure degrades
+health without blocking startup. `tools/list` consumes every page, rejects
+repeated cursors or tool names, sorts deterministically, honors
+`ttlMs`/`cacheScope`, and supports explicit refresh. Calls preserve the
+ToolRegistry call ID and expose stable timeout, cancellation, connection,
+circuit, and tool-error codes.
+
+HTTP Servers require an explicit host allowlist. HTTPS is the default;
+redirects and proxy environments are disabled, and private/local resolutions
+are rejected unless explicitly enabled. Credentials enter only through shared
+`SecretStore` references in `header_refs`/`env_refs`, never through snapshots,
+diagnostics, or object representations. Reserved/injected headers, dangerous
+stdio variables, and inherited API keys are blocked. All MCP permission
+annotations pass through the central `PermissionResolver`; missing or high-risk
+hints conservatively become external side effects rather than authorization.
+
+In local administration mode, open **MCP Connections** (`/#mcp`) to register,
+edit, test/refresh, enable, disable, or delete a Server. The UI supports current
+stdio, current Streamable HTTP, and both explicit compatibility paths while
+showing per-Server state, protocol version, retry errors, and discovered versus
+registered tool counts. UI writes require at least
+`MCP_CONFIG_PATH=/path/to/mcp.json`; the file may be absent and the first save
+creates it atomically with mode `0600`. With `MCP_ENABLED=true`, a save
+immediately replaces that Server's connection and synchronizes the ToolRegistry.
+Otherwise the configuration is persisted and shown as awaiting restart. Literal
+environment variables/headers are separate from Secret inputs. Secret values go
+only to the shared `SecretStore`; the config file and later GET responses retain
+only references or key names. Management writes are exposed only in loopback
+local mode with `AUTH_MODE=disabled`.
+
+The management API consists of `GET /api/v1/mcp/servers`,
+`PUT /api/v1/mcp/servers/{name}`,
+`PATCH /api/v1/mcp/servers/{name}/enabled`,
+`POST /api/v1/mcp/servers/{name}/test`, and
+`DELETE /api/v1/mcp/servers/{name}`. Each mutation affects only its target
+Server; disable/delete closes that connection and atomically removes its dynamic
+tools without rebuilding other Server lifecycles.
+
+```json
+{
+  "mcp_servers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "example_mcp_server"],
+      "env_refs": {"EXAMPLE_TOKEN": "keyring:mcp/example"},
+      "required": false
+    },
+    "remote-tools": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "allowed_hosts": ["mcp.example.com"],
+      "header_refs": {"Authorization": "keyring:mcp/remote"},
+      "required": true
+    }
+  }
+}
+```
 
 ### Project instructions
 
@@ -1045,7 +1172,8 @@ configuration is resolved through the fixed five-layer precedence before the
 factory is entered.
 
 The returned `RuntimeContainer` explicitly owns its immutable resolved config,
-redacted snapshot, `ExecutionContextFactory`, services, and resources and records `config_loaded`,
+redacted snapshot, shared `SecretStore`, `MCPConnectionManager`,
+`ExecutionContextFactory`, services, and resources and records `config_loaded`,
 `stores_ready`, `mcp_ready`, `tools_ready`, and
 `agent_ready` startup checkpoints in order. FastAPI lifespan shutdown, Worker
 shutdown, and partial-startup rollback use the same idempotent `close()`;

@@ -10,10 +10,12 @@ keyring>=25.0.0,<26.0.0
 google-genai>=2.14.0,<3.0.0
 langgraph>=0.6.0
 langgraph-checkpoint-postgres>=2.0.0
+mcp==2.0.0
 chromadb>=0.5.0
 psycopg[binary]>=3.2.0
 psycopg-pool>=3.2.0
 pypdf>=5.0.0
+PyYAML>=6.0.0,<7.0.0
 python-docx>=1.1.0
 python-multipart>=0.0.18
 qdrant-client>=1.16.0,<1.18.0

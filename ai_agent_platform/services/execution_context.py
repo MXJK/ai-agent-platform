@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from ai_agent_platform.agents.coding.context import load_project_instructions
 from ai_agent_platform.agents.coding.text import extract_paths, unique
+from ai_agent_platform.core import ConfigResolver, ResolvedConfig
 from ai_agent_platform.domain import (
     AdditionalDirectoryContext,
     ConversationMessageSnapshot,
@@ -28,9 +29,10 @@ from ai_agent_platform.domain import (
     RunContextSnapshot,
     RunMetadata,
     SessionContext,
-    ToolDefinitionSnapshot,
+    ToolSelectionContext,
     canonical_project_config,
 )
+from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.model_registry import ModelSelection
 
 
@@ -65,7 +67,9 @@ class ExecutionContextFactory:
         max_context_messages: int = 12,
         max_instruction_chars: int = 16000,
         config_snapshot: Mapping[str, object] | None = None,
-        tool_registry: Any = None,
+        skill_service: Any = None,
+        process_config: ResolvedConfig | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -76,6 +80,8 @@ class ExecutionContextFactory:
         self._entrypoint_type = entrypoint_type
         self._max_context_messages = max_context_messages
         self._max_instruction_chars = max_instruction_chars
+        self._skill_service = skill_service
+        self._process_config = process_config
         self._tool_registry = tool_registry
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
@@ -114,6 +120,20 @@ class ExecutionContextFactory:
 
         workspace, workspace_root = self._resolve_workspace(workspace_id)
         workspace_role = self._resolve_workspace_role(workspace_id, actor)
+        effective_config, config_json, config_version = self._workspace_config(
+            workspace_root
+        )
+        tool_selection = self._tool_selection(effective_config)
+        context_message_limit = (
+            int(effective_config.llm_max_context_messages)
+            if effective_config is not None
+            else self._max_context_messages
+        )
+        instruction_char_limit = (
+            int(effective_config.agent_max_instruction_chars)
+            if effective_config is not None
+            else self._max_instruction_chars
+        )
         resolved_cwd = _resolve_cwd(workspace_root, cwd)
         normalized_focus = tuple(
             _validate_focus_path(workspace_root, item) for item in focus_files
@@ -133,13 +153,13 @@ class ExecutionContextFactory:
             try:
                 raw_history = build_agent_context(
                     session_id=conversation_id,
-                    max_context_messages=self._max_context_messages,
+                    max_context_messages=context_message_limit,
                     record_injection=False,
                 )
             except TypeError:
                 raw_history = build_agent_context(
                     session_id=conversation_id,
-                    max_context_messages=self._max_context_messages,
+                    max_context_messages=context_message_limit,
                 )
         else:
             messages = self._session_service.list_messages(
@@ -147,7 +167,7 @@ class ExecutionContextFactory:
             )
             raw_history = [
                 {"role": item.role, "content": item.content}
-                for item in messages[-self._max_context_messages :]
+                for item in messages[-context_message_limit:]
             ]
         history = tuple(
             ConversationMessageSnapshot(
@@ -183,11 +203,110 @@ class ExecutionContextFactory:
                 )
             except ValueError:
                 continue
-        instructions = load_project_instructions(
+        file_instructions = load_project_instructions(
             workspace_root=workspace_root,
             focus_files=unique(instruction_focus),
-            max_chars=self._max_instruction_chars,
+            max_chars=instruction_char_limit,
         )
+        instruction_snapshots = [
+            InstructionSourceSnapshot(
+                kind=item.kind,
+                path=item.path,
+                start_line=item.start_line,
+                end_line=item.end_line,
+                text=item.text,
+                reason=item.reason,
+                content_hash=item.content_hash,
+                truncated=item.truncated,
+                priority=_instruction_file_priority(item.path),
+            )
+            for item in file_instructions
+        ]
+        configured_instructions = (
+            tuple(effective_config.project_session.project_instructions)
+            if effective_config is not None
+            else ()
+        )
+        remaining_instruction_chars = max(
+            0,
+            instruction_char_limit
+            - sum(len(item.text) for item in instruction_snapshots),
+        )
+        instruction_provenance = (
+            effective_config.provenance_for("project_instructions").detail
+            if effective_config is not None
+            else "static process snapshot"
+        )
+        for index, text in enumerate(configured_instructions):
+            clipped = text[:remaining_instruction_chars]
+            instruction_snapshots.append(
+                InstructionSourceSnapshot(
+                    kind="config_instruction",
+                    path=(
+                        "config://project_session/project_instructions/"
+                        f"{index}"
+                    ),
+                    start_line=1,
+                    end_line=clipped.count("\n") + 1,
+                    text=clipped,
+                    reason=(
+                        "lower-priority project configuration instruction; "
+                        f"source={instruction_provenance}"
+                    ),
+                    content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    truncated=len(clipped) < len(text),
+                    priority=100,
+                )
+            )
+            remaining_instruction_chars = max(
+                0,
+                remaining_instruction_chars - len(clipped),
+            )
+        skill_diagnostics: tuple[str, ...] = ()
+        if self._skill_service is not None and remaining_instruction_chars > 0:
+            skill_options: dict[str, object] = {}
+            if effective_config is not None:
+                skill_options["enabled"] = bool(
+                    effective_config.skills_allowed
+                    and effective_config.skills_enabled
+                )
+                skill_options["enabled_skills"] = (
+                    effective_config.enabled_skills
+                    if effective_config.enabled_skills is not None
+                    else effective_config.skill_allowlist
+                )
+            if self._tool_registry is not None:
+                skill_options["available_tools"] = (
+                    tool_selection.enabled_tools or ()
+                )
+            selection = self._skill_service.build_context(
+                workspace_root=workspace_root,
+                agent="coding",
+                mode="default",
+                max_chars=remaining_instruction_chars,
+                **skill_options,
+            )
+            skill_diagnostics = tuple(
+                _skill_diagnostic_message(item) for item in selection.diagnostics
+            )
+            for item in selection.sources:
+                instruction_snapshots.append(
+                    InstructionSourceSnapshot(
+                        kind=item.kind,
+                        path=item.path,
+                        start_line=1,
+                        end_line=item.text.count("\n") + 1,
+                        text=item.text,
+                        reason=item.reason,
+                        content_hash=item.content_hash,
+                        truncated=item.truncated,
+                        priority=50,
+                    )
+                )
+                remaining_instruction_chars = max(
+                    0,
+                    remaining_instruction_chars - len(item.text),
+                )
         selection_values = (
             asdict(model_selection)
             if isinstance(model_selection, ModelSelection)
@@ -219,56 +338,75 @@ class ExecutionContextFactory:
                 workspace_revision=int(workspace.revision),
                 cwd=resolved_cwd,
                 git=_capture_git_context(workspace_root),
-                _project_config_json=self._config_json,
+                _project_config_json=config_json,
             ),
             instructions=InstructionContext(
-                sources=tuple(
-                    InstructionSourceSnapshot(
-                        kind=item.kind,
-                        path=item.path,
-                        start_line=item.start_line,
-                        end_line=item.end_line,
-                        text=item.text,
-                        reason=item.reason,
-                        content_hash=item.content_hash,
-                        truncated=item.truncated,
-                    )
-                    for item in instructions
-                ),
+                sources=tuple(instruction_snapshots),
                 focus_files=normalized_focus,
-                max_chars=self._max_instruction_chars,
+                max_chars=instruction_char_limit,
+                diagnostics=skill_diagnostics,
             ),
             additional_directories=additional,
-            tools=self._snapshot_tools(),
+            tools=tool_selection,
             metadata=RunMetadata(
                 run_id=resolved_run_id,
                 created_at=timestamp.astimezone(timezone.utc).isoformat(),
                 entrypoint_type=resolved_entrypoint,
-                config_version=self._config_version,
+                config_version=config_version,
                 _entrypoint_metadata_json=canonical_project_config(
                     entrypoint_metadata or {}
                 ),
             ),
         )
 
-    def _snapshot_tools(self) -> tuple[ToolDefinitionSnapshot, ...]:
-        list_specs = getattr(self._tool_registry, "list_specs", None)
-        specs = list_specs() if callable(list_specs) else []
-        return tuple(
-            ToolDefinitionSnapshot(
-                name=str(spec.name),
-                provider=str(spec.provider),
-                permission_level=str(spec.permission_level),
-                requires_approval=bool(spec.requires_approval),
-                risk_summary=str(spec.risk_summary),
-                max_output_chars=int(spec.max_output_chars),
-                timeout_seconds=float(spec.timeout_seconds),
-                max_retries=int(spec.max_retries),
-                idempotent=bool(spec.idempotent),
-                _input_schema_json=canonical_project_config(spec.input_schema),
-                _output_schema_json=canonical_project_config(spec.output_schema),
+    def _workspace_config(
+        self,
+        workspace_root: str,
+    ) -> tuple[ResolvedConfig | None, str, str]:
+        if self._process_config is None:
+            return None, self._config_json, self._config_version
+        resolved = ConfigResolver.resolve_workspace(
+            self._process_config,
+            workspace_root=workspace_root,
+        )
+        config_json = canonical_project_config(resolved.safe_snapshot())
+        version = "sha256:" + hashlib.sha256(
+            config_json.encode("utf-8")
+        ).hexdigest()[:16]
+        return resolved, config_json, version
+
+    def _tool_selection(
+        self,
+        config: ResolvedConfig | None,
+    ) -> ToolSelectionContext:
+        if self._tool_registry is None:
+            return ToolSelectionContext(
+                enabled_tools=(),
+                source="registry_unavailable",
+                version="sha256:4f53cda18c2baa0c",
             )
-            for spec in sorted(specs, key=lambda item: item.name)
+        available = tuple(spec.name for spec in self._tool_registry.list_specs())
+        configured = config.enabled_tools if config is not None else None
+        selected = tuple(configured) if configured is not None else available
+        view = self._tool_registry.select(selected)
+        effective = view.allowed_names
+        if config is not None and configured is not None:
+            provenance = config.provenance_for("enabled_tools")
+            source = f"{provenance.source.value}:{provenance.detail}"
+        elif config is not None and config.tool_allowlist is not None:
+            provenance = config.provenance_for("tool_allowlist")
+            source = f"process_cap:{provenance.source.value}:{provenance.detail}"
+        else:
+            source = "process_registry"
+        encoded = json.dumps(
+            list(effective),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return ToolSelectionContext(
+            enabled_tools=effective,
+            source=source,
+            version="sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
         )
 
     def _resolve_workspace(self, workspace_id: str) -> tuple[Any, str]:
@@ -321,6 +459,13 @@ class ExecutionContextFactory:
         return tuple(resolved)
 
 
+def _skill_diagnostic_message(value: Any) -> str:
+    code = str(getattr(value, "code", "skill_diagnostic"))
+    path = str(getattr(value, "path", "SKILL.md"))
+    message = str(getattr(value, "message", "Skill could not be loaded"))
+    return f"skill[{code}] {path}: {message}"[:1000]
+
+
 def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:
     root = Path(workspace_root).resolve()
     candidate = Path(cwd).expanduser() if cwd else root
@@ -335,6 +480,15 @@ def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:
     if resolved != root and root not in resolved.parents:
         raise ValueError("cwd escapes the registered workspace root")
     return str(resolved)
+
+
+def _instruction_file_priority(path: str) -> int:
+    name = Path(path).name
+    if name == "AGENTS.override.md":
+        return 400
+    if name == "AGENTS.md":
+        return 300
+    return 200
 
 
 def _validate_focus_path(workspace_root: str, value: str) -> str:

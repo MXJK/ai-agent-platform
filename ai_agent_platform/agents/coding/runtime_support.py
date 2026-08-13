@@ -336,7 +336,11 @@ def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
         "planned_tools": [call.name for call in state.get("tool_calls", [])],
         "approval_required_tools": state.get("approval_required_tools", []),
         "tool_calls": [
-            {"name": call.name, "arguments": call.arguments}
+            {
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+            }
             for call in state.get("tool_calls", [])
         ],
     }

@@ -99,7 +99,7 @@ class MCPProviderTests(unittest.TestCase):
             {"issue_id": "ISSUE-1"},
         )
 
-        with self.assertRaisesRegex(Exception, "permission denied") as raised:
+        with self.assertRaisesRegex(Exception, "isError=true") as raised:
             normalize_mcp_tool_result(
                 {
                     "content": [{"type": "text", "text": "permission denied"}],
@@ -147,6 +147,43 @@ class MCPProviderTests(unittest.TestCase):
         self.assertEqual(result.arguments_summary, {"text": "hello MCP"})
         self.assertEqual(client.calls, [("echo", {"text": "hello MCP"})])
 
+    def test_tool_registry_call_id_is_forwarded_to_mcp_client(self) -> None:
+        class CallIdClient(FakeMCPClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.call_ids: list[str | None] = []
+
+            def call_tool(
+                self,
+                name: str,
+                arguments: dict[str, object],
+                *,
+                call_id: str | None = None,
+            ) -> object:
+                self.call_ids.append(call_id)
+                return super().call_tool(name, arguments)
+
+        client = CallIdClient()
+        registry = create_coding_tool_registry(
+            mcp_providers=[MCPToolProvider(server_name="demo", client=client)]
+        )
+        result = registry.execute(
+            ToolCall(
+                name="mcp.demo.echo",
+                arguments={"text": "stable"},
+                call_id="provider-call-42",
+            ),
+            context=ToolExecutionContext(
+                conversation_id="sess_1",
+                workspace_id="workspace_main",
+                workspace_root=".",
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.call_id, "provider-call-42")
+        self.assertEqual(client.call_ids, ["provider-call-42"])
+
     def test_loads_mcp_server_configs_from_json(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "mcp.json"
@@ -158,7 +195,7 @@ class MCPProviderTests(unittest.TestCase):
       "transport": "stdio",
       "command": "github-mcp-server",
       "args": ["--read-only"],
-      "env": {"GITHUB_TOKEN": "test-token"}
+      "env_refs": {"GITHUB_TOKEN": "env:GITHUB_TOKEN"}
     },
     "disabled": {
       "enabled": false,
@@ -177,7 +214,8 @@ class MCPProviderTests(unittest.TestCase):
         self.assertEqual(configs[0].transport, "stdio")
         self.assertEqual(configs[0].command, "github-mcp-server")
         self.assertEqual(configs[0].args, ["--read-only"])
-        self.assertEqual(configs[0].env, {"GITHUB_TOKEN": "test-token"})
+        self.assertEqual(configs[0].env, {})
+        self.assertEqual(configs[0].env_refs, {"GITHUB_TOKEN": "env:GITHUB_TOKEN"})
 
     def test_stdio_mcp_client_discovers_and_calls_subprocess_tools(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -270,7 +308,7 @@ class MCPProviderTests(unittest.TestCase):
                 "mcp:startup_demo",
             )
 
-    def test_agent_dynamically_executes_read_only_mcp_tool(self) -> None:
+    def test_agent_centrally_approves_mcp_reported_read_only_tool(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _create_app_with_fake_mcp(temp_dir, server_name="dynamic_demo")
 
@@ -295,11 +333,33 @@ class MCPProviderTests(unittest.TestCase):
                 run_status_body = wait_for_agent_run(
                     client,
                     run_response.json()["run_id"],
+                )
+                pending = run_status_body["pending_approval"]
+                approval_item = next(
+                    item
+                    for item in pending["approval_required_tools"]
+                    if item["name"] == "mcp.dynamic_demo.echo"
+                )
+                resume_response = client.post(
+                    f"/api/v1/agent/runs/{run_response.json()['run_id']}/resume",
+                    json={"approved": True, "feedback": "approved for test"},
+                )
+                completed_body = wait_for_agent_run(
+                    client,
+                    run_response.json()["run_id"],
                     terminal_statuses=("completed", "failed"),
                 )
 
             self.assertEqual(run_response.status_code, 202)
-            body = run_status_body["result"]
+            self.assertEqual(run_status_body["status"], "waiting_approval")
+            self.assertEqual(
+                approval_item["matched_rule"],
+                "provider.annotation_requires_central_approval",
+            )
+            self.assertTrue(approval_item["call_id"])
+            self.assertEqual(len(approval_item["arguments_hash"]), 64)
+            self.assertEqual(resume_response.status_code, 202)
+            body = completed_body["result"]
             self.assertEqual(body["status"], "completed")
             tool_names = [tool_call["name"] for tool_call in body["tool_calls"]]
             self.assertIn("mcp.dynamic_demo.echo", tool_names)

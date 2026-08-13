@@ -28,7 +28,7 @@ from .run_context import (
     RunContextSnapshot,
     RunMetadata,
     SessionContext,
-    ToolDefinitionSnapshot,
+    ToolSelectionContext,
     canonical_project_config,
 )
 from .query import (
@@ -65,7 +65,7 @@ __all__ = [
     "Session",
     "SessionSummary",
     "SessionContext",
-    "ToolDefinitionSnapshot",
+    "ToolSelectionContext",
     "TokenUsageRecord",
     "TokenUsageTotals",
     "UserPreferences",

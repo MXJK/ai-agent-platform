@@ -6,6 +6,8 @@ class HealthResponse(BaseModel):
     service: str
     session_storage: str = "memory"
     persistent_sessions: bool = False
+    ready: bool = True
+    mcp_servers: list[dict[str, object]] = Field(default_factory=list)
 
 
 class TimingMetricResponse(BaseModel):

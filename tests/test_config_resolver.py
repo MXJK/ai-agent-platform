@@ -17,6 +17,74 @@ from ai_agent_platform.core import (
 
 
 class ConfigResolverTests(unittest.TestCase):
+    def test_process_resolution_ignores_service_cwd_project_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            service_cwd = root / "service"
+            workspace = root / "workspace"
+            for item in (service_cwd, workspace):
+                (item / ".ai-agent-platform").mkdir(parents=True)
+            (service_cwd / ".ai-agent-platform" / "config.json").write_text(
+                json.dumps(
+                    {"project_session": {"enabled_tools": ["cwd.tool"]}}
+                ),
+                encoding="utf-8",
+            )
+            (workspace / ".ai-agent-platform" / "config.json").write_text(
+                json.dumps(
+                    {
+                        "project_session": {
+                            "enabled_tools": ["workspace.tool"],
+                            "project_instructions": ["workspace rules"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            os.chdir(service_cwd)
+            try:
+                process = ConfigResolver.from_default_locations(
+                    env={
+                        "AI_AGENT_PLATFORM_USER_CONFIG": str(root / "missing.json")
+                    },
+                    dotenv_path=root / "missing.env",
+                ).resolve_process()
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertIsNone(process.enabled_tools)
+            self.assertEqual(process.project_instructions, ())
+            resolved = ConfigResolver.resolve_workspace(
+                process,
+                workspace_root=workspace,
+            )
+            self.assertEqual(resolved.enabled_tools, ("workspace.tool",))
+            self.assertEqual(resolved.project_instructions, ("workspace rules",))
+            self.assertEqual(
+                resolved.provenance_for("enabled_tools").detail,
+                "workspace:.ai-agent-platform/config.json",
+            )
+
+    def test_explicit_project_config_selector_is_process_controlled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_path = root / "controlled.json"
+            project_path.write_text(
+                json.dumps(
+                    {"project_session": {"enabled_tools": ["controlled.tool"]}}
+                ),
+                encoding="utf-8",
+            )
+            resolved = ConfigResolver.from_default_locations(
+                env={
+                    "AI_AGENT_PLATFORM_PROJECT_CONFIG": str(project_path),
+                    "AI_AGENT_PLATFORM_USER_CONFIG": str(root / "missing.json"),
+                },
+                dotenv_path=root / "missing.env",
+            ).resolve_process()
+        self.assertEqual(resolved.enabled_tools, ("controlled.tool",))
+
     def test_merges_all_layers_in_order_and_tracks_every_field(self) -> None:
         resolver = ConfigResolver(
             user_config={
@@ -224,7 +292,12 @@ class ConfigResolverTests(unittest.TestCase):
             (
                 {"runtime": {"agent_approval_policy": "always"}},
                 {"runtime": {"agent_approval_policy": "never"}},
-                "more approval",
+                "tighten permission",
+            ),
+            (
+                {"runtime": {"agent_approval_policy": "never"}},
+                {"runtime": {"agent_approval_policy": "on_request"}},
+                "tighten permission",
             ),
         )
         for user_config, project_config, message in weakening_cases:
@@ -237,6 +310,17 @@ class ConfigResolverTests(unittest.TestCase):
                     project_config=project_config,
                     env={},
                 ).resolve()
+
+        deny_asks = ConfigResolver(
+            user_config={
+                "runtime": {"agent_approval_policy": "on_request"}
+            },
+            project_config={
+                "runtime": {"agent_approval_policy": "never"}
+            },
+            env={},
+        ).resolve()
+        self.assertEqual(deny_asks.agent_approval_policy, "never")
 
     def test_process_denies_mcp_skills_and_tool_expansion(self) -> None:
         cases = (
