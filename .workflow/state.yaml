@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "SKILL-DISCOVERY"
-next_action: "Review and explicitly authorize Alembic 20260810_0020 before starting PostgreSQL runtime."
+active_task: "MCP-LIFECYCLE-V2"
+next_action: "Review and merge the conflict-resolved MCP lifecycle branch; no implementation work remains."
 blockers: []
-last_verified_commit: "cfdce9b1546d07eb1e063974c759725b6c49d47c"
-updated_at: "2026-08-12T16:53:49+08:00"
+last_verified_commit: "6e9589f5bafe04ee731c2bcb46f6f037958be799"
+updated_at: "2026-08-13T13:04:41+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

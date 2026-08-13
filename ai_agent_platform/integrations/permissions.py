@@ -153,6 +153,46 @@ class PermissionDecision:
 class PermissionResolver:
     """Resolve hard boundaries, project restrictions, and exact approvals."""
 
+    def resolve_mcp_annotations(
+        self,
+        *,
+        name: str,
+        annotations: Mapping[str, Any] | None,
+    ) -> PermissionRequest:
+        """Convert untrusted MCP hints into conservative local metadata.
+
+        This conversion is deliberately owned by the central resolver.  The
+        resulting ``permission_source`` still forces the normal display/plan/
+        execute policy path to treat the metadata as advisory rather than as
+        an authorization grant.
+        """
+
+        hints = dict(annotations or {})
+        destructive = hints.get("destructiveHint") is True
+        open_world = hints.get("openWorldHint") is True
+        explicitly_read_only = hints.get("readOnlyHint") is True
+        explicitly_writable = hints.get("readOnlyHint") is False
+        if destructive or open_world:
+            permission_level = "external_side_effect"
+        elif explicitly_writable:
+            permission_level = "write_safe"
+        elif explicitly_read_only:
+            permission_level = "read_only"
+        else:
+            # Missing hints are not evidence that a remote operation is safe.
+            permission_level = "external_side_effect"
+        requires_approval = permission_level != "read_only"
+        return PermissionRequest(
+            name=name,
+            permission_level=permission_level,
+            requires_approval=requires_approval,
+            provider="mcp",
+            risk_summary=(
+                f"MCP tool {name} reports advisory {permission_level} metadata."
+            ),
+            permission_source="mcp_annotation",
+        )
+
     def resolve(
         self,
         request: PermissionRequest,

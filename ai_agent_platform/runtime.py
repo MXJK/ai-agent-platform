@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 import logging
 from pathlib import Path
 from threading import Lock
@@ -26,6 +27,8 @@ from ai_agent_platform.core import (
 from ai_agent_platform.integrations import (
     DirectoryPicker,
     LLMClient,
+    MCPConnectionManager,
+    MCPRegistryService,
     MCPToolProvider,
     RAGService,
     SystemDirectoryPicker,
@@ -115,6 +118,7 @@ class RuntimeContainer:
     usage_ledger: UsageLedgerService | None = None
     llm_client: LLMClient | None = None
     model_registry: ModelRegistryService | None = None
+    secret_store: Any = field(default=None, repr=False)
     game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
     project_memory_service: ProjectMemoryService | None = None
@@ -123,6 +127,8 @@ class RuntimeContainer:
     rag_service: RAGService | None = None
     knowledge_base_service: KnowledgeBaseService | None = None
     mcp_providers: list[MCPToolProvider] = field(default_factory=list)
+    mcp_connection_manager: MCPConnectionManager | None = None
+    mcp_registry: MCPRegistryService | None = None
     tool_registry: ToolRegistry | None = None
     skill_service: SkillService | None = None
     skill_catalog: SkillCatalog | None = None
@@ -243,9 +249,11 @@ class ApplicationFactory:
             )
             if callable(set_usage_ledger):
                 set_usage_ledger(container.usage_ledger)
+            container.secret_store = self.create_secret_store(settings)
             container.model_registry = self.create_model_registry(
                 settings,
                 container.llm_client,
+                secret_store=container.secret_store,
             )
             container.game_agent_runtime = self.create_game_agent_runtime()
             container.workspace_service = WorkspaceService(
@@ -296,12 +304,36 @@ class ApplicationFactory:
             )
             container.checkpoint("stores_ready")
 
-            container.mcp_providers = self.create_mcp_providers(settings)
-            for provider in container.mcp_providers:
-                container.register_cleanup(
-                    f"mcp_provider:{provider.server_name}",
-                    provider.close,
+            mcp_factory_parameters = inspect.signature(
+                self.create_mcp_providers
+            ).parameters
+            mcp_factory_kwargs: dict[str, Any] = {}
+            if "secret_store" in mcp_factory_parameters:
+                mcp_factory_kwargs["secret_store"] = container.secret_store
+            if "permission_resolver" in mcp_factory_parameters:
+                mcp_factory_kwargs["permission_resolver"] = (
+                    container.permission_resolver
                 )
+            container.mcp_providers = self.create_mcp_providers(
+                settings,
+                **mcp_factory_kwargs,
+            )
+            container.mcp_connection_manager = getattr(
+                container.mcp_providers,
+                "connection_manager",
+                None,
+            )
+            if container.mcp_connection_manager is not None:
+                container.register_cleanup(
+                    "mcp_connection_manager",
+                    container.mcp_connection_manager.close,
+                )
+            else:
+                for provider in container.mcp_providers:
+                    container.register_cleanup(
+                        f"mcp_provider:{provider.server_name}",
+                        provider.close,
+                    )
             container.checkpoint("mcp_ready")
 
             container.tool_registry = self.create_tool_registry(
@@ -318,6 +350,12 @@ class ApplicationFactory:
             container.register_cleanup(
                 "tool_registry",
                 container.tool_registry.close,
+            )
+            container.mcp_registry = self.create_mcp_registry(
+                settings,
+                secret_store=container.secret_store,
+                tool_registry=container.tool_registry,
+                connection_manager=container.mcp_connection_manager,
             )
             container.checkpoint("tools_ready")
 
@@ -519,6 +557,8 @@ class ApplicationFactory:
         self,
         settings: Settings,
         llm_client: LLMClient,
+        *,
+        secret_store: Any | None = None,
     ) -> ModelRegistryService:
         if settings.model_registry_store == "memory":
             repository = InMemoryModelRegistryRepository()
@@ -531,11 +571,7 @@ class ApplicationFactory:
                 "unsupported model registry store: "
                 f"{settings.model_registry_store}"
             )
-        secret_store = (
-            InMemorySecretStore()
-            if settings.model_secret_backend == "memory"
-            else KeyringSecretStore(service_name=settings.app_name)
-        )
+        secret_store = secret_store or self.create_secret_store(settings)
         runtime_router = getattr(llm_client, "model_router", None)
         initial_models = (
             runtime_router.models
@@ -570,6 +606,13 @@ class ApplicationFactory:
             )
         return registry
 
+    def create_secret_store(self, settings: Settings) -> Any:
+        return (
+            InMemorySecretStore()
+            if settings.model_secret_backend == "memory"
+            else KeyringSecretStore(service_name=settings.app_name)
+        )
+
     def create_game_agent_runtime(self) -> GameAgentRuntime:
         return GameAgentRuntime()
 
@@ -603,7 +646,13 @@ class ApplicationFactory:
             usage_ledger=usage_ledger,
         )
 
-    def create_mcp_providers(self, settings: Settings) -> list[MCPToolProvider]:
+    def create_mcp_providers(
+        self,
+        settings: Settings,
+        *,
+        secret_store: Any | None = None,
+        permission_resolver: PermissionResolver | None = None,
+    ) -> list[MCPToolProvider]:
         if not settings.mcp_enabled:
             return []
         if not settings.mcp_config_path:
@@ -611,6 +660,8 @@ class ApplicationFactory:
         return create_mcp_providers_from_config_file(
             settings.mcp_config_path,
             request_timeout_seconds=settings.mcp_request_timeout_seconds,
+            secret_store=secret_store,
+            permission_resolver=permission_resolver,
         )
 
     def create_tool_registry(
@@ -634,6 +685,22 @@ class ApplicationFactory:
         if settings.tool_allowlist is not None:
             registry.restrict_to(settings.tool_allowlist)
         return registry
+
+    def create_mcp_registry(
+        self,
+        settings: Settings,
+        *,
+        secret_store: Any,
+        tool_registry: ToolRegistry,
+        connection_manager: MCPConnectionManager | None,
+    ) -> MCPRegistryService:
+        return MCPRegistryService(
+            config_path=settings.mcp_config_path,
+            secret_store=secret_store,
+            tool_registry=tool_registry,
+            connection_manager=connection_manager,
+            tool_allowlist=settings.tool_allowlist,
+        )
 
     def create_skill_service(
         self,

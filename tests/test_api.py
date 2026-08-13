@@ -522,11 +522,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260810-inline-agent-approval-1',
+            '/static/styles.css?v=20260813-mcp-registry-1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260810-inline-agent-approval-1',
+            '/static/app.js?v=20260813-mcp-registry-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)

@@ -503,6 +503,67 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 契约：优先读取 `structuredContent`，文本块会被标准化，`isError=true` 会变成稳定的
 工具失败，而不是成功载荷。
 
+### MCP 生命周期与传输
+
+MCP 默认通过精确锁定的官方 Python SDK `mcp==2.0.0` 协商当前 `2026-07-28`
+协议。`stdio` 和无会话的 `streamable_http` 是当前路径；原有固定
+`2025-06-18` 客户端仅由 `stdio_2025_06_18` 显式选择，旧 HTTP+SSE 仅由
+`legacy_sse` 加 `legacy_compatibility=true` 启用，不参与默认回退。架构取舍记录在
+[`docs/adr/0001-mcp-official-python-sdk-v2.md`](docs/adr/0001-mcp-official-python-sdk-v2.md)。
+
+`MCPConnectionManager` 为每个 Server 独立拥有连接、事件循环、连接/请求超时、幂等
+重试、指数退避、熔断、缓存、取消、关闭和脱敏状态。启动会隔离单 Server 故障；只有
+`required=true` 且未就绪的 Server 会令 `/api/v1/health` 返回 `503` 和
+`ready=false`，可选 Server 故障只使健康状态降级。`tools/list` 会遍历全部分页、拒绝
+重复 cursor/工具名、按名称确定性排序，遵循 `ttlMs`/`cacheScope` 提示，并支持显式
+refresh。工具调用沿用 ToolRegistry 的稳定 call ID；超时、取消、连接关闭、熔断和远端
+工具失败映射为稳定错误码。
+
+HTTP Server 必须使用显式 host allowlist；HTTPS 是默认要求，重定向和代理环境被禁用，
+解析到私网/本机地址默认拒绝。凭据只能通过共享 `SecretStore` 引用注入
+`header_refs`/`env_refs`，不会进入配置快照、诊断或 repr。Header 控制字符、保留
+MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断。MCP 权限注解始终先
+进入中央 `PermissionResolver`，缺失或高风险提示按外部副作用保守处理，不能直接授权。
+
+本机管理模式可直接打开工作台的「MCP 连接」（`/#mcp`）注册、编辑、测试/刷新、启停
+或删除 Server。前端支持当前 stdio、当前 Streamable HTTP 以及两条显式兼容路径，展示
+独立连接状态、协议版本、重试错误和发现/注册工具数。启用界面写入至少要设置
+`MCP_CONFIG_PATH=/path/to/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
+同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
+否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
+写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。管理写接口仅在
+`AUTH_MODE=disabled` 的 loopback 本机模式开放。
+
+管理 API 为 `GET /api/v1/mcp/servers`、
+`PUT /api/v1/mcp/servers/{name}`、
+`PATCH /api/v1/mcp/servers/{name}/enabled`、
+`POST /api/v1/mcp/servers/{name}/test` 和
+`DELETE /api/v1/mcp/servers/{name}`。这些变更只影响目标 Server；停用或删除会关闭其连接
+并原子移除对应的动态工具，不会重建其他 Server 的生命周期。
+
+最小配置示例：
+
+```json
+{
+  "mcp_servers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "example_mcp_server"],
+      "env_refs": {"EXAMPLE_TOKEN": "keyring:mcp/example"},
+      "required": false
+    },
+    "remote-tools": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.com/mcp",
+      "allowed_hosts": ["mcp.example.com"],
+      "header_refs": {"Authorization": "keyring:mcp/remote"},
+      "required": true
+    }
+  }
+}
+```
+
 ### 项目指令
 
 Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md`。同目录下的
@@ -975,7 +1036,7 @@ checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cl
 配置指令和项目工具选择在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
 
 返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
-`ExecutionContextFactory`、服务和资源，并按
+共享 `SecretStore`、`MCPConnectionManager`、`ExecutionContextFactory`、服务和资源，并按
 顺序记录 `config_loaded`、
 `stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
 lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按
