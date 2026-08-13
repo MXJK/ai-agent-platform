@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "QUERY-KERNEL"
-next_action: "Resolve the latest-main integration, verify Query Kernel, then create and merge the pull request."
+next_action: "Review and apply migration 20260813_0021 before starting the PostgreSQL runtime."
 blockers: []
-last_verified_commit: "6e9589f5bafe04ee731c2bcb46f6f037958be799"
-updated_at: "2026-08-13T14:25:00+08:00"
+last_verified_commit: "a73aef5d0148fe395d42bb13d5346640273c722c"
+updated_at: "2026-08-13T14:30:21+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
