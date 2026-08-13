@@ -33,6 +33,12 @@ from ai_agent_platform.domain import (
     canonical_project_config,
 )
 from ai_agent_platform.integrations.tools import ToolRegistry
+from ai_agent_platform.integrations.permissions import ToolUseContext
+from ai_agent_platform.integrations.tool_pool import (
+    SandboxCapabilities,
+    ToolCatalog,
+    ToolPoolBuilder,
+)
 from ai_agent_platform.model_registry import ModelSelection
 
 
@@ -70,6 +76,7 @@ class ExecutionContextFactory:
         skill_service: Any = None,
         process_config: ResolvedConfig | None = None,
         tool_registry: ToolRegistry | None = None,
+        model_registry: Any = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -82,7 +89,8 @@ class ExecutionContextFactory:
         self._max_instruction_chars = max_instruction_chars
         self._skill_service = skill_service
         self._process_config = process_config
-        self._tool_registry = tool_registry
+        self._tool_registry = tool_registry or ToolRegistry()
+        self._model_registry = model_registry
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -115,13 +123,25 @@ class ExecutionContextFactory:
         if actor_user_id is not None and session.user_id != actor_user_id:
             raise PermissionError("conversation access denied")
         actor = actor_user_id or session.user_id
+        resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
+        selection_values = (
+            asdict(model_selection)
+            if isinstance(model_selection, ModelSelection)
+            else dict(model_selection)
+        )
 
         workspace, workspace_root = self._resolve_workspace(workspace_id)
         workspace_role = self._resolve_workspace_role(workspace_id, actor)
         effective_config, config_json, config_version = self._workspace_config(
             workspace_root
         )
-        tool_selection = self._tool_selection(effective_config)
+        tool_selection = self._tool_selection(
+            effective_config,
+            workspace_root=workspace_root,
+            workspace_role=workspace_role,
+            run_id=resolved_run_id,
+            model_selection=selection_values,
+        )
         context_message_limit = (
             int(effective_config.llm_max_context_messages)
             if effective_config is not None
@@ -305,12 +325,6 @@ class ExecutionContextFactory:
                     0,
                     remaining_instruction_chars - len(item.text),
                 )
-        selection_values = (
-            asdict(model_selection)
-            if isinstance(model_selection, ModelSelection)
-            else dict(model_selection)
-        )
-        resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
         timestamp = created_at or datetime.now(timezone.utc)
         return RunContextSnapshot(
             identity=IdentityContext(
@@ -370,18 +384,75 @@ class ExecutionContextFactory:
     def _tool_selection(
         self,
         config: ResolvedConfig | None,
+        *,
+        workspace_root: str,
+        workspace_role: str,
+        run_id: str,
+        model_selection: Mapping[str, object],
     ) -> ToolSelectionContext:
-        if self._tool_registry is None:
-            return ToolSelectionContext(
-                enabled_tools=(),
-                source="registry_unavailable",
-                version="sha256:4f53cda18c2baa0c",
-            )
-        available = tuple(spec.name for spec in self._tool_registry.list_specs())
+        catalog = ToolCatalog.from_registry(self._tool_registry)
+        available = tuple(entry.name for entry in catalog.entries)
         configured = config.enabled_tools if config is not None else None
         selected = tuple(configured) if configured is not None else available
-        view = self._tool_registry.select(selected)
-        effective = view.allowed_names
+        process_allowed = (
+            tuple(config.tool_allowlist)
+            if config is not None and config.tool_allowlist is not None
+            else available
+        )
+        approval_policy = (
+            str(config.agent_approval_policy)
+            if config is not None
+            else "on_request"
+        )
+        skills: Sequence[object] = ()
+        enabled_skill_names: Sequence[str] | None = None
+        if self._skill_service is not None:
+            skills_enabled = bool(
+                config is not None
+                and config.skills_allowed
+                and config.skills_enabled
+            )
+            skill_catalog = self._skill_service.discover(
+                workspace_root=workspace_root,
+                enabled=skills_enabled,
+            )
+            skills = skill_catalog.skills
+            if config is not None:
+                enabled_skill_names = (
+                    config.enabled_skills
+                    if config.enabled_skills is not None
+                    else config.skill_allowlist
+                )
+        pool = ToolPoolBuilder(self._tool_registry).build(
+            catalog=catalog,
+            skills=skills,
+            enabled_skill_names=enabled_skill_names,
+            agent_type="coding",
+            run_mode="default",
+            model_capabilities=self._model_capabilities(model_selection),
+            tool_use_context=ToolUseContext(
+                conversation_id="snapshot_pending",
+                workspace_id="snapshot_pending",
+                workspace_root=workspace_root,
+                authorized_workspace_root=workspace_root,
+                run_id=run_id,
+                workspace_role=workspace_role,
+                approval_policy=approval_policy,
+                process_allowed_tools=process_allowed,
+                project_allowed_tools=(
+                    tuple(configured) if configured is not None else None
+                ),
+            ),
+            sandbox_capabilities=SandboxCapabilities(
+                available=any(
+                    entry.name.startswith("sandbox.")
+                    for entry in catalog.entries
+                ),
+                mode=(str(config.sandbox_mode) if config is not None else "local"),
+            ),
+            requested_names=selected,
+        )
+        effective = pool.allowed_names
         if config is not None and configured is not None:
             provenance = config.provenance_for("enabled_tools")
             source = f"{provenance.source.value}:{provenance.detail}"
@@ -390,16 +461,55 @@ class ExecutionContextFactory:
             source = f"process_cap:{provenance.source.value}:{provenance.detail}"
         else:
             source = "process_registry"
-        encoded = json.dumps(
-            list(effective),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
         return ToolSelectionContext(
             enabled_tools=effective,
             source=source,
-            version="sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
+            version=pool.pool_version,
+            catalog_version=pool.catalog_version,
+            catalog_hash=pool.catalog_hash,
+            catalog_summary=pool.catalog_summary,
+            pool_hash=pool.pool_hash,
+            normalized_summary=pool.normalized_summary,
         )
+
+    def _model_capabilities(
+        self,
+        selection: Mapping[str, object],
+    ) -> Mapping[str, bool]:
+        if self._model_registry is None:
+            return {"tool_calling": True, "structured_output": True}
+        model_configs = getattr(self._model_registry, "model_configs", None)
+        if not callable(model_configs):
+            return {"tool_calling": True, "structured_output": True}
+        candidates = list(model_configs())
+        preferred_provider = selection.get("preferred_provider")
+        preferred_model = selection.get("preferred_model")
+        if preferred_provider and preferred_model:
+            candidates = [
+                item
+                for item in candidates
+                if item.provider == preferred_provider
+                and item.model == preferred_model
+            ]
+        else:
+            candidates = [
+                item
+                for item in candidates
+                if bool(getattr(item, "enabled", True))
+                and bool(getattr(item, "auto_eligible", True))
+            ]
+        if not candidates:
+            return {"tool_calling": True, "structured_output": True}
+        return {
+            "tool_calling": any(
+                item.provider == "fake" or item.capabilities.tool_calling
+                for item in candidates
+            ),
+            "structured_output": any(
+                item.provider == "fake" or item.capabilities.structured_output
+                for item in candidates
+            ),
+        }
 
     def _resolve_workspace(self, workspace_id: str) -> tuple[Any, str]:
         workspace = self._workspace_service.get(workspace_id)

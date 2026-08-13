@@ -1,6 +1,5 @@
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -748,22 +747,8 @@ class WorkerContextRecoveryTests(unittest.TestCase):
             )
             payload = snapshot.to_dict()
             payload["tools"]["enabled_tools"] = ["missing.tool"]  # type: ignore[index]
-            payload["tools"]["version"] = (  # type: ignore[index]
-                "sha256:"
-                + hashlib.sha256(b'["missing.tool"]').hexdigest()[:16]
-            )
-            restored = RunContextSnapshot.from_dict(payload)
-            runtime = CodingAgentRuntime(tool_registry=registry)
-
-            with self.assertRaisesRegex(ValueError, "unknown tools"):
-                runtime.run(
-                    conversation_id="ignored",
-                    user_input="ignored",
-                    history=[],
-                    workspace_id="ignored",
-                    workspace_root=str(root),
-                    run_context=restored,
-                )
+            with self.assertRaisesRegex(ValueError, "tool summary"):
+                RunContextSnapshot.from_dict(payload)
 
     def test_nullable_legacy_schema_one_snapshot_remains_loadable(self) -> None:
         with TemporaryDirectory() as temp_dir:

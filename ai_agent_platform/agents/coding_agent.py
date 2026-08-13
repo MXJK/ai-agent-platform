@@ -85,6 +85,11 @@ from ai_agent_platform.integrations.tools import (
     ToolRegistry,
     summarize_tool_arguments,
 )
+from ai_agent_platform.integrations.tool_pool import (
+    EffectiveToolPool,
+    SandboxCapabilities,
+    ToolPoolBuilder,
+)
 
 
 CHANGE_INTENTS = {"change_planning", "bug_investigation"}
@@ -194,6 +199,8 @@ class CodingAgentRuntime:
         change_set_service: Any = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
+        self._tool_pool_builder = ToolPoolBuilder(self._tools)
+        self._run_tool_pools: dict[str, EffectiveToolPool] = {}
         self._checkpointer = checkpointer or InMemorySaver()
         self._run_store = run_store or InMemoryAgentRunStore()
         self._planner = planner or RuleBasedAgentPlanner()
@@ -224,6 +231,7 @@ class CodingAgentRuntime:
             tools=self._tools,
             planner=self._planner,
             run_store=self._run_store,
+            pool_provider=self._tools_for_state,
         )
         self._graph = self._build_graph()
         self.graph_engine = "langgraph"
@@ -289,10 +297,35 @@ class CodingAgentRuntime:
                 }
                 for item in run_context.additional_directories
             ]
-            if run_context.tools.enabled_tools is not None:
-                enabled_tools = list(run_context.tools.enabled_tools)
-            self._tools.select(tuple(enabled_tools))
+            pool = self._pool_from_snapshot(run_context)
+            self._run_tool_pools[run_id] = pool
+            enabled_tools = list(pool.allowed_names)
         run_id = run_id or f"run_{uuid4().hex[:12]}"
+        if run_id not in self._run_tool_pools:
+            pool = self._tool_pool_builder.build(
+                agent_type="coding",
+                run_mode="default",
+                tool_use_context=ToolUseContext(
+                    conversation_id=conversation_id,
+                    workspace_id=workspace_id,
+                    workspace_root=workspace_root,
+                    authorized_workspace_root=workspace_root,
+                    run_id=run_id,
+                    actor_user_id=actor_user_id,
+                    workspace_role=workspace_role,
+                    approval_policy=approval_policy,
+                    process_allowed_tools=tuple(enabled_tools),
+                    project_allowed_tools=tuple(enabled_tools),
+                ),
+                sandbox_capabilities=SandboxCapabilities(
+                    available=any(
+                        name.startswith("sandbox.") for name in enabled_tools
+                    )
+                ),
+                requested_names=enabled_tools,
+            )
+            self._run_tool_pools[run_id] = pool
+            enabled_tools = list(pool.allowed_names)
         thread_id = run_id
         config = {
             "configurable": {"thread_id": thread_id},
@@ -524,6 +557,7 @@ class CodingAgentRuntime:
         approved_by: str | None = None,
     ) -> AgentRunResult:
         record = self.get_run(run_id)
+        self.effective_tool_pool(run_id)
         resume_pending = (
             record.status == "running" and record.control_action == "resume"
         )
@@ -1040,6 +1074,9 @@ class CodingAgentRuntime:
             return None
 
     def _tools_for_state(self, state: CodingAgentState):
+        run_id = str(state.get("run_id") or "")
+        if run_id:
+            return self.effective_tool_pool(run_id)
         selected_values = state.get("enabled_tools")
         selected = (
             tuple(selected_values)
@@ -1047,6 +1084,59 @@ class CodingAgentRuntime:
             else tuple(spec.name for spec in self._tools.list_specs())
         )
         return self._tools.select(selected)
+
+    def effective_tool_pool(self, run_id: str):
+        pool = self._run_tool_pools.get(run_id)
+        if pool is not None:
+            pool.list_specs()
+            return pool
+        record = self.get_run(run_id)
+        snapshot = record.context_snapshot
+        if snapshot is None:
+            selected = tuple(spec.name for spec in self._tools.list_specs())
+            return self._tools.select(selected)
+        pool = self._pool_from_snapshot(snapshot)
+        self._run_tool_pools[run_id] = pool
+        return pool
+
+    def _pool_from_snapshot(
+        self,
+        snapshot: RunContextSnapshot,
+    ) -> EffectiveToolPool:
+        if snapshot.metadata.schema_version >= 3:
+            return self._tool_pool_builder.restore(snapshot.tools)
+        selected = (
+            snapshot.tools.enabled_tools
+            if snapshot.tools.enabled_tools is not None
+            else tuple(spec.name for spec in self._tools.list_specs())
+        )
+        return self._tool_pool_builder.build(
+            agent_type="coding",
+            run_mode="default",
+            tool_use_context=ToolUseContext(
+                conversation_id=snapshot.session.conversation_id,
+                workspace_id=snapshot.project.workspace_id,
+                workspace_root=snapshot.project.workspace_root,
+                authorized_workspace_root=snapshot.project.workspace_root,
+                run_id=snapshot.metadata.run_id,
+                actor_user_id=snapshot.identity.actor_user_id,
+                workspace_role=snapshot.identity.workspace_role,
+                approval_policy=_snapshot_config_value(
+                    snapshot.project.project_config,
+                    "runtime",
+                    "agent_approval_policy",
+                    default=self._approval_policy,
+                ),
+                process_allowed_tools=tuple(
+                    spec.name for spec in self._tools.list_specs()
+                ),
+                project_allowed_tools=tuple(selected),
+            ),
+            sandbox_capabilities=SandboxCapabilities(
+                available=any(name.startswith("sandbox.") for name in selected)
+            ),
+            requested_names=selected,
+        )
 
     def _tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
         approvals = tuple(

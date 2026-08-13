@@ -723,11 +723,20 @@ class AgentRunService:
                     )
                     or ""
                 )
+        effective_pool = None
+        get_effective_pool = getattr(self._runtime, "effective_tool_pool", None)
+        if snapshot is not None and callable(get_effective_pool):
+            effective_pool = get_effective_pool(record.run_id)
         project_tools = (
             snapshot.tools.enabled_tools if snapshot is not None else None
         )
         process_tools = tuple(
-            spec.name for spec in self._tool_registry.list_specs()
+            spec.name
+            for spec in (
+                effective_pool.list_specs()
+                if effective_pool is not None
+                else self._tool_registry.list_specs()
+            )
         )
         approval_policy = (
             _snapshot_approval_policy(snapshot)
@@ -752,7 +761,11 @@ class AgentRunService:
             if not isinstance(item, dict):
                 raise PermissionError("tool approval entry is invalid")
             call = calls.get(str(item.get("call_id") or ""))
-            spec = self._tool_registry.get_spec(str(item.get("name") or ""))
+            spec = (
+                effective_pool.get_spec(str(item.get("name") or ""))
+                if effective_pool is not None
+                else self._tool_registry.get_spec(str(item.get("name") or ""))
+            )
             if call is None or spec is None or not isinstance(
                 call.get("arguments"), dict
             ):

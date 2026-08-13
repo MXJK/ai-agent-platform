@@ -104,8 +104,11 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也�
 镜像交给项目选择、把 Docker 降为 local、放宽审批语义、扩张命令/工具/Skill allowlist，
 或越过 `mcp_allowed=false`、
 `skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
-时裁剪全局能力上限，项目 `enabled_tools` 会冻结为每 Run 的只读 Registry view，不修改
-源 `ToolRegistry`。未知工具、尝试突破进程上限或非法恢复选择都会 fail closed。环境变量
+时裁剪全局能力上限。`ToolRegistry` 只保留进程注册和可靠执行能力；每次 Run 由
+`ToolCatalog` 和 `ToolPoolBuilder` 把 base/local、MCP、Skill 依赖、Agent/模式、模型、
+`ToolUseContext`、deny 与 Sandbox 能力求交为不可变 `EffectiveToolPool`。项目
+`enabled_tools` 只能继续取子集，不修改源 Registry。未知工具、命名空间冲突、重复名、
+尝试突破进程上限或非法恢复选择都会 fail closed。环境变量
 继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
 `AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
@@ -113,8 +116,9 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也�
 解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
 最终字段的来源。`Settings.from_env()` 仍返回 `Settings`；需要来源或入口覆盖时直接使用
 `ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
-带 schema version、逐字段 source/detail 的序列化视图；Run 再保存配置内容哈希与确切
-工具选择哈希。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
+带 schema version、逐字段 source/detail 的序列化视图；Run 再保存配置内容哈希、工具
+目录版本、只含定义/Schema 哈希的规范化摘要、catalog hash 与确切有效池 hash，不保存
+密钥或完整敏感参数。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
 递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
 
 ## Skill 发现与 slash command
@@ -464,6 +468,7 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 
 ```text
 原生工具调用
+→ EffectiveToolPool 只暴露本 Run 的冻结工具规范
 → PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
 → ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
@@ -487,6 +492,13 @@ root、进程能力上限、冻结的项目工具选择、审批策略以及当�
 只能继续收紧。展示给模型的工具可先过滤 deny，但 `ToolRegistry` 执行前仍无条件复判，
 避免展示和执行之间的 TOCTOU。MCP/Skill 的权限注解只作为不可信风险输入，不能自行
 产生最终授权。
+
+工具目录和执行注册是两层：`ToolCatalog` 为 base/local 与 `mcp.<server>.<tool>` 建立显式
+来源/命名空间、稳定顺序和定义指纹，重复或大小写规范化冲突直接报错；
+`ToolPoolBuilder` 再按 coding Agent/default 模式、Workspace role、当前模型工具调用能力、
+Skill 所需工具、deny rules 与 Sandbox 能力构建本 Run 的 `EffectiveToolPool`。模型、规则
+规划器、审批与执行都从该池取规范。恢复时允许全局目录新增无关工具，但快照中任一工具
+缺失或 Schema/权限/超时等定义漂移都会明确失败，不会用当前同名工具静默替换。
 
 所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
 PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
@@ -580,7 +592,8 @@ symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都�
 不会进入快照。
 
 `ExecutionContextFactory` 在 Run 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、确切工具选择和额外目录，形成可 JSON
+Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、有效工具池
+目录版本/脱敏摘要/hash 和额外目录，形成可 JSON
 往返的深度不可变 `RunContextSnapshot`。API、Worker、预留 CLI 角色和 Agent Loop 共用
 这一契约；Worker 任务只接收 `run_id`，重启后从 Run store 恢复快照，不重新读取已经
 变化的会话历史、模型偏好或指令文件。Git 缺失、非仓库、无 HEAD 或状态读取失败只记录
@@ -952,7 +965,7 @@ RAG_RERANK_DEFAULT_ENABLED=false
 - `20260809_0019`：添加每 Run 唯一的 `agent_change_sets`，持久化完整补丁、基线哈希、
   workspace 快照、验证与 apply/reject 状态。
 - `20260810_0020`：为 `agent_runs` 添加不可变 `run_context_snapshot` JSONB，持久化身份、
-  会话/摘要/模型、Workspace/Git/配置/指令/工具选择和已授权额外目录，供 Worker 按 Run ID
+  会话/摘要/模型、Workspace/Git/配置/指令/有效工具池快照和已授权额外目录，供 Worker 按 Run ID
   恢复。该 revision 在本任务中**没有执行**；启动 PostgreSQL runtime 前必须先由操作者
   审阅并显式授权应用。
 
@@ -1033,7 +1046,7 @@ FastAPI `create_app()` 与 Celery Worker 进程单例都通过
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
 checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
 可构建角色，没有新增命令。启动配置在进入工厂前只解析进程基线；Workspace 项目覆盖、
-配置指令和项目工具选择在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
+配置指令和 `EffectiveToolPool` 在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
 
 返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
 共享 `SecretStore`、`MCPConnectionManager`、`ExecutionContextFactory`、服务和资源，并按

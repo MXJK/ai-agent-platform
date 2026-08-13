@@ -441,6 +441,7 @@ class ApplicationFactory:
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ),
                 tool_registry=container.tool_registry,
+                model_registry=container.model_registry,
             )
             container.agent_run_service = AgentRunService(
                 runtime=container.coding_agent_runtime,

@@ -8,8 +8,8 @@ import json
 from typing import Any, Mapping
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 2
-_SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2})
+RUN_CONTEXT_SCHEMA_VERSION = 3
+_SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 
 
 @dataclass(frozen=True)
@@ -148,6 +148,11 @@ class ToolSelectionContext:
     enabled_tools: tuple[str, ...] | None
     source: str
     version: str
+    catalog_version: str = "legacy:unversioned"
+    catalog_hash: str = ""
+    catalog_summary: str = ""
+    pool_hash: str = ""
+    normalized_summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -259,6 +264,11 @@ class RunContextSnapshot:
                 ),
                 "source": self.tools.source,
                 "version": self.tools.version,
+                "catalog_version": self.tools.catalog_version,
+                "catalog_hash": self.tools.catalog_hash,
+                "catalog_summary": self.tools.catalog_summary,
+                "pool_hash": self.tools.pool_hash,
+                "normalized_summary": self.tools.normalized_summary,
             },
             "metadata": {
                 "run_id": self.metadata.run_id,
@@ -338,9 +348,11 @@ class RunContextSnapshot:
             ).hexdigest()[:16]
             if str(metadata_value.get("config_version") or "") != expected_config_version:
                 raise ValueError("Run context project configuration version mismatch")
+        if schema_version == 2:
             expected_tool_version = _tool_selection_version(enabled_tool_values or [])
             if str(tool_value.get("version") or "") != expected_tool_version:
                 raise ValueError("Run context tool selection version mismatch")
+        if schema_version >= 2:
             configured_tools = _config_snapshot_value(
                 project_config,
                 "project_session",
@@ -352,16 +364,23 @@ class RunContextSnapshot:
                 "tool_allowlist",
             )
             selected_set = set(enabled_tool_values or [])
-            if isinstance(configured_tools, list) and selected_set != set(
-                configured_tools
-            ):
+            if schema_version == 2 and isinstance(configured_tools, list) and selected_set != set(configured_tools):
                 raise ValueError(
                     "Run context tool selection conflicts with project configuration"
+                )
+            if schema_version >= 3 and isinstance(configured_tools, list) and not selected_set.issubset(configured_tools):
+                raise ValueError(
+                    "Run context tool selection exceeds project configuration"
                 )
             if isinstance(process_cap, list) and not selected_set.issubset(process_cap):
                 raise ValueError(
                     "Run context tool selection exceeds the frozen process cap"
                 )
+        if schema_version >= 3:
+            _validate_tool_pool_snapshot(
+                tool_value,
+                enabled_tools=tuple(str(item) for item in enabled_tool_values or []),
+            )
         return cls(
             identity=IdentityContext(
                 actor_user_id=str(identity_value.get("actor_user_id") or ""),
@@ -454,6 +473,15 @@ class RunContextSnapshot:
                 ),
                 source=str(tool_value.get("source") or "legacy_process_registry"),
                 version=str(tool_value.get("version") or "legacy:unversioned"),
+                catalog_version=str(
+                    tool_value.get("catalog_version") or "legacy:unversioned"
+                ),
+                catalog_hash=str(tool_value.get("catalog_hash") or ""),
+                catalog_summary=str(tool_value.get("catalog_summary") or ""),
+                pool_hash=str(tool_value.get("pool_hash") or ""),
+                normalized_summary=str(
+                    tool_value.get("normalized_summary") or ""
+                ),
             ),
             metadata=RunMetadata(
                 run_id=str(metadata_value.get("run_id") or ""),
@@ -484,6 +512,82 @@ def _canonical_json(value: Mapping[str, object]) -> str:
 def _tool_selection_version(names: list[object]) -> str:
     encoded = json.dumps(names, ensure_ascii=False, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _validate_tool_pool_snapshot(
+    value: Mapping[str, object],
+    *,
+    enabled_tools: tuple[str, ...],
+) -> None:
+    catalog_version = str(value.get("catalog_version") or "")
+    catalog_hash = str(value.get("catalog_hash") or "")
+    catalog_summary = str(value.get("catalog_summary") or "")
+    pool_hash = str(value.get("pool_hash") or "")
+    pool_version = str(value.get("version") or "")
+    summary_text = str(value.get("normalized_summary") or "")
+    if not catalog_version.startswith("tool-catalog/"):
+        raise ValueError("Run context tool catalog version is invalid")
+    if not pool_version.startswith("effective-tool-pool/"):
+        raise ValueError("Run context effective tool pool version is invalid")
+    if not _is_sha256(catalog_hash) or not _is_sha256(pool_hash):
+        raise ValueError("Run context tool catalog hash is invalid")
+    try:
+        parsed_catalog_summary = json.loads(catalog_summary)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Run context tool catalog summary is invalid") from exc
+    canonical_catalog_summary = json.dumps(
+        parsed_catalog_summary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected_catalog_hash = "sha256:" + hashlib.sha256(
+        canonical_catalog_summary.encode("utf-8")
+    ).hexdigest()
+    if (
+        not isinstance(parsed_catalog_summary, list)
+        or canonical_catalog_summary != catalog_summary
+        or expected_catalog_hash != catalog_hash
+    ):
+        raise ValueError("Run context tool catalog summary hash mismatch")
+    try:
+        summary = json.loads(summary_text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Run context tool summary is invalid") from exc
+    if not isinstance(summary, list) or not all(
+        isinstance(item, Mapping) for item in summary
+    ):
+        raise ValueError("Run context tool summary must be an array of objects")
+    canonical = json.dumps(
+        summary,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected_hash = "sha256:" + hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    if canonical != summary_text or pool_hash != expected_hash:
+        raise ValueError("Run context effective tool pool hash mismatch")
+    expected_pool_version = (
+        "effective-tool-pool/v1:"
+        + pool_hash.removeprefix("sha256:")[:16]
+    )
+    if pool_version != expected_pool_version:
+        raise ValueError("Run context effective tool pool version mismatch")
+    summary_names = tuple(str(item.get("name") or "") for item in summary)
+    if summary_names != enabled_tools:
+        raise ValueError("Run context tool summary differs from enabled tools")
+
+
+def _is_sha256(value: str) -> bool:
+    if not value.startswith("sha256:") or len(value) != 71:
+        return False
+    try:
+        int(value.removeprefix("sha256:"), 16)
+    except ValueError:
+        return False
+    return True
 
 
 def _config_snapshot_value(

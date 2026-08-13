@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Callable
 
 from langgraph.types import interrupt
 
@@ -17,7 +17,6 @@ from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
-    ToolRegistryView,
     ToolSpec,
     summarize_tool_arguments,
 )
@@ -47,10 +46,12 @@ class ChangeLoopExecutor:
         tools: ToolRegistry,
         planner: object,
         run_store: AgentRunStore | None = None,
+        pool_provider: Callable[[CodingAgentState], Any] | None = None,
     ) -> None:
         self._tools = tools
         self._planner = planner
         self._run_store = run_store
+        self._pool_provider = pool_provider
 
     def execute_changes(self, state: CodingAgentState) -> CodingAgentState:
         iteration = state.get("change_iteration", 0)
@@ -321,7 +322,9 @@ class ChangeLoopExecutor:
             for tool_call in tool_calls
         ]
 
-    def _tools_for_state(self, state: CodingAgentState) -> ToolRegistryView:
+    def _tools_for_state(self, state: CodingAgentState):
+        if self._pool_provider is not None:
+            return self._pool_provider(state)
         selected_values = state.get("enabled_tools")
         selected = (
             tuple(selected_values)
@@ -357,7 +360,7 @@ class ChangeLoopExecutor:
         self,
         tool_call: ToolCall,
         context: ToolExecutionContext,
-        tools: ToolRegistryView,
+        tools: Any,
     ) -> dict[str, Any]:
         run_id = context.run_id
         arguments_hash = hashlib.sha256(
