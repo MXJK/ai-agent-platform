@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import inspect
 from typing import Any
 
 from ai_agent_platform.integrations.mcp.client import MCPClient, MCPTool
@@ -38,10 +39,22 @@ class MCPToolProvider:
     def registered_name(self, tool_name: str) -> str:
         return f"{self._namespace}.{self.server_name}.{_safe_name(tool_name)}"
 
-    def register(self, registry: ToolRegistry) -> None:
+    def register(
+        self,
+        registry: ToolRegistry,
+        *,
+        allowed_names: frozenset[str] | None = None,
+    ) -> None:
         for tool in self.list_tools():
+            registered_name = self.registered_name(tool.name)
+            if allowed_names is not None and registered_name not in allowed_names:
+                continue
+            client_config = getattr(self._client, "config", None)
+            timeout_seconds = float(
+                getattr(client_config, "request_timeout_seconds", 10.0)
+            ) + 0.5
             registry.register(
-                self.registered_name(tool.name),
+                registered_name,
                 self._callable_for(tool.name),
                 description=tool.description or tool.name,
                 input_schema=tool.input_schema,
@@ -49,8 +62,9 @@ class MCPToolProvider:
                 provider=f"mcp:{self.server_name}",
                 permission_level=tool.permission_level,
                 requires_approval=tool.requires_approval,
-                max_retries=1 if tool.permission_level == "read_only" else 0,
-                idempotent=tool.permission_level == "read_only",
+                timeout_seconds=timeout_seconds,
+                max_retries=0,
+                idempotent=tool.idempotent,
                 risk_summary=(
                     f"MCP tool {self.server_name}.{tool.name} requests "
                     f"{tool.permission_level} permission."
@@ -62,7 +76,13 @@ class MCPToolProvider:
         def call_mcp_tool(
             context: ToolExecutionContext | None = None, **arguments: Any
         ) -> Any:
-            result = self._client.call_tool(tool_name, arguments)
+            call = self._client.call_tool
+            supports_call_id = "call_id" in inspect.signature(call).parameters
+            result = (
+                call(tool_name, arguments, call_id=context.call_id if context else None)
+                if supports_call_id
+                else call(tool_name, arguments)
+            )
             return normalize_mcp_tool_result(result)
 
         return call_mcp_tool
@@ -93,7 +113,7 @@ def normalize_mcp_tool_result(result: Any) -> Any:
         return result
     if bool(result.get("isError")):
         raise MCPProviderError(
-            _mcp_error_text(result.get("content")),
+            "MCP tool returned isError=true",
             code="mcp_tool_error",
             retryable=False,
         )
@@ -119,17 +139,3 @@ def normalize_mcp_tool_result(result: Any) -> Any:
     if non_text_blocks:
         normalized["content_blocks"] = non_text_blocks
     return normalized
-
-
-def _mcp_error_text(content: Any) -> str:
-    if isinstance(content, list):
-        text = "\n".join(
-            str(block.get("text") or "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
-        if text:
-            return text
-    if isinstance(content, str) and content:
-        return content
-    return "MCP tool returned isError=true"

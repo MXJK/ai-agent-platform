@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260810-inline-agent-approval-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260813-mcp-registry-1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -23,6 +23,7 @@
       <symbol id="icon-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v5l3 2" /></symbol>
       <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4 12 2.2-6H21" /></symbol>
       <symbol id="icon-model" viewBox="0 0 24 24"><path d="M12 3 4.5 7.2 12 11.5l7.5-4.3L12 3Z" /><path d="m4.5 12 7.5 4.3 7.5-4.3M4.5 16.8 12 21l7.5-4.2" /></symbol>
+      <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="6" rx="2" /><rect x="3" y="15" width="6" height="6" rx="2" /><rect x="15" y="15" width="6" height="6" rx="2" /><path d="M12 9v3M6 15v-3h12v3" /></symbol>
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
       <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></symbol>
       <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5" /></symbol>
@@ -98,6 +99,10 @@
           <button class="nav-item" type="button" data-view="models">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
             <span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="mcp">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-network"></use></svg></span>
+            <span><strong>MCP 连接</strong><small>Server、工具与凭据</small></span>
           </button>
           <button class="nav-item" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
@@ -693,6 +698,130 @@
           </div>
         </section>
 
+        <section id="mcp-view" class="view-panel" data-view-panel="mcp" aria-labelledby="mcp-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Model Context Protocol</p>
+              <h1 id="mcp-title">MCP 连接</h1>
+              <p>注册外部工具 Server，先验证连接状态，再把发现的工具交给 Agent。</p>
+            </div>
+            <button id="refresh-mcp-registry-btn" class="button secondary" type="button">刷新连接</button>
+          </header>
+
+          <div id="mcp-runtime-note" class="mcp-runtime-note" role="status" aria-live="polite" hidden></div>
+
+          <article class="surface mcp-topology" aria-label="MCP 连接概览">
+            <div class="mcp-topology-track" aria-hidden="true">
+              <span class="mcp-topology-node host">HOST</span>
+              <i></i>
+              <span class="mcp-topology-node protocol">MCP</span>
+              <i></i>
+              <span class="mcp-topology-node servers">SERVER</span>
+            </div>
+            <dl class="mcp-stat-grid">
+              <div><dt>已注册</dt><dd id="mcp-server-count">0</dd></div>
+              <div><dt>连接就绪</dt><dd id="mcp-ready-count">0</dd></div>
+              <div><dt>可用工具</dt><dd id="mcp-tool-count">0</dd></div>
+            </dl>
+          </article>
+
+          <div class="content-grid mcp-registry-grid">
+            <article class="surface mcp-registration-surface">
+              <div class="surface-heading">
+                <div>
+                  <span class="step-kicker">01 · 注册</span>
+                  <h2 id="mcp-form-title">添加 Server</h2>
+                  <p>凭据会写入 SecretStore；配置文件只保存引用。</p>
+                </div>
+                <button id="reset-mcp-form-btn" class="text-button" type="button">清空</button>
+              </div>
+
+              <form id="mcp-server-form" autocomplete="off">
+                <div class="field-grid">
+                  <label for="mcp-name-input">Server 名称
+                    <input id="mcp-name-input" required maxlength="128" pattern="[A-Za-z0-9_.-]+" placeholder="例如 github" spellcheck="false" />
+                  </label>
+                  <label for="mcp-transport-input">传输方式
+                    <select id="mcp-transport-input">
+                      <option value="stdio">stdio · 当前协议</option>
+                      <option value="streamable_http">Streamable HTTP · 当前协议</option>
+                      <option value="stdio_2025_06_18">stdio · 2025-06-18 兼容</option>
+                      <option value="legacy_sse">HTTP+SSE · 旧版兼容</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div id="mcp-stdio-fields" class="mcp-transport-fields">
+                  <label for="mcp-command-input">启动命令
+                    <input id="mcp-command-input" maxlength="4096" placeholder="例如 npx" spellcheck="false" />
+                  </label>
+                  <label for="mcp-args-input">参数 · 每行一个
+                    <textarea id="mcp-args-input" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-github" spellcheck="false"></textarea>
+                  </label>
+                  <label for="mcp-env-input">普通环境变量 · KEY=value
+                    <textarea id="mcp-env-input" rows="3" placeholder="LOG_LEVEL=info" spellcheck="false"></textarea>
+                  </label>
+                  <label for="mcp-env-secrets-input">Secret 环境变量 · KEY=value
+                    <textarea id="mcp-env-secrets-input" class="secret-entry" rows="3" placeholder="GITHUB_TOKEN=粘贴后只会安全保存" spellcheck="false"></textarea>
+                    <small>编辑已有 Server 时，保留 <code>KEY=</code> 即沿用原凭据。</small>
+                  </label>
+                </div>
+
+                <div id="mcp-http-fields" class="mcp-transport-fields" hidden>
+                  <label for="mcp-url-input">Server URL
+                    <input id="mcp-url-input" type="url" maxlength="2048" placeholder="https://mcp.example.com/mcp" spellcheck="false" />
+                  </label>
+                  <label for="mcp-allowed-hosts-input">允许的 Host · 逗号或换行分隔
+                    <textarea id="mcp-allowed-hosts-input" rows="2" placeholder="mcp.example.com" spellcheck="false"></textarea>
+                  </label>
+                  <label for="mcp-headers-input">普通 Header · Name=value
+                    <textarea id="mcp-headers-input" rows="3" placeholder="X-Workspace=demo" spellcheck="false"></textarea>
+                  </label>
+                  <label for="mcp-header-secrets-input">Secret Header · Name=value
+                    <textarea id="mcp-header-secrets-input" class="secret-entry" rows="3" placeholder="Authorization=Bearer …" spellcheck="false"></textarea>
+                    <small>认证 Header 不能作为普通配置保存。</small>
+                  </label>
+                </div>
+
+                <div class="mcp-option-row">
+                  <label class="check-field"><input id="mcp-enabled-input" type="checkbox" checked /> 启用连接</label>
+                  <label class="check-field"><input id="mcp-required-input" type="checkbox" /> 影响 readiness</label>
+                </div>
+
+                <details class="advanced-options mcp-advanced-options">
+                  <summary>超时、重试与网络边界</summary>
+                  <div class="field-grid mcp-number-grid">
+                    <label for="mcp-connect-timeout-input">连接超时（秒）<input id="mcp-connect-timeout-input" type="number" min="0.1" max="300" step="0.1" value="10" /></label>
+                    <label for="mcp-request-timeout-input">请求超时（秒）<input id="mcp-request-timeout-input" type="number" min="0.1" max="900" step="0.1" value="10" /></label>
+                    <label for="mcp-max-retries-input">最大重试<input id="mcp-max-retries-input" type="number" min="0" max="10" step="1" value="1" /></label>
+                    <label for="mcp-cache-ttl-input">工具缓存（秒）<input id="mcp-cache-ttl-input" type="number" min="0" max="86400" step="1" value="30" /></label>
+                  </div>
+                  <div class="mcp-option-row">
+                    <label class="check-field"><input id="mcp-insecure-http-input" type="checkbox" /> 允许明文 HTTP</label>
+                    <label class="check-field"><input id="mcp-private-network-input" type="checkbox" /> 允许私网地址</label>
+                    <label class="check-field"><input id="mcp-legacy-input" type="checkbox" /> 启用旧协议兼容</label>
+                  </div>
+                </details>
+
+                <div class="surface-actions">
+                  <p id="mcp-form-hint">保存后立即连接并发现工具；连接失败不会阻止其他 Server。</p>
+                  <button id="save-mcp-server-btn" class="button primary" type="submit">保存并连接</button>
+                </div>
+              </form>
+            </article>
+
+            <article class="surface">
+              <div class="surface-heading">
+                <div><span class="step-kicker">02 · 发现</span><h2>Server 与工具</h2><p>每条连接独立重试、熔断和关闭。</p></div>
+                <span id="mcp-list-count" class="meta-badge">0</span>
+              </div>
+              <div id="mcp-server-list" class="mcp-server-list">
+                <div class="empty-state">尚未注册 MCP Server。</div>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section id="sessions-view" class="view-panel" data-view-panel="sessions" aria-labelledby="sessions-title" hidden>
           <header class="view-header compact">
             <div>
@@ -921,6 +1050,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260810-inline-agent-approval-1" defer></script>
+    <script src="/static/app.js?v=20260813-mcp-registry-1" defer></script>
   </body>
 </html>
