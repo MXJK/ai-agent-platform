@@ -4,6 +4,6 @@ active_task: "MCP-LIFECYCLE-V2"
 next_action: "Decide whether to merge the existing skill-discovery implementation or remove/downgrade its stale handbook fact, then rerun INTERVIEW_NOTES/validate.py."
 blockers:
   - "INTERVIEW_NOTES/validate.py is blocked by five pre-existing skill_discovery evidence paths absent from this branch; MCP implementation and documentation checks otherwise pass."
-last_verified_commit: "3d3d5b1ef5cb23b1b547a1ec36f990c0579ded64"
-updated_at: "2026-08-13T10:58:16+08:00"
+last_verified_commit: "f891dabc7ad532117680141d447e551d556aa869"
+updated_at: "2026-08-13T12:54:25+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
