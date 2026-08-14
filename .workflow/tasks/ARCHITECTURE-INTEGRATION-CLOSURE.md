@@ -56,7 +56,8 @@ Query Kernel、Agent Loop Decomposition 和 Shell Adapters 的最新主线，使
   不直接 cherry-pick。
 - `run_context_snapshot` JSONB 继续承载 schema v3，不新增迁移；`20260810_0020` 与
   `20260813_0021` 在 PostgreSQL runtime 启动前仍需操作者审阅并人工授权应用。
-- `last_verified_commit` 在没有新提交时保留既有值，最终 Result 明确说明验证覆盖工作树而非新提交。
+- 实现验证先覆盖未提交工作树；用户后续明确授权提交后，由工作流控制器将
+  `last_verified_commit` 更新为该已验证实现提交。
 
 ## Verification
 
@@ -71,8 +72,8 @@ Query Kernel、Agent Loop Decomposition 和 Shell Adapters 的最新主线，使
   `git diff --check` 全部通过。
 - Agent Loop 绕过审计确认只有 `agents/coding/tool_access.py` 读取/选择全局 Registry；
   `change_loop.py` 中的 `list_specs()` 对象为已恢复的 pool。
-- 当前 `main`/HEAD `4f99fbac` 同时含 Query Kernel、拆分 Agent Loop 和 Shell Adapters；
-  本工作树在该代码线上增加 Effective Tool Pool，没有依赖旁支运行。
+- 基线 `main`/`4f99fbac` 同时含 Query Kernel、拆分 Agent Loop 和 Shell Adapters；
+  已验证实现提交 `ca74c25f` 在该代码线上整合 Effective Tool Pool，不依赖旁支运行。
 
 ## Result
 
@@ -85,7 +86,7 @@ RunContext v3 契约，v1/v2 保留明确 legacy view。
 `facts.json` 均已同步，并移除 ToolRegistryView 作为最终工具池、Skill command 只注册不使用
 等过时表述。
 
-本任务没有执行迁移、部署、commit、push、PR 或 merge；也没有 cherry-pick
-`d4a9be3d`。因没有新提交，`last_verified_commit` 保留 `4f64a3c7c79ba9937cb03ebaf2a5b55da22a5812`；
-上述验证覆盖的是 HEAD `4f99fbac` 上的当前未提交工作树。Alembic `20260810_0020` 和
+实现与验证回合没有执行迁移、部署、push、PR 或 merge，也没有 cherry-pick
+`d4a9be3d`。用户后续明确授权提交与推送后，已将完整验证覆盖的工作树提交为
+`ca74c25f`，并将 `last_verified_commit` 更新为该实现提交。Alembic `20260810_0020` 和
 `20260813_0021` 仍需在 PostgreSQL runtime 启动前由操作者审阅并明确授权应用。
