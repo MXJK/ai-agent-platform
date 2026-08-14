@@ -210,7 +210,7 @@ fi
 API_ARGS=(
   "${PYTHON}"
   -m uvicorn
-  ai_agent_platform.main:app
+  ai_agent_platform.api.entrypoint:app
   --host "${APP_HOST:-127.0.0.1}"
   --port "${APP_PORT:-8000}"
 )

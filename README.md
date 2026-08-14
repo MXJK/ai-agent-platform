@@ -14,6 +14,7 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 ## 目录
 
 - [本地启动](#本地启动)
+- [CLI、REPL、SDK 与进程入口](#clireplsdk-与进程入口)
 - [分层运行时配置](#分层运行时配置)
 - [Skill 发现与 slash command](#skill-发现与-slash-command)
 - [主要能力](#主要能力)
@@ -35,6 +36,7 @@ Google Gen AI SDK 要求 Python 3.10 或更高版本：
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -e .
 cp -n .env.example .env
 # 将 POSTGRES_PASSWORD 与 DATABASE_URL 中的示例 PostgreSQL 密码
 # 替换为同一个仅供本地使用的随机密码。
@@ -59,6 +61,54 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 构建前端。示例配置使用 Fake LLM 和本地嵌入提供方，不需要 API Key。
 当 `AUTH_MODE=disabled` 时，启动脚本会直接拒绝非回环地址的 `APP_HOST`，而不是
 只输出运维警告。
+
+## CLI、REPL、SDK 与进程入口
+
+可安装入口全部是 `RuntimeContainer` 和 `QueryService` 之上的薄适配器：
+
+```bash
+# 一个 Query；stdout 每行都是 AgentEvent 的 JSON，适合脚本消费。
+.venv/bin/ai-agent --workspace /absolute/path/to/project print "解释入口结构"
+
+# 同一 conversation 的多轮交互。
+.venv/bin/ai-agent --workspace /absolute/path/to/project repl
+
+# 只启动 FastAPI/uvicorn HTTP 入口；未认证模式仍强制 loopback。
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+```
+
+REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
+普通输入在同一个 session 中逐轮创建 Query；运行期间按 `Ctrl+C` 会向当前 Run 发送
+`cancel`，不会把信号处理安装进 SDK、Service 或领域模型。`/resume [run_id]
+[approve|deny] [message]` 对 `waiting_approval` 使用 resume，对 `waiting_input`/`paused`
+使用 continue。print mode 和 REPL 都直接输出 `AgentEventEncoder` 的七字段事件 Schema，
+不另造 CLI 事件模型。
+
+Python SDK 同样返回领域契约：
+
+```python
+from ai_agent_platform.domain import QueryParams
+from ai_agent_platform.sdk import AgentSDK
+
+async def run() -> None:
+    with AgentSDK.from_settings() as sdk:
+        events = sdk.query(QueryParams(
+            conversation_id="sess_existing",
+            workspace_id="project",
+            message="解释 RuntimeContainer",
+        ))
+        last = None
+        async for event in events:       # AgentEvent
+            last = event
+        result = sdk.result(last.run_id) # QueryResult
+```
+
+`AgentSDK.query()`/`resume()` 返回 `AsyncIterator[AgentEvent]`，`control()`/`result()`
+返回 `QueryResult`。SDK 不拥有进程信号；只有 `AgentSDK.from_settings()` 创建的 facade
+会在 `close()` 时释放自己的容器。FastAPI 只在 lifespan 关闭容器；Celery 则在
+`worker_process_init` 后创建每进程单例，并在 `worker_process_shutdown` 关闭，避免 fork
+前创建连接或在 task handler 中重组依赖。`scripts/start.sh` 的 uvicorn target 也已收敛到
+`ai_agent_platform.api.entrypoint:app`。
 
 ## 分层运行时配置
 
