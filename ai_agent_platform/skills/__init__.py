@@ -13,7 +13,7 @@ from .models import (
     SlashCommandMetadata,
 )
 from .registry import CommandRegistry
-from .service import SkillService
+from .service import SkillInvocationError, SkillService
 
 __all__ = [
     "CommandDefinition",
@@ -27,6 +27,7 @@ __all__ = [
     "SkillDiscoveryLimits",
     "SkillDocumentError",
     "SkillService",
+    "SkillInvocationError",
     "SkillSource",
     "SlashCommandMetadata",
 ]

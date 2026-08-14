@@ -5,7 +5,7 @@ import logging
 from dataclasses import replace
 from threading import Lock
 from time import perf_counter
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from ai_agent_platform.agents.coding_agent import (
@@ -15,6 +15,7 @@ from ai_agent_platform.agents.coding_agent import (
     AgentRunResult,
     CodingAgentRuntime,
 )
+from ai_agent_platform.agents.coding.models import AgentRunEvent
 from ai_agent_platform.core import (
     InProcessTaskQueue,
     MetricsRegistry,
@@ -50,6 +51,10 @@ from ai_agent_platform.integrations.permissions import (
     canonical_arguments_hash,
 )
 from ai_agent_platform.integrations.tools import ToolRegistry
+from ai_agent_platform.integrations.tool_pool import (
+    ToolPoolBuilder,
+    ToolPoolRestoreError,
+)
 from ai_agent_platform.usage_ledger import model_usage_scope
 from ai_agent_platform.project_memory.service import ProjectMemoryService
 
@@ -81,6 +86,7 @@ class QueryService:
         execution_context_factory: ExecutionContextFactory | None = None,
         permission_resolver: PermissionResolver | None = None,
         tool_registry: ToolRegistry | None = None,
+        tool_pool_builder: ToolPoolBuilder | None = None,
         query_uow=None,
         event_encoder: AgentEventEncoder | None = None,
         event_store: EventStore | None = None,
@@ -101,7 +107,13 @@ class QueryService:
         self._model_registry = model_registry
         self._execution_context_factory = execution_context_factory
         self._permission_resolver = permission_resolver
-        self._tool_registry = tool_registry
+        self._tool_registry = tool_registry or getattr(runtime, "_tools", None)
+        runtime_tool_access = getattr(runtime, "_tool_access", None)
+        self._tool_pool_builder = tool_pool_builder or getattr(
+            runtime_tool_access,
+            "_tool_pool_builder",
+            None,
+        )
         self._query_uow = query_uow
         self._event_encoder = event_encoder or AgentEventEncoder()
         self._event_store = event_store or RuntimeEventStore(runtime)
@@ -127,6 +139,8 @@ class QueryService:
             mode=params.mode,
             cwd=params.cwd,
             additional_workspace_ids=list(params.additional_workspace_ids),
+            skill_name=params.skill_name,
+            skill_arguments=params.skill_arguments,
             entrypoint_type=params.entrypoint,
             entrypoint_metadata=params.metadata_dict(),
         )
@@ -185,6 +199,8 @@ class QueryService:
         additional_workspace_ids: Optional[list[str]] = None,
         entrypoint_type: str = "sdk",
         entrypoint_metadata: Optional[dict[str, object]] = None,
+        skill_name: str | None = None,
+        skill_arguments: tuple[str, ...] = (),
     ) -> AgentRunRecord:
         if mode is not None and mode not in {"auto", "manual"}:
             raise ValueError("Query mode must be auto or manual")
@@ -254,6 +270,8 @@ class QueryService:
                 run_id=run_id,
                 entrypoint_type=entrypoint_type,
                 entrypoint_metadata=entrypoint_metadata or {},
+                skill_name=skill_name,
+                skill_arguments=skill_arguments,
             )
             resolved_actor = context_snapshot.identity.actor_user_id
             workspace_root = context_snapshot.project.workspace_root
@@ -721,6 +739,14 @@ class QueryService:
                 extra={"run_id": run_id, "status": record.status},
             )
             return
+        if context_snapshot is not None and self._can_restore_tool_access():
+            # Production RuntimeContainer always injects the shared builder. The
+            # guard keeps minimal compatibility test runtimes on their legacy path.
+            try:
+                self._restore_tool_access(context_snapshot)
+            except ToolPoolRestoreError:
+                self._fail_tool_pool_restore(run_id)
+                return
         with log_context(
             run_id=run_id,
             conversation_id=conversation_id,
@@ -815,6 +841,11 @@ class QueryService:
         ):
             logger.info("agent run resume started", extra={"approved": approved})
             try:
+                if (
+                    record.context_snapshot is not None
+                    and self._can_restore_tool_access()
+                ):
+                    self._restore_tool_access(record.context_snapshot)
                 if approved:
                     self._validate_approval_binding(record)
                     self._authorize_pending_approval(record, actor_user_id)
@@ -851,6 +882,13 @@ class QueryService:
                             feedback=feedback,
                             approved_by=actor_user_id,
                         )
+            except ToolPoolRestoreError:
+                self._record_execution_metrics(
+                    status="failed",
+                    started_at=started_at,
+                )
+                self._fail_tool_pool_restore(run_id)
+                return
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -947,7 +985,16 @@ class QueryService:
                     )
                     or ""
                 )
-        project_tools = snapshot.tools.enabled_tools if snapshot is not None else None
+        tool_access = (
+            self._restore_tool_access(snapshot)
+            if snapshot is not None
+            else self._tool_registry
+        )
+        project_tools = (
+            tuple(tool_access.allowed_names)
+            if snapshot is not None
+            else None
+        )
         process_tools = tuple(spec.name for spec in self._tool_registry.list_specs())
         approval_policy = (
             _snapshot_approval_policy(snapshot)
@@ -972,7 +1019,7 @@ class QueryService:
             if not isinstance(item, dict):
                 raise PermissionError("tool approval entry is invalid")
             call = calls.get(str(item.get("call_id") or ""))
-            spec = self._tool_registry.get_spec(str(item.get("name") or ""))
+            spec = tool_access.get_spec(str(item.get("name") or ""))
             if call is None or spec is None or not isinstance(
                 call.get("arguments"), dict
             ):
@@ -989,6 +1036,57 @@ class QueryService:
             )
             if decision.effect == "deny":
                 raise PermissionError(decision.reason)
+
+    def _restore_tool_access(self, snapshot: Any):
+        if snapshot.metadata.schema_version >= 3:
+            if self._tool_pool_builder is None:
+                raise ToolPoolRestoreError(
+                    "effective tool pool restoration is unavailable"
+                )
+            return self._tool_pool_builder.restore(snapshot.tools)
+        if self._tool_registry is None:
+            raise ToolPoolRestoreError("legacy tool restoration is unavailable")
+        selected = snapshot.tools.enabled_tools
+        if selected is None:
+            selected = tuple(
+                spec.name for spec in self._tool_registry.list_specs()
+            )
+        try:
+            return self._tool_registry.select(tuple(selected))
+        except ValueError as exc:
+            raise ToolPoolRestoreError(
+                "legacy Run tool selection is unavailable"
+            ) from exc
+
+    def _can_restore_tool_access(self) -> bool:
+        return self._tool_pool_builder is not None or self._tool_registry is not None
+
+    def _fail_tool_pool_restore(self, run_id: str) -> None:
+        message = "The frozen effective tool pool could not be restored safely."
+        self.fail_run_task(
+            run_id=run_id,
+            error=message,
+            attempt=1,
+            max_attempts=1,
+        )
+        try:
+            self._event_store.append(
+                run_id,
+                AgentRunEvent(
+                    sequence=0,
+                    type="tool_pool_restore_failed",
+                    status="failed",
+                    node="tool_access",
+                    summary=message,
+                    output={"error_code": "tool_pool_restore_failed"},
+                ),
+            )
+        except RuntimeError:
+            logger.info(
+                "tool pool restore failure event store is unavailable",
+                extra={"run_id": run_id},
+            )
+        self._metrics.increment("agent_tool_pool_restore_failures_total")
 
     def _record_execution_metrics(self, *, status: str, started_at: float) -> None:
         duration_ms = int((perf_counter() - started_at) * 1000)

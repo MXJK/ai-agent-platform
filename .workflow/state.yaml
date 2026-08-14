@@ -1,8 +1,9 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "SHELL-ADAPTERS"
-next_action: "Review the pushed SHELL-ADAPTERS branch and open a pull request when desired."
-blockers: []
+active_task: "ARCHITECTURE-INTEGRATION-CLOSURE"
+next_action: "No action required; ARCHITECTURE-INTEGRATION-CLOSURE is complete and verified in the current worktree."
+blockers:
+  - "Before starting a PostgreSQL runtime, review and explicitly authorize applying Alembic revisions 20260810_0020 and 20260813_0021; no migration was authorized or executed in this task."
 last_verified_commit: "4f64a3c7c79ba9937cb03ebaf2a5b55da22a5812"
-updated_at: "2026-08-14T09:28:34+08:00"
+updated_at: "2026-08-14T10:16:35+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Callable
 
 from langgraph.types import interrupt
 
@@ -13,17 +13,16 @@ from ai_agent_platform.agents.coding.models import (
     AgentToolExecution,
     CodingAgentState,
 )
+from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
     ToolRegistry,
-    ToolRegistryView,
     ToolSpec,
     summarize_tool_arguments,
 )
 from ai_agent_platform.integrations.permissions import (
     PermissionDecision,
-    ToolApproval,
     ToolUseContext,
     canonical_arguments_hash,
 )
@@ -47,10 +46,20 @@ class ChangeLoopExecutor:
         tools: ToolRegistry,
         planner: object,
         run_store: AgentRunStore | None = None,
+        pool_provider: Callable[[CodingAgentState], Any] | None = None,
+        context_provider: Callable[[CodingAgentState], ToolUseContext] | None = None,
     ) -> None:
         self._tools = tools
         self._planner = planner
         self._run_store = run_store
+        fallback_access = ToolAccessCoordinator(
+            tools=tools,
+            default_approval_policy="on_request",
+        )
+        self._pool_provider = pool_provider or fallback_access.tools_for_state
+        self._context_provider = (
+            context_provider or fallback_access.tool_use_context
+        )
 
     def execute_changes(self, state: CodingAgentState) -> CodingAgentState:
         iteration = state.get("change_iteration", 0)
@@ -321,43 +330,17 @@ class ChangeLoopExecutor:
             for tool_call in tool_calls
         ]
 
-    def _tools_for_state(self, state: CodingAgentState) -> ToolRegistryView:
-        selected_values = state.get("enabled_tools")
-        selected = (
-            tuple(selected_values)
-            if selected_values is not None
-            else tuple(spec.name for spec in self._tools.list_specs())
-        )
-        return self._tools.select(selected)
+    def _tools_for_state(self, state: CodingAgentState):
+        return self._pool_provider(state)
 
     def _tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
-        selected_values = state.get("enabled_tools")
-        return ToolUseContext(
-            conversation_id=state["conversation_id"],
-            workspace_id=state["workspace_id"],
-            workspace_root=state["workspace_root"],
-            authorized_workspace_root=state.get("authorized_workspace_root"),
-            run_id=state.get("run_id"),
-            actor_user_id=state.get("actor_user_id", ""),
-            workspace_role=state.get("workspace_role", "viewer"),
-            approval_policy=state.get("approval_policy", "on_request"),
-            process_allowed_tools=tuple(
-                spec.name for spec in self._tools.list_specs()
-            ),
-            project_allowed_tools=(
-                tuple(selected_values) if selected_values is not None else None
-            ),
-            approvals=tuple(
-                ToolApproval.from_mapping(item)
-                for item in state.get("tool_approvals", [])
-            ),
-        )
+        return self._context_provider(state)
 
     def _execute_tool_call(
         self,
         tool_call: ToolCall,
         context: ToolExecutionContext,
-        tools: ToolRegistryView,
+        tools: Any,
     ) -> dict[str, Any]:
         run_id = context.run_id
         arguments_hash = hashlib.sha256(

@@ -154,8 +154,11 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也�
 镜像交给项目选择、把 Docker 降为 local、放宽审批语义、扩张命令/工具/Skill allowlist，
 或越过 `mcp_allowed=false`、
 `skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
-时裁剪全局能力上限，项目 `enabled_tools` 会冻结为每 Run 的只读 Registry view，不修改
-源 `ToolRegistry`。未知工具、尝试突破进程上限或非法恢复选择都会 fail closed。环境变量
+时裁剪全局能力上限。每个 Run 再从进程 Registry 建立带 base/local/MCP 来源和 namespace
+的不可变 `ToolCatalog`，由共享 `ToolPoolBuilder` 将项目 `enabled_tools`、Agent/模式、模型
+能力、Workspace role、中央 display deny、显式 deny、Sandbox 和 Skill 依赖求交为
+`EffectiveToolPool`，不修改源 `ToolRegistry`。未知工具、大小写冲突、保留 namespace
+冒用、尝试突破进程上限或非法恢复都会 fail closed。环境变量
 继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
 `AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
@@ -163,8 +166,10 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也�
 解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
 最终字段的来源。`Settings.from_env()` 仍返回 `Settings`；需要来源或入口覆盖时直接使用
 `ConfigResolver`。`ResolvedConfig.safe_snapshot()` 是日志、Run 快照和配置诊断支持的
-带 schema version、逐字段 source/detail 的序列化视图；Run 再保存配置内容哈希与确切
-工具选择哈希。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
+带 schema version、逐字段 source/detail 的序列化视图；新 Run 写 schema v3，并保存配置
+内容哈希、catalog/pool contract version、脱敏规范化摘要、hash、选择 provenance 与安全
+排除诊断。摘要只含工具定义和 Schema 的 hash，不保存 Secret、Header、连接凭据或完整
+敏感参数。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
 递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
 
 ## Skill 发现与 slash command
@@ -211,8 +216,11 @@ Skill 是纯声明数据：系统不会执行同目录 Python/Shell，也不会�
 `tools` 只是所需工具名称；缺少本次 Run 已筛选工具时 Skill 不进入上下文，即使工具
 存在，调用仍受既有 `ToolUseContext`、Sandbox 和 allow/ask/deny 规则约束。Skill
 不能注册工具、降低审批、扩大 allowlist 或授予权限。Skill 指令的快照优先级低于
-Workspace 指令文件和项目配置指令；slash command 注册表也只保存名称、描述、usage、
-alias 与目标 Skill，不直接执行命令。
+Workspace 指令文件和项目配置指令。REPL 对非内置 slash command 使用当前 Workspace 的
+有效 Skill catalog 解析覆盖、启用列表、Agent/模式和 `required_tools`；成功后提交普通
+`QueryParams(skill_name, skill_arguments)`，并在入队前把选中 Skill 指令与 invocation
+元数据冻结。未知、禁用或缺依赖命令返回稳定诊断；注册表只保存元数据，不执行 Skill
+目录代码，也不扩大工具池或绕过 `PermissionResolver`。
 
 ## 主要能力
 
@@ -514,6 +522,7 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 
 ```text
 原生工具调用
+→ EffectiveToolPool 只暴露本 Run 冻结且校验通过的 ToolSpec
 → PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
 → ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
@@ -639,17 +648,23 @@ symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都�
 不会进入快照。
 
 `QueryService` 是 HTTP、CLI/SDK 适配器和 Worker 共用的入口无关命令内核。
-`QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖和入口元数据；
+`QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖、可选
+Skill invocation 和入口元数据；
 `QueryCommand` 统一 start/resume/continue/steer/pause/cancel；`AgentEvent` 与 `QueryResult`
 分别固定游标事件和终态/恢复结果。FastAPI 仍在 start/resume/continue 入队后立即返回 `202`，
 不会等待 Agent Loop。
 
 `ExecutionContextFactory` 在 start 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、确切工具选择和额外目录，形成
+Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、schema v3
+Effective Tool Pool 快照和额外目录，形成
 可 JSON 往返的深度不可变 `RunContextSnapshot`。用户消息、queued Run 及其中的模型/配置/
 上下文/工具快照在同一 Query UoW 中提交，提交成功后才派发只含 `run_id` 的 Worker 任务。
 内建运行时要求 Session 与 Run store 使用同一受支持后端，无法建立原子 UoW 时启动即失败。
 Worker 重启后从 Run store 恢复快照，不重新读取已经变化的会话历史、模型偏好或指令文件。
+v3 恢复会校验 catalog/pool 摘要与 hash、工具顺序、当前 Registry 中的 callable 以及
+Schema/provider/权限/超时/重试等定义；新增无关全局工具不会进入旧 Run，缺失、漂移或
+篡改则在模型和工具执行前产生安全的 `tool_pool_restore_failed` 终态。v1/v2 历史快照
+仍通过明确的 legacy `ToolRegistryView` 路径加载。
 Git 缺失、非仓库、无 HEAD 或状态读取失败只记录诊断，不会无条件拒绝 Run。
 
 README 文件和目录不会无条件注入上下文；通用项目概览会先列举工作区并优先读取
@@ -1103,9 +1118,11 @@ Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独�
 FastAPI `create_app()` 与 Celery Worker 进程单例都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
-checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；`cli` 目前只是预留的
-可构建角色，没有新增命令。启动配置在进入工厂前只解析进程基线；Workspace 项目覆盖、
-配置指令和项目工具选择在 Run 入队前按已鉴权主 Workspace root 解析并冻结。
+checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；正式 CLI print、REPL
+和 SDK 也复用该容器与 Query Kernel。启动配置在进入工厂前只解析进程基线；Workspace
+项目覆盖、配置指令和 Effective Tool Pool 在 Run 入队前按已鉴权主 Workspace root
+解析并冻结。共享 `ToolPoolBuilder` 注入 ExecutionContextFactory、QueryService 与拆分后的
+Agent Loop，但不拥有或关闭 Registry/MCP 资源。
 
 返回的 `RuntimeContainer` 显式持有不可变解析结果、脱敏配置快照、
 共享 `SecretStore`、`MCPConnectionManager`、`ExecutionContextFactory`、服务和资源，并按

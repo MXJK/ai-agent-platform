@@ -86,7 +86,6 @@ class ContextRetrievalNodes:
     """Context and retrieval node implementations used only inside the graph."""
 
     def __init__(self, runtime: Any) -> None:
-        self._tools = runtime._tools
         self._planner = runtime._planner
         self._max_instruction_chars = runtime._max_instruction_chars
         self._knowledge_context_provider = runtime._knowledge_context_provider

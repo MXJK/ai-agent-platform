@@ -34,6 +34,8 @@ class QueryParams:
     cwd: str | None = None
     additional_workspace_ids: tuple[str, ...] = ()
     actor_user_id: str | None = None
+    skill_name: str | None = None
+    skill_arguments: tuple[str, ...] = ()
     entrypoint: str = "sdk"
     entrypoint_metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -47,6 +49,11 @@ class QueryParams:
             self,
             "additional_workspace_ids",
             tuple(str(item) for item in self.additional_workspace_ids),
+        )
+        object.__setattr__(
+            self,
+            "skill_arguments",
+            tuple(str(item) for item in self.skill_arguments),
         )
         object.__setattr__(
             self,

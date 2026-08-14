@@ -41,7 +41,6 @@ class ToolLoopNodes:
     """Tool-loop nodes with no API, Service, CLI, or Repository surface."""
 
     def __init__(self, runtime: Any) -> None:
-        self._tools = runtime._tools
         self._planner = runtime._planner
         self._change_loop = runtime._change_loop
         self._max_tool_rounds = runtime._max_tool_rounds
