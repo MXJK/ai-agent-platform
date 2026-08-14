@@ -293,17 +293,52 @@ Inspect the requested files before answering.
                             "runtime": {"agent_max_elapsed_seconds": elapsed},
                             "project_session": {
                                 "enabled_tools": [tool],
+                                "skills_enabled": True,
+                                "enabled_skills": [f"{root.name}-review"],
                                 "project_instructions": [instruction],
                             },
                         }
                     ),
                     encoding="utf-8",
                 )
-            registry = _tool_registry("tool.alpha", "tool.beta")
+                skill = (
+                    root
+                    / ".agents"
+                    / "skills"
+                    / f"{root.name}-review"
+                    / "SKILL.md"
+                )
+                skill.parent.mkdir(parents=True)
+                skill.write_text(
+                    (
+                        "---\n"
+                        f"name: {root.name}-review\n"
+                        f"description: Review {root.name}\n"
+                        "agents: [coding]\n"
+                        "modes: [default]\n"
+                        "context_budget: 800\n"
+                        f"tools: [{tool}]\n"
+                        "---\n"
+                        f"{root.name} skill instructions\n"
+                    ),
+                    encoding="utf-8",
+                )
+            registry = ToolRegistry()
+            registry.register("tool.alpha", lambda: {})
+            registry.register(
+                "tool.beta",
+                lambda: {},
+                permission_level="write_safe",
+                requires_approval=True,
+            )
             process = ConfigResolver(
                 user_config={
                     "process_security": {
-                        "tool_allowlist": ["tool.alpha", "tool.beta"]
+                        "tool_allowlist": ["tool.alpha", "tool.beta"],
+                        "skill_allowlist": [
+                            "alpha-review",
+                            "beta-review",
+                        ],
                     }
                 },
                 env={},
@@ -315,7 +350,14 @@ Inspect the requested files before answering.
                     ("alpha", alpha),
                     ("beta", beta),
                 ),
-                auth_mode="disabled",
+                workspace_authorizer=_Authorizer(
+                    {
+                        ("alpha", "alice"): "viewer",
+                        ("beta", "alice"): "editor",
+                    }
+                ),
+                auth_mode="trusted_header",
+                skill_service=SkillService(SkillDiscovery(), enabled=True),
                 process_config=process,
                 tool_registry=registry,
             )
@@ -325,28 +367,41 @@ Inspect the requested files before answering.
                 user_message="inspect alpha",
                 workspace_id="alpha",
                 model_selection=ModelSelection(),
+                actor_user_id="alice",
             )
             beta_snapshot = factory.create(
                 conversation_id="session_1",
                 user_message="inspect beta",
                 workspace_id="beta",
                 model_selection=ModelSelection(),
+                actor_user_id="alice",
             )
 
             self.assertEqual(alpha_snapshot.tools.enabled_tools, ("tool.alpha",))
             self.assertEqual(beta_snapshot.tools.enabled_tools, ("tool.beta",))
+            self.assertEqual(alpha_snapshot.identity.workspace_role, "viewer")
+            self.assertEqual(beta_snapshot.identity.workspace_role, "editor")
             self.assertEqual(
                 [spec.name for spec in registry.list_specs()],
                 ["tool.alpha", "tool.beta"],
             )
             self.assertEqual(
-                [item.text for item in alpha_snapshot.instructions.sources],
+                [
+                    item.text
+                    for item in alpha_snapshot.instructions.sources[:2]
+                ],
                 ["alpha agents", "alpha config"],
             )
             self.assertEqual(
-                [item.text for item in beta_snapshot.instructions.sources],
+                [item.text for item in beta_snapshot.instructions.sources[:2]],
                 ["beta agents", "beta config"],
             )
+            alpha_skill = alpha_snapshot.instructions.sources[2]
+            beta_skill = beta_snapshot.instructions.sources[2]
+            self.assertEqual(alpha_skill.path, "skill://project:alpha-review")
+            self.assertEqual(beta_skill.path, "skill://project:beta-review")
+            self.assertIn("alpha skill instructions", alpha_skill.text)
+            self.assertIn("beta skill instructions", beta_skill.text)
             self.assertGreater(
                 alpha_snapshot.instructions.sources[0].priority,
                 alpha_snapshot.instructions.sources[1].priority,
@@ -748,22 +803,8 @@ class WorkerContextRecoveryTests(unittest.TestCase):
             )
             payload = snapshot.to_dict()
             payload["tools"]["enabled_tools"] = ["missing.tool"]  # type: ignore[index]
-            payload["tools"]["version"] = (  # type: ignore[index]
-                "sha256:"
-                + hashlib.sha256(b'["missing.tool"]').hexdigest()[:16]
-            )
-            restored = RunContextSnapshot.from_dict(payload)
-            runtime = CodingAgentRuntime(tool_registry=registry)
-
-            with self.assertRaisesRegex(ValueError, "unknown tools"):
-                runtime.run(
-                    conversation_id="ignored",
-                    user_input="ignored",
-                    history=[],
-                    workspace_id="ignored",
-                    workspace_root=str(root),
-                    run_context=restored,
-                )
+            with self.assertRaisesRegex(ValueError, "effective tool pool"):
+                RunContextSnapshot.from_dict(payload)
 
     def test_nullable_legacy_schema_one_snapshot_remains_loadable(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -784,6 +825,43 @@ class WorkerContextRecoveryTests(unittest.TestCase):
 
             self.assertIsNone(restored.tools.enabled_tools)
             self.assertEqual(restored.metadata.schema_version, 1)
+
+    def test_legacy_schema_two_registry_view_snapshot_remains_loadable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            snapshot = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                tool_registry=_tool_registry("tool.a"),
+            ).create(
+                conversation_id="session_1",
+                user_message="legacy v2",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+            )
+            payload = snapshot.to_dict()
+            names = payload["tools"]["enabled_tools"]  # type: ignore[index]
+            encoded = json.dumps(
+                names,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            payload["metadata"]["schema_version"] = 2  # type: ignore[index]
+            payload["tools"] = {
+                "enabled_tools": names,
+                "source": "legacy_registry_view",
+                "version": "sha256:"
+                + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
+            }
+
+            restored = RunContextSnapshot.from_dict(payload)
+
+            self.assertEqual(restored.metadata.schema_version, 2)
+            self.assertEqual(restored.tools.enabled_tools, ("tool.a",))
+            self.assertEqual(
+                restored.tools.catalog_version,
+                "legacy:unversioned",
+            )
 
     def test_postgres_store_round_trips_the_context_json(self) -> None:
         with TemporaryDirectory() as temp_dir:

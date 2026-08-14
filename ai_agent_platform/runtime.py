@@ -34,6 +34,7 @@ from ai_agent_platform.integrations import (
     RAGService,
     SystemDirectoryPicker,
     ToolRegistry,
+    ToolPoolBuilder,
     PermissionResolver,
     create_mcp_providers_from_config_file,
     create_rag_service,
@@ -133,6 +134,7 @@ class RuntimeContainer:
     mcp_connection_manager: MCPConnectionManager | None = None
     mcp_registry: MCPRegistryService | None = None
     tool_registry: ToolRegistry | None = None
+    tool_pool_builder: ToolPoolBuilder | None = None
     skill_service: SkillService | None = None
     skill_catalog: SkillCatalog | None = None
     command_registry: CommandRegistry | None = None
@@ -356,6 +358,9 @@ class ApplicationFactory:
                 "tool_registry",
                 container.tool_registry.close,
             )
+            container.tool_pool_builder = ToolPoolBuilder(
+                container.tool_registry
+            )
             container.mcp_registry = self.create_mcp_registry(
                 settings,
                 secret_store=container.secret_store,
@@ -393,6 +398,7 @@ class ApplicationFactory:
                     knowledge_base_service=container.knowledge_base_service,
                     project_memory_service=container.project_memory_service,
                     change_set_service=container.change_set_service,
+                    tool_pool_builder=container.tool_pool_builder,
                 )
             else:
                 container.coding_agent_runtime = coding_agent_runtime
@@ -446,6 +452,8 @@ class ApplicationFactory:
                     resolved_config or ResolvedConfig.from_settings(settings)
                 ),
                 tool_registry=container.tool_registry,
+                tool_pool_builder=container.tool_pool_builder,
+                model_registry=container.model_registry,
             )
             container.query_uow = create_query_unit_of_work(
                 session_service=container.session_service,
@@ -476,6 +484,7 @@ class ApplicationFactory:
                 query_uow=container.query_uow,
                 permission_resolver=container.permission_resolver,
                 tool_registry=container.tool_registry,
+                tool_pool_builder=container.tool_pool_builder,
             )
             container.query_service = container.agent_run_service
             container.register_cleanup(
@@ -795,6 +804,7 @@ class ApplicationFactory:
         knowledge_base_service: KnowledgeBaseService,
         project_memory_service: ProjectMemoryService,
         change_set_service: ChangeSetService,
+        tool_pool_builder: ToolPoolBuilder,
     ) -> CodingAgentRuntime:
         return CodingAgentRuntime(
             tool_registry=tool_registry,
@@ -824,6 +834,7 @@ class ApplicationFactory:
             project_memory_provider=project_memory_service,
             max_rag_context_chars=settings.rag_max_prompt_chars,
             change_set_service=change_set_service,
+            tool_pool_builder=tool_pool_builder,
         )
 
 

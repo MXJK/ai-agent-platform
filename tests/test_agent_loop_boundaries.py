@@ -67,6 +67,24 @@ class AgentLoopBoundaryTests(unittest.TestCase):
         self.assertNotIn("def _retrieve_knowledge(", runtime_source)
         self.assertNotIn("def _finish_invocation(", runtime_source)
 
+    def test_graph_nodes_cannot_list_or_select_from_the_global_registry(self) -> None:
+        violations = []
+        coding_root = ROOT / "ai_agent_platform" / "agents" / "coding"
+        for source in coding_root.glob("*.py"):
+            if source.name == "tool_access.py":
+                continue
+            text = source.read_text(encoding="utf-8")
+            for forbidden in (
+                "self._tools.list_specs",
+                "self._tools.select",
+                "runtime._tools.list_specs",
+                "runtime._tools.select",
+            ):
+                if forbidden in text:
+                    violations.append(f"{source.name}:{forbidden}")
+
+        self.assertEqual(violations, [])
+
 
 _EXPECTED_EDGES = {
     ("__start__", "setup_workspace", False),

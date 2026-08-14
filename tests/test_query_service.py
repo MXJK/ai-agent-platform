@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -207,6 +208,20 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 persisted_run.context_snapshot.tools.enabled_tools,
                 ("demo.lookup",),
             )
+            self.assertEqual(
+                persisted_run.context_snapshot.metadata.schema_version,
+                3,
+            )
+            self.assertTrue(
+                persisted_run.context_snapshot.tools.catalog_hash.startswith(
+                    "sha256:"
+                )
+            )
+            self.assertTrue(
+                persisted_run.context_snapshot.tools.pool_hash.startswith(
+                    "sha256:"
+                )
+            )
 
             event = await anext(iterator)
             self.assertEqual(event.run_id, persisted_run.run_id)
@@ -313,6 +328,69 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_run_service_is_a_compatible_query_service_facade(self) -> None:
         self.assertTrue(issubclass(AgentRunService, QueryService))
 
+    async def test_worker_restores_frozen_pool_after_unrelated_tool_is_registered(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="inspect",
+                    workspace_id="workspace_main",
+                )
+            )
+            registry: ToolRegistry = kernel["registry"]
+            registry.register("demo.new", lambda: {"new": True})
+            runtime = kernel["runtime"]
+            runtime.run = Mock(return_value=_result(record, answer="done"))
+
+            service.execute_run_task(run_id=record.run_id)
+
+            runtime.run.assert_called_once()
+            restored = runtime.run.call_args.kwargs["run_context"]
+            self.assertEqual(restored.tools.enabled_tools, ("demo.lookup",))
+            self.assertNotIn("demo.new", restored.tools.enabled_tools)
+
+    async def test_worker_fails_safely_before_model_when_tool_definition_drifts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="inspect",
+                    workspace_id="workspace_main",
+                )
+            )
+            registry: ToolRegistry = kernel["registry"]
+            registry.remove_provider("local")
+            registry.register(
+                "demo.lookup",
+                lambda: {"value": 2},
+                description="changed definition",
+            )
+            runtime = kernel["runtime"]
+            runtime.run = Mock()
+
+            service.execute_run_task(run_id=record.run_id)
+
+            runtime.run.assert_not_called()
+            failed = service.get_run(record.run_id)
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(
+                failed.error,
+                "The frozen effective tool pool could not be restored safely.",
+            )
+            self.assertIn(
+                "tool_pool_restore_failed",
+                [
+                    event.type
+                    for event in service.events_for_actor(
+                        record.run_id, None
+                    )[1]
+                ],
+            )
+
 
 def _kernel(root: Path, on_submit=None) -> dict[str, object]:
     (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -375,6 +453,7 @@ def _kernel(root: Path, on_submit=None) -> dict[str, object]:
         "workspace_service": workspace_service,
         "uow": uow,
         "queue": queue,
+        "registry": registry,
     }
 
 

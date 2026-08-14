@@ -182,6 +182,108 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
             kinds,
             {"skills", "tools", "mcp", "permissions", "error"},
         )
+        diagnostics = {
+            item["kind"]: item
+            for item in _json_objects(output.getvalue())
+            if "kind" in item
+        }
+        self.assertEqual(diagnostics["skills"]["workspace_id"], "workspace")
+        self.assertEqual(diagnostics["skills"]["agent"], "coding")
+        self.assertEqual(diagnostics["tools"]["workspace_id"], "workspace")
+        self.assertIn("effective_pool_tools", diagnostics["mcp"])
+        self.assertEqual(
+            diagnostics["permissions"]["workspace_role"],
+            "admin",
+        )
+        self.assertIn("effective_denies", diagnostics["permissions"])
+
+    async def test_project_skill_command_submits_query_and_freezes_invocation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _write_project_skill(
+                root,
+                name="review",
+                command="review",
+                required_tools=("repo.read_file",),
+            )
+            _write_project_config(
+                root,
+                enabled_skills=("project:review",),
+            )
+            runtime = build_runtime(_settings(root), role="cli")
+            output = io.StringIO()
+            try:
+                application = CliApplication(
+                    runtime,
+                    workspace_root=root,
+                    workspace_id="workspace",
+                    input_stream=io.StringIO("/review app.py\n/exit\n"),
+                    output_stream=output,
+                    error_stream=io.StringIO(),
+                )
+                self.assertEqual(await application.run_repl(), 0)
+                record = runtime.coding_agent_runtime.get_run(
+                    application.last_run_id
+                )
+            finally:
+                runtime.close()
+
+        self.assertEqual(record.status, "completed")
+        invocation = record.context_snapshot.metadata.entrypoint_metadata[
+            "skill_invocation"
+        ]
+        self.assertEqual(invocation["skill_name"], "project:review")
+        self.assertEqual(invocation["arguments"], ["app.py"])
+        self.assertIn(
+            "untrusted_project_skill",
+            {item.kind for item in record.context_snapshot.instructions.sources},
+        )
+        self.assertNotIn(
+            "review",
+            record.context_snapshot.tools.enabled_tools,
+        )
+
+    async def test_disabled_and_missing_tool_skill_commands_are_rejected_stably(self) -> None:
+        for enabled_skills, required_tools, expected_code in (
+            ((), (), "skill_disabled"),
+            (
+                ("project:review",),
+                ("missing.tool",),
+                "skill_required_tools_unavailable",
+            ),
+        ):
+            with self.subTest(expected_code=expected_code), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+                _write_project_skill(
+                    root,
+                    name="review",
+                    command="review",
+                    required_tools=required_tools,
+                )
+                _write_project_config(root, enabled_skills=enabled_skills)
+                runtime = build_runtime(_settings(root), role="cli")
+                output = io.StringIO()
+                try:
+                    application = CliApplication(
+                        runtime,
+                        workspace_root=root,
+                        workspace_id="workspace",
+                        input_stream=io.StringIO("/review app.py\n/exit\n"),
+                        output_stream=output,
+                        error_stream=io.StringIO(),
+                    )
+                    self.assertEqual(await application.run_repl(), 0)
+                finally:
+                    runtime.close()
+                diagnostics = [
+                    item
+                    for item in _json_objects(output.getvalue())
+                    if item.get("kind") == "error"
+                ]
+                self.assertEqual(diagnostics[-1]["code"], expected_code)
+                self.assertIsNone(application.last_run_id)
 
 
 class ShellAdapterE2ETests(unittest.TestCase):
@@ -344,6 +446,53 @@ def _settings(root: Path) -> Settings:
         workspace_allowed_roots=(str(root.resolve()),),
         background_task_workers=1,
         conversation_summary_enabled=False,
+    )
+
+
+def _write_project_config(
+    root: Path,
+    *,
+    enabled_skills: tuple[str, ...],
+) -> None:
+    path = root / ".ai-agent-platform" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "project_session": {
+                    "skills_enabled": True,
+                    "enabled_skills": list(enabled_skills),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_project_skill(
+    root: Path,
+    *,
+    name: str,
+    command: str,
+    required_tools: tuple[str, ...],
+) -> None:
+    path = root / ".agents" / "skills" / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (
+            "---\n"
+            f"name: {name}\n"
+            f"description: {name} description\n"
+            "agents: [coding]\n"
+            "modes: [default]\n"
+            "context_budget: 1000\n"
+            f"tools: [{', '.join(required_tools)}]\n"
+            "command:\n"
+            f"  name: {command}\n"
+            "---\n"
+            "Review the requested files using only the effective tool pool.\n"
+        ),
+        encoding="utf-8",
     )
 
 

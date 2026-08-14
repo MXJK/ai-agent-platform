@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from threading import RLock
 from typing import Any
 
 from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.permissions import (
     PermissionDecision,
     ToolApproval,
@@ -16,6 +18,7 @@ from ai_agent_platform.integrations.tools import (
     ToolRegistry,
     summarize_tool_arguments,
 )
+from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder, ToolPoolRestoreError
 
 
 class ToolAccessCoordinator:
@@ -26,18 +29,69 @@ class ToolAccessCoordinator:
         *,
         tools: ToolRegistry,
         default_approval_policy: str,
+        tool_pool_builder: ToolPoolBuilder | None = None,
     ) -> None:
         self._tools = tools
         self._default_approval_policy = default_approval_policy
+        self._tool_pool_builder = tool_pool_builder or ToolPoolBuilder(tools)
+        self._run_tools: dict[str, Any] = {}
+        self._lock = RLock()
+
+    def restore_snapshot(self, snapshot: RunContextSnapshot):
+        """Restore and cache the exact v3 pool or the explicit legacy v1/v2 view."""
+
+        if snapshot.metadata.schema_version >= 3:
+            tools = self._tool_pool_builder.restore(snapshot.tools)
+        else:
+            selected = snapshot.tools.enabled_tools
+            if selected is None:
+                selected = tuple(spec.name for spec in self._tools.list_specs())
+            try:
+                tools = self._tools.select(tuple(selected))
+            except ValueError as exc:
+                raise ToolPoolRestoreError(
+                    "legacy Run tool selection is unavailable"
+                ) from exc
+        with self._lock:
+            self._run_tools[snapshot.metadata.run_id] = tools
+        return tools
+
+    def legacy_view(self, allowed_names: tuple[str, ...] | None = None):
+        """Explicit compatibility path for callers without a persisted snapshot."""
+
+        selected = (
+            tuple(spec.name for spec in self._tools.list_specs())
+            if allowed_names is None
+            else allowed_names
+        )
+        return self._tools.select(tuple(selected))
+
+    def tools_for_run(
+        self,
+        run_id: str,
+        *,
+        snapshot: RunContextSnapshot | None = None,
+    ):
+        with self._lock:
+            tools = self._run_tools.get(run_id)
+        if tools is None and snapshot is not None:
+            tools = self.restore_snapshot(snapshot)
+        if tools is None:
+            raise ToolPoolRestoreError("Run tool access has not been restored")
+        tools.list_specs()
+        return tools
 
     def tools_for_state(self, state: CodingAgentState):
+        run_id = str(state.get("run_id") or "")
+        if run_id:
+            with self._lock:
+                tools = self._run_tools.get(run_id)
+            if tools is not None:
+                tools.list_specs()
+                return tools
         selected_values = state.get("enabled_tools")
-        selected = (
-            tuple(selected_values)
-            if selected_values is not None
-            else tuple(spec.name for spec in self._tools.list_specs())
-        )
-        return self._tools.select(selected)
+        selected = tuple(selected_values) if selected_values is not None else None
+        return self.legacy_view(selected)
 
     def tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
         approvals = tuple(
@@ -45,7 +99,7 @@ class ToolAccessCoordinator:
             for item in state.get("tool_approvals", [])
         )
         process_tools = tuple(spec.name for spec in self._tools.list_specs())
-        selected_values = state.get("enabled_tools")
+        selected_values = self.tools_for_state(state).allowed_names
         return ToolUseContext(
             conversation_id=state["conversation_id"],
             workspace_id=state["workspace_id"],

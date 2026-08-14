@@ -111,8 +111,12 @@ cannot change databases, authentication, API keys/secret backends, allowed roots
 live-write switches, or the MCP config path. They also cannot weaken Docker to the
 local sandbox, choose the Docker image, reduce approval, expand command/tool/Skill
 allowlists, or bypass
-`mcp_allowed=false`/`skills_allowed=false`; they may select a smaller permission
-set, which is applied to the final Tool Registry.
+`mcp_allowed=false`/`skills_allowed=false`. The process Tool Registry remains the
+hard capability ceiling. Each Run builds an immutable `ToolCatalog` with explicit
+base/local/MCP sources and namespaces, then a shared `ToolPoolBuilder` intersects
+project selection, Agent/mode, model capabilities, Workspace role, central display
+deny, explicit deny, Sandbox capabilities, and Skill requirements into an
+`EffectiveToolPool` without mutating the Registry.
 
 Legacy unprefixed environment names and `.env` remain supported, including
 `GEMINI_API_KEY` and the old `SESSION_REPOSITORY`/`AGENT_RUN_STORE` fallback chains.
@@ -123,6 +127,9 @@ containers retain `ResolvedConfig.safe_snapshot()` as `config_snapshot`, the
 supported serialization view for logs, Run snapshots, and configuration
 diagnostics. Structured logging also recursively redacts nested keys, secrets,
 tokens, and credential-bearing connection strings.
+New Runs write RunContext schema v3 with catalog/pool contract versions, normalized
+hash-only summaries, hashes, selection provenance, and safe exclusion diagnostics;
+tool Schemas, headers, credentials, and sensitive arguments are not persisted.
 
 ## Skill discovery and slash commands
 
@@ -171,8 +178,12 @@ Skills are declarative data. Python and shell files are never executed, and
 Markdown cannot register functions. `tools` lists requirements only: a Skill with
 missing registered tools is not injected, while existing tools remain governed by
 `ToolUseContext`, sandbox, and allow/ask/deny policy. Skills cannot register tools,
-reduce approval, expand allowlists, or grant permission. The slash command registry
-stores only metadata and a target Skill; it does not execute a command.
+reduce approval, expand allowlists, or grant permission. For a non-built-in REPL
+slash command, the effective Workspace Skill catalog applies source precedence,
+enabled Skills, Agent/mode, and `required_tools`, then submits an ordinary
+`QueryParams(skill_name, skill_arguments)`. The selected instructions are frozen
+before queueing; unknown, disabled, or dependency-missing commands return stable
+diagnostics and never execute Skill-directory code.
 
 The shared composer offers:
 
@@ -523,6 +534,8 @@ order inside the same tool transcript instead of isolated fixed phases:
 
 ```text
 native tool call
+→ EffectiveToolPool exposes only this Run's frozen, verified ToolSpec values
+→ PermissionResolver resolves allow/ask/deny from ToolUseContext
 → ToolRegistry validation and execution
 → result/error linked by call ID
 → provider-native tool result message
@@ -640,8 +653,9 @@ and therefore more specific. Multi-directory tasks retain each rule's scope.
 Before queueing, `ExecutionContextFactory` freezes identity, bounded session
 history/summary/model selection, Workspace revision/root/cwd/Git summary, safe
 configuration version, project instructions, and additional directories into a
-deeply immutable, JSON-round-trippable `RunContextSnapshot`. API, Worker, the
-reserved CLI role, and the Agent Loop share this contract. Worker tasks carry
+deeply immutable, JSON-round-trippable schema-v3 `RunContextSnapshot`, including
+the Effective Tool Pool catalog/pool summaries and hashes. API, Worker, CLI/REPL,
+SDK, and the Agent Loop share this contract. Worker tasks carry
 only `run_id`; after restart they recover the persisted snapshot instead of
 re-reading changed history, model preferences, or instruction files. Missing
 Git, a non-repository directory, an unborn HEAD, or a status-probe failure is a
@@ -1191,10 +1205,10 @@ FastAPI `create_app()` and the process-local Celery Worker singleton both enter
 the same `ApplicationFactory` through
 `build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
 registry, Workspace, RAG, MCP, Tool Registry, LangGraph checkpointer, Agent
-runtime, and business services therefore share one dependency graph. `cli` is
-only a buildable role reserved for future use; this change adds no command and
-configuration is resolved through the fixed five-layer precedence before the
-factory is entered.
+runtime, and business services therefore share one dependency graph. CLI print,
+REPL, and SDK are active thin Query Kernel adapters. A shared non-owning
+`ToolPoolBuilder` is injected into context creation, Query recovery, and the
+decomposed Agent Loop; RuntimeContainer still owns and closes Registry/MCP resources.
 
 The returned `RuntimeContainer` explicitly owns its immutable resolved config,
 redacted snapshot, shared `SecretStore`, `MCPConnectionManager`,

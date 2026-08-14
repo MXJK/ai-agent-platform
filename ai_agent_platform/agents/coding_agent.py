@@ -53,6 +53,7 @@ from ai_agent_platform.domain import (
 )
 from ai_agent_platform.integrations.llm import LLMUsageAccumulator
 from ai_agent_platform.integrations.tools import ToolRegistry
+from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder
 
 
 def _merge_llm_usage(
@@ -134,6 +135,7 @@ class CodingAgentRuntime:
         project_memory_provider: ProjectMemoryContextProvider | None = None,
         max_rag_context_chars: int = 6000,
         change_set_service: Any = None,
+        tool_pool_builder: ToolPoolBuilder | None = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -162,18 +164,21 @@ class CodingAgentRuntime:
         self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
         self._change_set_service = change_set_service
-        self._change_loop = ChangeLoopExecutor(
-            tools=self._tools,
-            planner=self._planner,
-            run_store=self._run_store,
-        )
         self._tool_access = ToolAccessCoordinator(
             tools=self._tools,
             default_approval_policy=self._approval_policy,
+            tool_pool_builder=tool_pool_builder,
         )
         self._tools_for_state = self._tool_access.tools_for_state
         self._tool_use_context = self._tool_access.tool_use_context
         self._visible_tool_specs = self._tool_access.visible_tool_specs
+        self._change_loop = ChangeLoopExecutor(
+            tools=self._tools,
+            planner=self._planner,
+            run_store=self._run_store,
+            pool_provider=self._tools_for_state,
+            context_provider=self._tool_use_context,
+        )
         self._context_nodes = ContextRetrievalNodes(self)
         self._policies = AgentLoopPolicies(self)
         self._tool_loop_nodes = ToolLoopNodes(self)
@@ -203,7 +208,7 @@ class CodingAgentRuntime:
     ) -> AgentRunResult:
         snapshot_instructions: list[ContextSource] = []
         additional_directories: list[dict[str, Any]] = []
-        enabled_tools = [spec.name for spec in self._tools.list_specs()]
+        enabled_tools = list(self._tool_access.legacy_view().allowed_names)
         workspace_role = "admin"
         approval_policy = self._approval_policy
         cwd = workspace_root
@@ -251,7 +256,8 @@ class CodingAgentRuntime:
             ]
             if run_context.tools.enabled_tools is not None:
                 enabled_tools = list(run_context.tools.enabled_tools)
-            self._tools.select(tuple(enabled_tools))
+            tool_access = self._tool_access.restore_snapshot(run_context)
+            enabled_tools = list(tool_access.allowed_names)
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = self._checkpoint_coordinator.config(thread_id)
@@ -476,6 +482,8 @@ class CodingAgentRuntime:
         approved_by: str | None = None,
     ) -> AgentRunResult:
         record = self.get_run(run_id)
+        if record.context_snapshot is not None:
+            self._tool_access.restore_snapshot(record.context_snapshot)
         resume_pending = (
             record.status == "running" and record.control_action == "resume"
         )
@@ -599,6 +607,15 @@ class CodingAgentRuntime:
             return None
         record = get_latest(conversation_id)
         return self.get_run(record.run_id) if record is not None else None
+
+    def effective_tool_pool(self, run_id: str):
+        """Return the restored v3 pool or explicit legacy v1/v2 view for one Run."""
+
+        record = self.get_run(run_id)
+        return self._tool_access.tools_for_run(
+            run_id,
+            snapshot=record.context_snapshot,
+        )
 
     def list_events(self, run_id: str, *, after: int = 0):
         self.get_run(run_id)

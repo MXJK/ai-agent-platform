@@ -32,6 +32,13 @@ from ai_agent_platform.domain import (
     ToolSelectionContext,
     canonical_project_config,
 )
+from ai_agent_platform.integrations.permissions import ToolUseContext
+from ai_agent_platform.integrations.tool_pool import (
+    EffectiveToolPool,
+    SandboxCapabilities,
+    ToolCatalog,
+    ToolPoolBuilder,
+)
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.model_registry import ModelSelection
 
@@ -70,6 +77,8 @@ class ExecutionContextFactory:
         skill_service: Any = None,
         process_config: ResolvedConfig | None = None,
         tool_registry: ToolRegistry | None = None,
+        tool_pool_builder: ToolPoolBuilder | None = None,
+        model_registry: Any = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -82,7 +91,11 @@ class ExecutionContextFactory:
         self._max_instruction_chars = max_instruction_chars
         self._skill_service = skill_service
         self._process_config = process_config
-        self._tool_registry = tool_registry
+        self._tool_registry = tool_registry or ToolRegistry()
+        self._tool_pool_builder = tool_pool_builder or ToolPoolBuilder(
+            self._tool_registry
+        )
+        self._model_registry = model_registry
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -112,18 +125,64 @@ class ExecutionContextFactory:
         created_at: datetime | None = None,
         entrypoint_type: str | None = None,
         entrypoint_metadata: Mapping[str, object] | None = None,
+        skill_name: str | None = None,
+        skill_arguments: Sequence[str] = (),
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
             raise PermissionError("conversation access denied")
         actor = actor_user_id or session.user_id
+        resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
 
         workspace, workspace_root = self._resolve_workspace(workspace_id)
         workspace_role = self._resolve_workspace_role(workspace_id, actor)
         effective_config, config_json, config_version = self._workspace_config(
             workspace_root
         )
-        tool_selection = self._tool_selection(effective_config)
+        agent_type = "coding"
+        run_mode = "default"
+        skill_enabled = bool(
+            self._skill_service is not None
+            and (
+                self._skill_service.enabled
+                if effective_config is None
+                else (
+                    effective_config.skills_allowed
+                    and effective_config.skills_enabled
+                )
+            )
+        )
+        enabled_skills = (
+            (
+                effective_config.enabled_skills
+                if effective_config.enabled_skills is not None
+                else effective_config.skill_allowlist
+            )
+            if effective_config is not None
+            else None
+        )
+        skill_catalog = (
+            self._skill_service.discover(
+                workspace_root=workspace_root,
+                enabled=skill_enabled,
+            )
+            if self._skill_service is not None
+            else None
+        )
+        tool_selection, effective_pool = self._tool_selection(
+            effective_config,
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            run_id=resolved_run_id,
+            actor_user_id=actor,
+            workspace_role=workspace_role,
+            model_selection=model_selection,
+            skills=(skill_catalog.skills if skill_catalog is not None else ()),
+            enabled_skill_names=enabled_skills,
+            agent_type=agent_type,
+            run_mode=run_mode,
+        )
         context_message_limit = (
             int(effective_config.llm_max_context_messages)
             if effective_config is not None
@@ -262,7 +321,22 @@ class ExecutionContextFactory:
                 0,
                 remaining_instruction_chars - len(clipped),
             )
-        skill_diagnostics: tuple[str, ...] = ()
+        selected_skill_names: tuple[str, ...] | None = None
+        invoked_skill = None
+        if skill_name:
+            if self._skill_service is None:
+                raise ValueError("Skills are unavailable")
+            invoked_skill = self._skill_service.require_skill(
+                skill_name,
+                workspace_root=workspace_root,
+                agent=agent_type,
+                mode=run_mode,
+                enabled=skill_enabled,
+                enabled_skills=enabled_skills,
+                available_tools=tool_selection.enabled_tools or (),
+            )
+            selected_skill_names = (invoked_skill.qualified_name,)
+        skill_diagnostics: tuple[str, ...] = tool_selection.diagnostics
         if self._skill_service is not None and remaining_instruction_chars > 0:
             skill_options: dict[str, object] = {}
             if effective_config is not None:
@@ -279,10 +353,12 @@ class ExecutionContextFactory:
                 skill_options["available_tools"] = (
                     tool_selection.enabled_tools or ()
                 )
+            if selected_skill_names is not None:
+                skill_options["selected_skill_names"] = selected_skill_names
             selection = self._skill_service.build_context(
                 workspace_root=workspace_root,
-                agent="coding",
-                mode="default",
+                agent=agent_type,
+                mode=run_mode,
                 max_chars=remaining_instruction_chars,
                 **skill_options,
             )
@@ -312,11 +388,16 @@ class ExecutionContextFactory:
             if isinstance(model_selection, ModelSelection)
             else dict(model_selection)
         )
-        resolved_run_id = run_id or f"run_{uuid4().hex[:12]}"
         timestamp = created_at or datetime.now(timezone.utc)
         resolved_entrypoint = entrypoint_type or self._entrypoint_type
         if resolved_entrypoint not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {resolved_entrypoint}")
+        resolved_entrypoint_metadata = dict(entrypoint_metadata or {})
+        if invoked_skill is not None:
+            resolved_entrypoint_metadata["skill_invocation"] = {
+                "skill_name": invoked_skill.qualified_name,
+                "arguments": [str(item) for item in skill_arguments],
+            }
         return RunContextSnapshot(
             identity=IdentityContext(
                 actor_user_id=actor,
@@ -354,7 +435,7 @@ class ExecutionContextFactory:
                 entrypoint_type=resolved_entrypoint,
                 config_version=config_version,
                 _entrypoint_metadata_json=canonical_project_config(
-                    entrypoint_metadata or {}
+                    resolved_entrypoint_metadata
                 ),
             ),
         )
@@ -375,21 +456,107 @@ class ExecutionContextFactory:
         ).hexdigest()[:16]
         return resolved, config_json, version
 
+    def preview(
+        self,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        actor_user_id: str | None = None,
+    ) -> RunContextSnapshot:
+        """Build a read-only effective-context preview through the normal factory."""
+
+        return self.create(
+            conversation_id=conversation_id,
+            user_message="",
+            workspace_id=workspace_id,
+            model_selection=ModelSelection(),
+            actor_user_id=actor_user_id,
+            entrypoint_type=self._entrypoint_type,
+            entrypoint_metadata={"adapter": "effective_context_preview"},
+        )
+
+    def restore_tool_access(self, snapshot: RunContextSnapshot):
+        if snapshot.metadata.schema_version >= 3:
+            return self._tool_pool_builder.restore(snapshot.tools)
+        selected = snapshot.tools.enabled_tools
+        if selected is None:
+            selected = tuple(
+                spec.name for spec in self._tool_registry.list_specs()
+            )
+        return self._tool_registry.select(tuple(selected))
+
+    def effective_skills(self, snapshot: RunContextSnapshot):
+        if self._skill_service is None:
+            return None
+        config = snapshot.project.project_config
+        skills_allowed = _config_snapshot_value(
+            config, "process_security", "skills_allowed"
+        )
+        skills_enabled = _config_snapshot_value(
+            config, "project_session", "skills_enabled"
+        )
+        enabled_skills = _config_snapshot_value(
+            config, "project_session", "enabled_skills"
+        )
+        if enabled_skills is None:
+            enabled_skills = _config_snapshot_value(
+                config, "process_security", "skill_allowlist"
+            )
+        return self._skill_service.effective_catalog(
+            workspace_root=snapshot.project.workspace_root,
+            agent="coding",
+            mode="default",
+            enabled=bool(skills_allowed is not False and skills_enabled),
+            enabled_skills=(
+                tuple(str(item) for item in enabled_skills)
+                if isinstance(enabled_skills, list)
+                else None
+            ),
+            available_tools=snapshot.tools.enabled_tools or (),
+        )
+
+    def describe_permissions(self, snapshot: RunContextSnapshot) -> dict[str, object]:
+        config = snapshot.project.project_config
+        process_cap = _config_snapshot_value(
+            config, "process_security", "tool_allowlist"
+        )
+        project_selection = _config_snapshot_value(
+            config, "project_session", "enabled_tools"
+        )
+        approval_policy = _config_snapshot_value(
+            config, "runtime", "agent_approval_policy"
+        )
+        return {
+            "process_tool_allowlist": process_cap,
+            "workspace_role": snapshot.identity.workspace_role,
+            "project_enabled_tools": project_selection,
+            "approval_policy": approval_policy or "on_request",
+            "effective_denies": [
+                {"name": name, "reason": reason}
+                for name, reason in snapshot.tools.exclusions
+            ],
+        }
+
     def _tool_selection(
         self,
         config: ResolvedConfig | None,
-    ) -> ToolSelectionContext:
-        if self._tool_registry is None:
-            return ToolSelectionContext(
-                enabled_tools=(),
-                source="registry_unavailable",
-                version="sha256:4f53cda18c2baa0c",
-            )
-        available = tuple(spec.name for spec in self._tool_registry.list_specs())
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        workspace_root: str,
+        run_id: str,
+        actor_user_id: str,
+        workspace_role: str,
+        model_selection: ModelSelection | Mapping[str, object],
+        skills: Sequence[object],
+        enabled_skill_names: Sequence[str] | None,
+        agent_type: str,
+        run_mode: str,
+    ) -> tuple[ToolSelectionContext, EffectiveToolPool | None]:
+        catalog = ToolCatalog.from_registry(self._tool_registry)
+        available = tuple(entry.name for entry in catalog.entries)
         configured = config.enabled_tools if config is not None else None
         selected = tuple(configured) if configured is not None else available
-        view = self._tool_registry.select(selected)
-        effective = view.allowed_names
         if config is not None and configured is not None:
             provenance = config.provenance_for("enabled_tools")
             source = f"{provenance.source.value}:{provenance.detail}"
@@ -398,15 +565,134 @@ class ExecutionContextFactory:
             source = f"process_cap:{provenance.source.value}:{provenance.detail}"
         else:
             source = "process_registry"
-        encoded = json.dumps(
-            list(effective),
-            ensure_ascii=False,
-            separators=(",", ":"),
+        approval_policy = (
+            config.agent_approval_policy if config is not None else "on_request"
+        )
+        context = ToolUseContext(
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            authorized_workspace_root=workspace_root,
+            run_id=run_id,
+            actor_user_id=actor_user_id,
+            workspace_role=workspace_role,
+            approval_policy=approval_policy,
+            process_allowed_tools=available,
+            project_allowed_tools=selected,
+        )
+        model_capabilities = self._model_capabilities(model_selection)
+        sandbox = self._sandbox_capabilities(config, catalog)
+        selection_provenance = (
+            source,
+            f"agent:{agent_type}",
+            f"mode:{run_mode}",
+            f"workspace_role:{workspace_role}",
+            "model_capabilities:"
+            + ",".join(
+                f"{name}={str(value).lower()}"
+                for name, value in sorted(model_capabilities.items())
+            ),
+            f"sandbox:{sandbox.mode}",
+        )
+        pool = self._tool_pool_builder.build(
+            catalog=catalog,
+            skills=skills,
+            enabled_skill_names=enabled_skill_names,
+            agent_type=agent_type,
+            run_mode=run_mode,
+            model_capabilities=model_capabilities,
+            tool_use_context=context,
+            sandbox_capabilities=sandbox,
+            requested_names=selected,
+            selection_provenance=selection_provenance,
         )
         return ToolSelectionContext(
-            enabled_tools=effective,
+            enabled_tools=pool.allowed_names,
             source=source,
-            version="sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
+            version=pool.pool_version,
+            catalog_version=pool.catalog_version,
+            catalog_hash=pool.catalog_hash,
+            catalog_summary=pool.catalog_summary,
+            pool_hash=pool.pool_hash,
+            normalized_summary=pool.normalized_summary,
+            selection_provenance=pool.selection_provenance,
+            exclusions=tuple(
+                (item.name, item.reason) for item in pool.exclusions
+            ),
+            diagnostics=pool.diagnostics,
+        ), pool
+
+    def _model_capabilities(
+        self,
+        model_selection: ModelSelection | Mapping[str, object],
+    ) -> dict[str, bool]:
+        if self._model_registry is None:
+            return {"tool_calling": True, "structured_output": True}
+        values = (
+            asdict(model_selection)
+            if isinstance(model_selection, ModelSelection)
+            else dict(model_selection)
+        )
+        configs = tuple(self._model_registry.model_configs())
+        preferred_id = values.get("preferred_model_id")
+        preferred_provider = values.get("preferred_provider")
+        preferred_model = values.get("preferred_model")
+        if preferred_id:
+            view = next(
+                (
+                    item
+                    for item in self._model_registry.list_models()
+                    if item.get("id") == preferred_id
+                ),
+                None,
+            )
+            if view is not None:
+                preferred_provider = view.get("provider")
+                preferred_model = view.get("model")
+        if preferred_provider or preferred_model:
+            candidates = tuple(
+                item
+                for item in configs
+                if (not preferred_provider or item.provider == preferred_provider)
+                and (not preferred_model or item.model == preferred_model)
+                and item.enabled
+            )
+        else:
+            candidates = tuple(
+                item for item in configs if item.enabled and item.auto_eligible
+            )
+        return {
+            "tool_calling": any(
+                item.capabilities.tool_calling or item.provider == "fake"
+                for item in candidates
+            ),
+            "structured_output": any(
+                item.capabilities.structured_output for item in candidates
+            ),
+        }
+
+    @staticmethod
+    def _sandbox_capabilities(
+        config: ResolvedConfig | None,
+        catalog: ToolCatalog,
+    ) -> SandboxCapabilities:
+        sandbox_entries = tuple(
+            entry for entry in catalog.entries if entry.name.startswith("sandbox.")
+        )
+        names = tuple(entry.name for entry in sandbox_entries)
+        return SandboxCapabilities(
+            available=bool(names),
+            mode=config.sandbox_mode if config is not None else "local",
+            readable=any(
+                entry.spec.permission_level == "read_only"
+                for entry in sandbox_entries
+            ),
+            writable=any(
+                entry.spec.permission_level != "read_only"
+                for entry in sandbox_entries
+            ),
+            command_execution="sandbox.run_command" in names,
+            supported_tools=names,
         )
 
     def _resolve_workspace(self, workspace_id: str) -> tuple[Any, str]:
@@ -464,6 +750,23 @@ def _skill_diagnostic_message(value: Any) -> str:
     path = str(getattr(value, "path", "SKILL.md"))
     message = str(getattr(value, "message", "Skill could not be loaded"))
     return f"skill[{code}] {path}: {message}"[:1000]
+
+
+def _config_snapshot_value(
+    snapshot: Mapping[str, object],
+    section: str,
+    field_name: str,
+) -> object:
+    config = snapshot.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    section_value = config.get(section)
+    if not isinstance(section_value, Mapping):
+        return None
+    field_value = section_value.get(field_name)
+    if not isinstance(field_value, Mapping):
+        return None
+    return field_value.get("value")
 
 
 def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:

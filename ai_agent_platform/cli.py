@@ -28,6 +28,7 @@ from ai_agent_platform.domain import (
 )
 from ai_agent_platform.runtime import RuntimeContainer, build_runtime
 from ai_agent_platform.sdk import AgentSDK
+from ai_agent_platform.skills import CommandRegistry, SkillInvocationError
 
 
 _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -191,7 +192,14 @@ class CliApplication:
                 raise PermissionError("CLI session belongs to another user")
         self._prepared = True
 
-    def _query_params(self, message: str, *, mode: str) -> QueryParams:
+    def _query_params(
+        self,
+        message: str,
+        *,
+        mode: str,
+        skill_name: str | None = None,
+        skill_arguments: Sequence[str] = (),
+    ) -> QueryParams:
         assert self.session_id is not None
         return QueryParams(
             conversation_id=self.session_id,
@@ -203,6 +211,8 @@ class CliApplication:
                 if self.runtime.settings.auth_mode != "disabled"
                 else None
             ),
+            skill_name=skill_name,
+            skill_arguments=tuple(skill_arguments),
             entrypoint="cli",
             entrypoint_metadata={"adapter": mode, "transport": "stdio"},
         )
@@ -276,15 +286,19 @@ class CliApplication:
         if command == "/exit":
             return True
         if command == "/skills":
-            service = self.runtime.skill_service
+            snapshot = self._effective_snapshot()
+            factory = self.runtime.execution_context_factory
             catalog = (
-                service.discover(workspace_root=self.workspace_root)
-                if service is not None
+                factory.effective_skills(snapshot)
+                if factory is not None
                 else None
             )
             self._write_diagnostic(
                 "skills",
                 {
+                    "workspace_id": self.workspace_id,
+                    "agent": "coding",
+                    "mode": "default",
                     "skills": [
                         {
                             "name": item.qualified_name,
@@ -307,11 +321,20 @@ class CliApplication:
             )
             return False
         if command == "/tools":
-            registry = self.runtime.tool_registry
-            specs = registry.list_specs() if registry is not None else []
+            snapshot = self._effective_snapshot()
+            tools = self._effective_tools(snapshot)
+            specs = tools.list_specs()
             self._write_diagnostic(
                 "tools",
                 {
+                    "run_id": (
+                        self.last_run_id
+                        if self.last_run_id == snapshot.metadata.run_id
+                        else None
+                    ),
+                    "workspace_id": snapshot.project.workspace_id,
+                    "agent": "coding",
+                    "mode": "default",
                     "tools": [
                         {
                             "name": item.name,
@@ -326,35 +349,47 @@ class CliApplication:
             return False
         if command == "/mcp":
             registry = self.runtime.mcp_registry
-            self._write_diagnostic(
-                "mcp",
+            snapshot = self._effective_snapshot()
+            pool = self._effective_tools(snapshot)
+            view = (
                 registry.registry_view()
                 if registry is not None
                 else {
                     "runtime_enabled": False,
                     "config_writable": False,
                     "servers": [],
+                }
+            )
+            self._write_diagnostic(
+                "mcp",
+                {
+                    **view,
+                    "effective_pool_tools": [
+                        name
+                        for name in pool.allowed_names
+                        if name.startswith("mcp.")
+                    ],
                 },
             )
             return False
         if command == "/permissions":
-            settings = self.runtime.settings
+            snapshot = self._effective_snapshot()
+            factory = self.runtime.execution_context_factory
+            permissions = (
+                factory.describe_permissions(snapshot)
+                if factory is not None
+                else {}
+            )
             self._write_diagnostic(
                 "permissions",
                 {
-                    "approval_policy": settings.agent_approval_policy,
-                    "auth_mode": settings.auth_mode,
-                    "sandbox_mode": settings.sandbox_mode,
-                    "live_workspace_writes_enabled": (
-                        settings.live_workspace_writes_enabled
-                    ),
-                    "tool_allowlist": (
-                        list(settings.tool_allowlist)
-                        if settings.tool_allowlist is not None
+                    "workspace_id": snapshot.project.workspace_id,
+                    "run_id": (
+                        self.last_run_id
+                        if self.last_run_id == snapshot.metadata.run_id
                         else None
                     ),
-                    "mcp_allowed": settings.mcp_allowed,
-                    "skills_allowed": settings.skills_allowed,
+                    **permissions,
                 },
             )
             return False
@@ -364,9 +399,86 @@ class CliApplication:
             except (QueryStateError, RuntimeError, ValueError) as exc:
                 self._write_diagnostic("error", {"message": str(exc)})
             return False
+        snapshot = self._effective_snapshot()
+        factory = self.runtime.execution_context_factory
+        catalog = (
+            factory.effective_skills(snapshot)
+            if factory is not None
+            else None
+        )
+        registered = CommandRegistry(
+            catalog.commands if catalog is not None else ()
+        ).resolve(command)
+        if registered is not None:
+            try:
+                message = " ".join(arguments).strip() or (
+                    f"Invoke Skill {registered.skill_qualified_name}."
+                )
+                await self._stream(
+                    self.sdk.query(
+                        self._query_params(
+                            message,
+                            mode="repl",
+                            skill_name=registered.skill_qualified_name,
+                            skill_arguments=arguments,
+                        )
+                    )
+                )
+            except SkillInvocationError as exc:
+                self._write_diagnostic(
+                    "error", {"code": exc.code, "message": str(exc)}
+                )
+            return False
+        service = self.runtime.skill_service
+        raw_catalog = (
+            service.discover(workspace_root=self.workspace_root, enabled=True)
+            if service is not None
+            else None
+        )
+        unavailable = CommandRegistry(
+            raw_catalog.commands if raw_catalog is not None else ()
+        ).resolve(command)
+        if unavailable is not None:
+            skill = raw_catalog.get_skill(unavailable.skill_qualified_name)
+            missing = sorted(
+                set(skill.required_tools).difference(snapshot.tools.enabled_tools or ())
+                if skill is not None
+                else ()
+            )
+            not_applicable = bool(
+                skill is not None
+                and not skill.applies_to(agent="coding", mode="default")
+            )
+            code = (
+                "skill_not_applicable"
+                if not_applicable
+                else (
+                    "skill_required_tools_unavailable"
+                    if missing
+                    else "skill_disabled"
+                )
+            )
+            self._write_diagnostic(
+                "error",
+                {
+                    "code": code,
+                    "message": (
+                        f"Skill command {parts[0]} is unavailable for coding/default"
+                        if not_applicable
+                        else (
+                        f"Skill command {parts[0]} requires unavailable tools: "
+                        + ", ".join(missing)
+                        if missing
+                        else f"Skill command {parts[0]} is disabled or not applicable"
+                        )
+                    ),
+                },
+            )
+            return False
         self._write_diagnostic(
             "error",
             {
+                "code": "unknown_slash_command",
                 "message": f"unknown slash command: {parts[0]}",
                 "available": [
                     "/skills",
@@ -379,6 +491,36 @@ class CliApplication:
             },
         )
         return False
+
+    def _effective_snapshot(self):
+        factory = self.runtime.execution_context_factory
+        if factory is None:
+            raise RuntimeError("effective context factory is unavailable")
+        if self.last_run_id:
+            runtime = self.runtime.coding_agent_runtime
+            if runtime is not None:
+                record = runtime.get_run(self.last_run_id)
+                if record.context_snapshot is not None:
+                    return record.context_snapshot
+        assert self.session_id is not None
+        return factory.preview(
+            conversation_id=self.session_id,
+            workspace_id=self.workspace_id,
+            actor_user_id=(
+                self.user_id
+                if self.runtime.settings.auth_mode != "disabled"
+                else None
+            ),
+        )
+
+    def _effective_tools(self, snapshot):
+        runtime = self.runtime.coding_agent_runtime
+        if self.last_run_id == snapshot.metadata.run_id and runtime is not None:
+            return runtime.effective_tool_pool(self.last_run_id)
+        factory = self.runtime.execution_context_factory
+        if factory is None:
+            raise RuntimeError("effective context factory is unavailable")
+        return factory.restore_tool_access(snapshot)
 
     async def _resume(self, arguments: list[str]) -> None:
         run_id = self.last_run_id
