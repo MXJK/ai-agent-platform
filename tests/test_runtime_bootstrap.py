@@ -192,7 +192,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
             app.state.runtime.close()
             worker.close()
 
-    def test_build_runtime_accepts_future_cli_role_without_adding_a_cli(self) -> None:
+    def test_build_runtime_supports_the_cli_adapter_role(self) -> None:
         runtime = build_runtime(self.settings(), role="cli")
         try:
             self.assertEqual(runtime.role, "cli")

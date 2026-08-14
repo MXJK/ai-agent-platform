@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from celery import Celery
-from celery.signals import worker_process_shutdown
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from ai_agent_platform.core import ConfigResolver
 from ai_agent_platform.workers.runtime import (
@@ -49,6 +49,13 @@ celery_app.conf.update(
     },
     visibility_timeout=settings.celery_visibility_timeout_seconds,
 )
+
+
+@worker_process_init.connect
+def initialize_worker_runtime(**_: Any) -> None:
+    """Build the shared dependency graph once, after Celery forks a worker."""
+
+    get_worker_services()
 
 
 @celery_app.task(bind=True, name="ai_agent_platform.agent_run")

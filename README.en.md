@@ -20,6 +20,7 @@ Python 3.10 or newer is required by the Google Gen AI SDK:
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -e .
 cp -n .env.example .env
 # Replace the sample PostgreSQL password in both POSTGRES_PASSWORD and
 # DATABASE_URL with the same random local-only value.
@@ -45,6 +46,30 @@ FastAPI and requires no separate frontend build. The example configuration uses
 the fake LLM and local embedding provider, which require no API key.
 When `AUTH_MODE=disabled`, the startup script rejects non-loopback `APP_HOST`
 values instead of relying on an operator warning.
+
+## CLI, REPL, SDK, and process entrypoints
+
+The installed entrypoints are thin adapters over `RuntimeContainer` and
+`QueryService`:
+
+```bash
+.venv/bin/ai-agent --workspace /absolute/path/to/project print "Explain the entrypoints"
+.venv/bin/ai-agent --workspace /absolute/path/to/project repl
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+```
+
+Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
+keeps one conversation across turns and provides `/skills`, `/tools`, `/mcp`,
+`/permissions`, `/resume`, and `/exit`. `Ctrl+C` during a Run requests cancellation
+of that Run; signal handling exists only in the process-owning CLI, never in the SDK
+or Query Kernel.
+
+`AgentSDK.query()` and `resume()` return `AsyncIterator[AgentEvent]`, while
+`control()` and `result()` return `QueryResult`. The API console entrypoint owns only
+uvicorn/HTTP/lifespan behavior. Celery creates its process-local `RuntimeContainer`
+from `worker_process_init` and closes it from `worker_process_shutdown`; task handlers
+do not assemble dependencies. The startup script now targets
+`ai_agent_platform.api.entrypoint:app`.
 
 ## Layered runtime configuration
 

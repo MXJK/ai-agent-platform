@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ai_agent_platform.workers.celery_app import (
+    initialize_worker_runtime,
     celery_app,
     execute_conversation_compression,
     execute_agent_resume,
@@ -13,6 +14,14 @@ from ai_agent_platform.workers.celery_app import (
 
 
 class CeleryWorkerTests(unittest.TestCase):
+    def test_worker_process_hook_initializes_shared_runtime(self) -> None:
+        with patch(
+            "ai_agent_platform.workers.celery_app.get_worker_services"
+        ) as get_services:
+            initialize_worker_runtime()
+
+        get_services.assert_called_once_with()
+
     def test_registers_only_agent_distributed_tasks(self) -> None:
         self.assertIn("ai_agent_platform.agent_run", celery_app.tasks)
         self.assertIn("ai_agent_platform.agent_resume", celery_app.tasks)
