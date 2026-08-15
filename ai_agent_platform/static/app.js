@@ -541,18 +541,19 @@ function saveUiPreferences() {
 }
 
 function switchView(viewName, updateHash = true) {
-  const panel = document.querySelector(`[data-view-panel="${viewName}"]`);
+  const normalizedView = viewName === "agent" ? "chat" : viewName;
+  const panel = document.querySelector(`[data-view-panel="${normalizedView}"]`);
   if (!panel) {
     return;
   }
-  state.currentView = viewName;
+  state.currentView = normalizedView;
   document.querySelectorAll("[data-view-panel]").forEach((item) => {
-    const active = item.dataset.viewPanel === viewName;
+    const active = item.dataset.viewPanel === normalizedView;
     item.classList.toggle("active", active);
     item.hidden = !active;
   });
   document.querySelectorAll("[data-view]").forEach((item) => {
-    const active = item.dataset.view === viewName;
+    const active = item.dataset.view === normalizedView;
     item.classList.toggle("active", active);
     if (active) {
       item.setAttribute("aria-current", "page");
@@ -561,17 +562,17 @@ function switchView(viewName, updateHash = true) {
     }
   });
   if (updateHash) {
-    history.replaceState(null, "", `#${viewName}`);
+    history.replaceState(null, "", `#${normalizedView}`);
   }
   saveUiPreferences();
   $("main-workspace").focus({ preventScroll: true });
-  if (viewName === "memory") {
+  if (normalizedView === "memory") {
     refreshProjectMemory();
   }
-  if (viewName === "models") {
+  if (normalizedView === "models") {
     loadModelRegistry().catch((error) => showToast(humanizeError(error), "error"));
   }
-  if (viewName === "mcp") {
+  if (normalizedView === "mcp") {
     loadMCPRegistry().catch((error) => showToast(humanizeError(error), "error"));
   }
 }
@@ -632,29 +633,12 @@ function closeWorkspacePicker() {
 
 function updateContextSummary() {
   const workspace = currentWorkspace();
-  const workspaceId = workspace?.id || "";
   const workspaceLabel = workspace ? workspaceName(workspace) : "未选择";
-  const workspaceReady = workspaceIsReady(workspace);
-  const workspaceRoot = workspace?.root_path || "Agent 运行前必须选择一个可用工作区";
-  const roleLabel = workspaceRoleLabel(workspace?.role);
   const modelLabel = currentModelSelectionLabel();
 
   $("context-model").textContent = modelLabel;
   $("context-workspace").textContent = workspaceLabel;
   $("composer-context").textContent = modelLabel;
-  $("agent-workspace-badge").textContent = workspaceReady
-    ? `${workspaceLabel} · 可用`
-    : workspace
-      ? `${workspaceLabel} · 不可用`
-      : "未选择工作区";
-  $("agent-workspace-context-id").textContent = workspaceLabel;
-  $("agent-workspace-root").textContent = workspaceRoot;
-  $("agent-workspace-role").textContent = workspace
-    ? `${roleLabel} · ${workspaceReady ? "可运行" : "路径不可用"}`
-    : "未连接";
-  $("agent-workspace-context").className = `agent-workspace-context ${
-    workspaceReady ? "is-ready" : workspace ? "is-unavailable" : "is-missing"
-  }`;
   $("header-session-id").textContent = state.currentSession?.title
     || state.conversationId
     || "尚未创建";
@@ -755,7 +739,6 @@ function updateComposerAvailability() {
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
   $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace;
-  $("run-agent-btn").disabled = archived || !workspaceIsReady(currentWorkspace());
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
   }
@@ -1787,20 +1770,11 @@ function resetChatView() {
 
 function resetLatestAgentRunState() {
   state.agentPollGeneration += 1;
+  state.changeSetRequestGeneration += 1;
   state.latestRunId = "";
   state.latestRunStatus = "";
   state.latestRunConversationId = "";
-  const statusNode = $("agent-status");
-  statusNode.className = "status-pill neutral";
-  statusNode.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>尚未运行</span>';
-  $("approval-card").classList.add("hidden");
-  $("agent-control-bar").classList.add("hidden");
-  $("agent-answer").className = "rich-output empty-output";
-  $("agent-answer").textContent = "运行 Agent 后，结果会显示在这里。";
-  $("agent-events").innerHTML = '<div class="empty-state">暂无运行事件</div>';
-  renderAgentMetrics(null);
-  renderArtifacts([]);
-  resetChangeSetCard();
+  state.currentChangeSet = null;
 }
 
 function normalizedMessageText(value) {
@@ -1832,10 +1806,14 @@ async function restoreLatestAgentRun(conversationId, messages = []) {
   const runId = agentRunId(body);
   const status = agentRunStatus(body);
   const answerPersisted = runAnswerAlreadyPersisted(body, messages);
-  const shouldRestoreMessage = !answerPersisted;
-  if (!shouldRestoreMessage) return body;
-
   let contentNode = chatContentForRun(runId);
+  if (!contentNode && answerPersisted) {
+    const lastAssistant = [...document.querySelectorAll(".chat-message.assistant")].at(-1);
+    if (lastAssistant) {
+      lastAssistant.dataset.agentRunId = runId;
+      contentNode = lastAssistant.querySelector(".message-content");
+    }
+  }
   if (!contentNode) {
     contentNode = appendChatMessage("assistant", "", null, { runId });
     const timestamp = contentNode.closest(".chat-bubble")?.querySelector(".message-label span");
@@ -2537,6 +2515,290 @@ function renderInlineAgentCheckpoint(contentNode, body) {
   }
 }
 
+function renderInlineAgentControls(contentNode, body) {
+  const bubble = contentNode.closest(".chat-bubble");
+  if (!bubble) return;
+  const status = agentRunStatus(body);
+  let controls = bubble.querySelector(".inline-agent-controls");
+  if (!["queued", "running"].includes(status)) {
+    controls?.remove();
+    return;
+  }
+  const runId = agentRunId(body) || contentNode.closest("[data-agent-run-id]")?.dataset.agentRunId;
+  if (controls?.dataset.runId === runId) return;
+  if (!controls) {
+    controls = document.createElement("section");
+    bubble.appendChild(controls);
+  }
+  controls.className = "inline-agent-controls";
+  controls.dataset.runId = runId;
+  controls.setAttribute("aria-label", "Agent 运行控制");
+  controls.innerHTML = `
+    <label>
+      <span>运行中转向 <small>将在下一个安全边界生效</small></span>
+      <input maxlength="4000" placeholder="例如：先不要改 API，优先补回归测试" />
+    </label>
+    <p class="inline-control-error" role="alert" hidden></p>
+    <div class="inline-control-actions">
+      <button class="button ghost" type="button" data-inline-run-action="steer">发送转向</button>
+      <button class="button ghost" type="button" data-inline-run-action="pause">暂停</button>
+      <button class="button danger" type="button" data-inline-run-action="cancel">取消</button>
+    </div>
+  `;
+  controls.querySelectorAll("[data-inline-run-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleInlineRunControl(contentNode, body, button.dataset.inlineRunAction, controls);
+    });
+  });
+}
+
+async function handleInlineRunControl(contentNode, body, action, controls) {
+  const runId = controls.dataset.runId;
+  const conversationId = agentRunConversationId(body)
+    || state.latestRunConversationId
+    || state.conversationId;
+  if (!runId || conversationId !== state.conversationId) {
+    showToast("这条运行记录不属于当前会话，请重新打开对应会话", "warning");
+    return;
+  }
+  const input = controls.querySelector("input");
+  const message = input?.value.trim() || "";
+  if (action === "steer" && !message) {
+    input.setAttribute("aria-invalid", "true");
+    input.focus();
+    return;
+  }
+  const errorNode = controls.querySelector(".inline-control-error");
+  controls.setAttribute("aria-busy", "true");
+  controls.querySelectorAll("button, input").forEach((node) => { node.disabled = true; });
+  errorNode.hidden = true;
+  try {
+    const nextBody = await fetchJson(
+      `/agent/runs/${encodeURIComponent(runId)}/${action}`,
+      { method: "POST", body: JSON.stringify({ message }) },
+    );
+    if (conversationId !== state.conversationId) return;
+    renderAgentRun(nextBody);
+    renderAgentChatResponse(
+      contentNode,
+      nextBody,
+      performance.now() - (nextBody?.result?.metrics?.elapsed_ms || 0),
+    );
+    setChatStatusFromRun(nextBody);
+    showToast({
+      pause: "暂停请求已发送，将在安全边界生效",
+      cancel: "取消请求已发送",
+      steer: "转向信息已加入当前运行",
+    }[action] || "运行状态已更新", action === "cancel" ? "warning" : "success");
+  } catch (error) {
+    controls.removeAttribute("aria-busy");
+    controls.querySelectorAll("button, input").forEach((node) => { node.disabled = false; });
+    errorNode.textContent = humanizeError(error);
+    errorNode.hidden = false;
+  }
+}
+
+function agentChangeSetId(body) {
+  return body?.change_set_id || body?.result?.change_set_id || "";
+}
+
+function changeSetFileStats(changeSet) {
+  const stats = new Map(
+    (changeSet.changed_files || []).map((path) => [path, {
+      path,
+      additions: 0,
+      deletions: 0,
+      kind: changeSet.baseline_file_hashes?.[path] == null ? "A" : "M",
+    }]),
+  );
+  let current = null;
+  let previousPath = null;
+  for (const line of String(changeSet.patch || "").split("\n")) {
+    const header = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (header) {
+      current = header[2];
+      if (!stats.has(current)) stats.set(current, { path: current, additions: 0, deletions: 0, kind: "M" });
+      continue;
+    }
+    const previousHeader = line.match(/^--- a\/(.+)$/);
+    if (previousHeader) {
+      previousPath = previousHeader[1];
+      continue;
+    }
+    const nextHeader = line.match(/^\+\+\+ b\/(.+)$/);
+    if (nextHeader || line === "+++ /dev/null") {
+      current = nextHeader?.[1] || previousPath;
+      if (current && !stats.has(current)) {
+        stats.set(current, { path: current, additions: 0, deletions: 0, kind: "M" });
+      }
+      if (current && line === "+++ /dev/null") stats.get(current).kind = "D";
+      continue;
+    }
+    if (!current) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) stats.get(current).additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) stats.get(current).deletions += 1;
+  }
+  return [...stats.values()];
+}
+
+function ensureInlineChangeReview(contentNode) {
+  const bubble = contentNode.closest(".chat-bubble");
+  if (!bubble) return null;
+  let card = bubble.querySelector(".inline-change-review");
+  if (!card) {
+    card = document.createElement("section");
+    card.className = "inline-change-review";
+    card.setAttribute("aria-live", "polite");
+    bubble.appendChild(card);
+  }
+  return card;
+}
+
+function renderInlineChangeReview(contentNode, changeSet) {
+  const card = ensureInlineChangeReview(contentNode);
+  if (!card) return;
+  delete card.dataset.loading;
+  const files = changeSetFileStats(changeSet);
+  const ready = changeSet.status === "ready";
+  const patchOnly = changeSet.apply_mode === "patch_only";
+  const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
+  const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
+  const applied = changeSet.status === "applied";
+  const rejected = changeSet.status === "rejected";
+  const modeNote = patchOnly
+    ? "当前为 patch-only：修改只保存在 ChangeSet，不会写入真实工作区。启用真实写入后，需要重新运行任务生成可应用的 ChangeSet。"
+    : changeSet.apply_mode === "worktree"
+      ? "应用前会校验补丁摘要、Workspace revision 和文件基线，并写入隔离 worktree。"
+      : "应用前会重新校验补丁摘要、Workspace revision 和文件基线；确认后才会写入真实工作区。";
+  const applyLabel = patchOnly
+    ? "真实写入未启用"
+    : applied
+      ? changeSet.apply_mode === "worktree" ? "已创建隔离 Worktree" : "已应用到真实工作区"
+      : rejected
+        ? "变更已拒绝"
+        : changeSet.apply_mode === "worktree" ? "创建隔离 Worktree" : "应用到真实工作区";
+  card.dataset.changeSetId = changeSet.id;
+  card.dataset.runId = changeSet.run_id;
+  card.dataset.status = changeSet.status;
+  card.innerHTML = `
+    <div class="change-review-heading">
+      <div>
+        <span class="change-review-kicker">Change review</span>
+        <h3>${files.length} 个文件已修改</h3>
+      </div>
+      <span class="status-pill ${statusClass(changeSet.status)}"><span class="status-dot" aria-hidden="true"></span>${escapeHtml(humanizeStatus(changeSet.status))}</span>
+    </div>
+    <div class="change-review-summary">
+      <span><strong>${files.length}</strong> files</span>
+      <span class="diff-addition">+${totalAdditions}</span>
+      <span class="diff-deletion">−${totalDeletions}</span>
+      <code title="${escapeHtml(changeSet.patch_sha256)}">${escapeHtml(truncate(changeSet.patch_sha256, 18))}</code>
+    </div>
+    <div class="change-file-list" role="list" aria-label="修改的文件">
+      ${files.map((file) => `
+        <div class="change-file-row" role="listitem">
+          <span class="change-file-mark ${file.kind === "A" ? "added" : file.kind === "D" ? "deleted" : ""}" aria-hidden="true">${file.kind}</span>
+          <code title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</code>
+          <span><b class="diff-addition">+${file.additions}</b><b class="diff-deletion">−${file.deletions}</b></span>
+        </div>
+      `).join("")}
+    </div>
+    <details class="change-diff-details">
+      <summary>查看完整 Diff</summary>
+      <pre class="change-set-patch"><code>${escapeHtml(changeSet.patch || "没有可显示的补丁")}</code></pre>
+    </details>
+    <div class="change-safety-note ${patchOnly ? "patch-only" : "writable"}">
+      <span aria-hidden="true">${patchOnly ? "!" : "✓"}</span>
+      <p><strong>${patchOnly ? "尚未写入磁盘" : "应用操作受保护"}</strong>${escapeHtml(modeNote)}</p>
+    </div>
+    ${changeSet.error ? `<p class="change-review-error" role="alert">${escapeHtml(changeSet.error)}</p>` : ""}
+    <div class="change-review-actions">
+      <span>${escapeHtml(changeSet.apply_mode)} · ${escapeHtml(changeSet.validation_status)}</span>
+      <div>
+        <button class="button ghost" type="button" data-inline-change-action="reject" ${ready ? "" : "disabled"}>拒绝变更</button>
+        <button class="button primary" type="button" data-inline-change-action="apply" ${ready && !patchOnly ? "" : "disabled"}>${applyLabel}</button>
+      </div>
+    </div>
+  `;
+  card.querySelectorAll("[data-inline-change-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleInlineChangeAction(contentNode, changeSet, button.dataset.inlineChangeAction, card);
+    });
+  });
+}
+
+function renderInlineChangeLoading(contentNode) {
+  const card = ensureInlineChangeReview(contentNode);
+  if (!card) return null;
+  card.dataset.loading = "true";
+  card.innerHTML = `
+    <div class="change-review-loading" role="status">
+      <span class="execution-indicator" aria-hidden="true"></span>
+      <div><strong>正在准备变更审阅</strong><p>读取文件清单、校验状态和完整 Diff…</p></div>
+    </div>
+  `;
+  return card;
+}
+
+async function loadInlineChangeSet(runId, contentNode, { force = false } = {}) {
+  const existing = contentNode.closest(".chat-bubble")?.querySelector(".inline-change-review");
+  if (!force && (existing?.dataset.loading === "true" || existing?.dataset.changeSetId)) {
+    return state.currentChangeSet;
+  }
+  const requestedConversationId = state.conversationId;
+  const generation = ++state.changeSetRequestGeneration;
+  const loadingCard = renderInlineChangeLoading(contentNode);
+  try {
+    const changeSet = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/changes`);
+    if (
+      generation !== state.changeSetRequestGeneration
+      || requestedConversationId !== state.conversationId
+      || changeSet.conversation_id !== state.conversationId
+      || !contentNode.isConnected
+    ) return null;
+    state.currentChangeSet = changeSet;
+    renderInlineChangeReview(contentNode, changeSet);
+    return changeSet;
+  } catch (error) {
+    if (loadingCard?.isConnected) {
+      delete loadingCard.dataset.loading;
+      loadingCard.innerHTML = `<p class="change-review-error" role="alert">ChangeSet 加载失败：${escapeHtml(humanizeError(error))}</p>`;
+    }
+    throw error;
+  }
+}
+
+async function handleInlineChangeAction(contentNode, changeSet, action, card) {
+  if (changeSet.conversation_id !== state.conversationId) {
+    showToast("这份变更不属于当前会话，请重新打开对应会话", "warning");
+    return;
+  }
+  if (action === "apply" && !window.confirm(
+    changeSet.apply_mode === "worktree"
+      ? `确认从捕获的 Git HEAD 创建隔离 worktree，并应用 ${changeSet.changed_files.length} 个文件？\n补丁摘要：${changeSet.patch_sha256}`
+      : `确认将 ${changeSet.changed_files.length} 个文件写入真实工作区？\n补丁摘要：${changeSet.patch_sha256}`,
+  )) return;
+  card.setAttribute("aria-busy", "true");
+  card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  try {
+    const updated = await fetchJson(
+      `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/${action}`,
+      {
+        method: "POST",
+        body: JSON.stringify(action === "apply"
+          ? { change_set_id: changeSet.id, patch_sha256: changeSet.patch_sha256 }
+          : { change_set_id: changeSet.id }),
+      },
+    );
+    state.currentChangeSet = updated;
+    renderInlineChangeReview(contentNode, updated);
+    showToast(action === "apply" ? "ChangeSet 已应用到真实工作区" : "ChangeSet 已拒绝", "success");
+  } catch (error) {
+    await loadInlineChangeSet(changeSet.run_id, contentNode, { force: true }).catch(() => null);
+    showToast(humanizeError(error), "error");
+  }
+}
+
 function setChatStatusFromRun(body) {
   const status = agentRunStatus(body);
   if (status === "completed") {
@@ -2701,6 +2963,13 @@ function renderAgentChatResponse(
   }
   if (!holdAnswer) {
     renderInlineAgentCheckpoint(contentNode, body);
+    renderInlineAgentControls(contentNode, body);
+    const changeSetId = agentChangeSetId(body);
+    if (changeSetId && FINAL_RUN_STATUSES.has(actualStatus)) {
+      loadInlineChangeSet(agentRunId(body), contentNode).catch((error) => {
+        showToast(`ChangeSet 加载失败：${humanizeError(error)}`, "error");
+      });
+    }
   }
 }
 
@@ -2756,8 +3025,6 @@ async function runAgentFromComposer() {
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
-  $("agent-message-input").value = message;
-  $("focus-files-input").value = "";
   input.value = "";
   let submitted = false;
   let assistantContent = null;
@@ -2766,6 +3033,8 @@ async function runAgentFromComposer() {
   setChatStatus("正在提交给 Agent", "running");
   try {
     const run = await runAgent({
+      message,
+      focusFiles: [],
       onSubmitted: (body) => {
         submitted = true;
         appendChatMessage("user", message);
@@ -2776,7 +3045,7 @@ async function runAgentFromComposer() {
         progressPresenter.update(body);
         startResponseTimer(assistantContent, startedAt);
         setChatStatus("Agent 运行中", "running");
-        showToast("任务已交给代码 Agent；运行详情可前往代码 Agent 页面查看");
+        showToast("任务已交给 Agent；运行、审批和代码变更会显示在当前对话中");
       },
       onProgress: async (body) => {
         if (progressPresenter) {
@@ -3127,17 +3396,9 @@ function parseSseBlock(block) {
   }
 }
 
-function setAgentStatus(status, runId = "") {
-  const node = $("agent-status");
-  node.className = `status-pill ${statusClass(status)}`;
-  const label = `${humanizeStatus(status)}${runId ? ` · ${truncate(runId, 18)}` : ""}`;
-  node.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
-}
-
-async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
-  const message = $("agent-message-input").value.trim();
-  if (!message) {
-    $("agent-message-input").setAttribute("aria-invalid", "true");
+async function runAgent({ message = "", focusFiles = [], onSubmitted = null, onProgress = null } = {}) {
+  const normalizedMessage = message.trim();
+  if (!normalizedMessage) {
     showToast("请先描述 Agent 任务", "warning");
     return null;
   }
@@ -3152,24 +3413,14 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
   }
   let submittedRun = null;
   let conversationId = "";
-  const button = $("run-agent-btn");
-  button.disabled = true;
-  button.setAttribute("aria-busy", "true");
-  $("agent-answer").setAttribute("aria-busy", "true");
-  setAgentStatus("running");
-  $("agent-answer").className = "rich-output empty-output";
-  $("agent-answer").textContent = "Agent 正在理解任务并规划下一步…";
-  $("agent-events").innerHTML = '<div class="empty-state">正在等待第一个运行事件…</div>';
-  resetChangeSetCard();
-  $("approval-card").classList.add("hidden");
   try {
     conversationId = await ensureSession();
     const payload = {
       conversation_id: conversationId,
-      message,
+      message: normalizedMessage,
       workspace_id: workspace.id,
       ...optionalModelFields(),
-      focus_files: csvValues($("focus-files-input").value),
+      focus_files: focusFiles,
     };
     const body = await fetchJson("/agent/runs", {
       method: "POST",
@@ -3194,236 +3445,22 @@ async function runAgent({ onSubmitted = null, onProgress = null } = {}) {
     return finalBody || body;
   } catch (error) {
     if (!conversationId || conversationId === state.conversationId) {
-      setAgentStatus("failed");
-      $("agent-answer").className = "rich-output";
-      $("agent-answer").innerHTML = `<p>${escapeHtml(humanizeError(error))}</p>`;
       showToast(humanizeError(error), "error");
     }
     return submittedRun;
   } finally {
-    button.disabled = false;
-    button.removeAttribute("aria-busy");
-    $("agent-answer").removeAttribute("aria-busy");
     updateComposerAvailability();
   }
 }
 
-function renderAgentRun(body, { scrollApproval = true } = {}) {
+function renderAgentRun(body) {
   const result = body.result || {};
   state.latestRunId = body.run_id || result.run_id || "";
   state.latestRunStatus = body.status || result.status || "";
   state.latestRunConversationId = agentRunConversationId(body);
-  const actualStatus = state.latestRunStatus;
-  setAgentStatus(state.latestRunStatus, state.latestRunId);
-
-  const answer = result.answer || body.error || "";
-  const answerNode = $("agent-answer");
-  if (answer) {
-    answerNode.className = "rich-output";
-    answerNode.innerHTML = renderMarkdown(answer);
-  } else if (actualStatus === "waiting_input" && body.pending_approval?.type === "input_required") {
-    answerNode.className = "rich-output empty-output";
-    answerNode.textContent = body.pending_approval.question || "Agent 需要你补充一项信息后才能继续。";
-    $("agent-steering-input").placeholder = body.pending_approval.question || "补充信息后点击继续";
-  } else if (actualStatus === "waiting_approval" && body.pending_approval) {
-    answerNode.className = "rich-output empty-output";
-    answerNode.textContent = "执行计划已生成，请完成下方审批。";
-  } else {
-    answerNode.className = "rich-output empty-output";
-    answerNode.textContent = "Agent 正在运行，结果会在完成后显示。";
-  }
-
-  renderApproval(
-    state.latestRunStatus === "waiting_approval" ? body.pending_approval : null,
-    { scroll: scrollApproval },
-  );
-  renderAgentControls(state.latestRunStatus);
-  renderAgentMetrics(result.metrics);
-  renderArtifacts(result.artifacts || []);
-  const changeSetId = result.change_set_id || body.change_set_id || "";
-  if (changeSetId && FINAL_RUN_STATUSES.has(actualStatus)) {
-    loadChangeSet(state.latestRunId).catch((error) => {
-      showToast(`ChangeSet 加载失败：${humanizeError(error)}`, "error");
-    });
-  } else if (!changeSetId) {
-    resetChangeSetCard();
-  }
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
-}
-
-function renderAgentControls(status) {
-  const bar = $("agent-control-bar");
-  if (!state.latestRunId || FINAL_RUN_STATUSES.has(status)) {
-    bar.classList.add("hidden");
-    return;
-  }
-  bar.classList.remove("hidden");
-  const isRunning = ["queued", "running"].includes(status);
-  const canContinue = ["paused", "waiting_input"].includes(status);
-  $("pause-run-btn").classList.toggle("hidden", !isRunning);
-  $("steer-run-btn").classList.toggle("hidden", !(isRunning || canContinue));
-  $("continue-run-btn").classList.toggle("hidden", !canContinue);
-  $("cancel-run-btn").classList.toggle("hidden", status === "cancelled");
-}
-
-function renderApproval(approval, { scroll = true } = {}) {
-  const card = $("approval-card");
-  if (!approval || approval.type === "input_required" || approval.type === "run_pause") {
-    card.classList.add("hidden");
-    return;
-  }
-  card.classList.remove("hidden");
-  $("approval-reason").textContent = humanizeApprovalReason(approval.reason);
-  const tools = $("approval-tools");
-  tools.innerHTML = "";
-  for (const call of inlineApprovalTools(approval)) {
-    const item = document.createElement("details");
-    item.className = "approval-tool";
-    item.innerHTML = `
-      <summary><strong>${escapeHtml(call.name)}</strong><span>${escapeHtml(humanizePermissionLevel(call.permission_level))}</span></summary>
-      <p>${escapeHtml(call.risk_summary || "请确认此操作及参数符合你的预期。")}</p>
-      <pre>${escapeHtml(jsonPretty(call.arguments || {}))}</pre>
-    `;
-    tools.appendChild(item);
-  }
-  if (scroll) {
-    card.scrollIntoView({ behavior: preferredScrollBehavior(), block: "center" });
-  }
-}
-
-function renderAgentMetrics(metrics) {
-  const values = metrics
-    ? [
-        ["耗时", formatDuration(metrics.elapsed_ms)],
-        ["节点", metrics.node_count],
-        ["工具调用", `${metrics.successful_tool_call_count}/${metrics.tool_call_count}`],
-        ["变更文件", metrics.changed_file_count],
-        ["Token", formatTokenCount(metrics.total_tokens)],
-        ["思考 Token", formatTokenCount(metrics.thoughts_tokens)],
-      ]
-    : [
-        ["耗时", "—"],
-        ["节点", "—"],
-        ["工具调用", "—"],
-        ["变更文件", "—"],
-        ["Token", "—"],
-        ["思考 Token", "—"],
-      ];
-  $("agent-metrics").innerHTML = values
-    .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
-    .join("");
-}
-
-function renderArtifacts(artifacts) {
-  const list = $("agent-artifacts");
-  list.innerHTML = "";
-  for (const [index, artifact] of artifacts.entries()) {
-    const item = document.createElement("article");
-    item.className = "artifact-card";
-    const title = artifact.type || artifact.name || `Artifact ${index + 1}`;
-    const content = artifact.content || artifact.diff || artifact.output || artifact;
-    item.innerHTML = `<strong>${escapeHtml(title)}</strong><pre>${escapeHtml(typeof content === "string" ? content : jsonPretty(content))}</pre>`;
-    list.appendChild(item);
-  }
-}
-
-function resetChangeSetCard() {
-  state.changeSetRequestGeneration += 1;
-  state.currentChangeSet = null;
-  $("change-set-card").classList.add("hidden");
-  $("change-set-patch").textContent = "";
-}
-
-async function loadChangeSet(runId) {
-  const generation = ++state.changeSetRequestGeneration;
-  const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/changes`);
-  if (generation !== state.changeSetRequestGeneration || runId !== state.latestRunId) {
-    return null;
-  }
-  state.currentChangeSet = body;
-  renderChangeSet(body);
-  return body;
-}
-
-function renderChangeSet(changeSet) {
-  const card = $("change-set-card");
-  card.classList.remove("hidden");
-  $("change-set-status").textContent = humanizeStatus(changeSet.status);
-  $("change-set-status").className = `meta-badge ${statusClass(changeSet.status)}`;
-  $("change-set-summary").textContent = changeSet.apply_mode === "patch_only"
-    ? "当前为 patch-only：补丁可审阅和拒绝，但不会写入真实工作区。"
-    : "应用会再次校验补丁摘要、工作区登记版本与每个目标文件的基线哈希。";
-  $("change-set-meta").innerHTML = [
-    ["文件", (changeSet.changed_files || []).length],
-    ["模式", changeSet.apply_mode],
-    ["校验", changeSet.validation_status],
-    ["SHA-256", truncate(changeSet.patch_sha256, 18)],
-  ]
-    .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`)
-    .join("");
-  $("change-set-patch").textContent = changeSet.patch || "没有可显示的补丁";
-  const errorNode = $("change-set-error");
-  errorNode.hidden = !changeSet.error;
-  errorNode.textContent = changeSet.error || "";
-  const ready = changeSet.status === "ready";
-  $("reject-change-set-btn").disabled = !ready;
-  $("apply-change-set-btn").disabled = !ready || changeSet.apply_mode === "patch_only";
-  $("apply-change-set-btn").textContent = changeSet.apply_mode === "patch_only"
-    ? "真实写入未启用"
-    : "确认并应用到工作区";
-}
-
-async function applyCurrentChangeSet() {
-  const changeSet = state.currentChangeSet;
-  if (!changeSet || changeSet.status !== "ready") return;
-  const confirmed = window.confirm(
-    `确认应用 ${changeSet.changed_files.length} 个文件？\n补丁摘要：${changeSet.patch_sha256}`,
-  );
-  if (!confirmed) return;
-  const button = $("apply-change-set-btn");
-  button.disabled = true;
-  try {
-    const updated = await fetchJson(
-      `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/apply`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          change_set_id: changeSet.id,
-          patch_sha256: changeSet.patch_sha256,
-        }),
-      },
-    );
-    state.currentChangeSet = updated;
-    renderChangeSet(updated);
-    showToast("ChangeSet 已应用", "success");
-  } catch (error) {
-    await loadChangeSet(changeSet.run_id).catch(() => null);
-    showToast(humanizeError(error), "error");
-  }
-}
-
-async function rejectCurrentChangeSet() {
-  const changeSet = state.currentChangeSet;
-  if (!changeSet || changeSet.status !== "ready") return;
-  const button = $("reject-change-set-btn");
-  button.disabled = true;
-  try {
-    const updated = await fetchJson(
-      `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/reject`,
-      {
-        method: "POST",
-        body: JSON.stringify({ change_set_id: changeSet.id }),
-      },
-    );
-    state.currentChangeSet = updated;
-    renderChangeSet(updated);
-    showToast("ChangeSet 已拒绝", "success");
-  } catch (error) {
-    button.disabled = false;
-    showToast(humanizeError(error), "error");
-  }
 }
 
 async function refreshRun(
@@ -3440,7 +3477,7 @@ async function refreshRun(
     && runId === state.latestRunId
     && conversationId === state.conversationId
   ) {
-    renderAgentRun(body, { scrollApproval: state.currentView === "agent" });
+    renderAgentRun(body);
   }
   return body;
 }
@@ -3453,40 +3490,18 @@ async function refreshEvents(
     conversationId = state.latestRunConversationId || state.conversationId,
   } = {},
 ) {
-  if (!runId) {
-    $("agent-events").innerHTML = '<div class="empty-state">暂无运行事件</div>';
-    return null;
-  }
+  if (!runId) return null;
   const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/events`);
   const isCurrentRun = runId === state.latestRunId
     && conversationId === state.conversationId;
-  if (render && isCurrentRun) renderAgentEvents(body.events || []);
+  if (render && isCurrentRun) {
+    setTrace(agentProgressBodyFromEvents(body.events || [], runId).trace);
+    renderOverview();
+  }
   if (showRaw && isCurrentRun) {
     setRaw(body);
   }
   return body;
-}
-
-function renderAgentEvents(events) {
-  const list = $("agent-events");
-  list.innerHTML = "";
-  if (events.length === 0) {
-    list.innerHTML = '<div class="empty-state">暂无运行事件</div>';
-    return;
-  }
-  for (const event of events) {
-    const item = document.createElement("div");
-    const eventStatus = event.status || "pending";
-    item.className = `timeline-item ${statusClass(eventStatus)}`;
-    item.innerHTML = `
-      <div class="timeline-heading">
-        <strong>${escapeHtml(event.sequence)} · ${escapeHtml(event.node || event.type)}</strong>
-        <span>${escapeHtml(humanizeStatus(eventStatus))}</span>
-      </div>
-      <p>${escapeHtml(event.summary || humanizeStatus(event.status))}</p>
-    `;
-    list.appendChild(item);
-  }
 }
 
 function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
@@ -3510,150 +3525,9 @@ function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
 function renderStreamedAgentProgress(events, runId = state.latestRunId) {
   const body = agentProgressBodyFromEvents(events, runId);
   state.latestRunStatus = body.status;
-  setAgentStatus(body.status, runId);
-  renderAgentControls(body.status);
-  renderAgentEvents(events);
   setTrace(body.trace);
   renderOverview();
   return body;
-}
-
-async function resumeRun(approved) {
-  if (!state.latestRunId) {
-    return;
-  }
-  const runId = state.latestRunId;
-  const conversationId = state.latestRunConversationId || state.conversationId;
-  const chatContent = chatContentForRun(runId);
-  const approveButton = $("approve-run-btn");
-  const rejectButton = $("reject-run-btn");
-  approveButton.disabled = true;
-  rejectButton.disabled = true;
-  approveButton.setAttribute("aria-busy", "true");
-  setAgentStatus("running", state.latestRunId);
-  try {
-    const feedback = $("approval-feedback-input").value.trim();
-    const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/resume`, {
-      method: "POST",
-      body: JSON.stringify({
-        approved,
-        feedback: feedback || (approved ? "用户已在产品界面确认执行计划" : "用户拒绝执行计划"),
-      }),
-    });
-    if (
-      conversationId !== state.conversationId
-      || runId !== state.latestRunId
-    ) {
-      return;
-    }
-    renderAgentRun(body);
-    let presenter = null;
-    if (chatContent) {
-      const checkpoint = chatContent.closest(".chat-bubble")
-        ?.querySelector(".inline-agent-checkpoint");
-      if (checkpoint) checkpoint.dataset.decision = approved ? "approve" : "reject";
-      const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
-      presenter = createAgentProgressPresenter(chatContent, startedAt, {
-        initialTrace: agentRunTrace(body),
-      });
-      await presenter.update(body);
-    }
-    showToast(approved ? "执行计划已批准" : "执行计划已拒绝", approved ? "success" : "warning");
-    const finalBody = await watchRunUntilTerminal({
-      runId,
-      conversationId,
-      preserveChat: Boolean(chatContent),
-      onProgress: presenter ? (latestBody) => presenter.update(latestBody) : null,
-    });
-    if (
-      conversationId !== state.conversationId
-      || runId !== state.latestRunId
-    ) {
-      return;
-    }
-    if (presenter && finalBody) await presenter.update(finalBody);
-    if (finalBody) setChatStatusFromRun(finalBody);
-  } catch (error) {
-    if (
-      conversationId === state.conversationId
-      && runId === state.latestRunId
-    ) {
-      showToast(humanizeError(error), "error");
-    }
-  } finally {
-    approveButton.disabled = false;
-    rejectButton.disabled = false;
-    approveButton.removeAttribute("aria-busy");
-  }
-}
-
-async function controlRun(action) {
-  if (!state.latestRunId) return;
-  const runId = state.latestRunId;
-  const conversationId = state.latestRunConversationId || state.conversationId;
-  const input = $("agent-steering-input");
-  const message = input.value.trim();
-  if (action === "steer" && !message) {
-    showToast("请先输入需要转向的方向", "warning");
-    input.focus();
-    return;
-  }
-  const endpoint = action === "continue" ? "continue" : action;
-  try {
-    const body = await fetchJson(
-      `/agent/runs/${encodeURIComponent(runId)}/${endpoint}`,
-      {
-        method: "POST",
-        body: JSON.stringify({ message }),
-      },
-    );
-    if (
-      conversationId !== state.conversationId
-      || runId !== state.latestRunId
-    ) {
-      return;
-    }
-    renderAgentRun(body);
-    if (["steer", "continue"].includes(action)) input.value = "";
-    showToast({
-      pause: "暂停请求已发送，将在安全边界生效",
-      cancel: "取消请求已发送",
-      steer: "转向信息已加入当前运行",
-      continue: "Agent 已继续运行",
-    }[action] || "运行状态已更新", action === "cancel" ? "warning" : "success");
-    if (action === "continue") {
-      const chatContent = chatContentForRun(runId);
-      let presenter = null;
-      if (chatContent) {
-        const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
-        presenter = createAgentProgressPresenter(chatContent, startedAt, {
-          initialTrace: agentRunTrace(body),
-        });
-        await presenter.update(body);
-      }
-      const finalBody = await watchRunUntilTerminal({
-        runId,
-        conversationId,
-        preserveChat: Boolean(chatContent),
-        onProgress: presenter ? (latestBody) => presenter.update(latestBody) : null,
-      });
-      if (
-        conversationId !== state.conversationId
-        || runId !== state.latestRunId
-      ) {
-        return;
-      }
-      if (presenter && finalBody) await presenter.update(finalBody);
-      if (finalBody) setChatStatusFromRun(finalBody);
-    }
-  } catch (error) {
-    if (
-      conversationId === state.conversationId
-      && runId === state.latestRunId
-    ) {
-      showToast(humanizeError(error), "error");
-    }
-  }
 }
 
 async function watchRunUntilTerminal(options = {}) {
@@ -5472,7 +5346,6 @@ function bindEvents() {
   $("open-workspace-picker-btn").addEventListener("click", (event) => {
     openWorkspacePicker(null, event.currentTarget);
   });
-  $("agent-workspace-settings-btn").addEventListener("click", openSettings);
   $("close-workspace-picker-btn").addEventListener("click", closeWorkspacePicker);
   $("workspace-picker-dialog").addEventListener("click", (event) => {
     if (event.target === $("workspace-picker-dialog")) {
@@ -5672,33 +5545,9 @@ function bindEvents() {
       submitComposerMessage();
     }
   });
-  ["chat-message-input", "agent-message-input", "rag-question-input"].forEach((id) => {
+  ["chat-message-input", "rag-question-input"].forEach((id) => {
     $(id).addEventListener("input", () => $(id).removeAttribute("aria-invalid"));
   });
-
-  $("run-agent-btn").addEventListener("click", runAgent);
-  $("refresh-run-btn").addEventListener("click", async () => {
-    try {
-      await refreshRun();
-    } catch (error) {
-      showToast(humanizeError(error), "error");
-    }
-  });
-  $("refresh-events-btn").addEventListener("click", async () => {
-    try {
-      await refreshEvents();
-    } catch (error) {
-      showToast(humanizeError(error), "error");
-    }
-  });
-  $("approve-run-btn").addEventListener("click", () => resumeRun(true));
-  $("reject-run-btn").addEventListener("click", () => resumeRun(false));
-  $("pause-run-btn").addEventListener("click", () => controlRun("pause"));
-  $("cancel-run-btn").addEventListener("click", () => controlRun("cancel"));
-  $("steer-run-btn").addEventListener("click", () => controlRun("steer"));
-  $("continue-run-btn").addEventListener("click", () => controlRun("continue"));
-  $("apply-change-set-btn").addEventListener("click", applyCurrentChangeSet);
-  $("reject-change-set-btn").addEventListener("click", rejectCurrentChangeSet);
 
   $("ingest-doc-btn").addEventListener("click", ingestDocument);
   $("document-files-input").addEventListener("change", renderSelectedDocumentFiles);
@@ -5931,6 +5780,10 @@ function bindEvents() {
 
   window.addEventListener("hashchange", () => {
     const view = location.hash.replace("#", "");
+    if (view === "agent") {
+      switchView("chat");
+      return;
+    }
     if (document.querySelector(`[data-view-panel="${view}"]`)) {
       switchView(view, false);
     }
@@ -5978,9 +5831,12 @@ async function init() {
   $("user-id-input").value = "demo_user";
   updateMCPTransportFields();
   bindEvents();
-  const requestedView = location.hash.replace("#", "");
-  const preferredView = document.querySelector(`[data-view-panel="${preferences.view}"]`)
-    ? preferences.view
+  const requestedView = location.hash.replace("#", "") === "agent"
+    ? "chat"
+    : location.hash.replace("#", "");
+  const storedView = preferences.view === "agent" ? "chat" : preferences.view;
+  const preferredView = document.querySelector(`[data-view-panel="${storedView}"]`)
+    ? storedView
     : "chat";
   const initialView = document.querySelector(`[data-view-panel="${requestedView}"]`)
     ? requestedView

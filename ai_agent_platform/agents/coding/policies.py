@@ -92,6 +92,11 @@ class BudgetPolicy:
             return "max_consecutive_tool_failures", "blocked"
         if state.get("native_no_progress_rounds", 0) >= self.no_progress_rounds:
             return "no_progress", "partial"
+        if (
+            state.get("native_unfulfilled_change_rounds", 0)
+            >= self.no_progress_rounds
+        ):
+            return "change_not_applied", "blocked"
         started_at = state.get("started_at")
         if isinstance(started_at, (int, float)) and (
             perf_counter() - started_at >= self.max_elapsed_seconds

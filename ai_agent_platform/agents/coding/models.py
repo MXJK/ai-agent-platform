@@ -82,6 +82,7 @@ class CodingAgentState(TypedDict, total=False):
     native_tool_stop_reason: str
     native_soft_limit_warned: bool
     native_no_progress_rounds: int
+    native_unfulfilled_change_rounds: int
     native_consecutive_failures: int
     native_context_compactions: int
     native_context_chars: int

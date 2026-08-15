@@ -639,7 +639,7 @@ class PostgresAgentRunRepository:
     def save(self, record: AgentRunRecord) -> None:
         Jsonb = _require_jsonb()
         with self._connect() as conn:
-            conn.execute(
+            stored_status = conn.execute(
                 """
                 INSERT INTO agent_runs (
                     id,
@@ -701,6 +701,11 @@ class PostgresAgentRunRepository:
                     steering_messages = EXCLUDED.steering_messages,
                     run_context_snapshot = EXCLUDED.run_context_snapshot,
                     updated_at = NOW()
+                WHERE
+                    agent_runs.status NOT IN (
+                        'completed', 'partial', 'blocked', 'cancelled', 'failed'
+                    )
+                RETURNING status
                 """,
                 (
                     record.run_id,
@@ -725,14 +730,21 @@ class PostgresAgentRunRepository:
                         else None
                     ),
                 ),
-            )
+            ).fetchone()
+            if stored_status is None:
+                return
             for event_key, event in events_for_record(record):
                 conn.execute(
                     """
                     INSERT INTO agent_run_events (
                         run_id, event_key, type, status, node, summary, output
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    SELECT %s, %s, %s, %s, %s, %s, %s
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM agent_runs
+                        WHERE id = %s AND status = %s
+                    )
                     ON CONFLICT (run_id, event_key) DO NOTHING
                     """,
                     (
@@ -743,6 +755,8 @@ class PostgresAgentRunRepository:
                         event.node,
                         event.summary,
                         Jsonb(event.output),
+                        record.run_id,
+                        record.status,
                     ),
                 )
 

@@ -312,6 +312,7 @@ class CodingAgentRuntime:
             "native_tool_stop_reason": "",
             "native_soft_limit_warned": False,
             "native_no_progress_rounds": 0,
+            "native_unfulfilled_change_rounds": 0,
             "native_consecutive_failures": 0,
             "native_context_compactions": 0,
             "native_context_chars": 0,
@@ -508,8 +509,9 @@ class CodingAgentRuntime:
                 ],
             )
             self._run_store.save(record)
+        config = self._checkpoint_coordinator.config(record.thread_id)
         try:
-            state, llm_usage, config = self._checkpoint_coordinator.resume(
+            state, llm_usage, _ = self._checkpoint_coordinator.resume(
                 record,
                 approved=approved,
                 feedback=feedback,
@@ -598,7 +600,6 @@ class CodingAgentRuntime:
             steering_messages=record.steering_messages,
             context_snapshot=record.context_snapshot,
         )
-        self._run_store.save(updated)
         return updated
 
     def get_latest_run(self, conversation_id: str) -> AgentRunRecord | None:

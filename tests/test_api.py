@@ -522,14 +522,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260813-mcp-registry-1',
+            '/static/styles.css?v=20260815-chat-change-review-1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260813-mcp-registry-1',
+            '/static/app.js?v=20260815-chat-change-review-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
+        self.assertNotIn('data-view="agent"', response.text)
+        self.assertNotIn('id="agent-view"', response.text)
         self.assertNotIn('id="session-token-usage"', response.text)
         self.assertNotIn('id="composer-attachment-btn"', response.text)
         self.assertNotIn('id="composer-provider-input"', response.text)
@@ -577,6 +579,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn("restoreLatestAgentRun", script_response.text)
         self.assertIn("inline-agent-checkpoint", script_response.text)
         self.assertIn("data-inline-agent-action", script_response.text)
+        self.assertIn("inline-agent-controls", script_response.text)
+        self.assertIn("data-inline-run-action", script_response.text)
+        self.assertIn("inline-change-review", script_response.text)
+        self.assertIn("data-inline-change-action", script_response.text)
+        self.assertIn("应用到真实工作区", script_response.text)
+        self.assertIn("修改只保存在 ChangeSet，不会写入真实工作区", script_response.text)
+        self.assertIn('viewName === "agent" ? "chat"', script_response.text)
+        self.assertNotIn("代码 Agent 页面", script_response.text)
         self.assertIn("已提交补充信息", script_response.text)
         self.assertIn("已继续运行", script_response.text)
         self.assertIn("await reader.cancel()", script_response.text)
@@ -590,6 +600,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
         self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)
+        self.assertIn(".inline-agent-controls", stylesheet_response.text)
+        self.assertIn(".inline-change-review", stylesheet_response.text)
+        self.assertIn(".change-file-row", stylesheet_response.text)
         self.assertIn("scroll-margin-block: 96px 340px", stylesheet_response.text)
         self.assertIn("flex: 1 1 440px", stylesheet_response.text)
         self.assertIn(".document-name-cell::before", stylesheet_response.text)
@@ -629,10 +642,6 @@ class ApiTests(unittest.TestCase):
         self.assertIn("renderStreamedAgentProgress", script_response.text)
         self.assertIn("return polledBody || latestBody", script_response.text)
         self.assertNotIn("const latestBody = await refreshRun();", script_response.text)
-        self.assertIn(
-            'id="agent-events" class="timeline" aria-live="polite"',
-            response.text,
-        )
         self.assertIn(
             'id="trace-list" class="trace-list" aria-live="polite"',
             response.text,

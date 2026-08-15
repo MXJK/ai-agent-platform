@@ -45,20 +45,21 @@ cp -n .env.example .env
 
 首次完成环境初始化后，先审阅待处理的 Alembic revision，再由操作者用
 `./scripts/start.sh --apply-migrations` 显式授权升级。脚本会验证持久化配置，启动
-PostgreSQL、Qdrant 和 Redis，等待服务就绪，执行迁移，然后同时启动 Celery Worker 与
-FastAPI。未给出该参数时脚本会在迁移和 runtime 启动前停止；按 `Ctrl+C` 会停止 API 和
-Worker，持久化数据库容器仍会继续运行。
+PostgreSQL、Qdrant、Redis 和 loopback Go 网关，等待依赖服务就绪，执行迁移，然后同时
+启动 Celery Worker 与 FastAPI。未给出该参数时脚本会在迁移和 runtime 启动前停止；按
+`Ctrl+C` 会停止 API 和 Worker，持久化服务与网关容器仍会继续运行。
 
 常用启动选项：
 
 ```bash
 ./scripts/start.sh --check  # 仅检查依赖和配置，不执行写操作。
 APP_RELOAD=0 ./scripts/start.sh --apply-migrations
-APP_PORT=8001 ./scripts/start.sh
+APP_PORT=8001 ./scripts/start.sh --apply-migrations
 ```
 
-Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供，不需要单独
-构建前端。示例配置使用 Fake LLM 和本地嵌入提供方，不需要 API Key。
+Web UI 默认从网关地址 <http://127.0.0.1:8000> 进入；FastAPI 在内部
+<http://127.0.0.1:8001> 提供 upstream，`8080` 暂时保留为旧标签页兼容入口。页面不需要
+单独构建。示例配置使用 Fake LLM 和本地嵌入提供方，不需要 API Key。
 当 `AUTH_MODE=disabled` 时，启动脚本会直接拒绝非回环地址的 `APP_HOST`，而不是
 只输出运维警告。
 
@@ -74,7 +75,7 @@ Web UI 默认地址为 <http://127.0.0.1:8000>。页面由 FastAPI 直接提供�
 .venv/bin/ai-agent --workspace /absolute/path/to/project repl
 
 # 只启动 FastAPI/uvicorn HTTP 入口；未认证模式仍强制 loopback。
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8001
 ```
 
 REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
@@ -227,7 +228,8 @@ Workspace 指令文件和项目配置指令。REPL 对非内置 slash command �
 统一输入框提供两种模式：
 
 - `快速对话`：直接返回模型的 SSE 流式响应；
-- `代码 Agent`：围绕任务探索工作区，展示审批、进度和产物；
+- `代码 Agent`：围绕任务探索工作区，并在同一条助手消息内展示进度、审批、文件变更、
+  Diff 和 ChangeSet 操作；
 - 两种模式共享会话历史和持久化滚动摘要。压缩后的历史与数量受控的近期消息可以
   共同参与 Chat、Agent 探索和原生工具选择，同时保留原始消息。
 
@@ -264,13 +266,16 @@ Token 时才作为后备。
   拒绝、遗忘和索引修复；
 - 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区文件夹管理，可切换当前工作区、设置
   新会话默认值、重新关联失效路径和安全移除注册；统一输入框不重复展开代码上下文，
-  当前工作区通过左侧工作上下文或设置管理，独立代码 Agent 输入区持续显示其可用状态
-  与角色；本机 macOS 点击“添加文件夹”会打开 Finder 系统文件夹窗口，系统窗口不可用
+  当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；本机 macOS
+  点击“添加文件夹”会打开 Finder 系统文件夹窗口，系统窗口不可用
   时才回退网页目录浏览器；未配置该变量时默认从当前用户主目录选择，部署环境应显式
   配置最小允许根目录；
 - Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
-  要求；运行详情继续提供完整风险、验证产物、错误和指标；刷新或重新进入会话时会恢复
-  该会话最近一次未完成 Run，避免把 `waiting_approval` 误认为卡死；
+  要求，运行中也可就地暂停、取消或发送转向；终态消息内显示修改文件、逐文件增删行、
+  可展开完整 Diff、ChangeSet 校验状态和拒绝/应用操作。`patch_only` 会明确标记“尚未写入
+  磁盘”并禁用应用；`direct` / `worktree` 只有在二次确认后才调用受保护的应用 API。
+  刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
+  `waiting_approval` 误认为卡死，也避免误以为 Sandbox 文件已经进入真实工作区；
 - 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
 
 ### 持久化会话与重启恢复
@@ -488,11 +493,15 @@ setup_workspace
 使用人工审批、每次运行独立的沙箱副本、验证、一次有界修复，以及 Diff/测试产物；
 终态会在沙箱清理前把完整补丁持久化为 ChangeSet。默认 `patch_only` 不修改源工作区；
 只有显式启用真实写入、可信身份 editor 二次批准且补丁摘要与逐文件基线哈希均通过时，
-服务才按 `direct` 或 `worktree` 模式应用。
+服务才按 `direct` 或 `worktree` 模式应用。浏览器不再把这一闭环放在独立 Agent 页面：
+对应对话消息会恢复并读取 ChangeSet，呈现文件账本和完整 Diff，再由用户点击“应用到真实
+工作区”。
 
-运行中的 Agent 状态同时读取产品运行存储和最近的 LangGraph checkpoint，因此 API
-可以在任务仍执行时暴露已经完成的 Trace 节点。最终指标包括耗时、节点和工具数量、
-修改文件、已恢复错误，以及 Provider 上报的输入、输出、思考和总 Token。
+运行中的 Agent 状态以产品运行存储为事实源，并把最近的 LangGraph checkpoint 作为
+只读进度叠加，因此 API 可以在任务仍执行时暴露已经完成的 Trace 节点，GET 查询本身
+不会反写 Run。产品记录一旦进入终态便不可被迟到的 running 快照覆盖；恢复异常也会
+保留原始错误并完成沙箱清理。最终指标包括耗时、节点和工具数量、修改文件、已恢复
+错误，以及 Provider 上报的输入、输出、思考和总 Token。
 
 默认探索预算：
 
@@ -519,6 +528,21 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 原生模型采用统一、有界的“观察—决策—执行”循环。读文件、写 Sandbox、运行验证、
 获取状态与 Diff 都由同一次模型会话按原顺序选择，不再把读、写、验证拆成彼此看不到
 结果的固定阶段：
+
+创建/修改任务在空工作区也必须继续调用 `sandbox.write_file` 或
+`sandbox.apply_patch`；目录盘点使用 `repo.list_files`。`sandbox.run_command` 的模型
+可见契约列出允许的 executable basename，并定位为变更后的验证工具。变更前失败的
+诊断命令只作为可观察错误回灌，不会触发 artifact 收尾或产生空 ChangeSet。
+`change_planning` 还有运行时完成门：没有成功的 Sandbox mutation 时，模型的文本终答
+会被退回并附带明确重规划要求；连续三次仍不执行变更则进入 `blocked`，不会把零文件
+结果标成 `completed`。
+Google Developer API 的工具调用 Token 预检把 system instruction 与工具 Schema 作为
+额外 content 计数，因为它不支持 `CountTokensConfig.system_instruction/tools`；真实
+生成请求仍使用原生 system instruction 和 tools，预算预检不会因 fallback 到 Google
+而失败。
+跨 Provider fallback 时，仅 Google 自己返回的原始 provider items 会作为带
+`thought_signature` 的原生 functionCall 历史重放；其他 Provider 的调用与结果转成
+明确文本观察，避免伪造 Gemini 签名或丢失已执行证据。
 
 ```text
 原生工具调用
@@ -808,6 +832,23 @@ CHANGE_SET_MAX_PATCH_CHARS=1000000
 CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
+
+本机需要真实落盘时，使用 Compose 已限制到 `127.0.0.1:8000` 的 passwordless local
+gateway 身份模式，并为网关和 FastAPI 配置同一个随机信任密钥：
+
+```dotenv
+AUTH_MODE=trusted_header
+LIVE_WORKSPACE_WRITES_ENABLED=true
+CHANGE_SET_APPLY_MODE=direct
+GATEWAY_AUTH_MODE=local
+GATEWAY_LOCAL_USER_ID=demo_user
+GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
+```
+
+浏览器应从 `http://127.0.0.1:8000` 进入；`8080` 只是兼容别名。Agent 仍只修改每次
+Run 的沙箱；完成后对话内显示文件列表与完整 Diff，用户再次确认“应用到真实工作区”
+才会写入注册根目录。原来以 `patch_only` 生成的 ChangeSet 不会因配置切换而变为可
+应用，必须重新运行任务。
 
 `SANDBOX_MODE=local` 只适用于由本地用户拥有并信任的仓库。它在最小环境中执行
 `SANDBOX_ALLOWED_COMMANDS` 里的可执行文件基本名，使用固定最大超时、有界输出捕获和
@@ -1134,8 +1175,8 @@ Agent runtime 和目录选择器，也可覆写 `ApplicationFactory` 的组件�
 
 ## 可选 Go 网关
 
-`gateway/` 服务提供请求准入、Request ID 传递、可选的 RS256 JWKS OIDC/JWT 校验、
-健康与就绪探针、SSE 安全代理和优雅停机：
+`gateway/` 服务提供请求准入、Request ID 传递、本机固定身份或 RS256 JWKS OIDC/JWT
+校验、健康与就绪探针、SSE 安全代理和优雅停机：
 
 ```bash
 go run ./gateway/cmd/gateway
@@ -1146,7 +1187,10 @@ go vet ./gateway/...
 生产环境应配置 `GATEWAY_AUTH_MODE=oidc`、Issuer、Audience、JWKS URL 和共享的
 `GATEWAY_TRUST_SECRET`；FastAPI 则配置 `AUTH_MODE=trusted_header` 和相同 Secret。
 网关会移除伪造身份 Header、验证 Bearer Token、剥离 Token，再注入可信 Subject。
-本地开发可以让两侧认证模式都保持关闭。
+本地只读开发可以让两侧认证模式都保持关闭。需要真实写入时，使用
+`GATEWAY_AUTH_MODE=local`；它会移除调用方身份和 Authorization Header，再注入
+`GATEWAY_LOCAL_USER_ID`，且标准 Compose 只把端口发布到 `127.0.0.1`。local 模式不得
+暴露到局域网或公网。
 
 这是会话和工作区记忆的可信身份边界，并不代表每一个旧版知识库接口都已具备完整的
 多租户授权。

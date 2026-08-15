@@ -18,6 +18,7 @@ from ai_agent_platform.integrations.llm import (
     LLMClient,
     LLMToolDecision,
     LLMUsage,
+    _google_tool_contents,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
@@ -38,6 +39,43 @@ def _tool_spec(name: str = "repo.read_file") -> ToolSpec:
 
 
 class NativeProviderMappingTests(unittest.TestCase):
+    def test_google_converts_foreign_tool_history_to_text_without_signatures(self) -> None:
+        contents = _google_tool_contents(
+            [
+                {"role": "user", "content": "inspect the workspace"},
+                {
+                    "role": "assistant",
+                    "provider": "deepseek",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "call_id": "deepseek_call_1",
+                            "name": "repo.list_files",
+                            "arguments": {"path": ""},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "call_id": "deepseek_call_1",
+                    "name": "repo.list_files",
+                    "content": {"ok": True, "result": {"files": []}},
+                },
+            ],
+            types,
+            {"repo.list_files": "repo_list_files"},
+        )
+
+        parts = [part for content in contents for part in content.parts]
+        self.assertTrue(
+            any("previous provider" in (part.text or "") for part in parts)
+        )
+        self.assertTrue(
+            any("deepseek_call_1" in (part.text or "") for part in parts)
+        )
+        self.assertTrue(all(part.function_call is None for part in parts))
+        self.assertTrue(all(part.function_response is None for part in parts))
+
     def test_native_provider_can_select_namespaced_mcp_tool(self) -> None:
         client = LLMClient(
             Settings(
@@ -298,12 +336,14 @@ class NativeProviderMappingTests(unittest.TestCase):
         class FakeModels:
             def __init__(self) -> None:
                 self.kwargs: dict[str, object] = {}
+                self.count_kwargs: dict[str, object] = {}
 
             def generate_content(self, **kwargs):
                 self.kwargs = kwargs
                 return response
 
             def count_tokens(self, **kwargs):
+                self.count_kwargs = kwargs
                 return SimpleNamespace(total_tokens=9)
 
         fake_client = SimpleNamespace(
@@ -320,7 +360,10 @@ class NativeProviderMappingTests(unittest.TestCase):
 
         with patch("google.genai.Client", return_value=fake_client):
             decision = client.decide_tools(
-                [{"role": "user", "content": "read app.py"}],
+                [
+                    {"role": "system", "content": "follow repository policy"},
+                    {"role": "user", "content": "read app.py"},
+                ],
                 [_tool_spec()],
             )
 
@@ -328,6 +371,21 @@ class NativeProviderMappingTests(unittest.TestCase):
         self.assertEqual(decision.tool_calls[0].name, "repo.read_file")
         self.assertEqual(decision.usage.total_tokens, 13)
         self.assertTrue(decision.provider_items)
+        self.assertEqual(
+            fake_client.models.kwargs["config"].system_instruction,
+            "follow repository policy",
+        )
+        self.assertIsNone(
+            fake_client.models.count_kwargs["config"].system_instruction
+        )
+        self.assertIsNone(fake_client.models.count_kwargs["config"].tools)
+        count_context = fake_client.models.count_kwargs["contents"][0].parts[0].text
+        self.assertIn("follow repository policy", count_context)
+        self.assertIn("repo_read_file", count_context)
+        self.assertIn(
+            '"path"',
+            count_context,
+        )
         config = fake_client.models.kwargs["config"]
         self.assertEqual(
             config.tools[0].function_declarations[0].name,
@@ -570,7 +628,204 @@ class UnifiedChangeNativePlanner(ScriptedNativePlanner):
         )
 
 
+class DiagnosticCommandRecoveryPlanner(ScriptedNativePlanner):
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+        self.observed_diagnostic_failure = False
+
+    def classify_intent(self, user_input: str) -> dict[str, object]:
+        return {
+            "intent": "change_planning",
+            "reason": "empty workspace recovery test",
+            "confidence": 1.0,
+            "source": "test",
+        }
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="denied_listing",
+                        name="sandbox.run_command",
+                        arguments={"command": "ls -la"},
+                        source="test_native",
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        if self.decisions == 2:
+            self.observed_diagnostic_failure = any(
+                message.get("role") == "tool"
+                and message.get("call_id") == "denied_listing"
+                and not bool(message.get("content", {}).get("ok"))
+                for message in messages
+            )
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="create_index",
+                        name="sandbox.write_file",
+                        arguments={
+                            "path": "index.html",
+                            "content": "<!doctype html><title>Snake</title>\n",
+                        },
+                        source="test_native",
+                    ),
+                    ToolCall(
+                        call_id="validate_index",
+                        name="sandbox.run_command",
+                        arguments={"command": self.command},
+                        source="test_native",
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        return LLMToolDecision(
+            text="Recovered from the diagnostic failure and created the app.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
+class RefusalThenMutationPlanner(ScriptedNativePlanner):
+    def __init__(self, command: str) -> None:
+        super().__init__()
+        self.command = command
+        self.observed_completion_gate = False
+
+    def classify_intent(self, user_input: str) -> dict[str, object]:
+        return {
+            "intent": "change_planning",
+            "reason": "completion gate test",
+            "confidence": 1.0,
+            "source": "test",
+        }
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="The empty workspace cannot be changed.",
+                tool_calls=[],
+                model="scripted",
+                provider="test",
+                stop_reason="end_turn",
+            )
+        if self.decisions == 2:
+            self.observed_completion_gate = any(
+                message.get("role") == "system"
+                and "empty workspace is valid" in str(message.get("content") or "")
+                for message in messages
+            )
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="gated_write",
+                        name="sandbox.write_file",
+                        arguments={
+                            "path": "index.html",
+                            "content": "<!doctype html><title>Snake</title>\n",
+                        },
+                        source="test_native",
+                    ),
+                    ToolCall(
+                        call_id="gated_validation",
+                        name="sandbox.run_command",
+                        arguments={"command": self.command},
+                        source="test_native",
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        return LLMToolDecision(
+            text="Created and validated the game after the completion gate.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class NativeToolLoopTests(unittest.TestCase):
+    def test_change_task_cannot_complete_before_successful_sandbox_mutation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            validation = "from pathlib import Path; assert Path('index.html').is_file()"
+            planner = RefusalThenMutationPlanner(
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(validation)}"
+            )
+            runtime = CodingAgentRuntime(planner=planner)
+
+            waiting = runtime.run(
+                conversation_id="sess_change_completion_gate",
+                user_input="create a snake game in this empty workspace",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            result = runtime.resume(run_id=waiting.run_id, approved=True)
+
+        self.assertEqual(waiting.status, "waiting_approval")
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(planner.observed_completion_gate)
+        self.assertEqual(planner.decisions, 3)
+        self.assertEqual(result.change_summary.changed_files, ["index.html"])
+        self.assertTrue(result.change_summary.validation_passed)
+
+    def test_failed_diagnostic_command_does_not_preempt_empty_workspace_change(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            validation = (
+                "from pathlib import Path; "
+                "assert Path('index.html').read_text().startswith('<!doctype html>')"
+            )
+            planner = DiagnosticCommandRecoveryPlanner(
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(validation)}"
+            )
+            runtime = CodingAgentRuntime(planner=planner)
+
+            first_approval = runtime.run(
+                conversation_id="sess_empty_workspace_recovery",
+                user_input="create a snake game in this empty workspace",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            second_approval = runtime.resume(
+                run_id=first_approval.run_id,
+                approved=True,
+            )
+            result = runtime.resume(
+                run_id=first_approval.run_id,
+                approved=True,
+            )
+            source_files = list(root.iterdir())
+
+        self.assertEqual(first_approval.status, "waiting_approval")
+        self.assertEqual(second_approval.status, "waiting_approval")
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(planner.observed_diagnostic_failure)
+        self.assertEqual(planner.decisions, 3)
+        self.assertEqual(result.change_summary.changed_files, ["index.html"])
+        self.assertTrue(result.change_summary.validation_passed)
+        self.assertEqual(source_files, [])
+
     def test_hard_budget_reserves_text_only_finalization_and_returns_partial(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

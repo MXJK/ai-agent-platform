@@ -1679,12 +1679,45 @@ class LLMClient:
                 )
                 for spec in tools
             ]
-            config_kwargs: dict[str, Any] = {
-                "tools": [types.Tool(function_declarations=declarations)]
-            }
             system_instruction = _google_system_instruction_any(messages)
+            count_contents = _google_tool_contents(
+                messages,
+                types,
+                reverse_aliases,
+            )
+            count_context: list[str] = []
             if system_instruction:
-                config_kwargs["system_instruction"] = system_instruction
+                count_context.append(system_instruction)
+            if tools:
+                count_context.append(
+                    json.dumps(
+                        [
+                            {
+                                "name": reverse_aliases[spec.name],
+                                "description": spec.description,
+                                "parameters": spec.input_schema,
+                                "response": spec.output_schema,
+                            }
+                            for spec in tools
+                        ],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            if count_context:
+                # Gemini Developer API rejects both system_instruction and tools
+                # in CountTokensConfig even though GenerateContentConfig accepts
+                # them. Count the same text/schema as a leading content part so
+                # preflight remains conservative without Enterprise-only fields.
+                count_contents.insert(
+                    0,
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(text="\n\n".join(count_context))
+                        ],
+                    ),
+                )
             client = genai.Client(
                 api_key=api_key,
                 http_options=types.HttpOptions(
@@ -1697,12 +1730,8 @@ class LLMClient:
             try:
                 response = client.models.count_tokens(
                     model=model,
-                    contents=_google_tool_contents(
-                        messages,
-                        types,
-                        reverse_aliases,
-                    ),
-                    config=types.CountTokensConfig(**config_kwargs),
+                    contents=count_contents,
+                    config=types.CountTokensConfig(),
                 )
             except Exception as exc:
                 raise LLMProviderError(
@@ -2842,6 +2871,7 @@ def _google_tool_contents(
     reverse_aliases: dict[str, str],
 ) -> list[Any]:
     contents: list[Any] = []
+    native_google_call_ids: set[str] = set()
     for message in messages:
         role = str(message.get("role") or "")
         if role == "system":
@@ -2849,6 +2879,11 @@ def _google_tool_contents(
         if role == "assistant" and message.get("provider") == "google":
             provider_items = message.get("provider_items")
             if isinstance(provider_items, list) and provider_items:
+                native_google_call_ids.update(
+                    str(call.get("call_id") or "")
+                    for call in message.get("tool_calls", [])
+                    if isinstance(call, dict) and call.get("call_id")
+                )
                 contents.extend(
                     types.Content(**item)
                     for item in provider_items
@@ -2859,13 +2894,35 @@ def _google_tool_contents(
             content = message.get("content")
             response = content if isinstance(content, dict) else {"result": content}
             registry_name = str(message.get("name") or "")
+            call_id = str(message.get("call_id") or "")
+            if call_id not in native_google_call_ids:
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_text(
+                                text=(
+                                    f"Tool result from a previous provider for "
+                                    f"{registry_name} ({call_id}): "
+                                    + json.dumps(
+                                        response,
+                                        ensure_ascii=False,
+                                        default=str,
+                                        sort_keys=True,
+                                    )
+                                )
+                            )
+                        ],
+                    )
+                )
+                continue
             contents.append(
                 types.Content(
                     role="user",
                     parts=[
                         types.Part(
                             function_response=types.FunctionResponse(
-                                id=str(message.get("call_id") or ""),
+                                id=call_id,
                                 name=reverse_aliases.get(registry_name, registry_name),
                                 response=response,
                             )
@@ -2880,16 +2937,22 @@ def _google_tool_contents(
         content = message.get("content")
         if isinstance(content, str) and content:
             parts.append(types.Part.from_text(text=content))
-        for call in message.get("tool_calls", []):
-            if not isinstance(call, dict):
-                continue
-            registry_name = str(call.get("name") or "")
+        foreign_calls = [
+            call
+            for call in message.get("tool_calls", [])
+            if isinstance(call, dict)
+        ]
+        if foreign_calls:
             parts.append(
-                types.Part(
-                    function_call=types.FunctionCall(
-                        id=str(call.get("call_id") or ""),
-                        name=reverse_aliases.get(registry_name, registry_name),
-                        args=dict(call.get("arguments") or {}),
+                types.Part.from_text(
+                    text=(
+                        "Tool calls proposed by a previous provider: "
+                        + json.dumps(
+                            foreign_calls,
+                            ensure_ascii=False,
+                            default=str,
+                            sort_keys=True,
+                        )
                     )
                 )
             )

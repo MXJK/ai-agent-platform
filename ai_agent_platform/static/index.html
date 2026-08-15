@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260813-mcp-registry-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260815-chat-change-review-1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -83,10 +83,6 @@
           <button class="nav-item active" type="button" data-view="chat" aria-current="page">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-message"></use></svg></span>
             <span><strong>对话工作台</strong><small>Chat 与 Agent 统一入口</small></span>
-          </button>
-          <button class="nav-item" type="button" data-view="agent">
-            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-agent"></use></svg></span>
-            <span><strong>代码 Agent</strong><small>按需读取与执行</small></span>
           </button>
           <button class="nav-item" type="button" data-view="rag">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-knowledge"></use></svg></span>
@@ -246,119 +242,6 @@
                 </div>
               </div>
             </div>
-          </div>
-        </section>
-
-        <section id="agent-view" class="view-panel" data-view-panel="agent" aria-labelledby="agent-title" hidden>
-          <header class="view-header compact">
-            <div>
-              <p class="eyebrow">Workspace Agent</p>
-              <h1 id="agent-title">代码 Agent</h1>
-              <p>按任务读取实时文件、规划改动，并在执行前把风险交给你审阅。</p>
-            </div>
-            <span id="agent-status" class="status-pill neutral" role="status" aria-live="polite">
-              <span class="status-dot" aria-hidden="true"></span><span>尚未运行</span>
-            </span>
-          </header>
-
-          <div class="content-grid agent-grid">
-            <div class="stack">
-              <article class="surface task-card">
-                <div class="surface-heading">
-                  <div><span class="step-kicker">01 · 任务</span><h2>描述你希望 Agent 完成的工作</h2></div>
-                  <span id="agent-workspace-badge" class="meta-badge">未选择工作区</span>
-                </div>
-                <div id="agent-workspace-context" class="agent-workspace-context is-missing">
-                  <span class="workspace-status-dot" aria-hidden="true"></span>
-                  <div><strong id="agent-workspace-context-id">未选择工作区</strong><code id="agent-workspace-root">请先选择 Agent 要读取的代码目录</code></div>
-                  <span id="agent-workspace-role" class="workspace-role">未连接</span>
-                  <button id="agent-workspace-settings-btn" class="text-button" type="button">切换</button>
-                </div>
-                <label for="agent-message-input">任务目标</label>
-                <textarea
-                  id="agent-message-input"
-                  rows="6"
-                  maxlength="8000"
-                  placeholder="例如：解释某个调用链、定位错误，或规划一次安全的代码改动"
-                >解释 ai_agent_platform/api/router.py 的职责和主要调用链</textarea>
-                <label for="focus-files-input">重点文件 <span>可选，逗号分隔</span></label>
-                <input id="focus-files-input" value="ai_agent_platform/api/router.py" />
-                <div class="surface-actions">
-                  <p>Agent 的可写操作会暂停并等待你的审批。</p>
-                  <button id="run-agent-btn" class="button primary" type="button">开始运行</button>
-                </div>
-                <div id="agent-control-bar" class="agent-control-bar hidden">
-                  <label for="agent-steering-input">运行中转向 <span>在下一个安全边界生效</span></label>
-                  <input id="agent-steering-input" maxlength="4000" placeholder="例如：先不要改 API，优先补回归测试" />
-                  <div class="button-row">
-                    <button id="steer-run-btn" class="button ghost" type="button">发送转向</button>
-                    <button id="pause-run-btn" class="button ghost" type="button">暂停</button>
-                    <button id="continue-run-btn" class="button primary hidden" type="button">继续</button>
-                    <button id="cancel-run-btn" class="button danger" type="button">取消</button>
-                  </div>
-                </div>
-              </article>
-
-              <article id="approval-card" class="surface approval-card hidden" aria-live="assertive">
-                <div class="approval-icon" aria-hidden="true">!</div>
-                <div class="approval-content">
-                  <p class="eyebrow">需要人工审批</p>
-                  <h2>Agent 已暂停，等待你检查执行计划</h2>
-                  <p id="approval-reason">一个或多个工具需要在执行前确认。</p>
-                  <div id="approval-tools" class="approval-tools"></div>
-                  <label for="approval-feedback-input">审批反馈 <span>可选</span></label>
-                  <textarea id="approval-feedback-input" rows="3" maxlength="4000" placeholder="补充限制、修正方向，或说明拒绝原因"></textarea>
-                  <div class="button-row approval-actions">
-                    <button id="reject-run-btn" class="button danger" type="button">拒绝执行</button>
-                    <button id="approve-run-btn" class="button primary" type="button">确认并继续</button>
-                  </div>
-                </div>
-              </article>
-
-              <article class="surface result-card">
-                <div class="surface-heading">
-                  <div><span class="step-kicker">02 · 结果</span><h2>Agent 回答</h2></div>
-                  <button id="refresh-run-btn" class="button ghost" type="button">刷新状态</button>
-                </div>
-                <div id="agent-answer" class="rich-output empty-output">运行 Agent 后，结果会显示在这里。</div>
-                <div id="agent-artifacts" class="artifact-list"></div>
-                <article id="change-set-card" class="change-set-card hidden" aria-live="polite">
-                  <div class="surface-heading">
-                    <div><span class="step-kicker">03 · 审阅</span><h2>ChangeSet</h2></div>
-                    <span id="change-set-status" class="meta-badge">等待生成</span>
-                  </div>
-                  <p id="change-set-summary" class="context-note"></p>
-                  <dl id="change-set-meta" class="metric-list compact"></dl>
-                  <details open>
-                    <summary>查看完整补丁</summary>
-                    <pre id="change-set-patch" class="change-set-patch"></pre>
-                  </details>
-                  <p id="change-set-error" class="context-note danger-text" hidden></p>
-                  <div class="button-row change-set-actions">
-                    <button id="reject-change-set-btn" class="button danger" type="button">拒绝变更</button>
-                    <button id="apply-change-set-btn" class="button primary" type="button">应用到工作区</button>
-                  </div>
-                </article>
-              </article>
-            </div>
-
-            <aside class="stack">
-              <article class="surface">
-                <div class="surface-heading"><h2>运行进度</h2><button id="refresh-events-btn" class="text-button" type="button">刷新</button></div>
-                <div id="agent-events" class="timeline" aria-live="polite" aria-atomic="false" aria-relevant="additions text"><div class="empty-state">暂无运行事件</div></div>
-              </article>
-              <article class="surface">
-                <div class="surface-heading"><h2>运行指标</h2></div>
-                <dl id="agent-metrics" class="metric-list">
-                  <div><dt>耗时</dt><dd>—</dd></div>
-                  <div><dt>节点</dt><dd>—</dd></div>
-                  <div><dt>工具调用</dt><dd>—</dd></div>
-                  <div><dt>变更文件</dt><dd>—</dd></div>
-                  <div><dt>Token</dt><dd>—</dd></div>
-                  <div><dt>思考 Token</dt><dd>—</dd></div>
-                </dl>
-              </article>
-            </aside>
           </div>
         </section>
 
@@ -1050,6 +933,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260813-mcp-registry-1" defer></script>
+    <script src="/static/app.js?v=20260815-chat-change-review-1" defer></script>
   </body>
 </html>

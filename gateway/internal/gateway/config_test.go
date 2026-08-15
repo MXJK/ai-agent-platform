@@ -51,11 +51,11 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 
 func TestLoadConfigAcceptsOIDCIdentityBoundary(t *testing.T) {
 	values := map[string]string{
-		"GATEWAY_AUTH_MODE":      "oidc",
-		"GATEWAY_OIDC_ISSUER":    "https://issuer.example",
-		"GATEWAY_OIDC_AUDIENCE":  "ai-agent-platform",
-		"GATEWAY_OIDC_JWKS_URL":  "https://issuer.example/.well-known/jwks.json",
-		"GATEWAY_TRUST_SECRET":    "test-trust-secret",
+		"GATEWAY_AUTH_MODE":     "oidc",
+		"GATEWAY_OIDC_ISSUER":   "https://issuer.example",
+		"GATEWAY_OIDC_AUDIENCE": "ai-agent-platform",
+		"GATEWAY_OIDC_JWKS_URL": "https://issuer.example/.well-known/jwks.json",
+		"GATEWAY_TRUST_SECRET":  "test-trust-secret",
 	}
 	config, err := loadConfig(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -66,6 +66,51 @@ func TestLoadConfigAcceptsOIDCIdentityBoundary(t *testing.T) {
 	}
 	if config.AuthMode != "oidc" || config.OIDCIssuer != values["GATEWAY_OIDC_ISSUER"] {
 		t.Fatalf("OIDC config was not loaded: %+v", config)
+	}
+}
+
+func TestLoadConfigAcceptsLocalIdentityBoundary(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_AUTH_MODE":     "local",
+		"GATEWAY_LOCAL_USER_ID": "demo_user",
+		"GATEWAY_TRUST_SECRET":  "test-trust-secret",
+	}
+	config, err := loadConfig(func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if err != nil {
+		t.Fatalf("loadConfig returned error: %v", err)
+	}
+	if config.AuthMode != "local" || config.LocalUserID != "demo_user" {
+		t.Fatalf("local config was not loaded: %+v", config)
+	}
+}
+
+func TestLoadConfigRequiresLocalTrustSecret(t *testing.T) {
+	_, err := loadConfig(func(key string) (string, bool) {
+		if key == "GATEWAY_AUTH_MODE" {
+			return "local", true
+		}
+		return "", false
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_TRUST_SECRET") {
+		t.Fatalf("loadConfig error = %v, want missing trust secret", err)
+	}
+}
+
+func TestLoadConfigRejectsUnsafeLocalUserID(t *testing.T) {
+	values := map[string]string{
+		"GATEWAY_AUTH_MODE":     "local",
+		"GATEWAY_LOCAL_USER_ID": "demo user",
+		"GATEWAY_TRUST_SECRET":  "test-trust-secret",
+	}
+	_, err := loadConfig(func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	if err == nil || !strings.Contains(err.Error(), "GATEWAY_LOCAL_USER_ID") {
+		t.Fatalf("loadConfig error = %v, want invalid local user ID", err)
 	}
 }
 

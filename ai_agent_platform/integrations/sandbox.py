@@ -172,6 +172,12 @@ class SandboxRuntime:
     def mode(self) -> str:
         return self._mode
 
+    @property
+    def allowed_commands(self) -> tuple[str, ...]:
+        """Return the command contract exposed to native tool-calling models."""
+
+        return tuple(sorted(self._allowed_commands))
+
     def workspace_status(
         self,
         *,

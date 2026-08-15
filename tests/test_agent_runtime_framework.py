@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
+from unittest.mock import patch
 
 from ai_agent_platform.agents.coding.change_loop import ChangeLoopExecutor
 from ai_agent_platform.agents.coding.models import AgentRunRecord, CodingAgentState
@@ -148,6 +149,66 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         assert latest is not None
         self.assertEqual(latest.run_id, "run_latest")
         self.assertIsNone(store.get_latest_for_conversation("missing"))
+
+    def test_terminal_run_cannot_be_overwritten_by_stale_active_snapshot(self) -> None:
+        store = InMemoryAgentRunStore()
+        terminal = AgentRunRecord(
+            run_id="run_terminal",
+            thread_id="run_terminal",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/workspace",
+            status="failed",
+            checkpoint_id="failed-checkpoint",
+            latest_node="runtime",
+            next_nodes=[],
+            trace=[],
+            error="original failure",
+        )
+        store.save(terminal)
+
+        store.save(
+            replace(
+                terminal,
+                status="running",
+                checkpoint_id="stale-checkpoint",
+                error=None,
+            )
+        )
+
+        self.assertEqual(store.get(terminal.run_id), terminal)
+
+    def test_resume_failure_preserves_original_exception_and_terminal_record(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(planner=InputPlanner())
+            waiting = runtime.run(
+                conversation_id="sess_resume_failure",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+
+            with patch.object(
+                runtime._checkpoint_coordinator,
+                "resume",
+                side_effect=RuntimeError("graph resume exploded"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "graph resume exploded"):
+                    runtime.resume(
+                        run_id=waiting.run_id,
+                        approved=True,
+                        feedback="the /health endpoint",
+                    )
+
+            failed = runtime.get_run(waiting.run_id)
+
+        self.assertEqual(waiting.status, "waiting_input")
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error, "graph resume exploded")
+        self.assertNotIn("config", failed.error)
 
     def test_model_can_pause_for_input_and_receive_answer_as_tool_result(self) -> None:
         with TemporaryDirectory() as temp_dir:

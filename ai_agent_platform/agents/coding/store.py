@@ -20,6 +20,12 @@ class InMemoryAgentRunStore:
 
     def save(self, record: AgentRunRecord) -> None:
         with self._lock:
+            current = self._runs.get(record.run_id)
+            if (
+                current is not None
+                and current.status in QueryLifecycle.TERMINAL_STATUSES
+            ):
+                return
             self._runs[record.run_id] = record
             events = self._events.setdefault(record.run_id, [])
             keys = self._event_keys.setdefault(record.run_id, set())

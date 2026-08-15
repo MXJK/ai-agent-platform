@@ -404,7 +404,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual([item.status for item in listed], ["active"])
 
     def test_agent_run_persists_workspace_root_snapshot(self) -> None:
-        connection = FakeConnection([None])
+        connection = FakeConnection([("queued",), None])
         record = AgentRunRecord(
             run_id="run_1",
             thread_id="run_1",
@@ -430,6 +430,9 @@ class PostgresRepositoryTests(unittest.TestCase):
         sql, params = connection.calls[0]
         self.assertIn("workspace_root", sql)
         self.assertIn("/workspace/code", params)
+        self.assertIn("agent_runs.status NOT IN", sql)
+        self.assertIn("RETURNING status", sql)
+        self.assertIn("WHERE EXISTS", connection.calls[1][0])
 
     def test_agent_run_repository_loads_latest_run_for_conversation(self) -> None:
         row = (

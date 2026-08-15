@@ -21,7 +21,7 @@ const (
 	defaultUpstreamHeaderTimeout       = 30 * time.Second
 	defaultReadinessTimeout            = 2 * time.Second
 	defaultShutdownTimeout             = 10 * time.Second
-	defaultOIDCJWKSCacheTTL             = 5 * time.Minute
+	defaultOIDCJWKSCacheTTL            = 5 * time.Minute
 )
 
 // Config contains process-level gateway settings. A zero RequestsPerSecond
@@ -46,6 +46,7 @@ type Config struct {
 	OIDCJWKSURL           *url.URL
 	OIDCJWKSCacheTTL      time.Duration
 	GatewayTrustSecret    string
+	LocalUserID           string
 }
 
 // LoadConfig reads gateway settings from the process environment.
@@ -107,13 +108,14 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("GATEWAY_LOG_LEVEL must be one of debug, info, warn, or error")
 	}
 	authMode := strings.ToLower(valueOrDefault(lookup, "GATEWAY_AUTH_MODE", "disabled"))
-	if authMode != "disabled" && authMode != "oidc" {
-		return Config{}, fmt.Errorf("GATEWAY_AUTH_MODE must be disabled or oidc")
+	if authMode != "disabled" && authMode != "local" && authMode != "oidc" {
+		return Config{}, fmt.Errorf("GATEWAY_AUTH_MODE must be disabled, local, or oidc")
 	}
 	var oidcJWKSURL *url.URL
 	oidcIssuer := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_OIDC_ISSUER", ""))
 	oidcAudience := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_OIDC_AUDIENCE", ""))
 	trustSecret := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_TRUST_SECRET", ""))
+	localUserID := strings.TrimSpace(valueOrDefault(lookup, "GATEWAY_LOCAL_USER_ID", "demo_user"))
 	jwksCacheTTL, err := positiveDuration(
 		lookup,
 		"GATEWAY_OIDC_JWKS_CACHE_TTL",
@@ -138,6 +140,14 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_TRUST_SECRET is required in oidc mode")
 		}
 	}
+	if authMode == "local" {
+		if trustSecret == "" {
+			return Config{}, fmt.Errorf("GATEWAY_TRUST_SECRET is required in local mode")
+		}
+		if !validLocalUserID(localUserID) {
+			return Config{}, fmt.Errorf("GATEWAY_LOCAL_USER_ID must contain 1-256 safe identity characters")
+		}
+	}
 
 	return Config{
 		ListenAddress:         valueOrDefault(lookup, "GATEWAY_LISTEN_ADDRESS", defaultListenAddress),
@@ -159,7 +169,24 @@ func loadConfig(lookup func(string) (string, bool)) (Config, error) {
 		OIDCJWKSURL:           oidcJWKSURL,
 		OIDCJWKSCacheTTL:      jwksCacheTTL,
 		GatewayTrustSecret:    trustSecret,
+		LocalUserID:           localUserID,
 	}, nil
+}
+
+func validLocalUserID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("._:@/-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func valueOrDefault(lookup func(string) (string, bool), name, fallback string) string {

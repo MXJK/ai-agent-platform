@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from ai_agent_platform.agents.coding.context import load_project_instructions
+from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.agents.coding.planner import RuleBasedAgentPlanner
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
@@ -410,7 +411,11 @@ class AgentContextBudgetTests(unittest.TestCase):
                 return super().classify_request(user_input, knowledge_bases)
 
         with TemporaryDirectory() as temp_dir:
-            runtime = CodingAgentRuntime(planner=BlockingPlanner())
+            store = InMemoryAgentRunStore()
+            runtime = CodingAgentRuntime(
+                planner=BlockingPlanner(),
+                run_store=store,
+            )
             results = []
             worker = Thread(
                 target=lambda: results.append(
@@ -426,7 +431,9 @@ class AgentContextBudgetTests(unittest.TestCase):
             )
             worker.start()
             self.assertTrue(entered_classification.wait(timeout=2))
+            stored_before = store.get("run_live_trace")
             running = runtime.get_run("run_live_trace")
+            stored_after = store.get("run_live_trace")
             release_classification.set()
             worker.join(timeout=3)
 
@@ -434,6 +441,7 @@ class AgentContextBudgetTests(unittest.TestCase):
         self.assertEqual(running.status, "running")
         self.assertGreaterEqual(len(running.trace), 1)
         self.assertEqual(running.trace[0]["node"], "setup_workspace")
+        self.assertEqual(stored_after, stored_before)
         self.assertEqual(len(results), 1)
 
     def test_agent_caps_rounds_files_and_context_characters(self) -> None:

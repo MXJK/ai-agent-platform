@@ -246,6 +246,33 @@ class ToolLoopNodes:
         if not all_proposed_calls:
             no_progress = 0
         native_answer = decision.text if not all_proposed_calls else ""
+        unfulfilled_change_rounds = state.get(
+            "native_unfulfilled_change_rounds",
+            0,
+        )
+        change_requires_mutation = (
+            state.get("intent") == "change_planning"
+            and not _has_successful_native_mutation(state)
+        )
+        if not all_proposed_calls and change_requires_mutation:
+            unfulfilled_change_rounds += 1
+            no_progress += 1
+            native_answer = ""
+            stop_reason = "no_progress_retry"
+            warnings.append(
+                "change task attempted to finish without a successful sandbox mutation"
+            )
+            native_messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "The requested repository change is not complete: no "
+                        "sandbox.write_file or sandbox.apply_patch call has succeeded. "
+                        "An empty workspace is valid for a create task. Use a sandbox "
+                        "mutation tool now, then validate and inspect the resulting diff."
+                    ),
+                }
+            )
         native_signatures = list(previous_signatures)
         native_call_count = state.get("native_tool_call_count", 0) + len(tool_calls)
         analysis_calls, change_calls, validation_calls = partition_tool_calls(tool_calls)
@@ -280,6 +307,9 @@ class ToolLoopNodes:
         ]
         terminal_status = "completed" if not all_proposed_calls else ""
         terminal_reason = "model_completed" if not all_proposed_calls else ""
+        if change_requires_mutation and not all_proposed_calls:
+            terminal_status = ""
+            terminal_reason = ""
         final_errors: list[dict[str, Any]] = []
         if denied_calls:
             native_messages.extend(
@@ -318,6 +348,7 @@ class ToolLoopNodes:
             "native_tool_stop_reason": stop_reason,
             "native_soft_limit_warned": soft_warned,
             "native_no_progress_rounds": no_progress,
+            "native_unfulfilled_change_rounds": unfulfilled_change_rounds,
             "native_context_compactions": compactions,
             "native_context_chars": _native_messages_chars(native_messages),
             "terminal_status": terminal_status,
@@ -524,10 +555,19 @@ class ToolLoopNodes:
                     results.extend(self._change_loop.execute_tool_calls(state, [call]))
             native_messages = list(state.get("native_tool_messages", []))
             native_messages.extend(_native_tool_result_message(result) for result in results)
+            successful_mutation = any(
+                result.get("ok")
+                and result.get("name") in SANDBOX_MUTATION_TOOLS
+                for result in results
+            )
+            has_changed_workspace = bool(
+                successful_mutation or state.get("change_iteration", 0) > 0
+            )
             validation_results = [
                 result
                 for result in results
-                if result.get("name") in SANDBOX_VALIDATION_TOOLS
+                if has_changed_workspace
+                and result.get("name") in SANDBOX_VALIDATION_TOOLS
             ]
             validation_history = list(state.get("validation_history", []))
             if validation_results:
@@ -537,9 +577,6 @@ class ToolLoopNodes:
                         "results": validation_results,
                     }
                 )
-            mutation_attempted = any(
-                call.name in SANDBOX_MUTATION_TOOLS for call in calls
-            )
             successful_new_result = any(
                 result.get("ok") and not result.get("durable_replay")
                 for result in results
@@ -562,16 +599,21 @@ class ToolLoopNodes:
                 "validation_history": validation_history,
                 "change_iteration": (
                     state.get("change_iteration", 0) + 1
-                    if mutation_attempted
+                    if successful_mutation
                     else state.get("change_iteration", 0)
                 ),
                 "native_artifacts_collected": (
                     False
-                    if mutation_attempted or validation_results
+                    if successful_mutation or validation_results
                     else state.get("native_artifacts_collected", False)
                 ),
                 "native_consecutive_failures": consecutive_failures,
                 "native_no_progress_rounds": no_progress,
+                "native_unfulfilled_change_rounds": (
+                    0
+                    if successful_mutation
+                    else state.get("native_unfulfilled_change_rounds", 0)
+                ),
                 "trace": _append_trace(
                     state,
                     node="inspect_repository",
@@ -717,8 +759,15 @@ def _native_tool_result_message(result: dict[str, Any]) -> dict[str, Any]:
 def _native_artifacts_needed(state: CodingAgentState) -> bool:
     if state.get("native_artifacts_collected"):
         return False
+    return bool(state.get("validation_results")) or any(
+        result.get("ok") and result.get("name") in SANDBOX_MUTATION_TOOLS
+        for result in state.get("tool_results", [])
+    )
+
+
+def _has_successful_native_mutation(state: CodingAgentState) -> bool:
     return any(
-        result.get("name") in SANDBOX_MUTATION_TOOLS | SANDBOX_VALIDATION_TOOLS
+        result.get("ok") and result.get("name") in SANDBOX_MUTATION_TOOLS
         for result in state.get("tool_results", [])
     )
 

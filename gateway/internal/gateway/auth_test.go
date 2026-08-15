@@ -133,6 +133,37 @@ func TestOIDCMiddlewareRejectsMissingAndInvalidAudienceTokens(t *testing.T) {
 	}
 }
 
+func TestLocalIdentityMiddlewareReplacesCallerIdentity(t *testing.T) {
+	received := make(chan http.Header, 1)
+	handler := localIdentityMiddleware("demo_user", "unit-test-trust-secret", http.HandlerFunc(
+		func(response http.ResponseWriter, request *http.Request) {
+			received <- request.Header.Clone()
+			response.WriteHeader(http.StatusNoContent)
+		},
+	))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces", nil)
+	request.Header.Set("Authorization", "Bearer must-not-pass")
+	request.Header.Set("X-Authenticated-User", "mallory")
+	request.Header.Set("X-Gateway-Auth", "forged")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	headers := <-received
+	if headers.Get("Authorization") != "" {
+		t.Fatal("Authorization reached upstream")
+	}
+	if headers.Get("X-Authenticated-User") != "demo_user" {
+		t.Fatalf("trusted subject = %q, want demo_user", headers.Get("X-Authenticated-User"))
+	}
+	if headers.Get("X-Gateway-Auth") != "unit-test-trust-secret" {
+		t.Fatal("gateway trust secret was not injected")
+	}
+}
+
 func oidcTestHandler(t *testing.T, upstreamURL, jwksURL string) http.Handler {
 	t.Helper()
 	upstream, err := url.Parse(upstreamURL)

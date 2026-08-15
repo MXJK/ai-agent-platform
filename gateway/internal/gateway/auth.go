@@ -18,7 +18,7 @@ import (
 
 var (
 	errMissingBearer = errors.New("bearer token is required")
-	errInvalidToken   = errors.New("bearer token is invalid")
+	errInvalidToken  = errors.New("bearer token is invalid")
 )
 
 type oidcAuthenticator struct {
@@ -44,7 +44,7 @@ type jwtClaims struct {
 	Subject   string          `json:"sub"`
 	Audience  json.RawMessage `json:"aud"`
 	Expires   json.Number     `json:"exp"`
-	NotBefore json.Number    `json:"nbf"`
+	NotBefore json.Number     `json:"nbf"`
 }
 
 type jwksDocument struct {
@@ -72,6 +72,20 @@ func newOIDCAuthenticator(config Config, client *http.Client) *oidcAuthenticator
 		client:      client,
 		keys:        make(map[string]*rsa.PublicKey),
 	}
+}
+
+func localIdentityMiddleware(userID, trustSecret string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		// Local mode is intentionally passwordless. Its security boundary is the
+		// loopback-only publish rule in docker-compose.yml, so caller-provided
+		// identity and credentials must never reach the trusted upstream.
+		request.Header.Del("Authorization")
+		request.Header.Del("X-Authenticated-User")
+		request.Header.Del("X-Gateway-Auth")
+		request.Header.Set("X-Authenticated-User", userID)
+		request.Header.Set("X-Gateway-Auth", trustSecret)
+		next.ServeHTTP(response, request)
+	})
 }
 
 func (auth *oidcAuthenticator) middleware(next http.Handler) http.Handler {

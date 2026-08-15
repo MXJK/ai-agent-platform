@@ -208,9 +208,10 @@ def route_after_tool_planning(state: CodingAgentState) -> PlanRoute:
             )
         if state.get("native_tool_stop_reason") == "no_progress_retry":
             return "plan_tools"
-        changed_or_validated = any(
-            call.name in SANDBOX_MUTATION_TOOLS | SANDBOX_VALIDATION_TOOLS
-            for call in state.get("tool_calls", [])
+        changed_or_validated = bool(state.get("validation_results")) or any(
+            result.get("ok")
+            and result.get("name") in SANDBOX_MUTATION_TOOLS
+            for result in state.get("tool_results", [])
         )
         if changed_or_validated and not state.get("native_artifacts_collected"):
             return "collect_artifacts"

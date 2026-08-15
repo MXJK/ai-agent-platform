@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON="${PROJECT_ROOT}/.venv/bin/python"
 ALEMBIC="${PROJECT_ROOT}/.venv/bin/alembic"
 CELERY="${PROJECT_ROOT}/.venv/bin/celery"
-COMPOSE_SERVICES=(postgres qdrant redis)
+COMPOSE_SERVICES=(postgres qdrant redis gateway)
 WORKER_PID=""
 
 cd "${PROJECT_ROOT}"
@@ -29,17 +29,84 @@ require_file() {
   fi
 }
 
+load_app_runtime_env() {
+  local exports
+  exports="$("${PYTHON}" - <<'PY'
+import os
+import shlex
+from pathlib import Path
+
+dotenv = {}
+dotenv_path = Path(".env")
+if dotenv_path.exists():
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        dotenv[name.strip()] = value.strip().strip("\"'")
+
+values = {
+    "APP_HOST": os.getenv("APP_HOST", dotenv.get("APP_HOST", "127.0.0.1")),
+    "APP_PORT": os.getenv("APP_PORT", dotenv.get("APP_PORT", "8001")),
+    "APP_RELOAD": os.getenv("APP_RELOAD", dotenv.get("APP_RELOAD", "1")),
+}
+try:
+    app_port = int(values["APP_PORT"])
+except ValueError as exc:
+    raise SystemExit("APP_PORT 必须是 1-65535 的整数。") from exc
+if not 1 <= app_port <= 65535:
+    raise SystemExit("APP_PORT 必须是 1-65535 的整数。")
+if values["APP_RELOAD"] not in {"0", "1"}:
+    raise SystemExit("APP_RELOAD 必须是 0 或 1。")
+for name, value in values.items():
+    print(f"export {name}={shlex.quote(value)}")
+PY
+)"
+  eval "${exports}"
+}
+
 validate_runtime_config() {
   "${PYTHON}" - <<'PY'
 import os
+from pathlib import Path
 
 from ai_agent_platform.core import Settings, validate_bind_host
 
 settings = Settings.from_env()
+dotenv = {}
+dotenv_path = Path(".env")
+if dotenv_path.exists():
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        dotenv[name.strip()] = value.strip().strip("\"'")
+
+gateway_auth_mode = os.getenv(
+    "GATEWAY_AUTH_MODE",
+    dotenv.get("GATEWAY_AUTH_MODE", "disabled"),
+).strip().lower()
+app_host = os.getenv("APP_HOST", dotenv.get("APP_HOST", "127.0.0.1"))
+if gateway_auth_mode not in {"disabled", "local", "oidc"}:
+    raise SystemExit(
+        "GATEWAY_AUTH_MODE 必须是 disabled、local 或 oidc。"
+    )
 validate_bind_host(
-    host=os.getenv("APP_HOST", "127.0.0.1"),
+    host=app_host,
     auth_mode=settings.auth_mode,
 )
+if gateway_auth_mode in {"local", "oidc"} and settings.auth_mode != "trusted_header":
+    raise SystemExit(
+        f"GATEWAY_AUTH_MODE={gateway_auth_mode} 要求 AUTH_MODE=trusted_header。"
+    )
+if gateway_auth_mode == "local":
+    validate_bind_host(host=app_host, auth_mode="disabled")
+elif settings.auth_mode == "trusted_header" and gateway_auth_mode == "disabled":
+    raise SystemExit(
+        "AUTH_MODE=trusted_header 要求启用 GATEWAY_AUTH_MODE=local 或 oidc。"
+    )
 expected = {
     "session_repository": "postgres",
     "agent_run_store": "postgres",
@@ -164,6 +231,7 @@ require_command docker
 require_file "${PYTHON}"
 require_file "${ALEMBIC}"
 require_file "${CELERY}"
+load_app_runtime_env
 docker compose version >/dev/null
 validate_runtime_config
 load_postgres_compose_env
@@ -185,8 +253,8 @@ if [[ $# -ne 1 || "${1:-}" != "--apply-migrations" ]]; then
   exit 2
 fi
 
-echo "正在启动 PostgreSQL、Qdrant 和 Redis..."
-docker compose up -d "${COMPOSE_SERVICES[@]}"
+echo "正在启动 PostgreSQL、Qdrant、Redis 和本地网关..."
+docker compose up -d --build "${COMPOSE_SERVICES[@]}"
 wait_for_services
 
 echo "已收到显式授权，正在应用数据库迁移..."
@@ -212,12 +280,13 @@ API_ARGS=(
   -m uvicorn
   ai_agent_platform.api.entrypoint:app
   --host "${APP_HOST:-127.0.0.1}"
-  --port "${APP_PORT:-8000}"
+  --port "${APP_PORT:-8001}"
 )
 if [[ "${APP_RELOAD:-1}" == "1" ]]; then
   API_ARGS+=(--reload)
 fi
 
-echo "正在启动 FastAPI：http://${APP_HOST:-127.0.0.1}:${APP_PORT:-8000}"
-echo "按 Ctrl+C 停止 API 和 Celery Worker；数据库容器会继续运行。"
+echo "正在启动 FastAPI upstream：http://${APP_HOST:-127.0.0.1}:${APP_PORT:-8001}"
+echo "浏览器入口：http://127.0.0.1:8000（兼容入口：http://127.0.0.1:8080）"
+echo "按 Ctrl+C 停止 API 和 Celery Worker；基础服务和网关容器会继续运行。"
 "${API_ARGS[@]}"

@@ -24,26 +24,28 @@ python3.10 -m venv .venv
 cp -n .env.example .env
 # Replace the sample PostgreSQL password in both POSTGRES_PASSWORD and
 # DATABASE_URL with the same random local-only value.
-./scripts/start.sh
+./scripts/start.sh --apply-migrations
 ```
 
-After the initial environment setup, `./scripts/start.sh` is the only command
-needed for local startup. It validates the persistent configuration, starts
-PostgreSQL/Qdrant/Redis, waits for them to become reachable, applies pending
-Alembic migrations, and runs both Celery Worker and FastAPI. Press `Ctrl+C` to
-stop the API and Worker; persistent database containers remain running.
+After reviewing pending Alembic revisions, the operator must explicitly pass
+`--apply-migrations`. The script validates the persistent configuration, starts
+PostgreSQL/Qdrant/Redis and the loopback Go gateway, applies migrations, and runs
+both Celery Worker and FastAPI. Press `Ctrl+C` to stop the API and Worker;
+persistent service and gateway containers remain running.
 
 Useful startup options:
 
 ```bash
 ./scripts/start.sh --check  # Validate dependencies/configuration without writes.
-APP_RELOAD=0 ./scripts/start.sh
-APP_PORT=8001 ./scripts/start.sh
+APP_RELOAD=0 ./scripts/start.sh --apply-migrations
+APP_PORT=8001 ./scripts/start.sh --apply-migrations
 ```
 
-The web UI is available at `http://127.0.0.1:8000`. It is served directly by
-FastAPI and requires no separate frontend build. The example configuration uses
-the fake LLM and local embedding provider, which require no API key.
+Open the web UI through the gateway at `http://127.0.0.1:8000`. FastAPI serves
+the internal upstream on `http://127.0.0.1:8001`; port 8080 remains a temporary
+compatibility alias for existing tabs. No separate frontend build is required.
+The example configuration uses the fake LLM and local embedding provider, which
+require no API key.
 When `AUTH_MODE=disabled`, the startup script rejects non-loopback `APP_HOST`
 values instead of relying on an operator warning.
 
@@ -55,7 +57,7 @@ The installed entrypoints are thin adapters over `RuntimeContainer` and
 ```bash
 .venv/bin/ai-agent --workspace /absolute/path/to/project print "Explain the entrypoints"
 .venv/bin/ai-agent --workspace /absolute/path/to/project repl
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8001
 ```
 
 Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
@@ -188,8 +190,8 @@ diagnostics and never execute Skill-directory code.
 The shared composer offers:
 
 - `快速对话` for direct SSE model responses;
-- `代码 Agent` for task-driven workspace exploration, approvals, progress, and
-  artifacts;
+- `代码 Agent` for task-driven workspace exploration with progress, approvals,
+  changed files, Diff, and ChangeSet actions rendered in the same assistant message;
 - a common conversation history with persistent rolling summaries, so a
   compressed history plus bounded recent messages can inform Chat and Agent
   exploration and native tool selection without discarding the original
@@ -232,17 +234,20 @@ The browser workspace also includes:
 - local workspace folder management constrained by `WORKSPACE_ALLOWED_ROOTS`,
   including current/default selection, invalid-path relinking, and safe removal;
   the shared composer omits a duplicate code-context strip, while the sidebar
-  and settings manage the current workspace and the dedicated Agent input keeps
-  its availability and role visible; on local macOS, Add Folder opens the Finder
+  and settings manage the current workspace; there is no separate Code Agent page;
+  on local macOS, Add Folder opens the Finder
   system folder dialog and falls back to the web directory browser only when the
   system dialog is unavailable; when unset locally, the allowed root defaults to
   the current user's home directory, while deployments should set explicit
   minimal roots;
 - approval, input, and pause checkpoints rendered inside the matching assistant
-  message, with inline approve, reject, feedback, and continue actions; the Run
-  inspector still exposes full risk, validation artifacts, errors, and metrics;
-  reopening a session restores its latest unfinished Run so `waiting_approval`
-  is not mistaken for a stalled conversation;
+  message, with inline approve, reject, feedback, continue, steer, pause, and cancel
+  actions; terminal messages include a changed-file ledger, line counts, expandable
+  Diff, validation state, and reject/apply actions. `patch_only` explicitly says the
+  files are not on disk and disables apply; `direct` / `worktree` requires a second
+  confirmation before calling the protected API. Reopening a session restores its
+  latest Run and ChangeSet so `waiting_approval` or Sandbox-only output is not
+  mistaken for a stalled or already-applied change;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
 
@@ -496,11 +501,14 @@ a ChangeSet. The default `patch_only` mode never changes the source workspace;
 `direct` or `worktree` promotion additionally requires explicitly enabled live
 writes, a trusted editor approval, the approved digest, and unchanged file hashes.
 
-Running Agent status is read from both the product run store and the latest
-LangGraph checkpoint. The API therefore exposes already-completed trace nodes
-while a run is still executing. Final metrics include elapsed time, node/tool
-counts, changed files, recovered errors, and provider-reported input, output,
-thinking, and total tokens.
+Running Agent status uses the product run store as its source of truth and adds
+the latest LangGraph checkpoint as a read-only progress overlay. The API can
+therefore expose already-completed trace nodes while a run is still executing
+without turning GET into a write. Once the product record reaches a terminal
+state, a late running snapshot cannot overwrite it; resume failures also retain
+the original error and clean up the sandbox. Final metrics include elapsed time,
+node/tool counts, changed files, recovered errors, and provider-reported input,
+output, thinking, and total tokens.
 
 Default exploration budgets:
 
@@ -527,6 +535,25 @@ function calls are normalized to `LLMToolDecision`, including a stable tool-call
 ID; dotted registry names receive provider-safe aliases and are mapped back
 before execution. The fake provider retains deterministic rule planning for
 offline tests.
+
+Create/modify tasks must still call `sandbox.write_file` or
+`sandbox.apply_patch` in an empty workspace; directory inventory uses
+`repo.list_files`. The model-visible `sandbox.run_command` contract lists its
+allowed executable basenames and positions commands as post-change validation.
+A failed pre-change diagnostic command is returned for replanning and does not
+trigger artifact finalization or an empty ChangeSet.
+`change_planning` also has a runtime completion gate: a text-only final answer
+is returned for explicit replanning until a Sandbox mutation succeeds. Three
+unfulfilled attempts become `blocked`, never a zero-file `completed` result.
+For Google Developer API tool-call preflight, the system-instruction text and
+tool schemas are counted as an additional content part because that API rejects
+`CountTokensConfig.system_instruction/tools`; the real generation request still
+uses native system instructions and tools, so a Google fallback does not break
+budgeting.
+On cross-provider fallback, only Google's own original provider items are
+replayed as native function calls with their `thought_signature`; calls and
+results from other providers become explicit text observations, preserving
+evidence without fabricating a Gemini signature.
 
 Native models use one bounded observe/decide/act loop. Repository reads,
 Sandbox mutations, validation commands, status, and diffs are selected in model
@@ -791,7 +818,8 @@ digest. Reapplying the same completed ChangeSet is idempotent and conflicts neve
 overwrite newer user edits. `direct` restores original files on failure;
 `worktree` creates a controlled `codex/` branch from the captured Git HEAD while
 leaving the source directory untouched. No commit, push, PR, merge, or deployment
-is performed automatically.
+is performed automatically. The browser exposes this promotion boundary directly
+inside the matching Agent conversation message rather than on a separate page.
 
 ### Live source tools
 
@@ -829,6 +857,25 @@ CHANGE_SET_MAX_PATCH_CHARS=1000000
 CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
+
+For local direct writes, use the passwordless local gateway that Compose
+publishes only on `127.0.0.1:8000`, and configure one random trust secret shared
+by the gateway and FastAPI:
+
+```dotenv
+AUTH_MODE=trusted_header
+LIVE_WORKSPACE_WRITES_ENABLED=true
+CHANGE_SET_APPLY_MODE=direct
+GATEWAY_AUTH_MODE=local
+GATEWAY_LOCAL_USER_ID=demo_user
+GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
+```
+
+Open the canonical UI on port 8000; port 8080 is only a compatibility alias. The
+Agent still writes only to its per-Run Sandbox. The conversation shows the file
+list and full Diff, and the registered workspace changes only after the user
+confirms “Apply to real workspace.” Existing `patch_only` ChangeSets remain
+non-applicable and require a fresh Run.
 
 `SANDBOX_MODE=local` is intended only for repositories owned and trusted by the
 local user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
@@ -1223,9 +1270,9 @@ builders on `ApplicationFactory`.
 
 ## Optional Go gateway
 
-The `gateway/` service provides request admission, request-ID propagation,
-optional OIDC/JWT validation through RS256 JWKS, health/readiness probes,
-SSE-safe proxying, and graceful shutdown:
+The `gateway/` service provides request admission, request-ID propagation, a
+fixed local identity mode or OIDC/JWT validation through RS256 JWKS,
+health/readiness probes, SSE-safe proxying, and graceful shutdown:
 
 ```bash
 go run ./gateway/cmd/gateway
@@ -1237,7 +1284,10 @@ In production, configure `GATEWAY_AUTH_MODE=oidc`, issuer, audience, JWKS URL,
 and a shared `GATEWAY_TRUST_SECRET`; configure FastAPI with
 `AUTH_MODE=trusted_header` and the same secret. The gateway removes forged
 identity headers, validates the bearer token, strips it, and injects the trusted
-subject. Local development can keep both auth modes disabled. This is a trusted
+subject. Read-only local development can keep both auth modes disabled. Direct
+local writes use `GATEWAY_AUTH_MODE=local`, which replaces caller identity and
+Authorization headers with `GATEWAY_LOCAL_USER_ID`; the standard Compose publish
+rule keeps this passwordless mode on loopback only. This is a trusted
 identity boundary for sessions and workspace memory, not a claim of complete
 multi-tenant authorization across every legacy knowledge-base endpoint.
 

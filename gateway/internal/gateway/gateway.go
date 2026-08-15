@@ -90,7 +90,9 @@ func NewHandler(config Config, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("GET /readyz", handler.ready)
 	proxyHandler := http.Handler(proxy)
-	if handler.authenticator != nil {
+	if config.AuthMode == "local" {
+		proxyHandler = localIdentityMiddleware(config.LocalUserID, config.GatewayTrustSecret, proxyHandler)
+	} else if handler.authenticator != nil {
 		proxyHandler = handler.authenticator.middleware(proxyHandler)
 	} else {
 		proxyHandler = stripUntrustedIdentityHeaders(proxyHandler)

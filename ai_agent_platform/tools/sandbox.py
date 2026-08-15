@@ -140,7 +140,12 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.run_command",
         toolkit.run_command,
-        description="Run a command in the sandbox workspace, locally or through Docker.",
+        description=(
+            "Run an allowlisted validation command in the sandbox workspace. "
+            "Use this after a workspace mutation; use repo.list_files for directory "
+            "inventory instead of shell commands such as ls. Allowed executable "
+            f"basenames: {', '.join(runtime.allowed_commands)}."
+        ),
         input_schema={
             "type": "object",
             "required": ["command"],

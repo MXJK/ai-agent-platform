@@ -29,6 +29,9 @@ class SandboxToolTests(unittest.TestCase):
         self.assertTrue(specs["sandbox.apply_patch"].requires_approval)
         self.assertEqual(specs["sandbox.run_command"].permission_level, "write_safe")
         self.assertTrue(specs["sandbox.run_command"].requires_approval)
+        self.assertIn("Allowed executable basenames", specs["sandbox.run_command"].description)
+        self.assertIn("repo.list_files", specs["sandbox.run_command"].description)
+        self.assertNotIn(" ls,", specs["sandbox.run_command"].description)
         self.assertEqual(specs["sandbox.git_diff"].permission_level, "read_only")
         self.assertFalse(specs["sandbox.git_diff"].requires_approval)
 

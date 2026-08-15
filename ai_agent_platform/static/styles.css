@@ -1700,6 +1700,300 @@ body.inspector-hidden .app-shell {
   font-size: 9px;
 }
 
+.inline-agent-controls {
+  display: grid;
+  width: min(640px, 100%);
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.inline-agent-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.inline-agent-controls label > span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.inline-agent-controls small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.inline-agent-controls input {
+  min-width: 0;
+  background: var(--canvas-deep);
+  font-size: 11px;
+}
+
+.inline-control-actions,
+.change-review-actions,
+.change-review-actions > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-control-actions {
+  justify-content: flex-end;
+}
+
+.inline-control-error,
+.change-review-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 10px;
+}
+
+.inline-change-review {
+  width: min(720px, 100%);
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--surface-soft);
+  box-shadow: inset 3px 0 0 var(--brand), var(--shadow-sm);
+}
+
+.change-review-heading {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(105deg, var(--brand-pale), transparent 56%);
+}
+
+.change-review-kicker {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--brand-strong);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.change-review-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 15px;
+}
+
+.change-review-heading .status-pill {
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.change-review-summary {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.change-review-summary strong {
+  color: var(--ink-soft);
+}
+
+.change-review-summary code {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.diff-addition {
+  color: var(--signal) !important;
+}
+
+.diff-deletion {
+  color: var(--red) !important;
+}
+
+.change-file-list {
+  display: grid;
+  padding: 6px 0;
+}
+
+.change-file-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 14px;
+}
+
+.change-file-row:hover {
+  background: rgba(143, 166, 255, 0.045);
+}
+
+.change-file-mark {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 850;
+}
+
+.change-file-mark.added {
+  background: var(--signal-soft);
+  color: var(--signal);
+}
+
+.change-file-mark.deleted {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.change-file-row code {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-file-row > span:last-child {
+  display: flex;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.change-diff-details {
+  border-top: 1px solid var(--line);
+}
+
+.change-diff-details summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.change-diff-details[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.change-diff-details .change-set-patch {
+  max-height: 440px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--code);
+  font-size: 10px;
+  line-height: 1.58;
+}
+
+.change-safety-note {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  margin: 12px 14px;
+  padding: 10px;
+  border: 1px solid rgba(98, 214, 194, 0.22);
+  border-radius: 8px;
+  background: var(--signal-soft);
+}
+
+.change-safety-note.patch-only {
+  border-color: rgba(228, 185, 110, 0.3);
+  background: var(--amber-soft);
+}
+
+.change-safety-note > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(98, 214, 194, 0.14);
+  color: var(--signal);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.change-safety-note.patch-only > span {
+  background: rgba(228, 185, 110, 0.16);
+  color: var(--amber);
+}
+
+.change-safety-note p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.change-safety-note strong {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--ink-soft);
+}
+
+.change-review-error {
+  padding: 11px 14px;
+}
+
+.change-review-actions {
+  justify-content: space-between;
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+  background: rgba(6, 14, 23, 0.36);
+}
+
+.change-review-actions > span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+}
+
+.change-review-loading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 15px;
+}
+
+.change-review-loading strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.change-review-loading p {
+  margin: 1px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .execution-process {
   width: auto;
   min-width: min(260px, 100%);
@@ -4876,6 +5170,35 @@ body.inspector-hidden .inspector {
 
   .inline-checkpoint-actions .button {
     width: 100%;
+  }
+
+  .inline-agent-controls,
+  .inline-change-review {
+    width: 100%;
+  }
+
+  .inline-control-actions,
+  .change-review-actions,
+  .change-review-actions > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inline-control-actions .button,
+  .change-review-actions .button {
+    width: 100%;
+  }
+
+  .change-review-actions > span {
+    align-self: flex-start;
+  }
+
+  .change-review-summary code {
+    display: none;
+  }
+
+  .change-file-row {
+    padding-inline: 10px;
   }
 
   .composer-tool span,
