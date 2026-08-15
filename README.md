@@ -223,6 +223,13 @@ Workspace 指令文件和项目配置指令。REPL 对非内置 slash command �
 元数据冻结。未知、禁用或缺依赖命令返回稳定诊断；注册表只保存元数据，不执行 Skill
 目录代码，也不扩大工具池或绕过 `PermissionResolver`。
 
+浏览器统一输入框也复用这条调用链。输入 `/` 会按内置命令、当前有效 Skill 和当前
+`EffectiveToolPool` 中的 MCP 工具分组展示并过滤，支持方向键、Enter/Tab、Escape 和
+鼠标选择。选择 Skill 会把限定名与引号感知的参数提交给 Agent；选择 MCP 工具只冻结
+“优先使用此工具”的用户意图，仍由模型原生 tool calling、中央权限解析、审批和 Sandbox
+决定是否调用。`GET /api/v1/agent/composer-capabilities` 按已鉴权会话、Workspace、模型与
+配置生成只读目录，不会把进程中已注册但本次 Run 不可用的能力暴露为可选项。
+
 ## 主要能力
 
 统一输入框提供两种模式：
@@ -230,6 +237,8 @@ Workspace 指令文件和项目配置指令。REPL 对非内置 slash command �
 - `快速对话`：直接返回模型的 SSE 流式响应；
 - `代码 Agent`：围绕任务探索工作区，并在同一条助手消息内展示进度、审批、文件变更、
   Diff 和 ChangeSet 操作；
+- 键入 `/` 可调用内置 `/chat`、`/agent`、`/new`、`/mcp` 命令，或选择当前会话真正
+  可用的 Skill/MCP 工具；Skill/MCP 选择会自动切换到代码 Agent；
 - 两种模式共享会话历史和持久化滚动摘要。压缩后的历史与数量受控的近期消息可以
   共同参与 Chat、Agent 探索和原生工具选择，同时保留原始消息。
 
@@ -276,6 +285,9 @@ Token 时才作为后备。
   磁盘”并禁用应用；`direct` / `worktree` 只有在二次确认后才调用受保护的应用 API。
   刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
   `waiting_approval` 误认为卡死，也避免误以为 Sandbox 文件已经进入真实工作区；
+- 对话输入框随内容自动增高，按会话保存未发送草稿；发送可用性会即时反映空输入、
+  流式忙碌、归档状态和 Agent 工作区前置条件。长对话只在用户停留于底部附近时自动
+  跟随，否则显示显式“回到底部”，避免用户阅读历史时被新内容强制拉走；
 - 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
 
 ### 持久化会话与重启恢复
@@ -300,7 +312,8 @@ Agent 执行都会返回 `409`。
 页面会停留在欢迎页，不会再创建空记录。加载会话时会恢复消息、摘要，以及该会话
 自己的模型、工作区和输入模式。
 
-浏览器 `localStorage` 只保存设备级 UI 状态，不保存用户 ID，也不重复保存会话配置。
+浏览器 `localStorage` 只保存设备级 UI 状态和最多 20 个非空会话草稿，不保存用户 ID，
+也不重复保存会话配置。草稿仅保留在当前设备，消息成功提交前不会进入服务端会话记录。
 本地单用户模式使用内部身份，认证模式由可信网关注入身份。健康检查接口会暴露
 `session_storage` 和 `persistent_sessions`；如果使用内存
 模式，界面会明确标记为临时存储。
@@ -747,6 +760,16 @@ curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 运行开始时捕获的 `workspace_root`。
 
 启动 Agent 运行：
+
+浏览器在展示 Slash 能力前先读取有效目录：
+
+```text
+GET /api/v1/agent/composer-capabilities?conversation_id=sess_xxx&workspace_id=project
+```
+
+响应只包含本次上下文可调用的 Skill command 与 MCP 工具。显式调用时，POST body 可在
+普通字段之外携带 `skill_name`、`skill_arguments` 或 `preferred_tool_name`；其中工具
+偏好不是授权，也不会绕过工具池和审批。
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/agent/runs \

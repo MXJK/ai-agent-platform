@@ -17,6 +17,7 @@ from ai_agent_platform.schemas import (
     AgentRunRequest,
     AgentRunResumeRequest,
     AgentRunStatusResponse,
+    ComposerCapabilitiesResponse,
 )
 from ai_agent_platform.services import QueryService, WorkspaceNotFoundError
 
@@ -26,6 +27,37 @@ def create_agent_runs_router(
     settings: Settings,
 ) -> APIRouter:
     router = APIRouter()
+
+    @router.get(
+        "/agent/composer-capabilities",
+        response_model=ComposerCapabilitiesResponse,
+    )
+    def composer_capabilities(
+        conversation_id: str,
+        workspace_id: str,
+        http_request: Request,
+    ) -> ComposerCapabilitiesResponse:
+        try:
+            payload = query_service.composer_capabilities(
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                actor_user_id=(
+                    request_user_id(http_request, settings)
+                    if settings.auth_mode != "disabled"
+                    else None
+                ),
+            )
+        except SessionNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail="conversation not found"
+            ) from exc
+        except WorkspaceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="workspace not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ComposerCapabilitiesResponse.model_validate(payload)
 
     @router.post(
         "/agent/runs",
@@ -56,6 +88,9 @@ def create_agent_runs_router(
                     additional_workspace_ids=tuple(
                         request.additional_workspace_ids
                     ),
+                    skill_name=request.skill_name,
+                    skill_arguments=tuple(request.skill_arguments),
+                    preferred_tool_name=request.preferred_tool_name,
                     actor_user_id=(
                         request_user_id(http_request, settings)
                         if settings.auth_mode != "disabled"

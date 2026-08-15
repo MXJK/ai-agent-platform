@@ -965,6 +965,17 @@ body.inspector-hidden .app-shell {
   margin: 24px auto 0;
 }
 
+.jump-to-latest {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  min-height: 34px;
+  padding-inline: 11px;
+  background: var(--surface);
+  font-size: 10px;
+  box-shadow: var(--shadow-md);
+}
+
 .archived-session-notice {
   display: flex;
   align-items: center;
@@ -993,6 +1004,132 @@ body.inspector-hidden .app-shell {
   box-shadow: 0 22px 56px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(143, 166, 255, 0.035);
   backdrop-filter: blur(16px);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.slash-command-menu {
+  position: absolute;
+  z-index: var(--z-overlay);
+  right: 8px;
+  bottom: calc(100% + 8px);
+  left: 8px;
+  max-height: min(430px, 55vh);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.slash-command-heading {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.slash-command-heading strong {
+  font-size: 11px;
+}
+
+.slash-command-heading span,
+.slash-command-status {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.slash-command-options {
+  max-height: min(340px, 44vh);
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.slash-command-group + .slash-command-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.slash-command-group h3 {
+  margin: 0;
+  padding: 3px 7px 5px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.slash-command-option {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(0, 1.8fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  text-align: left;
+}
+
+.slash-command-option:hover,
+.slash-command-option.active {
+  background: var(--brand-pale);
+}
+
+.slash-command-option.active {
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+
+.slash-command-option code {
+  overflow: hidden;
+  color: var(--brand-strong);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command-option span,
+.slash-command-option strong,
+.slash-command-option small {
+  display: block;
+  min-width: 0;
+}
+
+.slash-command-option strong {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command-option small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command-option em {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.slash-command-status {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
 }
 
 .composer:focus-within {
@@ -1425,10 +1562,12 @@ body.inspector-hidden .app-shell {
 
 .composer textarea {
   min-height: 64px;
+  max-height: 220px;
   padding: 12px 10px 6px;
   border: 0;
   background: transparent;
   box-shadow: none;
+  resize: none;
 }
 
 .composer textarea:focus {
@@ -4948,6 +5087,15 @@ body.inspector-hidden .inspector {
 
   .composer textarea {
     min-height: 60px;
+  }
+
+  .slash-command-heading span,
+  .slash-command-option em {
+    display: none;
+  }
+
+  .slash-command-option {
+    grid-template-columns: minmax(105px, 0.65fr) minmax(0, 1fr);
   }
 
   .composer-hints span:not(:first-child) {

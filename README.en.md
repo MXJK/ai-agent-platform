@@ -187,11 +187,23 @@ enabled Skills, Agent/mode, and `required_tools`, then submits an ordinary
 before queueing; unknown, disabled, or dependency-missing commands return stable
 diagnostics and never execute Skill-directory code.
 
+The browser composer reuses the same path. Typing `/` groups and filters built-in
+commands, effective Skills, and MCP tools from the current `EffectiveToolPool`,
+with Arrow, Enter/Tab, Escape, and pointer operation. A Skill selection sends its
+qualified name plus quote-aware arguments to Agent. An MCP selection freezes only
+a user preference to use that tool; provider-native tool calling, central
+permission resolution, approval, and the sandbox still decide whether it runs.
+`GET /api/v1/agent/composer-capabilities` builds this read-only catalog from the
+authenticated conversation, Workspace, model, and effective configuration, so a
+process-registered but unavailable capability is not presented as usable.
+
 The shared composer offers:
 
 - `快速对话` for direct SSE model responses;
 - `代码 Agent` for task-driven workspace exploration with progress, approvals,
   changed files, Diff, and ChangeSet actions rendered in the same assistant message;
+- `/chat`, `/agent`, `/new`, and `/mcp` built-ins plus effective Skill/MCP choices
+  from the same composer; selecting Skill or MCP switches to code Agent;
 - a common conversation history with persistent rolling summaries, so a
   compressed history plus bounded recent messages can inform Chat and Agent
   exploration and native tool selection without discarding the original
@@ -248,6 +260,9 @@ The browser workspace also includes:
   confirmation before calling the protected API. Reopening a session restores its
   latest Run and ChangeSet so `waiting_approval` or Sandbox-only output is not
   mistaken for a stalled or already-applied change;
+- an auto-growing conversation input with per-session unsent drafts, availability
+  that reflects empty/busy/archived/workspace states, and follow-near-bottom
+  scrolling with an explicit jump-to-latest action when the user reads history;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
 
@@ -279,7 +294,9 @@ stale zero-message candidates are skipped. With no valid session it keeps the
 welcome page and does not create another empty record. Loading a session
 restores messages, summary and its own model,
 workspace and composer mode. Browser `localStorage` is reserved for device UI
-state; it stores neither user IDs nor duplicated conversation configuration.
+state and at most 20 non-empty per-session drafts; it stores neither user IDs nor
+duplicated conversation configuration. Drafts stay on that device and do not
+enter server-side history until submission succeeds.
 Local single-user mode uses an internal identity, while authenticated mode gets
 identity from the trusted gateway. The health endpoint exposes `session_storage` and
 `persistent_sessions`; memory mode is explicitly labeled temporary in the UI.
@@ -763,6 +780,17 @@ historical record remains unchanged. Every `agent_runs` row keeps its captured
 `workspace_root`.
 
 Start an Agent run:
+
+Before presenting Slash capabilities, the browser reads the effective catalog:
+
+```text
+GET /api/v1/agent/composer-capabilities?conversation_id=sess_xxx&workspace_id=project
+```
+
+The response contains only Skill commands and MCP tools available in that context.
+An Agent POST may additionally include `skill_name`, `skill_arguments`, or
+`preferred_tool_name`; a preferred tool is user intent, not authorization, and
+cannot bypass the effective pool or approval.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/agent/runs \

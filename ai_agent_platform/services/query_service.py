@@ -141,6 +141,7 @@ class QueryService:
             additional_workspace_ids=list(params.additional_workspace_ids),
             skill_name=params.skill_name,
             skill_arguments=params.skill_arguments,
+            preferred_tool_name=params.preferred_tool_name,
             entrypoint_type=params.entrypoint,
             entrypoint_metadata=params.metadata_dict(),
         )
@@ -201,6 +202,7 @@ class QueryService:
         entrypoint_metadata: Optional[dict[str, object]] = None,
         skill_name: str | None = None,
         skill_arguments: tuple[str, ...] = (),
+        preferred_tool_name: str | None = None,
     ) -> AgentRunRecord:
         if mode is not None and mode not in {"auto", "manual"}:
             raise ValueError("Query mode must be auto or manual")
@@ -272,6 +274,7 @@ class QueryService:
                 entrypoint_metadata=entrypoint_metadata or {},
                 skill_name=skill_name,
                 skill_arguments=skill_arguments,
+                preferred_tool_name=preferred_tool_name,
             )
             resolved_actor = context_snapshot.identity.actor_user_id
             workspace_root = context_snapshot.project.workspace_root
@@ -398,6 +401,78 @@ class QueryService:
             raise
         self._metrics.increment("agent_runs_submitted_total")
         return record
+
+    def composer_capabilities(
+        self,
+        *,
+        conversation_id: str,
+        workspace_id: str,
+        actor_user_id: str | None = None,
+    ) -> dict[str, object]:
+        """Return the effective Skill commands and MCP tools for one composer."""
+
+        factory = self._execution_context_factory
+        if factory is None:
+            raise RuntimeError("effective context factory is unavailable")
+        selection = (
+            self._model_registry.selection_for_session(conversation_id)
+            if self._model_registry is not None
+            else ModelSelection()
+        )
+        snapshot = factory.preview(
+            conversation_id=conversation_id,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            model_selection=selection,
+        )
+        catalog = factory.effective_skills(snapshot)
+        tool_access = factory.restore_tool_access(snapshot)
+        mcp_specs = sorted(
+            (
+                spec
+                for spec in tool_access.list_specs()
+                if spec.name.startswith("mcp.") and spec.provider.startswith("mcp:")
+            ),
+            key=lambda spec: spec.name,
+        )
+        skill_diagnostics = (
+            [item.message for item in catalog.diagnostics]
+            if catalog is not None
+            else []
+        )
+        return {
+            "conversation_id": conversation_id,
+            "workspace_id": workspace_id,
+            "skill_commands": [
+                {
+                    "name": command.name,
+                    "description": command.description,
+                    "usage": command.usage,
+                    "aliases": list(command.aliases),
+                    "skill_name": command.skill_name,
+                    "skill_qualified_name": command.skill_qualified_name,
+                    "source": command.source.value,
+                }
+                for command in (catalog.commands if catalog is not None else ())
+            ],
+            "mcp_tools": [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "provider": spec.provider,
+                    "server_name": spec.provider.removeprefix("mcp:"),
+                    "permission_level": spec.permission_level,
+                    "requires_approval": spec.requires_approval,
+                    "input_schema": spec.input_schema,
+                }
+                for spec in mcp_specs
+            ],
+            "diagnostics": list(
+                dict.fromkeys(
+                    [*snapshot.instructions.diagnostics, *skill_diagnostics]
+                )
+            ),
+        }
 
     def execute(
         self,

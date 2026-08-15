@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260815-chat-change-review-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260815-slash-composer-1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -26,6 +26,7 @@
       <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="6" rx="2" /><rect x="3" y="15" width="6" height="6" rx="2" /><rect x="15" y="15" width="6" height="6" rx="2" /><path d="M12 9v3M6 15v-3h12v3" /></symbol>
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
       <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></symbol>
+      <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6.5 13.5 12 19l5.5-5.5" /></symbol>
       <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13.5 6.5 19 12l-5.5 5.5" /></symbol>
       <symbol id="icon-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6" /></symbol>
       <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6A2.5 2.5 0 0 1 20.5 9.5v7A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5Z" /></symbol>
@@ -164,11 +165,29 @@
           </div>
 
           <div class="composer-wrap">
+            <button id="jump-to-latest-btn" class="jump-to-latest button secondary" type="button" hidden>
+              回到底部
+              <svg class="app-icon" aria-hidden="true"><use href="#icon-arrow-down"></use></svg>
+            </button>
             <div id="archived-session-notice" class="archived-session-notice" hidden>
               <span>这是已归档会话，只能查看历史消息。</span>
               <button id="restore-current-session-btn" class="text-button" type="button">恢复并继续</button>
             </div>
             <div class="composer">
+              <div
+                id="slash-command-menu"
+                class="slash-command-menu"
+                role="listbox"
+                aria-label="可用命令"
+                hidden
+              >
+                <div class="slash-command-heading">
+                  <strong id="slash-command-title">命令与能力</strong>
+                  <span>↑↓ 选择 · Enter 使用 · Esc 关闭</span>
+                </div>
+                <div id="slash-command-options" class="slash-command-options"></div>
+                <p id="slash-command-status" class="slash-command-status" role="status" aria-live="polite"></p>
+              </div>
               <div class="composer-mode-bar">
                 <div class="composer-tools">
                   <label class="composer-mode-control" for="composer-mode-input">
@@ -223,11 +242,15 @@
                 id="chat-message-input"
                 rows="3"
                 maxlength="8000"
-                placeholder="输入消息，Enter 发送，Shift + Enter 换行…"
+                placeholder="输入消息，键入 / 使用 Skill 或 MCP，Enter 发送…"
+                aria-autocomplete="list"
+                aria-controls="slash-command-menu"
+                aria-expanded="false"
               ></textarea>
               <div class="composer-footer">
                 <div class="composer-hints">
                   <span id="composer-context">默认模型</span>
+                  <span>/ 调用命令与能力</span>
                   <span>内容上限 8,000 字符</span>
                 </div>
                 <div class="button-row">
@@ -933,6 +956,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260815-chat-change-review-1" defer></script>
+    <script src="/static/app.js?v=20260815-slash-composer-1" defer></script>
   </body>
 </html>

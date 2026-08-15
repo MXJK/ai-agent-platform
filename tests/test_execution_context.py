@@ -189,6 +189,50 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                 ["AGENTS.md", "src/AGENTS.override.md"],
             )
 
+    def test_user_selected_tool_preference_is_frozen_without_granting_access(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ToolRegistry()
+            registry.register(
+                "mcp.demo.lookup",
+                lambda: {},
+                description="Look up demo records",
+                provider="mcp:demo",
+                permission_level="read_only",
+            )
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                auth_mode="disabled",
+                tool_registry=registry,
+            )
+
+            snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="/mcp.demo.lookup find alpha",
+                workspace_id="main",
+                model_selection=ModelSelection(),
+                preferred_tool_name="mcp.demo.lookup",
+            )
+
+            source = snapshot.instructions.sources[0]
+            self.assertEqual(source.kind, "user_tool_preference")
+            self.assertEqual(source.path, "tool://mcp.demo.lookup")
+            self.assertIn("does not grant permission", source.text)
+            self.assertEqual(
+                snapshot.metadata.entrypoint_metadata["tool_preference"],
+                {"name": "mcp.demo.lookup", "provider": "mcp:demo"},
+            )
+            self.assertEqual(snapshot.tools.enabled_tools, ("mcp.demo.lookup",))
+            with self.assertRaisesRegex(ValueError, "preferred tool is unavailable"):
+                factory.create(
+                    conversation_id="session_1",
+                    user_message="inspect",
+                    workspace_id="main",
+                    model_selection=ModelSelection(),
+                    preferred_tool_name="mcp.demo.missing",
+                )
+
     def test_project_skill_is_frozen_as_untrusted_bounded_context(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -6,6 +6,42 @@ const TERMINAL_RUN_STATUSES = new Set([...FINAL_RUN_STATUSES, ...SUSPENDED_RUN_S
 const TRACE_STEP_REVEAL_DELAY_MS = 16;
 const MAX_TRACE_REPLAY_MS = 1200;
 const responseTimers = new WeakMap();
+const COMPOSER_BUILTIN_COMMANDS = [
+  {
+    kind: "builtin",
+    command: "agent",
+    title: "切换到代码 Agent",
+    description: "读取工作区并按权限运行工具。",
+    action: "agent",
+    keywords: ["code", "代码", "工具"],
+  },
+  {
+    kind: "builtin",
+    command: "chat",
+    title: "切换到快速对话",
+    description: "使用流式对话，不运行代码工具。",
+    action: "chat",
+    keywords: ["ask", "对话", "快速"],
+  },
+  {
+    kind: "builtin",
+    command: "new",
+    title: "新建会话",
+    description: "保留当前会话并开始一个新上下文。",
+    action: "new",
+    keywords: ["session", "会话"],
+  },
+  {
+    kind: "builtin",
+    command: "mcp",
+    title: "打开 MCP 管理",
+    description: "查看 Server 连接、状态和已注册工具。",
+    action: "mcp",
+    keywords: ["server", "tool", "工具"],
+  },
+];
+let composerDraftSaveTimer = null;
+let conversationFollowFrame = null;
 
 const state = {
   conversationId: "",
@@ -76,6 +112,22 @@ const state = {
     servers: [],
   },
   editingMCPServer: "",
+  composerDrafts: {},
+  slashCapabilities: {
+    conversation_id: "",
+    workspace_id: "",
+    skill_commands: [],
+    mcp_tools: [],
+    diagnostics: [],
+  },
+  slashCapabilityKey: "",
+  slashLoading: false,
+  slashError: "",
+  slashItems: [],
+  slashActiveIndex: 0,
+  slashQuery: "",
+  slashRequestGeneration: 0,
+  followConversation: true,
   currentView: "chat",
   composerMode: "chat",
   chatController: null,
@@ -525,6 +577,11 @@ function loadUiPreferences() {
 
 function saveUiPreferences() {
   try {
+    const composerDrafts = Object.fromEntries(
+      Object.entries(state.composerDrafts)
+        .filter(([, value]) => String(value || "").trim())
+        .slice(-20),
+    );
     localStorage.setItem(
       UI_STORAGE_KEY,
       JSON.stringify({
@@ -533,11 +590,451 @@ function saveUiPreferences() {
         rerankEnabled: state.rerankEnabled,
         knowledgeBaseId: $("kb-id-input")?.value || "",
         knowledgeTab: state.activeKnowledgeTab,
+        composerDrafts,
       }),
     );
   } catch {
     // Device-local preferences are optional; the product remains usable without them.
   }
+}
+
+function composerDraftKey(sessionId = state.conversationId) {
+  return sessionId || "__new__";
+}
+
+function queueUiPreferenceSave() {
+  window.clearTimeout(composerDraftSaveTimer);
+  composerDraftSaveTimer = window.setTimeout(saveUiPreferences, 120);
+}
+
+function saveComposerDraft(value = $("chat-message-input")?.value || "") {
+  const key = composerDraftKey();
+  if (value) {
+    state.composerDrafts[key] = value.slice(0, 8000);
+  } else {
+    delete state.composerDrafts[key];
+  }
+  queueUiPreferenceSave();
+}
+
+function resizeComposerInput() {
+  const input = $("chat-message-input");
+  if (!input) return;
+  input.style.height = "0px";
+  const nextHeight = Math.min(220, Math.max(64, input.scrollHeight));
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = input.scrollHeight > 220 ? "auto" : "hidden";
+}
+
+function setComposerValue(value, { save = true, focus = false } = {}) {
+  const input = $("chat-message-input");
+  input.value = String(value || "").slice(0, 8000);
+  input.removeAttribute("aria-invalid");
+  resizeComposerInput();
+  if (save) saveComposerDraft(input.value);
+  updateComposerAvailability();
+  if (focus) {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+}
+
+function restoreComposerDraft(sessionId = state.conversationId) {
+  setComposerValue(state.composerDrafts[composerDraftKey(sessionId)] || "", {
+    save: false,
+  });
+}
+
+function clearComposerInput() {
+  setComposerValue("");
+  closeSlashCommandMenu();
+}
+
+function invalidateSlashCapabilities() {
+  state.slashRequestGeneration += 1;
+  state.slashCapabilityKey = "";
+  state.slashCapabilities = {
+    conversation_id: "",
+    workspace_id: "",
+    skill_commands: [],
+    mcp_tools: [],
+    diagnostics: [],
+  };
+  state.slashLoading = false;
+  state.slashError = "";
+}
+
+function slashQueryContext() {
+  const input = $("chat-message-input");
+  const caret = input.selectionStart ?? input.value.length;
+  const prefix = input.value.slice(0, caret);
+  const match = prefix.match(/^(\s*)(\/[^\s]*)$/);
+  if (!match) return null;
+  return {
+    start: match[1].length,
+    end: caret,
+    query: match[2].slice(1).toLowerCase(),
+  };
+}
+
+function composerSlashItems() {
+  const builtin = COMPOSER_BUILTIN_COMMANDS.map((item) => ({ ...item }));
+  const skills = (state.slashCapabilities.skill_commands || []).map((command) => ({
+    kind: "skill",
+    command: command.name,
+    title: command.description || command.name,
+    description: [
+      `${command.source} Skill`,
+      command.usage ? `用法：/${command.name} ${command.usage}` : "",
+    ].filter(Boolean).join(" · "),
+    aliases: command.aliases || [],
+    skillName: command.skill_qualified_name,
+    keywords: [command.skill_name, command.skill_qualified_name, ...(command.aliases || [])],
+  }));
+  const mcpTools = (state.slashCapabilities.mcp_tools || []).map((tool) => ({
+    kind: "mcp",
+    command: tool.name,
+    title: tool.description || tool.name,
+    description: `${tool.server_name} · ${tool.permission_level}${tool.requires_approval ? " · 需要审批" : ""}`,
+    preferredToolName: tool.name,
+    keywords: [tool.server_name, tool.provider, tool.permission_level],
+  }));
+  return [...builtin, ...skills, ...mcpTools];
+}
+
+function slashItemMatchScore(item, query) {
+  if (!query) return 0;
+  const normalizedQuery = query.toLowerCase();
+  const command = item.command.toLowerCase();
+  if (command === normalizedQuery) return 0;
+  if (command.startsWith(normalizedQuery)) return 1;
+  if ((item.aliases || []).some((alias) => alias.toLowerCase().startsWith(normalizedQuery))) {
+    return 2;
+  }
+  const haystack = [
+    item.command,
+    item.title,
+    item.description,
+    ...(item.aliases || []),
+    ...(item.keywords || []),
+  ].join(" ").toLowerCase();
+  return haystack.includes(normalizedQuery) ? 3 : Number.POSITIVE_INFINITY;
+}
+
+function slashKindLabel(kind) {
+  return {
+    builtin: "命令",
+    skill: "Skills",
+    mcp: "MCP 工具",
+  }[kind] || kind;
+}
+
+function renderSlashCommandMenu() {
+  const menu = $("slash-command-menu");
+  const context = slashQueryContext();
+  if (!context || $("chat-message-input").disabled) {
+    closeSlashCommandMenu();
+    return;
+  }
+  if (context.query !== state.slashQuery) {
+    state.slashQuery = context.query;
+    state.slashActiveIndex = 0;
+  }
+  const items = composerSlashItems()
+    .map((item, order) => ({ item, order, score: slashItemMatchScore(item, context.query) }))
+    .filter(({ score }) => Number.isFinite(score))
+    .sort((left, right) => left.score - right.score || left.order - right.order)
+    .map(({ item }) => item);
+  state.slashItems = items;
+  state.slashActiveIndex = items.length
+    ? Math.min(state.slashActiveIndex, items.length - 1)
+    : 0;
+  const groups = new Map();
+  items.forEach((item, index) => {
+    const values = groups.get(item.kind) || [];
+    values.push({ item, index });
+    groups.set(item.kind, values);
+  });
+  $("slash-command-options").innerHTML = [...groups.entries()]
+    .map(([kind, values]) => `
+      <section class="slash-command-group" aria-label="${escapeHtml(slashKindLabel(kind))}">
+        <h3>${escapeHtml(slashKindLabel(kind))}</h3>
+        ${values.map(({ item, index }) => `
+          <button
+            id="slash-command-option-${index}"
+            class="slash-command-option ${index === state.slashActiveIndex ? "active" : ""}"
+            type="button"
+            role="option"
+            aria-selected="${index === state.slashActiveIndex}"
+            data-slash-index="${index}"
+          >
+            <code>/${escapeHtml(item.command)}</code>
+            <span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.description)}</small></span>
+            <em>${escapeHtml(slashKindLabel(item.kind))}</em>
+          </button>
+        `).join("")}
+      </section>
+    `)
+    .join("");
+  const status = $("slash-command-status");
+  const dynamicCount = (state.slashCapabilities.skill_commands || []).length
+    + (state.slashCapabilities.mcp_tools || []).length;
+  status.textContent = state.slashLoading
+    ? "正在读取当前工作区的 Skill 与 MCP 能力…"
+    : state.slashError
+      ? state.slashError
+      : items.length === 0
+        ? "没有匹配的命令。"
+        : !context.query && dynamicCount === 0 && state.slashCapabilityKey
+          ? "当前工作区没有可用的 Skill 或 MCP 工具。"
+        : "";
+  status.hidden = !status.textContent;
+  menu.hidden = false;
+  $("chat-message-input").setAttribute("aria-expanded", "true");
+  if (items.length) {
+    $("chat-message-input").setAttribute(
+      "aria-activedescendant",
+      `slash-command-option-${state.slashActiveIndex}`,
+    );
+  } else {
+    $("chat-message-input").removeAttribute("aria-activedescendant");
+  }
+}
+
+function closeSlashCommandMenu() {
+  const menu = $("slash-command-menu");
+  if (!menu) return;
+  menu.hidden = true;
+  state.slashItems = [];
+  state.slashActiveIndex = 0;
+  state.slashQuery = "";
+  $("chat-message-input")?.setAttribute("aria-expanded", "false");
+  $("chat-message-input")?.removeAttribute("aria-activedescendant");
+}
+
+async function loadSlashCapabilities() {
+  const workspace = currentWorkspace();
+  if (!workspaceIsReady(workspace)) {
+    state.slashError = "选择可用工作区后，才能读取 Skill 与 MCP 工具。";
+    renderSlashCommandMenu();
+    return;
+  }
+  if (state.slashLoading) return;
+  state.slashLoading = true;
+  state.slashError = "";
+  let generation = 0;
+  renderSlashCommandMenu();
+  try {
+    const conversationId = await ensureSession();
+    generation = ++state.slashRequestGeneration;
+    state.slashLoading = true;
+    const key = `${conversationId}:${workspace.id}`;
+    if (state.slashCapabilityKey === key) return;
+    const params = new URLSearchParams({
+      conversation_id: conversationId,
+      workspace_id: workspace.id,
+    });
+    const body = await fetchJson(`/agent/composer-capabilities?${params}`);
+    if (generation !== state.slashRequestGeneration) return;
+    state.slashCapabilities = body;
+    state.slashCapabilityKey = key;
+  } catch (error) {
+    if (generation && generation !== state.slashRequestGeneration) return;
+    state.slashError = `能力加载失败：${humanizeError(error)}`;
+  } finally {
+    if (!generation || generation === state.slashRequestGeneration) {
+      state.slashLoading = false;
+      renderSlashCommandMenu();
+    }
+  }
+}
+
+function updateSlashCommandMenu() {
+  const context = slashQueryContext();
+  if (!context) {
+    closeSlashCommandMenu();
+    return;
+  }
+  renderSlashCommandMenu();
+  const expectedKey = state.conversationId && state.activeWorkspaceId
+    ? `${state.conversationId}:${state.activeWorkspaceId}`
+    : "";
+  if (
+    !state.slashLoading
+    && (!expectedKey || state.slashCapabilityKey !== expectedKey)
+  ) {
+    loadSlashCapabilities();
+  }
+}
+
+function moveSlashSelection(offset) {
+  if (!state.slashItems.length) return;
+  state.slashActiveIndex = (
+    state.slashActiveIndex + offset + state.slashItems.length
+  ) % state.slashItems.length;
+  renderSlashCommandMenu();
+  $(`slash-command-option-${state.slashActiveIndex}`)?.scrollIntoView({
+    block: "nearest",
+  });
+}
+
+function insertSlashCommand(item) {
+  const input = $("chat-message-input");
+  const context = slashQueryContext();
+  if (!context) return;
+  const before = input.value.slice(0, context.start);
+  const after = input.value.slice(context.end);
+  setComposerValue(`${before}/${item.command} ${after}`, { focus: true });
+  closeSlashCommandMenu();
+}
+
+async function runBuiltinComposerCommand(item, remaining = "") {
+  closeSlashCommandMenu();
+  if (item.action === "agent" || item.action === "chat") {
+    await persistComposerMode(item.action);
+    setComposerValue(remaining, { focus: true });
+    if (remaining.trim()) await submitComposerMessage();
+    return;
+  }
+  if (item.action === "new") {
+    const draft = remaining.trim();
+    clearComposerInput();
+    if (canSwitchSession()) {
+      await createSession();
+      if (draft) setComposerValue(draft, { focus: true });
+    }
+    return;
+  }
+  if (item.action === "mcp") {
+    clearComposerInput();
+    switchView("mcp");
+  }
+}
+
+function selectSlashItem(index = state.slashActiveIndex) {
+  const item = state.slashItems[index];
+  if (!item) return;
+  if (item.kind === "builtin") {
+    runBuiltinComposerCommand(item).catch((error) =>
+      showToast(humanizeError(error), "error"),
+    );
+    return;
+  }
+  insertSlashCommand(item);
+  if (state.composerMode !== "agent") {
+    persistComposerMode("agent");
+  }
+}
+
+function splitSlashArguments(value) {
+  const matches = String(value || "").match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g) || [];
+  return matches.map((item) => {
+    if ((item.startsWith('"') && item.endsWith('"')) || (item.startsWith("'") && item.endsWith("'"))) {
+      return item.slice(1, -1).replace(/\\(["\\])/g, "$1");
+    }
+    return item;
+  });
+}
+
+function parseComposerSlashInvocation(value) {
+  const match = String(value || "").match(/^\s*\/([^\s]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  const commandName = match[1].toLowerCase();
+  const remaining = match[2] || "";
+  const builtin = COMPOSER_BUILTIN_COMMANDS.find(
+    (item) => item.command === commandName,
+  );
+  if (builtin) return { item: builtin, remaining };
+  const skill = (state.slashCapabilities.skill_commands || []).find((item) =>
+    [item.name, ...(item.aliases || [])].some(
+      (name) => name.toLowerCase() === commandName,
+    ),
+  );
+  if (skill) {
+    return {
+      item: {
+        kind: "skill",
+        command: skill.name,
+        skillName: skill.skill_qualified_name,
+      },
+      remaining,
+    };
+  }
+  const tool = (state.slashCapabilities.mcp_tools || []).find(
+    (item) => item.name.toLowerCase() === commandName,
+  );
+  return tool
+    ? {
+        item: {
+          kind: "mcp",
+          command: tool.name,
+          preferredToolName: tool.name,
+        },
+        remaining,
+      }
+    : null;
+}
+
+function composerSubmission(value) {
+  const message = String(value || "").trim();
+  const invocation = parseComposerSlashInvocation(message);
+  return {
+    message,
+    invocation,
+    skillName: invocation?.item.kind === "skill" ? invocation.item.skillName : null,
+    skillArguments: invocation?.item.kind === "skill"
+      ? splitSlashArguments(invocation.remaining)
+      : [],
+    preferredToolName: invocation?.item.kind === "mcp"
+      ? invocation.item.preferredToolName
+      : null,
+  };
+}
+
+function conversationIsNearBottom() {
+  const remaining = document.documentElement.scrollHeight
+    - (window.scrollY + window.innerHeight);
+  return remaining < 180;
+}
+
+function updateJumpToLatestButton() {
+  const button = $("jump-to-latest-btn");
+  if (!button) return;
+  const hasMessages = Boolean($("chat-output")?.querySelector(".chat-message"));
+  button.hidden = !hasMessages || conversationIsNearBottom();
+}
+
+function scrollConversationToLatest({ behavior = preferredScrollBehavior() } = {}) {
+  state.followConversation = true;
+  window.scrollTo({
+    top: document.documentElement.scrollHeight,
+    behavior,
+  });
+  window.setTimeout(updateJumpToLatestButton, behavior === "smooth" ? 240 : 0);
+}
+
+function scheduleConversationFollow() {
+  if (!state.followConversation) {
+    updateJumpToLatestButton();
+    return;
+  }
+  window.cancelAnimationFrame(conversationFollowFrame);
+  conversationFollowFrame = window.requestAnimationFrame(() => {
+    scrollConversationToLatest({ behavior: "auto" });
+  });
+}
+
+function bindConversationFollow() {
+  const output = $("chat-output");
+  const observer = new MutationObserver(scheduleConversationFollow);
+  observer.observe(output, { childList: true, subtree: true, characterData: true });
+  window.addEventListener("scroll", () => {
+    state.followConversation = conversationIsNearBottom();
+    updateJumpToLatestButton();
+  }, { passive: true });
+  $("jump-to-latest-btn").addEventListener("click", () =>
+    scrollConversationToLatest({ behavior: preferredScrollBehavior() }),
+  );
 }
 
 function switchView(viewName, updateHash = true) {
@@ -665,11 +1162,15 @@ function workspaceRoleLabel(role) {
 }
 
 function setActiveWorkspace(workspaceId) {
+  const previousId = state.activeWorkspaceId;
   const normalizedId = workspaceId || "";
   state.activeWorkspaceId = normalizedId && (
     !state.workspacesLoaded
     || state.workspaces.some((item) => item.id === normalizedId)
   ) ? normalizedId : "";
+  if (previousId !== state.activeWorkspaceId) {
+    invalidateSlashCapabilities();
+  }
   $("workspace-id-input").value = state.activeWorkspaceId;
   $("workspace-root-input").value = currentWorkspace()?.root_path || "";
   updateContextSummary();
@@ -696,8 +1197,8 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
     ? "读取工作区并运行工具；高风险操作等待审批。"
     : "流式回答，不执行代码工具。";
   $("chat-message-input").placeholder = isAgent
-    ? "描述代码任务，Enter 交给代码 Agent，Shift + Enter 换行…"
-    : "输入消息，Enter 发送，Shift + Enter 换行…";
+    ? "描述代码任务，键入 / 使用 Skill 或 MCP，Enter 交给 Agent…"
+    : "输入消息，键入 / 使用命令，Enter 发送…";
   $("send-chat-btn").innerHTML = isAgent
     ? `交给 Agent ${iconMarkup("arrow-right")}`
     : `发送 ${iconMarkup("arrow-up")}`;
@@ -735,10 +1236,11 @@ function updateComposerAvailability() {
   const streaming = Boolean(state.chatController);
   const agentNeedsWorkspace = state.composerMode === "agent"
     && !workspaceIsReady(currentWorkspace());
+  const empty = !$("chat-message-input").value.trim();
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
-  $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace;
+  $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace || empty;
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
   }
@@ -1045,6 +1547,7 @@ function renderMCPRegistry() {
 async function loadMCPRegistry(showRaw = false) {
   const body = await fetchJson("/mcp/servers");
   state.mcpRegistry = body;
+  invalidateSlashCapabilities();
   renderMCPRegistry();
   if (showRaw) setRaw(body);
   return body;
@@ -1467,6 +1970,7 @@ async function loadModelPreference(sessionId = state.conversationId) {
     }
   }
   state.modelPreference = preference;
+  invalidateSlashCapabilities();
   renderSessionModelControls();
   return preference;
 }
@@ -1495,6 +1999,7 @@ async function saveModelPreference() {
     `/sessions/${encodeURIComponent(conversationId)}/model-preference`,
     { method: "PUT", body: JSON.stringify(payload) },
   );
+  invalidateSlashCapabilities();
   const selected = registeredModel(state.modelPreference.preferred_model_id);
   if (state.currentSession) {
     state.currentSession.provider = selected?.provider || null;
@@ -1847,6 +2352,7 @@ async function restoreLatestAgentRun(conversationId, messages = []) {
 
 async function createSession() {
   $("session-status").textContent = "正在创建会话…";
+  const previousDraftKey = composerDraftKey();
   try {
     const body = await fetchJson("/sessions", {
       method: "POST",
@@ -1854,12 +2360,18 @@ async function createSession() {
     });
     state.currentSession = body;
     state.conversationId = body.id;
+    if (previousDraftKey === "__new__" && state.composerDrafts.__new__) {
+      state.composerDrafts[body.id] = state.composerDrafts.__new__;
+      delete state.composerDrafts.__new__;
+    }
+    invalidateSlashCapabilities();
     resetLatestAgentRunState();
     $("conversation-id-input").value = body.id;
     $("session-status").textContent = "会话已就绪";
     resetChatView();
     applyConfigurationToInputs(body);
     await loadModelPreference(body.id);
+    restoreComposerDraft(body.id);
     updateSessionUrl(body.id);
     updateComposerAvailability();
     updateContextSummary();
@@ -2063,9 +2575,13 @@ async function loadSession(showRaw = true, requestedSessionId = null, options = 
       body: JSON.stringify({ last_active_session_id: session.id }),
     });
   }
+  const previousConversationId = state.conversationId;
   resetLatestAgentRunState();
   state.currentSession = session;
   state.conversationId = session.id;
+  if (previousConversationId !== state.conversationId) {
+    invalidateSlashCapabilities();
+  }
   $("conversation-id-input").value = session.id;
   state.sessionTokenUsage[conversationId] = usage;
   $("session-status").textContent = session.archived_at ? "正在查看已归档会话" : "会话已加载";
@@ -2074,6 +2590,7 @@ async function loadSession(showRaw = true, requestedSessionId = null, options = 
   renderChatHistory(messages.messages || []);
   applyConfigurationToInputs(session);
   await loadModelPreference(session.id);
+  restoreComposerDraft(session.id);
   updateSessionUrl(session.id);
   updateComposerAvailability();
   replaceSessionInLists(session);
@@ -2296,10 +2813,12 @@ function renderChatHistory(messages) {
     return;
   }
   const output = $("chat-output");
+  state.followConversation = true;
   output.innerHTML = "";
   for (const message of chatMessages) {
     appendChatMessage(message.role, message.content, message.created_at);
   }
+  scrollConversationToLatest({ behavior: "auto" });
 }
 
 async function addMessage() {
@@ -2352,7 +2871,10 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
     item.dataset.agentRunId = runId;
   }
   output.appendChild(item);
-  item.scrollIntoView({ behavior: preferredScrollBehavior(), block: "nearest" });
+  if (role === "user" && !createdAt) {
+    state.followConversation = true;
+  }
+  scheduleConversationFollow();
   return item.querySelector(".message-content");
 }
 
@@ -2903,6 +3425,20 @@ function stopChat() {
 }
 
 async function submitComposerMessage() {
+  const submission = composerSubmission($("chat-message-input").value);
+  if (submission.invocation?.item.kind === "builtin") {
+    await runBuiltinComposerCommand(
+      submission.invocation.item,
+      submission.invocation.remaining,
+    );
+    return;
+  }
+  if (
+    ["skill", "mcp"].includes(submission.invocation?.item.kind)
+    && state.composerMode !== "agent"
+  ) {
+    await persistComposerMode("agent");
+  }
   if (state.composerMode === "agent") {
     await runAgentFromComposer();
     return;
@@ -3012,8 +3548,8 @@ function createAgentProgressPresenter(
 
 async function runAgentFromComposer() {
   const input = $("chat-message-input");
-  const message = input.value.trim();
-  if (!message) {
+  const submission = composerSubmission(input.value);
+  if (!submission.message) {
     input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
     input.focus();
@@ -3025,7 +3561,7 @@ async function runAgentFromComposer() {
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
-  input.value = "";
+  clearComposerInput();
   let submitted = false;
   let assistantContent = null;
   let progressPresenter = null;
@@ -3033,11 +3569,14 @@ async function runAgentFromComposer() {
   setChatStatus("正在提交给 Agent", "running");
   try {
     const run = await runAgent({
-      message,
+      message: submission.message,
       focusFiles: [],
+      skillName: submission.skillName,
+      skillArguments: submission.skillArguments,
+      preferredToolName: submission.preferredToolName,
       onSubmitted: (body) => {
         submitted = true;
-        appendChatMessage("user", message);
+        appendChatMessage("user", submission.message);
         assistantContent = appendChatMessage("assistant", "", null, {
           runId: agentRunId(body),
         });
@@ -3058,7 +3597,9 @@ async function runAgentFromComposer() {
       return;
     }
     if (!run && !submitted) {
-      input.value = message;
+      if (!input.value.trim()) {
+        setComposerValue(submission.message);
+      }
       setChatStatus("Agent 提交失败", "failed");
       return;
     }
@@ -3084,7 +3625,8 @@ async function runAgentFromComposer() {
 
 async function streamChat() {
   const input = $("chat-message-input");
-  const message = input.value.trim();
+  const submission = composerSubmission(input.value);
+  const message = submission.message;
   if (!message) {
     input.setAttribute("aria-invalid", "true");
     showToast("请输入一条消息", "warning");
@@ -3108,6 +3650,7 @@ async function streamChat() {
   let latestUsage = null;
   const startedAt = performance.now();
   const chatTrace = [];
+  let requestAccepted = false;
 
   try {
     const conversationId = await ensureSession();
@@ -3120,7 +3663,7 @@ async function streamChat() {
       fallbackSummary: "正在建立模型请求并等待首个响应。",
     });
     startResponseTimer(assistantContent, startedAt);
-    input.value = "";
+    clearComposerInput();
     const payload = {
       conversation_id: conversationId,
       message,
@@ -3134,6 +3677,7 @@ async function streamChat() {
       "/chat/stream",
       payload,
       (eventName, data) => {
+        requestAccepted = true;
         events.push({ event: eventName, data });
         if (events.length <= 200) {
           setRaw(events);
@@ -3248,6 +3792,9 @@ async function streamChat() {
       refreshRecentSessions(),
     ]);
   } catch (error) {
+    if (!requestAccepted && !input.value.trim()) {
+      setComposerValue(message);
+    }
     if (error.name === "AbortError") {
       if (assistantContent) {
         assistantContent.innerHTML = `${assistantContent.innerHTML}<p><em>生成已由你停止。</em></p>`;
@@ -3396,7 +3943,15 @@ function parseSseBlock(block) {
   }
 }
 
-async function runAgent({ message = "", focusFiles = [], onSubmitted = null, onProgress = null } = {}) {
+async function runAgent({
+  message = "",
+  focusFiles = [],
+  skillName = null,
+  skillArguments = [],
+  preferredToolName = null,
+  onSubmitted = null,
+  onProgress = null,
+} = {}) {
   const normalizedMessage = message.trim();
   if (!normalizedMessage) {
     showToast("请先描述 Agent 任务", "warning");
@@ -3421,6 +3976,11 @@ async function runAgent({ message = "", focusFiles = [], onSubmitted = null, onP
       workspace_id: workspace.id,
       ...optionalModelFields(),
       focus_files: focusFiles,
+      ...(skillName ? {
+        skill_name: skillName,
+        skill_arguments: skillArguments,
+      } : {}),
+      ...(preferredToolName ? { preferred_tool_name: preferredToolName } : {}),
     };
     const body = await fetchJson("/agent/runs", {
       method: "POST",
@@ -5331,8 +5891,7 @@ function bindEvents() {
     if (!prompt) {
       return;
     }
-    $("chat-message-input").value = prompt.dataset.prompt;
-    $("chat-message-input").focus();
+    setComposerValue(prompt.dataset.prompt, { focus: true });
   });
 
   $("open-settings-btn").addEventListener("click", openSettings);
@@ -5540,10 +6099,45 @@ function bindEvents() {
     saveModelPreference().catch(() => loadModelPreference().catch(() => {}));
   });
   $("chat-message-input").addEventListener("keydown", (event) => {
+    if (!$("slash-command-menu").hidden) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveSlashSelection(event.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+      if (["Enter", "Tab"].includes(event.key) && !event.isComposing) {
+        event.preventDefault();
+        selectSlashItem();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSlashCommandMenu();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       submitComposerMessage();
     }
+  });
+  $("chat-message-input").addEventListener("input", () => {
+    $("chat-message-input").removeAttribute("aria-invalid");
+    resizeComposerInput();
+    saveComposerDraft();
+    updateComposerAvailability();
+    updateSlashCommandMenu();
+  });
+  $("chat-message-input").addEventListener("click", updateSlashCommandMenu);
+  $("slash-command-options").addEventListener("pointerdown", (event) => {
+    if (event.target.closest("[data-slash-index]")) event.preventDefault();
+  });
+  $("slash-command-options").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-slash-index]");
+    if (option) selectSlashItem(Number(option.dataset.slashIndex));
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".composer")) closeSlashCommandMenu();
   });
   ["chat-message-input", "rag-question-input"].forEach((id) => {
     $(id).addEventListener("input", () => $(id).removeAttribute("aria-invalid"));
@@ -5816,21 +6410,28 @@ async function restoreInitialSession() {
 
   state.currentSession = null;
   state.conversationId = "";
+  invalidateSlashCapabilities();
   $("conversation-id-input").value = "";
   updateSessionUrl("");
   if (state.preferences) {
     applyConfigurationToInputs(state.preferences, true);
   }
   resetChatView();
+  restoreComposerDraft("");
   updateComposerAvailability();
   updateContextSummary();
 }
 
 async function init() {
   const preferences = loadUiPreferences();
+  state.composerDrafts = preferences.composerDrafts && typeof preferences.composerDrafts === "object"
+    ? preferences.composerDrafts
+    : {};
   $("user-id-input").value = "demo_user";
   updateMCPTransportFields();
   bindEvents();
+  bindConversationFollow();
+  resizeComposerInput();
   const requestedView = location.hash.replace("#", "") === "agent"
     ? "chat"
     : location.hash.replace("#", "");

@@ -522,14 +522,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260815-chat-change-review-1',
+            '/static/styles.css?v=20260815-slash-composer-1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260815-chat-change-review-1',
+            '/static/app.js?v=20260815-slash-composer-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
+        self.assertIn('id="slash-command-menu"', response.text)
+        self.assertIn('id="slash-command-options"', response.text)
+        self.assertIn('id="jump-to-latest-btn"', response.text)
+        self.assertIn('aria-autocomplete="list"', response.text)
         self.assertNotIn('data-view="agent"', response.text)
         self.assertNotIn('id="agent-view"', response.text)
         self.assertNotIn('id="session-token-usage"', response.text)
@@ -615,6 +619,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("thinking_level", script_response.text)
         self.assertIn("submitComposerMessage", script_response.text)
         self.assertIn("runAgentFromComposer", script_response.text)
+        self.assertIn("loadSlashCapabilities", script_response.text)
+        self.assertIn("parseComposerSlashInvocation", script_response.text)
+        self.assertIn("preferred_tool_name", script_response.text)
+        self.assertIn("saveComposerDraft", script_response.text)
+        self.assertIn("conversationIsNearBottom", script_response.text)
+        self.assertIn("event.isComposing", script_response.text)
         self.assertIn(".inspector-recent", stylesheet_response.text)
         self.assertIn("height: clamp(148px, 32vh, 260px)", stylesheet_response.text)
         self.assertIn(
@@ -658,8 +668,108 @@ class ApiTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
         self.assertIn(".execution-process", stylesheet_response.text)
         self.assertIn(".response-metrics", stylesheet_response.text)
+        self.assertIn(".slash-command-menu", stylesheet_response.text)
+        self.assertIn(".jump-to-latest", stylesheet_response.text)
         self.assertIn("width: fit-content", stylesheet_response.text)
 
+    def test_composer_capabilities_expose_effective_skill_and_freeze_invocation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            skill = workspace / ".agents" / "skills" / "review" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                """---
+name: review
+description: Review requested code
+agents: [coding]
+modes: [default]
+context_budget: 1200
+tools: []
+command:
+  name: review
+  description: Review requested code
+  usage: \"[path]\"
+  aliases: [rv]
+---
+Inspect the requested code before reporting findings.
+""",
+                encoding="utf-8",
+            )
+            app = create_app(
+                settings=Settings(
+                    llm_provider="fake",
+                    embedding_provider="local",
+                    workspace_allowed_roots=(str(root.resolve()),),
+                    background_task_workers=1,
+                    skills_enabled=True,
+                )
+            )
+            with TestClient(app) as client:
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                ).raise_for_status()
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "tester"},
+                ).json()["id"]
+
+                capabilities = client.get(
+                    "/api/v1/agent/composer-capabilities",
+                    params={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                    },
+                )
+
+                self.assertEqual(capabilities.status_code, 200, capabilities.text)
+                self.assertEqual(
+                    capabilities.json()["skill_commands"],
+                    [{
+                        "name": "review",
+                        "description": "Review requested code",
+                        "usage": "[path]",
+                        "aliases": ["rv"],
+                        "skill_name": "review",
+                        "skill_qualified_name": "project:review",
+                        "source": "project",
+                    }],
+                )
+                self.assertEqual(capabilities.json()["mcp_tools"], [])
+
+                started = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "message": "/review src/app.py",
+                        "skill_name": "project:review",
+                        "skill_arguments": ["src/app.py"],
+                    },
+                )
+                self.assertEqual(started.status_code, 202, started.text)
+                record = app.state.query_service.get_run_for_actor(
+                    started.json()["run_id"],
+                    None,
+                )
+                assert record.context_snapshot is not None
+                self.assertEqual(
+                    record.context_snapshot.metadata.entrypoint_metadata[
+                        "skill_invocation"
+                    ],
+                    {
+                        "skill_name": "project:review",
+                        "arguments": ["src/app.py"],
+                    },
+                )
+                self.assertIn(
+                    "skill://project:review",
+                    [
+                        item.path
+                        for item in record.context_snapshot.instructions.sources
+                    ],
+                )
     def test_chat_request_accepts_google_provider(self) -> None:
         request = ChatStreamRequest(
             conversation_id="sess_google",

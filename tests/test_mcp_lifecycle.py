@@ -416,6 +416,7 @@ class MCPLifecycleTests(unittest.TestCase):
                     model_secret_backend="memory",
                     mcp_enabled=True,
                     mcp_config_path=str(config_path),
+                    workspace_allowed_roots=(str(root.resolve()),),
                 )
             )
             payload = {
@@ -447,6 +448,27 @@ class MCPLifecycleTests(unittest.TestCase):
                 self.assertTrue(registry.json()["runtime_enabled"])
                 self.assertNotIn(secret_value, registry.text)
                 self.assertEqual(tested.status_code, 200, tested.text)
+
+                client.put(
+                    "/api/v1/workspaces/mcp-demo",
+                    json={"root_path": str(root)},
+                ).raise_for_status()
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "tester"},
+                ).json()["id"]
+                capabilities = client.get(
+                    "/api/v1/agent/composer-capabilities",
+                    params={
+                        "conversation_id": session_id,
+                        "workspace_id": "mcp-demo",
+                    },
+                )
+                self.assertEqual(capabilities.status_code, 200, capabilities.text)
+                self.assertIn(
+                    "mcp.frontend_demo.alpha",
+                    [item["name"] for item in capabilities.json()["mcp_tools"]],
+                )
 
                 disabled = client.patch(
                     "/api/v1/mcp/servers/frontend_demo/enabled",

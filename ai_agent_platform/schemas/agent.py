@@ -35,6 +35,19 @@ class AgentRunRequest(BaseModel):
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
     thinking_level: Optional[LLMThinkingLevel] = None
     routing_policy: Optional[LLMRoutingPolicy] = None
+    skill_name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    )
+    skill_arguments: list[str] = Field(default_factory=list, max_length=32)
+    preferred_tool_name: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    )
 
     @field_validator("additional_workspace_ids")
     @classmethod
@@ -47,6 +60,41 @@ class AgentRunRequest(BaseModel):
                     "additional directories must use registered Workspace IDs"
                 )
         return values
+
+    @field_validator("skill_arguments")
+    @classmethod
+    def validate_skill_arguments(cls, values: list[str]) -> list[str]:
+        if any(len(value) > 1000 for value in values):
+            raise ValueError("skill arguments must not exceed 1000 characters")
+        return values
+
+
+class ComposerSkillCommandResponse(BaseModel):
+    name: str
+    description: str
+    usage: Optional[str]
+    aliases: list[str]
+    skill_name: str
+    skill_qualified_name: str
+    source: str
+
+
+class ComposerToolResponse(BaseModel):
+    name: str
+    description: str
+    provider: str
+    server_name: str
+    permission_level: str
+    requires_approval: bool
+    input_schema: dict[str, Any]
+
+
+class ComposerCapabilitiesResponse(BaseModel):
+    conversation_id: str
+    workspace_id: str
+    skill_commands: list[ComposerSkillCommandResponse]
+    mcp_tools: list[ComposerToolResponse]
+    diagnostics: list[str]
 
 
 class AgentRunResumeRequest(BaseModel):

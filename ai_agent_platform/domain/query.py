@@ -36,6 +36,7 @@ class QueryParams:
     actor_user_id: str | None = None
     skill_name: str | None = None
     skill_arguments: tuple[str, ...] = ()
+    preferred_tool_name: str | None = None
     entrypoint: str = "sdk"
     entrypoint_metadata: Mapping[str, Any] = field(default_factory=dict)
 

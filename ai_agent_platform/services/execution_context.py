@@ -127,6 +127,7 @@ class ExecutionContextFactory:
         entrypoint_metadata: Mapping[str, object] | None = None,
         skill_name: str | None = None,
         skill_arguments: Sequence[str] = (),
+        preferred_tool_name: str | None = None,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
@@ -321,6 +322,50 @@ class ExecutionContextFactory:
                 0,
                 remaining_instruction_chars - len(clipped),
             )
+        preferred_tool = None
+        if preferred_tool_name:
+            if preferred_tool_name not in (tool_selection.enabled_tools or ()):
+                raise ValueError(
+                    f"preferred tool is unavailable: {preferred_tool_name}"
+                )
+            preferred_tool = (
+                effective_pool.get_spec(preferred_tool_name)
+                if effective_pool is not None
+                else self._tool_registry.get_spec(preferred_tool_name)
+            )
+            if preferred_tool is None:
+                raise ValueError(
+                    f"preferred tool is unavailable: {preferred_tool_name}"
+                )
+            tool_preference_text = (
+                "[User-selected tool preference]\n"
+                f"The user selected `{preferred_tool.name}` for this request. "
+                "Prefer this tool when it is relevant and its input schema fits "
+                "the task. This preference does not grant permission, bypass "
+                "approval, or require an inappropriate tool call.\n"
+                f"Tool description: {preferred_tool.description}"
+            )
+            clipped = tool_preference_text[:remaining_instruction_chars]
+            if clipped:
+                instruction_snapshots.append(
+                    InstructionSourceSnapshot(
+                        kind="user_tool_preference",
+                        path=f"tool://{preferred_tool.name}",
+                        start_line=1,
+                        end_line=clipped.count("\n") + 1,
+                        text=clipped,
+                        reason="tool explicitly selected in the conversation composer",
+                        content_hash=hashlib.sha256(
+                            tool_preference_text.encode("utf-8")
+                        ).hexdigest(),
+                        truncated=len(clipped) < len(tool_preference_text),
+                        priority=60,
+                    )
+                )
+                remaining_instruction_chars = max(
+                    0,
+                    remaining_instruction_chars - len(clipped),
+                )
         selected_skill_names: tuple[str, ...] | None = None
         invoked_skill = None
         if skill_name:
@@ -398,6 +443,11 @@ class ExecutionContextFactory:
                 "skill_name": invoked_skill.qualified_name,
                 "arguments": [str(item) for item in skill_arguments],
             }
+        if preferred_tool is not None:
+            resolved_entrypoint_metadata["tool_preference"] = {
+                "name": preferred_tool.name,
+                "provider": preferred_tool.provider,
+            }
         return RunContextSnapshot(
             identity=IdentityContext(
                 actor_user_id=actor,
@@ -462,6 +512,7 @@ class ExecutionContextFactory:
         conversation_id: str,
         workspace_id: str,
         actor_user_id: str | None = None,
+        model_selection: ModelSelection | Mapping[str, object] | None = None,
     ) -> RunContextSnapshot:
         """Build a read-only effective-context preview through the normal factory."""
 
@@ -469,7 +520,7 @@ class ExecutionContextFactory:
             conversation_id=conversation_id,
             user_message="",
             workspace_id=workspace_id,
-            model_selection=ModelSelection(),
+            model_selection=model_selection or ModelSelection(),
             actor_user_id=actor_user_id,
             entrypoint_type=self._entrypoint_type,
             entrypoint_metadata={"adapter": "effective_context_preview"},

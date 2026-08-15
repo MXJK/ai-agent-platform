@@ -10,6 +10,9 @@ from .agent import (
     AgentRunStatusResponse,
     AgentToolCallResponse,
     AgentTraceStepResponse,
+    ComposerCapabilitiesResponse,
+    ComposerSkillCommandResponse,
+    ComposerToolResponse,
     ContextSourceResponse,
 )
 from .chat import ChatStreamRequest
@@ -110,6 +113,9 @@ __all__ = [
     "AgentRunStatusResponse",
     "AgentToolCallResponse",
     "AgentTraceStepResponse",
+    "ComposerCapabilitiesResponse",
+    "ComposerSkillCommandResponse",
+    "ComposerToolResponse",
     "ContextSourceResponse",
     "ChatStreamRequest",
     "ChangeSetApplyRequest",
