@@ -1,5 +1,5 @@
 project_id: "ai-agent-platform"
-status: "in_progress"
+status: "active"
 active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
 next_action: "Create ignored project Skill fixtures and local MCP configuration, then verify the MCP management page."
 blockers: []
