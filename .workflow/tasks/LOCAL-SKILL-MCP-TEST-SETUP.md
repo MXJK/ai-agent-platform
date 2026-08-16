@@ -28,14 +28,14 @@
 
 - 三个测试 Skill 放在被忽略的 `.agents/skills/` 中，覆盖只读代码审查、缺陷分诊和测试设计三种权限映射；不把个人测试 fixture 提交到仓库。
 - `.env` 使用 `AUTH_MODE=disabled` 提供 loopback 本地管理写接口，并将与该模式不兼容的 `LIVE_WORKSPACE_WRITES_ENABLED` 关闭，避免无鉴权 live workspace 写入。
-- `mcp.json` 默认启用官方 Everything 参考 Server；Filesystem 作为推荐示例保留但默认停用，唯一根目录参数限定为当前仓库绝对路径。
+- `mcp.json` 默认启用官方 Everything 参考 Server；首次下载完成后使用 `npx --offline` 启动，避免 npm registry 短暂重置影响本地 smoke。Filesystem 作为推荐示例保留但默认停用，唯一根目录参数限定为当前仓库绝对路径。
 - 内置 Browser 的 localhost URL 安全策略阻止了真实 DOM 点击、刷新和 console smoke，且明确禁止换浏览器或间接绕行；以确定性 TestClient 完整生命周期和已提供的前端控件/路由绑定作为替代验收，并保留该验证限制。
 
 ## Verification
 
 - 项目 Skill 有效目录断言：`code-review`、`bug-triage`、`test-design` 均被发现，且工具集合匹配预期。
 - Settings 与 MCP 配置断言：Skill/MCP 开关生效；活动 Server 仅 `everything`，包含禁用项时为 `everything=true`、`filesystem=false`。
-- 真实 Everything 握手：网络授权环境下状态 `READY`，发现 13 个工具。
+- 真实 Everything 握手：npm registry 出现 `ECONNRESET` 时改用已缓存包的 `npx --offline` 启动，状态 `READY`，发现 13 个工具。
 - MCP 聚焦测试：4 passed。
 - 替代 UI 生命周期：`create -> edit(timeout=20) -> test -> disable -> enable -> delete: PASS`。
 - 前端控件与 PUT/POST/PATCH/DELETE 路由绑定：PASS。
