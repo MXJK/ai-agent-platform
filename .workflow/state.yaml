@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
-next_action: "Create ignored project Skill fixtures and local MCP configuration, then verify the MCP management page."
+next_action: "Review the ignored local Skill and MCP fixtures, then rerun the browser smoke when localhost Browser Use is available."
 blockers: []
-last_verified_commit: "94ff8cccab15d4631e39effe3d97f7c8d3a230d5"
-updated_at: "2026-08-16T09:40:04+08:00"
+last_verified_commit: "13abedd1c89c70e481ba686c234fe01e354882ab"
+updated_at: "2026-08-16T10:28:53+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
