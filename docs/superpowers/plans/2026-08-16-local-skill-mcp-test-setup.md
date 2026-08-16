@@ -82,7 +82,7 @@ Update `.workflow/state.yaml` to:
 
 ```yaml
 project_id: "ai-agent-platform"
-status: "in_progress"
+status: "active"
 active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
 next_action: "Create ignored project Skill fixtures and local MCP configuration, then verify the MCP management page."
 blockers: []
@@ -271,7 +271,7 @@ Write `mcp.json` with the absolute repository boundary:
     "everything": {
       "transport": "stdio",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "args": ["--offline", "-y", "@modelcontextprotocol/server-everything"],
       "required": false,
       "enabled": true,
       "connect_timeout_seconds": 60,
@@ -373,7 +373,7 @@ Expected: health is ready or explicitly degraded only for an optional MCP Server
 Open `http://127.0.0.1:8765/#mcp` and perform this exact reversible sequence:
 
 1. Confirm `everything` and disabled `filesystem` render.
-2. Add `ui-smoke` as enabled stdio: command `npx`, args `-y` and `@modelcontextprotocol/server-everything` on separate lines.
+2. Add `ui-smoke` as enabled stdio: command `npx`, args `--offline`, `-y`, and `@modelcontextprotocol/server-everything` on separate lines (the package was cached during Task 3).
 3. Edit `ui-smoke`, changing request timeout from `10` to `20`, save, and confirm it reconnects.
 4. Click `测试 / 刷新` and confirm the Server reaches `ready` with discovered/registered tools.
 5. Click `停用`, confirm state `disabled`, then click `启用` and confirm it returns to `ready`.

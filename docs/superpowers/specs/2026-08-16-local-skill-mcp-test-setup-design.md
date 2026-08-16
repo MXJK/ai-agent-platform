@@ -63,9 +63,10 @@ or SecretStore references.
 
 Create ignored `mcp.json` with two official reference servers:
 
-- `everything`: enabled stdio server using
-  `npx -y @modelcontextprotocol/server-everything`; this is the primary protocol
-  and tool-discovery smoke test.
+- `everything`: enabled stdio server using the already-cached package via
+  `npx --offline -y @modelcontextprotocol/server-everything`; bootstrap the npm
+  cache once with online `npx -y` if needed. This is the primary protocol and
+  tool-discovery smoke test, without a registry dependency on every startup.
 - `filesystem`: disabled by default, using
   `npx -y @modelcontextprotocol/server-filesystem <repository-root>`; when the
   user enables it, its own access is restricted to this repository.
