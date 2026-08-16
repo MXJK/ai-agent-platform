@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "SLASH-COMMAND-COMPOSER"
-next_action: "Push local commits 94ff8ccc and the verification record to origin/main from an environment that permits remote writes."
+status: "in_progress"
+active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
+next_action: "Create ignored project Skill fixtures and local MCP configuration, then verify the MCP management page."
 blockers: []
 last_verified_commit: "94ff8cccab15d4631e39effe3d97f7c8d3a230d5"
-updated_at: "2026-08-15T22:47:11+08:00"
+updated_at: "2026-08-16T09:40:04+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

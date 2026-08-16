@@ -16,3 +16,5 @@ gateway/gateway
 rag_test_documents/
 .workflow/tasks/AGENT-INTERVIEW-KNOWLEDGE.md
 harness讲义.pdf
+.agents/skills/
+mcp.json
