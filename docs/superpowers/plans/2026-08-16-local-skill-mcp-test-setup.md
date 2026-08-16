@@ -320,7 +320,7 @@ Run:
 .venv/bin/python -c 'from ai_agent_platform.integrations.mcp import MCPServerState, create_mcp_connection_manager_from_configs, load_mcp_server_configs; manager=create_mcp_connection_manager_from_configs(load_mcp_server_configs("mcp.json")); manager.start(); status=manager.status_for("everything"); assert status is not None and status.state is MCPServerState.READY, status; assert manager.server_tools("everything"); manager.close()'
 ```
 
-Expected: PASS. The first invocation may download the official npm package; a download failure is reported as an external setup failure, not hidden.
+Expected: PASS. If the package is not cached, first bootstrap it explicitly as described in the design, then rerun this offline verification; any bootstrap failure is reported as an external setup failure, not hidden.
 
 - [ ] **Step 7: Confirm local MCP configuration remains ignored**
 
