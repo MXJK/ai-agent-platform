@@ -4,6 +4,6 @@ active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
 next_action: "Run Task 4 Step 4 in a browser environment that can access the project localhost, or obtain explicit approval to adopt the TestClient acceptance."
 blockers:
   - "Browser Use localhost URL policy blocks the required real browser lifecycle, refresh, and console smoke."
-last_verified_commit: "491183caccfe73d53be7e12ab895bd5d15c852f1"
-updated_at: "2026-08-16T10:38:23+08:00"
+last_verified_commit: "e1e5acd2ccdca1eee87ed97d9cb44d8f38c245a9"
+updated_at: "2026-08-16T10:40:04+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
