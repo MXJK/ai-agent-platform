@@ -250,6 +250,7 @@ class Settings:
     change_set_worktree_parent: str | None = None
     change_set_branch_prefix: str = "codex/"
     auth_mode: str = "disabled"
+    native_directory_picker_mode: str = "loopback"
     gateway_trust_secret: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -391,6 +392,11 @@ class Settings:
             "auth_mode",
             self.auth_mode,
             {"disabled", "trusted_header"},
+        )
+        _require_choice(
+            "native_directory_picker_mode",
+            self.native_directory_picker_mode,
+            {"disabled", "loopback", "trusted_local_gateway"},
         )
         _require_choice(
             "agent_workspace_default_mode",
@@ -666,6 +672,14 @@ class Settings:
         if self.auth_mode == "trusted_header" and not self.gateway_trust_secret:
             raise ValueError(
                 "gateway_trust_secret is required when auth_mode=trusted_header"
+            )
+        if (
+            self.native_directory_picker_mode == "trusted_local_gateway"
+            and self.auth_mode != "trusted_header"
+        ):
+            raise ValueError(
+                "native_directory_picker_mode=trusted_local_gateway requires "
+                "auth_mode=trusted_header"
             )
         if self.live_workspace_writes_enabled and self.auth_mode == "disabled":
             raise ValueError(
@@ -1263,6 +1277,11 @@ class Settings:
                 dotenv,
             ),
             auth_mode=_env("AUTH_MODE", cls.auth_mode, dotenv),
+            native_directory_picker_mode=_env(
+                "NATIVE_DIRECTORY_PICKER_MODE",
+                cls.native_directory_picker_mode,
+                dotenv,
+            ),
             gateway_trust_secret=_env("GATEWAY_TRUST_SECRET", None, dotenv),
         )
 

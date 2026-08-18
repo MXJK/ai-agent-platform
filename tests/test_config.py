@@ -31,6 +31,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_approval_policy, "on_request")
         self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
+        self.assertEqual(settings.native_directory_picker_mode, "loopback")
 
     def test_workspace_mode_environment_precedence_and_legacy_mapping(self) -> None:
         with patch.dict(
@@ -411,6 +412,10 @@ class SettingsTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "gateway_trust_secret"):
             Settings(auth_mode="trusted_header")
+        with self.assertRaisesRegex(ValueError, "native_directory_picker_mode"):
+            Settings(native_directory_picker_mode="remote")
+        with self.assertRaisesRegex(ValueError, "auth_mode=trusted_header"):
+            Settings(native_directory_picker_mode="trusted_local_gateway")
         with self.assertRaisesRegex(ValueError, "weights must sum to 1"):
             Settings(
                 project_memory_relevance_weight=0.5,

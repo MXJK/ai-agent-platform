@@ -37,6 +37,11 @@ from ai_agent_platform.services import (
 )
 
 
+_NATIVE_PICKER_LOCAL_ONLY_DETAIL = (
+    "native directory picker is only available for local mode"
+)
+
+
 def create_workspaces_router(
     workspace_service: WorkspaceService,
     *,
@@ -56,11 +61,7 @@ def create_workspaces_router(
         request: WorkspaceDirectoryPickRequest,
         http_request: Request,
     ) -> WorkspaceDirectoryPickResponse:
-        if settings.auth_mode != "disabled" or not _is_loopback_request(http_request):
-            raise HTTPException(
-                status_code=403,
-                detail="native directory picker is only available for local mode",
-            )
+        _authorize_native_directory_picker(http_request, settings)
         if directory_picker is None:
             raise HTTPException(
                 status_code=501,
@@ -353,3 +354,20 @@ def _is_loopback_request(request: Request) -> bool:
         return ip_address(request.client.host).is_loopback
     except ValueError:
         return request.client.host == "localhost"
+
+
+def _authorize_native_directory_picker(request: Request, settings: Settings) -> None:
+    mode = settings.native_directory_picker_mode
+    if mode == "trusted_local_gateway":
+        request_user_id(request, settings)
+        return
+    if (
+        mode == "loopback"
+        and settings.auth_mode == "disabled"
+        and _is_loopback_request(request)
+    ):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=_NATIVE_PICKER_LOCAL_ONLY_DETAIL,
+    )

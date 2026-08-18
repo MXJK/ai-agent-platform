@@ -28,6 +28,7 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.runtime_profile, "local")
         self.assertEqual(settings.session_repository, "sqlite")
         self.assertEqual(settings.task_queue_backend, "in_process")
+        self.assertEqual(settings.native_directory_picker_mode, "loopback")
 
     def test_production_env_template_selects_shared_backends(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.production.example"
@@ -41,6 +42,25 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.session_repository, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.task_queue_backend, "celery")
+        self.assertEqual(settings.native_directory_picker_mode, "disabled")
+
+    def test_trusted_local_picker_mode_is_resolved_as_process_security(self) -> None:
+        resolved = ConfigResolver(
+            env={
+                "AUTH_MODE": "trusted_header",
+                "GATEWAY_TRUST_SECRET": "test-secret",
+                "NATIVE_DIRECTORY_PICKER_MODE": "trusted_local_gateway",
+            }
+        ).resolve_process()
+
+        self.assertEqual(
+            resolved.settings.native_directory_picker_mode,
+            "trusted_local_gateway",
+        )
+        self.assertEqual(
+            resolved.process_security.native_directory_picker_mode,
+            "trusted_local_gateway",
+        )
 
     def test_local_memory_profile_is_complete_and_enables_review_mode(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.local-memory.example"

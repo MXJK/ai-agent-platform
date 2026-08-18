@@ -27,7 +27,7 @@
 ## Decisions
 
 - 三个测试 Skill 放在被忽略的 `.agents/skills/` 中，覆盖只读代码审查、缺陷分诊和测试设计三种权限映射；不把个人测试 fixture 提交到仓库。
-- `.env` 使用 `AUTH_MODE=disabled` 提供 loopback 本地管理写接口，并将与该模式不兼容的 `LIVE_WORKSPACE_WRITES_ENABLED` 关闭，避免无鉴权 live workspace 写入。
+- `.env` 使用 `AUTH_MODE=trusted_header + GATEWAY_AUTH_MODE=local`，由仅发布到 loopback 的本地网关注入固定身份；`LIVE_WORKSPACE_WRITES_ENABLED` 仍保持关闭，避免在本次 MCP 测试配置中启用 live workspace 写入。
 - `mcp.json` 默认启用官方 Everything 参考 Server；首次下载完成后使用 `npx --offline` 启动，避免 npm registry 短暂重置影响本地 smoke。Filesystem 作为推荐示例保留但默认停用，唯一根目录参数限定为当前仓库绝对路径。
 - 内置 Browser 的 localhost URL 安全策略阻止了真实 DOM 点击、刷新和 console smoke，且明确禁止换浏览器或间接绕行；确定性 TestClient 完整生命周期和前端控件/路由绑定仅作为补充证据，不替代原定浏览器验收。
 
@@ -43,6 +43,7 @@
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`：exit 0。
 - `node --check ai_agent_platform/static/app.js`：exit 0。
 - `git diff --check`：exit 0。
+- `./scripts/start.sh --check`：认证模式组合与持久化运行配置检查通过。
 
 ## Documentation impact
 

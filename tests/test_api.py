@@ -365,6 +365,55 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(trusted_response.status_code, 403)
             self.assertFalse(picker.called)
 
+    def test_native_workspace_directory_picker_accepts_trusted_local_gateway(
+        self,
+    ) -> None:
+        class StubDirectoryPicker:
+            def __init__(self, selection: str):
+                self.selection = selection
+                self.initial_paths = []
+
+            def pick_directory(self, *, initial_path=None):
+                self.initial_paths.append(initial_path)
+                return self.selection
+
+        with TemporaryDirectory() as allowed_dir:
+            allowed = Path(allowed_dir).resolve()
+            project = allowed / "project"
+            project.mkdir()
+            picker = StubDirectoryPicker(str(project))
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(allowed),),
+                background_task_workers=2,
+                auth_mode="trusted_header",
+                gateway_trust_secret="test-secret",
+                native_directory_picker_mode="trusted_local_gateway",
+            )
+            app = create_app(settings=settings, directory_picker=picker)
+            with TestClient(app, client=("192.168.97.1", 50000)) as client:
+                missing_identity = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    json={"initial_path": None},
+                )
+                selected = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    headers={
+                        "X-Authenticated-User": "local-user",
+                        "X-Gateway-Auth": "test-secret",
+                    },
+                    json={"initial_path": str(allowed)},
+                )
+
+            self.assertEqual(missing_identity.status_code, 401)
+            self.assertEqual(selected.status_code, 200)
+            self.assertEqual(
+                selected.json(),
+                {"path": str(project), "cancelled": False},
+            )
+            self.assertEqual(picker.initial_paths, [str(allowed)])
+
     def test_agent_uses_workspace_contract_and_live_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -677,6 +726,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("body.directories?.length === 1", script_response.text)
         self.assertIn("系统窗口不可用时", response.text)
         self.assertIn("/workspace-directory-picker", script_response.text)
+        self.assertIn("NATIVE_PICKER_LOCAL_ONLY_DETAIL", script_response.text)
+        self.assertIn("policyFallback", script_response.text)
         self.assertIn("系统文件夹窗口不可用，已打开备用选择器", script_response.text)
         self.assertIn("createKnowledgeBase", script_response.text)
         self.assertNotIn("repository_id", script_response.text)

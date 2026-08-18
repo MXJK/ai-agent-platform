@@ -1,5 +1,7 @@
 const API_BASE = "/api/v1";
 const UI_STORAGE_KEY = "ai-agent-platform-ui-v2";
+const NATIVE_PICKER_LOCAL_ONLY_DETAIL =
+  "native directory picker is only available for local mode";
 const FINAL_RUN_STATUSES = new Set(["completed", "partial", "blocked", "cancelled", "failed"]);
 const SUSPENDED_RUN_STATUSES = new Set(["waiting_approval", "waiting_input", "paused"]);
 const TERMINAL_RUN_STATUSES = new Set([...FINAL_RUN_STATUSES, ...SUSPENDED_RUN_STATUSES]);
@@ -6313,7 +6315,9 @@ async function openWorkspacePicker(workspaceId = null, triggerButton = null) {
     }
     await applyWorkspaceDirectory(body.path);
   } catch (error) {
-    if (error.status === 501 || error.status === 503) {
+    const policyFallback = error.status === 403
+      && error.body?.detail === NATIVE_PICKER_LOCAL_ONLY_DETAIL;
+    if (policyFallback || error.status === 501 || error.status === 503) {
       showToast("系统文件夹窗口不可用，已打开备用选择器", "warning");
       await openWorkspaceBrowserPicker(workspaceId);
     } else {

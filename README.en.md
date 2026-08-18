@@ -263,11 +263,11 @@ The browser workspace also includes:
   including current/default selection, invalid-path relinking, and safe removal;
   the shared composer omits a duplicate code-context strip, while the sidebar
   and settings manage the current workspace; there is no separate Code Agent page;
-  on local macOS, Add Folder opens the Finder
-  system folder dialog and falls back to the web directory browser only when the
-  system dialog is unavailable; when unset locally, the allowed root defaults to
-  the current user's home directory, while deployments should set explicit
-  minimal roots;
+  on local macOS, Add Folder opens the Finder system folder dialog through either
+  a direct loopback request or an explicitly trusted local gateway and otherwise
+  falls back to the web directory browser; when unset locally, the allowed root
+  defaults to the current user's home directory, while deployments should set
+  explicit minimal roots;
 - approval, input, and pause checkpoints rendered inside the matching assistant
   message, with inline approve, reject, feedback, continue, steer, pause, and cancel
   actions; terminal messages include a changed-file ledger, line counts, expandable
@@ -755,12 +755,20 @@ and other projects below it; dot-directories are hidden from the picker by
 default. Container, multi-user, and remote deployments should configure narrower
 roots explicitly.
 
-When `AUTH_MODE=disabled` and the request comes from loopback, the frontend calls
-`POST /api/v1/workspace-directory-picker`, allowing the same-host service to open
-the macOS Finder folder dialog. Cancelling makes no changes, and a selected path
-must still pass `WORKSPACE_ALLOWED_ROOTS` validation. Authenticated or remote
-requests cannot trigger a server desktop dialog; when the native capability is
-unavailable, the frontend falls back to the constrained web directory browser.
+`NATIVE_DIRECTORY_PICKER_MODE` explicitly defines which HTTP boundary may open
+macOS Finder on the same machine that runs the Agent. The default `loopback` mode
+accepts only direct loopback requests with `AUTH_MODE=disabled`;
+`trusted_local_gateway` accepts requests authenticated by the existing
+`X-Gateway-Auth` shared secret, including local Docker gateways whose upstream
+address appears as `192.168.*`; and `disabled` turns the native dialog off. The
+frontend falls back to the constrained web directory browser when deployment
+policy or the system capability prevents the native dialog. Cancelling makes no
+changes, and every selected path must still pass `WORKSPACE_ALLOWED_ROOTS`.
+
+A Workspace root belongs to the filesystem that actually executes the Agent. If
+a future control plane runs in the cloud while code remains on a user's computer,
+a local Agent or desktop companion must own directory authorization and execution;
+the cloud service's Finder cannot select a directory on the browser's machine.
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/workspaces/project \
@@ -1433,7 +1441,10 @@ identity headers, validates the bearer token, strips it, and injects the trusted
 subject. Read-only local development can keep both auth modes disabled. Direct
 local writes use `GATEWAY_AUTH_MODE=local`, which replaces caller identity and
 Authorization headers with `GATEWAY_LOCAL_USER_ID`; the standard Compose publish
-rule keeps this passwordless mode on loopback only. This is a trusted
+rule keeps this passwordless mode on loopback only. Set
+`NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway` when that local gateway must
+also open Finder on the same machine; OIDC/shared services should keep it
+`disabled`. This is a trusted
 identity boundary for sessions and workspace memory, not a claim of complete
 multi-tenant authorization across every legacy knowledge-base endpoint.
 

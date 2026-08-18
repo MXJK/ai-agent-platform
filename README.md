@@ -739,11 +739,17 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 桌面、文稿和主目录下的其他项目；选择列表默认隐藏点目录。容器、多用户或远端部署
 应显式收紧此配置。
 
-本机 `AUTH_MODE=disabled` 且请求来自 loopback 时，前端会调用
-`POST /api/v1/workspace-directory-picker`，由同机服务打开 macOS Finder 文件夹选择窗口。
-取消窗口不会产生变更，选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验；启用认证、
-远端请求或系统选择能力不可用时不会触发服务器桌面窗口，前端会在能力不可用时回退
-受控网页目录浏览器。
+`NATIVE_DIRECTORY_PICKER_MODE` 明确描述哪个 HTTP 边界可以在运行 Agent 的同一台机器上
+打开 macOS Finder：默认 `loopback` 只接受 `AUTH_MODE=disabled` 的直连 loopback 请求；
+`trusted_local_gateway` 接受通过现有 `X-Gateway-Auth` 共享密钥验证的本机网关请求，适配
+Docker 网桥使上游看到 `192.168.*` 地址的情况；`disabled` 完全关闭原生窗口。请求不
+满足配置策略或系统选择能力不可用时，前端回退受控网页目录浏览器。取消窗口不会
+产生变更，
+任何选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验。
+
+Workspace 根路径属于实际执行 Agent 的文件系统。若未来控制面部署在云端而代码仍在
+用户电脑上，需要本地 Agent/桌面 companion 负责目录授权和执行；云端服务自身的 Finder
+无法选择浏览器所在电脑的目录。
 
 ```bash
 curl -X PUT http://localhost:8000/api/v1/workspaces/project \
@@ -1307,7 +1313,8 @@ go vet ./gateway/...
 本地只读开发可以让两侧认证模式都保持关闭。需要真实写入时，使用
 `GATEWAY_AUTH_MODE=local`；它会移除调用方身份和 Authorization Header，再注入
 `GATEWAY_LOCAL_USER_ID`，且标准 Compose 只把端口发布到 `127.0.0.1`。local 模式不得
-暴露到局域网或公网。
+暴露到局域网或公网。若该本机网关还需要打开同机 Finder，应同时设置
+`NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway`；OIDC/共享服务应保持 `disabled`。
 
 这是会话和工作区记忆的可信身份边界，并不代表每一个旧版知识库接口都已具备完整的
 多租户授权。
