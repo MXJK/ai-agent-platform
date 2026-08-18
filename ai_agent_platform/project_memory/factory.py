@@ -9,8 +9,10 @@ from ai_agent_platform.integrations.rag import (
     HashingEmbeddingProvider,
     OpenAIEmbeddingProvider,
 )
+from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.project_memory.extractor import LLMMemoryExtractor
 from ai_agent_platform.project_memory.service import ProjectMemoryService
+from ai_agent_platform.project_memory.sqlite_vector import SQLiteMemoryVectorStore
 from ai_agent_platform.project_memory.vector import (
     InMemoryMemoryVectorStore,
     QdrantMemoryVectorStore,
@@ -18,6 +20,7 @@ from ai_agent_platform.project_memory.vector import (
 from ai_agent_platform.repositories import (
     InMemoryProjectMemoryRepository,
     PostgresProjectMemoryRepository,
+    SQLiteProjectMemoryRepository,
 )
 from ai_agent_platform.services.workspace_service import WorkspaceService
 
@@ -29,11 +32,16 @@ def create_project_memory_service(
     llm_client: LLMClient,
     metrics: MetricsRegistry,
     usage_ledger=None,
+    local_state_database: LocalStateDatabase | None = None,
 ) -> ProjectMemoryService:
-    if settings.workspace_store == "postgres":
+    if settings.project_memory_store == "postgres":
         repository = PostgresProjectMemoryRepository(
             database_url=settings.database_url
         )
+    elif settings.project_memory_store == "sqlite":
+        if local_state_database is None:
+            raise ValueError("PROJECT_MEMORY_STORE=sqlite requires local state")
+        repository = SQLiteProjectMemoryRepository(database=local_state_database)
     else:
         repository = InMemoryProjectMemoryRepository()
 
@@ -54,11 +62,18 @@ def create_project_memory_service(
             usage_ledger=usage_ledger,
         )
 
-    if settings.rag_vector_store == "qdrant":
+    if settings.project_memory_vector_store == "qdrant":
         vector_store = QdrantMemoryVectorStore(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             collection_name=settings.project_memory_qdrant_collection,
+        )
+    elif settings.project_memory_vector_store == "sqlite":
+        if local_state_database is None:
+            raise ValueError("PROJECT_MEMORY_VECTOR_STORE=sqlite requires local state")
+        vector_store = SQLiteMemoryVectorStore(
+            database=local_state_database,
+            model=settings.embedding_model,
         )
     else:
         vector_store = InMemoryMemoryVectorStore()

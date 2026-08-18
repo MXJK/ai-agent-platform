@@ -22,9 +22,16 @@ from .project_memory import (
     InMemoryProjectMemoryRepository,
     PostgresProjectMemoryRepository,
 )
+from .sqlite import (
+    SQLiteAgentRunRepository,
+    SQLiteSessionRepository,
+    SQLiteWorkspaceRepository,
+)
+from .sqlite_project_memory import SQLiteProjectMemoryRepository
 from .query import (
     InMemoryQueryUnitOfWork,
     PostgresQueryUnitOfWork,
+    SQLiteQueryUnitOfWork,
     QueryUnitOfWork,
     create_query_unit_of_work,
 )
@@ -44,10 +51,15 @@ __all__ = [
     "PostgresSessionRepository",
     "PostgresWorkspaceRepository",
     "PostgresProjectMemoryRepository",
+    "SQLiteAgentRunRepository",
+    "SQLiteProjectMemoryRepository",
+    "SQLiteSessionRepository",
+    "SQLiteWorkspaceRepository",
     "SessionArchivedError",
     "SessionNotFoundError",
     "InMemoryQueryUnitOfWork",
     "PostgresQueryUnitOfWork",
+    "SQLiteQueryUnitOfWork",
     "QueryUnitOfWork",
     "create_query_unit_of_work",
 ]

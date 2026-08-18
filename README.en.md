@@ -15,39 +15,43 @@ snippets in the current model context.
 
 ## Local start
 
-Python 3.10 or newer is required by the Google Gen AI SDK:
+The default configuration targets personal local use: one API process, one SQLite
+file, and an in-process task queue, with no PostgreSQL/Qdrant/Redis/Celery data
+services. Python 3.10 or newer is required by the Google Gen AI SDK:
 
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip install -e .
 cp -n .env.example .env
-# Replace the sample PostgreSQL password in both POSTGRES_PASSWORD and
-# DATABASE_URL with the same random local-only value.
-./scripts/start.sh --apply-migrations
+./scripts/start-local.sh --check
+./scripts/start-local.sh
 ```
 
-After reviewing pending Alembic revisions, the operator must explicitly pass
-`--apply-migrations`. The script validates the persistent configuration, starts
-PostgreSQL/Qdrant/Redis and the loopback Go gateway, applies migrations, and runs
-both Celery Worker and FastAPI. Press `Ctrl+C` to stop the API and Worker;
-persistent service and gateway containers remain running.
+`RUNTIME_PROFILE=local` locks Session/Run/Workspace/L1/L3 and memory vectors to
+SQLite and selects the `in_process` queue. ChangeSets, documents, the model
+registry, LangGraph checkpoints, and document RAG still use process memory and do
+not survive restart. Trusted local direct/worktree mode starts only the loopback Go
+gateway container; it does not start production data services.
 
-Useful startup options:
+Open the UI at `http://127.0.0.1:8001` without authentication, or at
+`http://127.0.0.1:8000` when the trusted local gateway is enabled.
+
+The future shared deployment is documented in [`.env.production.example`](.env.production.example)
+with `RUNTIME_PROFILE=production`. Credentials, OIDC, mounts, backups, migrations,
+capacity, and operations remain explicit `TODO(PRODUCTION)` items. Only after review:
 
 ```bash
-./scripts/start.sh --check  # Validate dependencies/configuration without writes.
-APP_RELOAD=0 ./scripts/start.sh --apply-migrations
-APP_PORT=8001 ./scripts/start.sh --apply-migrations
+cp .env.production.example .env  # Future deployment only; replace every placeholder/TODO first.
+./scripts/start.sh --check
+./scripts/start.sh --apply-migrations  # Explicitly authorizes pending Alembic revisions.
 ```
 
-Open the web UI through the gateway at `http://127.0.0.1:8000`. FastAPI serves
-the internal upstream on `http://127.0.0.1:8001`; port 8080 remains a temporary
-compatibility alias for existing tabs. No separate frontend build is required.
-The example configuration uses the fake LLM and local embedding provider, which
-require no API key.
-When `AUTH_MODE=disabled`, the startup script rejects non-loopback `APP_HOST`
-values instead of relying on an operator warning.
+The production script accepts only the production profile and starts PostgreSQL,
+Qdrant, Redis, the Go gateway, Celery Worker, and FastAPI. A local profile gets an
+actionable `start-local.sh` error. An early single-instance product may deliberately
+use a `custom` PostgreSQL/Qdrant + `in_process` combination without claiming the
+multi-worker production profile.
 
 ## CLI, REPL, SDK, and process entrypoints
 
@@ -74,6 +78,18 @@ do not assemble dependencies. The startup script now targets
 `ai_agent_platform.api.entrypoint:app`.
 
 ## Layered runtime configuration
+
+`RUNTIME_PROFILE` classifies process infrastructure and rejects accidental mixing:
+
+| Profile | Structured state | Vectors | Tasks | Intended use |
+| --- | --- | --- | --- | --- |
+| `local` | SQLite core state; unsupported SQLite domains temporarily use memory | SQLite memory vectors; document RAG temporarily uses memory | `in_process` | Current personal default |
+| `production` | PostgreSQL | Qdrant | Redis/Celery | Future shared deployment after its TODO checklist |
+| `custom` | Explicit per-store choices | Explicit choice | Celery still requires shared stores | Tests or a single-instance transition |
+
+Named profiles may repeat their expanded values but cannot select incompatible
+backends. Intentional mixed configurations must use `custom`; validation fails
+before database connections or migrations.
 
 `ConfigResolver` resolves configuration in one fixed order: `Settings` defaults,
 user JSON, project JSON, environment/`.env`, then explicit entry-point overrides.
@@ -947,6 +963,18 @@ tmpfs limits.
 
 ## Project memory
 
+The memory architecture deliberately implements **L0 + L1 + L3**. L0 is the
+rolling conversation summary, recent messages, and explicit cross-session
+search; L1 is governed project knowledge for the current workspace/revision;
+L3 is user-scoped atomic facts plus a deterministic profile snapshot. There is
+**no L2 Scene Block**: live source, `.workflow/tasks`, Agent Runs, checkpoints,
+and ChangeSets already own task/scene state, so another generated scene record
+would duplicate facts and become stale. See the editable
+[`architecture overview`](docs/architecture/local-layered-memory-overview.drawio)
+and its [`PNG`](docs/architecture/local-layered-memory-overview.png); the same
+directory also contains editable context-assembly, write-governance, and
+persistence detail diagrams.
+
 Project memory is shared by authorized members of one `workspace_id`. Supported
 kinds are `architecture_fact`, `constraint`, `decision`, `convention`,
 `task_outcome`, and `incident_lesson`. Full source files, temporary discussion,
@@ -970,10 +998,14 @@ candidates. Source-backed mutable facts are hash-checked before injection and
 become `stale` after the source changes. Long-unconfirmed records are
 down-ranked rather than deleted solely because of age.
 
-Retrieval combines Qdrant dense recall and PostgreSQL full-text recall using
-weighted RRF, then reloads every result from PostgreSQL to verify workspace,
-revision, status, expiry, and version. Every eligible candidate receives an
-explainable final score:
+Retrieval combines dense and lexical recall using weighted RRF, then reloads
+every result from the configured L1 source of truth to verify workspace,
+revision, status, expiry, and version. PostgreSQL/Qdrant remain available for
+distributed deployments. The single-process local profile uses SQLite FTS5
+BM25 and float32 vector BLOBs carrying model, dimensions, and memory version;
+cosine similarity is computed over the small current workspace/revision set.
+FTS5 and vector failures degrade to bounded `LIKE` and lexical-only recall.
+Every eligible candidate receives an explainable final score:
 
 ```text
 0.65 × normalized relevance
@@ -984,8 +1016,8 @@ explainable final score:
 Recency uses `last_confirmed_at` (falling back to `updated_at`) with a
 configurable 180-day half-life. Candidates are globally ranked before the
 six-result/3,000-character budget is applied, and Chat/Agent provenance exposes
-the final score plus all three components. Qdrant failure degrades to lexical
-search, and memory failure never fails the main Chat or Agent answer.
+the final score plus all three components. Dense retrieval failure degrades to
+lexical search, and memory failure never fails the main Chat or Agent answer.
 
 Management endpoints:
 
@@ -1010,11 +1042,53 @@ Chat emits `memory_context` before answer tokens and enqueues post-response
 extraction. Agent runs execute `retrieve_project_memory` after context routing
 and enqueue extraction by `run_id` only after a completed result.
 
+### L0 conversation search and L3 user profile
+
+L0 indexes the original `messages` table rather than copying another log.
+Search is always user-scoped, can optionally constrain workspace/session, and
+is never injected across conversations automatically. It is available through
+`GET /api/v1/memory/conversations/search` and the read-only
+`memory.search_conversations` tool.
+
+L3 is a separate `UserMemory` domain with `profile_fact`,
+`communication_preference`, `tooling_preference`, `workflow_preference`,
+`standing_goal`, and `personal_constraint`. Manual and explicitly global
+remember requests become active immediately; other automatic extractions are
+review candidates. `UserProfileSnapshot` is rebuilt without an LLM from active
+facts, ordered by importance and confirmation recency, and defaults to 1,500
+characters. Chat and Agent inject it only as untrusted historical preferences;
+it cannot override the current request, policy, project instructions,
+permissions, or live evidence. Agent answer output can produce L1 evidence but
+never L3 inference. Credentials, complete environment values, privilege
+escalation requests, and prompt injection are rejected before L1/L3 storage.
+
+```text
+GET/PATCH /api/v1/users/me/memory-settings
+GET/POST  /api/v1/users/me/memories
+GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
+POST      /api/v1/users/me/memories/{memory_id}/confirm
+POST      /api/v1/users/me/memories/{memory_id}/reject
+GET       /api/v1/users/me/profile
+POST      /api/v1/users/me/profile/rebuild
+GET       /api/v1/memory/conversations/search
+```
+
+The Memory Workbench mirrors the backend layers with dedicated L1, L3, and L0
+views. Project and user facts use an asset-list/detail-governance split with
+active/candidate counts, status and kind filters, evidence, versions, and
+contextual actions. The profile view previews the exact deterministic snapshot
+visible to the model, while conversation search pairs user-scoped hits with a
+full message detail panel. The UI explicitly marks L2 as not stored and keeps
+loading, empty, and error states distinct so review candidates are not mistaken
+for injected memory.
+
 Configuration defaults keep the subsystem disabled:
 
 ```dotenv
 PROJECT_MEMORY_ENABLED=false
 PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_STORE=memory
+PROJECT_MEMORY_VECTOR_STORE=memory
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
 PROJECT_MEMORY_AUTO_THRESHOLD=0.85
 PROJECT_MEMORY_RECALL_LIMIT=20
@@ -1025,7 +1099,21 @@ PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
 PROJECT_MEMORY_RECENCY_WEIGHT=0.20
 PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
 PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
+USER_MEMORY_ENABLED=false
+USER_MEMORY_MODE=off
+USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
+
+The default [`.env.example`](.env.example) selects the local profile, while
+[`.env.local-memory.example`](.env.local-memory.example) remains as a focused
+compatibility example. It persists Sessions, summaries, Workspaces, Agent Runs,
+L1/L3 facts, profile snapshots, Outbox events, and memory vectors in
+`~/.ai-agent-platform/state.sqlite3`, with WAL, foreign keys, `busy_timeout`,
+versioned migrations, and restricted permissions. This profile supports one
+API process with `TASK_QUEUE_BACKEND=in_process`; it starts no PostgreSQL,
+Qdrant, or Redis service and provides no cross-store import. ChangeSets, documents,
+the model registry, checkpoints, and document RAG have no SQLite adapter yet and
+are not restart-persistent in this profile.
 
 Conversation compression is configured independently:
 
@@ -1239,6 +1327,8 @@ LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=false
 PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_STORE=postgres
+PROJECT_MEMORY_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 ```
 
@@ -1248,19 +1338,19 @@ The persistent runtime assigns one responsibility to each database:
 | --- | --- |
 | PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
+| SQLite (local profile) | Single-file Session/summary/Workspace/Run/L1/L3/profile/Outbox persistence, with FTS5/LIKE lexical search and float32-BLOB vector recall for small local scopes |
 | Redis | Celery broker and result backend; it is not the source of truth for business records |
 | Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
 
 `RAG_VECTOR_STORE` selects either Qdrant or Chroma. They implement the same
-vector-store boundary and are not written simultaneously. The checked-in
-example and current persistent runtime select Qdrant; in-memory repositories
-remain available only as explicit test doubles.
+vector-store boundary and are not written simultaneously. The production
+example selects Qdrant; the local profile temporarily keeps document RAG in process.
 
 Before starting the API and Celery worker, start the backing services and apply
 the schema migration:
 
 ```bash
-docker compose up -d postgres adminer qdrant redis
+docker compose --profile production up -d postgres adminer qdrant redis
 .venv/bin/alembic upgrade head
 .venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
@@ -1269,7 +1359,7 @@ The Compose ports for Gateway, PostgreSQL, Qdrant, Redis, and Adminer are bound
 to `127.0.0.1`. PostgreSQL credentials come from `.env`; `scripts/start.sh`
 derives the Compose variables from `DATABASE_URL`, while direct
 `docker compose` usage requires the matching `POSTGRES_DB`, `POSTGRES_USER`,
-and `POSTGRES_PASSWORD` entries shown in `.env.example`.
+and `POSTGRES_PASSWORD` entries shown in `.env.production.example`.
 
 ### Browse PostgreSQL with Adminer
 

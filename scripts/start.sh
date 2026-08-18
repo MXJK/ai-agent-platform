@@ -89,6 +89,12 @@ gateway_auth_mode = os.getenv(
     dotenv.get("GATEWAY_AUTH_MODE", "disabled"),
 ).strip().lower()
 app_host = os.getenv("APP_HOST", dotenv.get("APP_HOST", "127.0.0.1"))
+if settings.runtime_profile != "production":
+    raise SystemExit(
+        f"生产启动要求 RUNTIME_PROFILE=production，当前为 "
+        f"{settings.runtime_profile}。本地 SQLite 请运行 "
+        "./scripts/start-local.sh。"
+    )
 if gateway_auth_mode not in {"disabled", "local", "oidc"}:
     raise SystemExit(
         "GATEWAY_AUTH_MODE 必须是 disabled、local 或 oidc。"
@@ -129,7 +135,7 @@ if invalid:
     )
     raise SystemExit(f"持久化运行配置不完整：{details}")
 
-print("持久化运行配置检查通过。")
+print("production 持久化运行配置检查通过。")
 PY
 }
 
@@ -235,7 +241,7 @@ load_app_runtime_env
 docker compose version >/dev/null
 validate_runtime_config
 load_postgres_compose_env
-docker compose config --quiet
+docker compose --profile production --profile gateway config --quiet
 
 if [[ "${1:-}" == "--check" ]]; then
   if [[ $# -ne 1 ]]; then
@@ -254,7 +260,7 @@ if [[ $# -ne 1 || "${1:-}" != "--apply-migrations" ]]; then
 fi
 
 echo "正在启动 PostgreSQL、Qdrant、Redis 和本地网关..."
-docker compose up -d --build "${COMPOSE_SERVICES[@]}"
+docker compose --profile production --profile gateway up -d --build "${COMPOSE_SERVICES[@]}"
 wait_for_services
 
 echo "已收到显式授权，正在应用数据库迁移..."

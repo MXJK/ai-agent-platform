@@ -10,6 +10,7 @@ from ai_agent_platform.api.routes import (
     create_knowledge_bases_router,
     create_model_registry_router,
     create_mcp_registry_router,
+    create_memory_router,
     create_sessions_router,
     create_workspaces_router,
     create_project_memories_router,
@@ -30,6 +31,7 @@ from ai_agent_platform.services import (
     WorkspaceService,
 )
 from ai_agent_platform.project_memory import ProjectMemoryService
+from ai_agent_platform.memory import UserMemoryService
 
 
 def create_api_router(
@@ -40,6 +42,7 @@ def create_api_router(
     change_set_service: ChangeSetService,
     workspace_service: WorkspaceService,
     project_memory_service: ProjectMemoryService,
+    user_memory_service: UserMemoryService,
     settings: Settings,
     metrics: MetricsRegistry,
     task_queue: TaskQueue,
@@ -79,6 +82,7 @@ def create_api_router(
             project_memory_service=project_memory_service,
             task_queue=task_queue,
             model_registry=model_registry,
+            user_memory_service=user_memory_service,
         )
     )
     router.include_router(create_agent_runs_router(query_service, settings))
@@ -94,6 +98,9 @@ def create_api_router(
     )
     router.include_router(
         create_project_memories_router(project_memory_service, settings)
+    )
+    router.include_router(
+        create_memory_router(session_service, user_memory_service, settings)
     )
     router.include_router(
         create_knowledge_bases_router(

@@ -106,6 +106,16 @@ class ProjectMemoryService:
         """Connect the service to an asynchronous outbox consumer."""
         self._index_outbox_submitter = submitter
 
+    def resume_index_outbox(self) -> bool:
+        """Schedule durable pending index work after a process restart."""
+        if (
+            self._index_outbox_submitter is None
+            or self._repository.count_pending_index_events() == 0
+        ):
+            return False
+        self._index_outbox_submitter("startup-recovery")
+        return True
+
     def ensure_workspace_admin(
         self, *, workspace_id: str, actor_user_id: str
     ) -> None:
@@ -1266,6 +1276,8 @@ _INJECTION_PATTERNS = (
     re.compile(r"ignore (?:all |the )?(?:previous|system) instructions", re.I),
     re.compile(r"忽略(?:以上|之前|系统)指令"),
     re.compile(r"reveal (?:the )?system prompt", re.I),
+    re.compile(r"(?:请|必须|始终).{0,16}(?:sudo|root\s*权限|管理员权限|提权)", re.I),
+    re.compile(r"(?:use|request|require).{0,16}(?:sudo|root access|elevated privileges)", re.I),
 )
 
 

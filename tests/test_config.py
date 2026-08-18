@@ -40,6 +40,9 @@ class SettingsTests(unittest.TestCase):
                 "LLM_MODEL_CATALOG_JSON": "",
             },
             clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
         ):
             legacy = Settings.from_env()
         self.assertEqual(legacy.agent_workspace_default_mode, "direct")
@@ -57,6 +60,9 @@ class SettingsTests(unittest.TestCase):
                 "LLM_MODEL_CATALOG_JSON": "",
             },
             clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
         ):
             explicit = Settings.from_env()
         self.assertEqual(explicit.agent_workspace_default_mode, "direct")
@@ -72,6 +78,9 @@ class SettingsTests(unittest.TestCase):
                 "WORKSPACE_ALLOWED_ROOTS": "",
                 "LLM_MODEL_CATALOG_JSON": "",
             },
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
         ):
             settings = Settings.from_env()
         self.assertEqual(len(settings.workspace_allowed_roots), 1)
@@ -178,6 +187,9 @@ class SettingsTests(unittest.TestCase):
                 "CHANGE_SET_BRANCH_PREFIX": "agent/",
                 "GATEWAY_TRUST_SECRET": "test-trust-secret",
             },
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
         ):
             settings = Settings.from_env()
 
@@ -323,6 +335,14 @@ class SettingsTests(unittest.TestCase):
     def test_celery_requires_shared_worker_storage(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires shared storage"):
             Settings(task_queue_backend="celery")
+
+    def test_rejects_unknown_runtime_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime_profile"):
+            Settings(runtime_profile="staging")
+
+    def test_named_runtime_profile_rejects_incompatible_backends(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime_profile=local"):
+            Settings(runtime_profile="local")
 
     def test_celery_accepts_postgres_and_qdrant_shared_storage(self) -> None:
         settings = Settings(

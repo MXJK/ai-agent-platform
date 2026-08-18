@@ -522,11 +522,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260816-direct-workspaces-1',
+            '/static/styles.css?v=20260818-memory-workbench-2',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260816-direct-workspaces-1',
+            '/static/app.js?v=20260818-memory-workbench-2',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -535,6 +535,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('value="worktree"', response.text)
         self.assertIn('value="patch_only"', response.text)
         self.assertIn('id="slash-command-menu"', response.text)
+        self.assertIn('data-memory-tab="project"', response.text)
+        self.assertIn('data-memory-tab="profile"', response.text)
+        self.assertIn('data-memory-tab="conversations"', response.text)
+        self.assertIn('class="memory-layer-rail"', response.text)
+        self.assertIn('id="new-project-memory-btn"', response.text)
+        self.assertIn('id="new-user-memory-btn"', response.text)
+        self.assertIn('id="conversation-memory-detail"', response.text)
+        self.assertIn("L2 不存储", response.text)
         self.assertIn('id="slash-command-options"', response.text)
         self.assertIn('id="jump-to-latest-btn"', response.text)
         self.assertIn('aria-autocomplete="list"', response.text)

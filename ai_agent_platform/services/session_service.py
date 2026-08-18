@@ -87,6 +87,26 @@ class SessionService:
     def list_sessions(self) -> list[Session]:
         return self._repository.list_sessions()
 
+    def search_conversations(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        workspace_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10,
+    ):
+        search = getattr(self._repository, "search_conversations", None)
+        if not callable(search):
+            return []
+        return search(
+            user_id=user_id,
+            query=query,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
     def list_sessions_page(
         self,
         *,

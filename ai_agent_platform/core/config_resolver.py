@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .config import Settings
+from .config import Settings, runtime_profile_defaults
 
 
 CONFIG_SNAPSHOT_SCHEMA_VERSION = 2
@@ -200,6 +200,8 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "anthropic_api_key",
         "google_api_key",
         "database_url",
+        "runtime_profile",
+        "local_state_path",
         "session_repository",
         "agent_run_store",
         "change_set_store",
@@ -216,6 +218,11 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "qdrant_api_key",
         "qdrant_collection_name",
         "project_memory_qdrant_collection",
+        "project_memory_store",
+        "project_memory_vector_store",
+        "user_memory_enabled",
+        "user_memory_mode",
+        "user_profile_max_context_chars",
         "task_queue_backend",
         "redis_url",
         "celery_result_backend_url",
@@ -433,6 +440,7 @@ class ConfigResolver:
             )
 
         try:
+            _apply_runtime_profile_defaults(values, provenance)
             settings = Settings(**values)
         except (TypeError, ValueError) as exc:
             raise ConfigSchemaError(f"resolved configuration is invalid: {exc}") from exc
@@ -750,6 +758,25 @@ def _resolved_config(
         sources=sources,
         source_details=provenance,
     )
+
+
+def _apply_runtime_profile_defaults(
+    values: dict[str, Any],
+    provenance: dict[str, ConfigFieldSource],
+) -> None:
+    profile = str(values["runtime_profile"])
+    defaults = runtime_profile_defaults(profile)
+    if not defaults:
+        return
+    profile_source = provenance["runtime_profile"]
+    for name, value in defaults.items():
+        if provenance[name].source is not ConfigSource.DEFAULT:
+            continue
+        values[name] = _freeze_value(value)
+        provenance[name] = ConfigFieldSource(
+            profile_source.source,
+            f"{profile_source.detail} -> runtime_profile={profile}",
+        )
 
 
 def _flatten_config_mapping(

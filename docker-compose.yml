@@ -27,12 +27,13 @@ services:
     restart: unless-stopped
 
   postgres:
+    profiles: ["production"]
     image: postgres:16
     container_name: ai-agent-platform-postgres
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:?set POSTGRES_DB in .env}"
-      POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER in .env}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-ai_agent_platform}"
+      POSTGRES_USER: "${POSTGRES_USER:-ai_agent}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -49,6 +50,7 @@ services:
     restart: unless-stopped
 
   adminer:
+    profiles: ["production"]
     image: adminer:5.5.0-standalone
     container_name: ai-agent-platform-adminer
     environment:
@@ -61,6 +63,7 @@ services:
     restart: unless-stopped
 
   qdrant:
+    profiles: ["production"]
     image: qdrant/qdrant:v1.16.1
     container_name: ai-agent-platform-qdrant
     ports:
@@ -71,6 +74,7 @@ services:
     restart: unless-stopped
 
   redis:
+    profiles: ["production"]
     image: redis:7-alpine
     container_name: ai-agent-platform-redis
     command:

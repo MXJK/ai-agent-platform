@@ -100,6 +100,18 @@ from .project_memory import (
     ProjectMemoryResponse,
     ProjectMemoryUpdateRequest,
 )
+from .memory import (
+    ConversationMemoryHitResponse,
+    ConversationMemorySearchResponse,
+    UserMemoriesResponse,
+    UserMemoryCreateRequest,
+    UserMemoryResponse,
+    UserMemorySettingsResponse,
+    UserMemorySettingsUpdateRequest,
+    UserMemoryUpdateRequest,
+    UserMemoryVersionRequest,
+    UserProfileSnapshotResponse,
+)
 
 __all__ = [
     "AddMessageRequest",
@@ -194,4 +206,14 @@ __all__ = [
     "ProjectMemoryCreateRequest",
     "ProjectMemoryResponse",
     "ProjectMemoryUpdateRequest",
+    "ConversationMemoryHitResponse",
+    "ConversationMemorySearchResponse",
+    "UserMemoriesResponse",
+    "UserMemoryCreateRequest",
+    "UserMemoryResponse",
+    "UserMemorySettingsResponse",
+    "UserMemorySettingsUpdateRequest",
+    "UserMemoryUpdateRequest",
+    "UserMemoryVersionRequest",
+    "UserProfileSnapshotResponse",
 ]

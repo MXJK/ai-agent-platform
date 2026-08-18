@@ -57,6 +57,7 @@ from ai_agent_platform.integrations.tool_pool import (
 )
 from ai_agent_platform.usage_ledger import model_usage_scope
 from ai_agent_platform.project_memory.service import ProjectMemoryService
+from ai_agent_platform.memory import UserMemoryService
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class QueryService:
         metrics: MetricsRegistry | None = None,
         task_queue: TaskQueue | None = None,
         project_memory_service: ProjectMemoryService | None = None,
+        user_memory_service: UserMemoryService | None = None,
         max_context_messages: int = 12,
         llm_provider: str = "agent",
         llm_model: str = "aggregated",
@@ -101,6 +103,7 @@ class QueryService:
             metrics=self._metrics,
         )
         self._project_memory_service = project_memory_service
+        self._user_memory_service = user_memory_service
         self._max_context_messages = max_context_messages
         self._llm_provider = llm_provider
         self._llm_model = llm_model
@@ -402,6 +405,12 @@ class QueryService:
             self._metrics.increment("agent_runs_rejected_total")
             self._mark_queued_run_failed(record.run_id, str(exc))
             raise
+        self._enqueue_user_memory(
+            user_id=resolved_actor,
+            message=message,
+            source_id=record.run_id,
+            workspace_id=workspace_id,
+        )
         self._metrics.increment("agent_runs_submitted_total")
         return record
 
@@ -760,6 +769,34 @@ class QueryService:
         mark_failed = getattr(self._runtime, "mark_queued_run_failed", None)
         if callable(mark_failed):
             mark_failed(run_id=run_id, error=error)
+
+    def _enqueue_user_memory(
+        self,
+        *,
+        user_id: str,
+        message: str,
+        source_id: str,
+        workspace_id: str | None,
+    ) -> None:
+        if self._user_memory_service is None or not self._user_memory_service.enabled:
+            return
+        try:
+            self._task_queue.submit(
+                "user_memory_extraction",
+                self._user_memory_service.capture_user_message,
+                user_id=user_id,
+                message=message,
+                source_type="agent_request",
+                source_id=source_id,
+                workspace_id=workspace_id,
+            )
+        except TaskQueueError:
+            self._metrics.increment("user_memory_agent_extraction_enqueue_failed_total")
+            logger.warning(
+                "agent user-memory extraction enqueue skipped",
+                exc_info=True,
+                extra={"run_id": source_id},
+            )
 
     def fail_run_task(
         self,

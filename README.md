@@ -31,37 +31,40 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 
 ## 本地启动
 
-Google Gen AI SDK 要求 Python 3.10 或更高版本：
+默认配置面向本地个人使用：单个 API 进程、单文件 SQLite 和进程内任务队列，
+不启动 PostgreSQL、Qdrant 或 Redis/Celery。Google Gen AI SDK 要求 Python 3.10 或更高版本：
 
 ```bash
 python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pip install -e .
 cp -n .env.example .env
-# 将 POSTGRES_PASSWORD 与 DATABASE_URL 中的示例 PostgreSQL 密码
-# 替换为同一个仅供本地使用的随机密码。
-./scripts/start.sh --apply-migrations
+./scripts/start-local.sh --check
+./scripts/start-local.sh
 ```
 
-首次完成环境初始化后，先审阅待处理的 Alembic revision，再由操作者用
-`./scripts/start.sh --apply-migrations` 显式授权升级。脚本会验证持久化配置，启动
-PostgreSQL、Qdrant、Redis 和 loopback Go 网关，等待依赖服务就绪，执行迁移，然后同时
-启动 Celery Worker 与 FastAPI。未给出该参数时脚本会在迁移和 runtime 启动前停止；按
-`Ctrl+C` 会停止 API 和 Worker，持久化服务与网关容器仍会继续运行。
+`RUNTIME_PROFILE=local` 自动锁定 SQLite Session/Run/Workspace/L1/L3、SQLite 记忆向量
+与 `in_process` 队列。ChangeSet、文档、模型注册表、LangGraph checkpoint 和文档 RAG
+当前使用进程内实现，重启后不保留；这是明确边界，不是完整本地持久化。启用可信本地
+direct/worktree 模式时，启动脚本只额外构建 loopback Go 网关容器，数据服务仍不会启动。
 
-常用启动选项：
+Web UI 在未认证模式从 <http://127.0.0.1:8001> 进入；启用本地可信网关时从
+<http://127.0.0.1:8000> 进入。页面不需要单独构建，示例使用 Fake LLM 和本地嵌入。
+
+未来共享产品部署使用 [`.env.production.example`](.env.production.example) 的
+`RUNTIME_PROFILE=production`。该文件中的凭据、OIDC、共享挂载、备份、迁移、容量和
+运维事项均为 `TODO(PRODUCTION)`，当前没有执行。只有完成审阅后才运行：
 
 ```bash
-./scripts/start.sh --check  # 仅检查依赖和配置，不执行写操作。
-APP_RELOAD=0 ./scripts/start.sh --apply-migrations
-APP_PORT=8001 ./scripts/start.sh --apply-migrations
+cp .env.production.example .env  # 未来部署时再做，并先替换全部 TODO/占位值
+./scripts/start.sh --check
+./scripts/start.sh --apply-migrations  # 必须显式授权待处理的 Alembic revision
 ```
 
-Web UI 默认从网关地址 <http://127.0.0.1:8000> 进入；FastAPI 在内部
-<http://127.0.0.1:8001> 提供 upstream，`8080` 暂时保留为旧标签页兼容入口。页面不需要
-单独构建。示例配置使用 Fake LLM 和本地嵌入提供方，不需要 API Key。
-当 `AUTH_MODE=disabled` 时，启动脚本会直接拒绝非回环地址的 `APP_HOST`，而不是
-只输出运维警告。
+生产脚本只接受 production profile，启动 PostgreSQL、Qdrant、Redis、Go 网关、Celery
+Worker 和 FastAPI；本地 profile 会收到改用 `start-local.sh` 的明确提示。若产品早期只需
+单实例 PostgreSQL/Qdrant + `in_process`，应显式使用 `custom` profile，而不是冒充已经
+具备 Celery 多 Worker 的 production profile。
 
 ## CLI、REPL、SDK 与进程入口
 
@@ -112,6 +115,17 @@ async def run() -> None:
 `ai_agent_platform.api.entrypoint:app`。
 
 ## 分层运行时配置
+
+`RUNTIME_PROFILE` 是进程级配置分类，先提供一致默认值，再由解析器校验后端没有混搭：
+
+| Profile | 结构化状态 | 向量 | 任务 | 用途 |
+| --- | --- | --- | --- | --- |
+| `local` | SQLite 核心状态；未补 SQLite adapter 的域暂用 memory | SQLite 记忆向量；文档 RAG 暂用 memory | `in_process` | 当前个人单机默认 |
+| `production` | PostgreSQL | Qdrant | Redis/Celery | 未来共享部署，仍需完成配置中的上线 TODO |
+| `custom` | 显式逐项选择 | 显式逐项选择 | Celery 仍强制共享存储 | 测试或单实例产品过渡配置 |
+
+命名 profile 的底层 Store 可显式重复，但不能改成另一套后端；确需混合时必须把 profile
+改为 `custom`。这一约束会在建立数据库连接或执行迁移前失败。
 
 `ConfigResolver.resolve_process()` 只解析 `Settings` 默认值 → 用户 JSON → 环境变量/
 `.env` → 显式入口覆盖，不从服务进程 cwd 自动发现项目文件。默认用户路径是
@@ -903,6 +917,15 @@ Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmp
 
 ## 项目记忆
 
+当前记忆架构明确采用 **L0 + L1 + L3**：L0 是会话摘要、最近消息和按需跨会话搜索；
+L1 是当前 Workspace/revision 的可治理项目事实；L3 是当前用户的原子事实和确定性画像
+快照。**没有实现 L2 Scene Block**：任务进度、场景与工作流状态已经由实时源码、
+`.workflow/tasks`、Agent Run、checkpoint 和 ChangeSet 表达，再维护一份场景摘要会产生
+重复事实源和陈旧风险。架构总览见
+[`local-layered-memory-overview.drawio`](docs/architecture/local-layered-memory-overview.drawio)
+和对应的 [`PNG`](docs/architecture/local-layered-memory-overview.png)；同目录还提供上下文组装、
+写入治理和持久化三个可编辑细节图。
+
 项目记忆由同一个 `workspace_id` 的授权成员共享，支持以下类型：
 
 - `architecture_fact`；
@@ -930,9 +953,11 @@ Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmp
 依据的可变事实会在注入前检查哈希，源码变化后转为 `stale`。长期未确认的记录只会
 降低排序，不会仅因时间流逝被删除。
 
-检索使用加权 RRF 合并 Qdrant 稠密召回和 PostgreSQL 全文召回，然后从 PostgreSQL
-重新加载每条结果，验证工作区、revision、状态、过期时间和版本。每个候选都有可解释
-的最终分数：
+检索使用加权 RRF 合并稠密与词法召回，然后从配置的 L1 事实源重新加载每条结果，
+验证工作区、revision、状态、过期时间和版本。PostgreSQL/Qdrant 仍可用于分布式部署；
+单进程本地 profile 则使用 SQLite FTS5 BM25、标准库 `sqlite3` 和带模型/维度/记忆版本
+的 float32 BLOB，在当前小型 workspace/revision 数据集内计算余弦相似度。FTS5 或向量
+失败分别降级为受限 `LIKE` 或纯词法召回。每个候选都有可解释的最终分数：
 
 ```text
 0.65 × 归一化相关性
@@ -942,8 +967,8 @@ Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmp
 
 时间新鲜度使用 `last_confirmed_at`（缺失时回退到 `updated_at`），默认半衰期为 180
 天。候选会先全局排序，再应用六条结果和 3,000 字符预算；Chat/Agent 来源信息会暴露
-最终分数及三个组成项。Qdrant 失败时降级为词法检索，记忆失败不会导致主 Chat 或
-Agent 回答失败。
+最终分数及三个组成项。向量失败时降级为词法检索，记忆失败不会导致主 Chat 或 Agent
+回答失败。
 
 管理接口：
 
@@ -966,11 +991,48 @@ PATCH、confirm 和 reject 必须携带当前 `version`。Viewer 可以检索和
 Token 前发送 `memory_context`，并在响应完成后排队抽取任务。Agent 在上下文路由后
 执行 `retrieve_project_memory`，只有运行成功完成后才按 `run_id` 排队抽取。
 
+### L0 对话搜索与 L3 用户画像
+
+L0 不复制第二份聊天日志：SQLite 直接为原始 `messages` 建 FTS5 索引，搜索始终按当前
+用户隔离，并可进一步限定 workspace/session。历史命中不会自动跨会话注入；只有用户
+或 Agent 显式调用 `GET /api/v1/memory/conversations/search` 或只读工具
+`memory.search_conversations` 才会读取。
+
+L3 使用独立的 `UserMemory` 领域，固定为 `profile_fact`、
+`communication_preference`、`tooling_preference`、`workflow_preference`、
+`standing_goal` 和 `personal_constraint`。手工记录和明确的全局“记住/所有项目/以后”
+请求直接 active；其他自动提炼只进入 candidate。系统只从 active 事实按重要性和最近
+确认时间确定性重建最多 1,500 字符的 `UserProfileSnapshot`，不调用 LLM。Chat 与 Agent
+始终把已确认小画像标记为不可信历史偏好；它不能覆盖当前请求、系统/项目指令、权限或
+实时源码。Agent 的助手结果只可提炼 L1，不能推导 L3。凭据、完整环境变量、权限提升
+要求和 Prompt Injection 会在 L1/L3 写入前被拒绝。
+
+L3 管理接口：
+
+```text
+GET/PATCH /api/v1/users/me/memory-settings
+GET/POST  /api/v1/users/me/memories
+GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
+POST      /api/v1/users/me/memories/{memory_id}/confirm
+POST      /api/v1/users/me/memories/{memory_id}/reject
+GET       /api/v1/users/me/profile
+POST      /api/v1/users/me/profile/rebuild
+GET       /api/v1/memory/conversations/search
+```
+
+前端“记忆工作台”采用与后端层级一致的 L1/L3/L0 三页信息架构：项目记忆和个人事实
+均使用左侧资产列表、右侧详情治理的双栏布局，显示 active/candidate 统计、状态/类型
+筛选、证据、版本和可用操作；个人画像单独预览模型实际会看到的确定性快照；对话搜索
+展示用户隔离的命中列表与原文详情。页面显式标出“L2 不存储”，并为加载、空结果和失败
+提供独立状态，避免把未确认候选误解为已注入记忆。
+
 默认配置保持该子系统关闭：
 
 ```dotenv
 PROJECT_MEMORY_ENABLED=false
 PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_STORE=memory
+PROJECT_MEMORY_VECTOR_STORE=memory
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
 PROJECT_MEMORY_AUTO_THRESHOLD=0.85
 PROJECT_MEMORY_RECALL_LIMIT=20
@@ -981,7 +1043,18 @@ PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
 PROJECT_MEMORY_RECENCY_WEIGHT=0.20
 PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
 PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
+USER_MEMORY_ENABLED=false
+USER_MEMORY_MODE=off
+USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
+
+默认 [`.env.example`](.env.example) 使用 local profile；
+[`.env.local-memory.example`](.env.local-memory.example) 保留为兼容的记忆聚焦示例。
+它把 Session、Agent Run、Workspace、L1、L3、证据、Outbox 和记忆向量写入默认
+`~/.ai-agent-platform/state.sqlite3`，启用 WAL、外键、`busy_timeout`、版本化迁移和受限
+权限。该 profile 只支持单个 API 进程与 `TASK_QUEUE_BACKEND=in_process`，不启动
+PostgreSQL、Qdrant 或 Redis，也不提供与它们之间的数据导入。当前未实现 SQLite adapter
+的 ChangeSet、文档、模型注册表、checkpoint 和文档 RAG 不具备跨进程重启持久化。
 
 会话压缩单独配置：
 
@@ -1142,6 +1215,8 @@ LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=false
 PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_STORE=postgres
+PROJECT_MEMORY_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 ```
 
@@ -1151,24 +1226,24 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 | --- | --- |
 | PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
 | Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
+| SQLite（本地 profile） | 单文件持久化 Session/摘要/Workspace/Run/L1/L3/画像与 Outbox；FTS5/LIKE 负责词法搜索，float32 BLOB 负责小数据集向量召回 |
 | Redis | Celery Broker 和结果后端；不是业务记录的事实来源 |
 | Chroma | 可选的嵌入式/单节点向量存储，用于替代 Qdrant |
 
 `RAG_VECTOR_STORE` 在 Qdrant 和 Chroma 中二选一。二者实现同一向量存储边界，不会
-被同时写入。仓库示例和当前持久化运行时使用 Qdrant；内存 Repository 只作为显式
-测试替身。
+被同时写入。production 示例使用 Qdrant；local profile 的文档 RAG 暂用进程内实现。
 
 启动 API 和 Celery Worker 前，先启动依赖；审阅 revision 后由操作者明确授权并应用迁移：
 
 ```bash
-docker compose up -d postgres adminer qdrant redis
+docker compose --profile production up -d postgres adminer qdrant redis
 .venv/bin/alembic upgrade head
 .venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
 ```
 
 Compose 中 Gateway、PostgreSQL、Qdrant、Redis 和 Adminer 的端口都绑定到
 `127.0.0.1`。PostgreSQL 凭据来自 `.env`；`scripts/start.sh` 会根据 `DATABASE_URL`
-推导 Compose 变量，直接运行 `docker compose` 则需要 `.env.example` 所示且相互匹配
+推导 Compose 变量，直接运行 `docker compose` 则需要 `.env.production.example` 所示且相互匹配
 的 `POSTGRES_DB`、`POSTGRES_USER` 和 `POSTGRES_PASSWORD`。
 
 ### 使用 Adminer 浏览 PostgreSQL

@@ -1,9 +1,8 @@
 project_id: "ai-agent-platform"
-status: "blocked"
-active_task: "LOCAL-SKILL-MCP-TEST-SETUP"
-next_action: "Run Task 4 Step 4 in a browser environment that can access the project localhost, or obtain explicit approval to adopt the TestClient acceptance."
-blockers:
-  - "Browser Use localhost URL policy blocks the required real browser lifecycle, refresh, and console smoke."
+status: "done"
+active_task: "RUNTIME-CONFIG-PROFILES"
+next_action: "Review the pushed local-memory runtime profile branch, then merge when authorized."
+blockers: []
 last_verified_commit: "21a02f49433f198c83d56133b7481a0e22a9bad0"
-updated_at: "2026-08-16T10:43:18+08:00"
+updated_at: "2026-08-18T11:10:01+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
