@@ -381,7 +381,13 @@ class ConfigResolverTests(unittest.TestCase):
             "workspace_allowed_roots": ["/tmp"],
             "live_workspace_writes_enabled": True,
             "gateway_trust_secret": "do-not-log-this",
+            "sandbox_mode": "docker",
             "sandbox_docker_image": "untrusted/image:latest",
+            "sandbox_command_timeout_seconds": 10.0,
+            "sandbox_command_output_max_chars": 1000,
+            "sandbox_workspace_parent": "/tmp/sandboxes",
+            "sandbox_workspace_ttl_seconds": 60.0,
+            "sandbox_allowed_commands": ["pytest"],
         }
         for field_name, value in fields_and_values.items():
             with self.subTest(field=field_name), self.assertRaisesRegex(
@@ -393,43 +399,43 @@ class ConfigResolverTests(unittest.TestCase):
                     env={},
                 ).resolve()
 
-    def test_project_can_tighten_but_cannot_weaken_sandbox_policy(self) -> None:
-        tightened = ConfigResolver(
+    def test_sandbox_construction_is_process_owned(self) -> None:
+        resolved = ConfigResolver(
             user_config={
-                "runtime": {
-                    "sandbox_mode": "local",
+                "process_security": {
+                    "sandbox_mode": "docker",
+                    "sandbox_docker_image": "sandbox:test",
+                    "sandbox_command_timeout_seconds": 15.0,
+                    "sandbox_command_output_max_chars": 4000,
+                    "sandbox_workspace_parent": "/tmp/sandboxes",
+                    "sandbox_workspace_ttl_seconds": 120.0,
                     "sandbox_allowed_commands": ["python", "pytest"],
-                    "agent_approval_policy": "on_request",
                 }
             },
             project_config={
                 "runtime": {
-                    "sandbox_mode": "docker",
-                    "sandbox_allowed_commands": ["pytest"],
                     "agent_approval_policy": "always",
                 }
             },
             env={},
         ).resolve()
-        self.assertEqual(tightened.sandbox_mode, "docker")
-        self.assertEqual(tightened.sandbox_allowed_commands, ("pytest",))
-        self.assertEqual(tightened.agent_approval_policy, "always")
+        self.assertEqual(resolved.sandbox_mode, "docker")
+        self.assertEqual(
+            resolved.sandbox_allowed_commands,
+            ("python", "pytest"),
+        )
+        self.assertEqual(resolved.agent_approval_policy, "always")
+        self.assertIn("sandbox_mode", resolved.process_security.values)
+        self.assertNotIn("sandbox_mode", resolved.runtime.values)
 
+        with self.assertRaisesRegex(ConfigSchemaError, "sandbox_mode"):
+            ConfigResolver(
+                project_config={"runtime": {"sandbox_mode": "docker"}},
+                env={},
+            ).resolve()
+
+    def test_project_can_tighten_but_cannot_weaken_approval_policy(self) -> None:
         weakening_cases = (
-            (
-                {"runtime": {"sandbox_mode": "docker"}},
-                {"runtime": {"sandbox_mode": "local"}},
-                "sandbox_mode",
-            ),
-            (
-                {"runtime": {"sandbox_allowed_commands": ["python"]}},
-                {
-                    "runtime": {
-                        "sandbox_allowed_commands": ["python", "pytest"]
-                    }
-                },
-                "may only remove commands",
-            ),
             (
                 {"runtime": {"agent_approval_policy": "always"}},
                 {"runtime": {"agent_approval_policy": "never"}},
@@ -606,6 +612,26 @@ class ConfigResolverTests(unittest.TestCase):
         ):
             settings = Settings.from_env()
         self.assertEqual(settings.google_api_key, "canonical-key")
+
+    def test_sqlite_legacy_store_aliases_do_not_target_unsupported_stores(
+        self,
+    ) -> None:
+        resolved = ConfigResolver(
+            env={
+                "RUNTIME_PROFILE": "local",
+                "SESSION_REPOSITORY": "sqlite",
+                "AGENT_RUN_STORE": "sqlite",
+            }
+        ).resolve_process()
+
+        self.assertEqual(resolved.session_repository, "sqlite")
+        self.assertEqual(resolved.agent_run_store, "sqlite")
+        self.assertEqual(resolved.model_registry_store, "memory")
+        self.assertEqual(resolved.change_set_store, "memory")
+        self.assertIn(
+            "runtime_profile=local",
+            resolved.provenance_for("model_registry_store").detail,
+        )
 
     def test_new_workspace_mode_config_wins_over_legacy_environment_fallback(self) -> None:
         resolved = ConfigResolver(

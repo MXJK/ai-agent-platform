@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "LOCAL-NATIVE-DIRECTORY-PICKER"
-next_action: "Review the verified native picker diff, restart the local API if reload has not applied the dotenv change, then commit when authorized."
+active_task: "LOCAL-GATEWAY-ADMIN-CHAIN"
+next_action: "Review and commit the verified local runtime fixes when ready."
 blockers: []
 last_verified_commit: "21a02f49433f198c83d56133b7481a0e22a9bad0"
-updated_at: "2026-08-18T11:37:55+08:00"
+updated_at: "2026-08-18T12:36:48+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -84,12 +84,12 @@ class _ConfigSection:
 
 @dataclass(frozen=True)
 class ProcessSecurityConfig(_ConfigSection):
-    """Process-owned storage, authentication, credential and write policy."""
+    """Process-owned infrastructure, authentication and security policy."""
 
 
 @dataclass(frozen=True)
 class RuntimeConfig(_ConfigSection):
-    """Model, budget, Agent Loop, retrieval and sandbox runtime settings."""
+    """Model, budget, Agent Loop and retrieval runtime settings."""
 
 
 @dataclass(frozen=True)
@@ -241,8 +241,13 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "skills_allowed",
         "tool_allowlist",
         "skill_allowlist",
+        "sandbox_mode",
         "sandbox_docker_image",
+        "sandbox_command_timeout_seconds",
+        "sandbox_command_output_max_chars",
         "sandbox_workspace_parent",
+        "sandbox_workspace_ttl_seconds",
+        "sandbox_allowed_commands",
         "live_workspace_writes_enabled",
         "agent_workspace_default_mode",
         "agent_workspace_allowed_modes",
@@ -550,8 +555,9 @@ class ConfigResolver:
             )
             details[field_name] = f"{location}:{selected_name}"
 
-        # Preserve the two legacy fallback chains exactly when their canonical name
-        # is absent. They predate the one-field/one-env-name schema.
+        # Preserve compatible legacy fallbacks when their canonical name is absent.
+        # Store aliases predate the one-field/one-env-name schema, but SQLite is not
+        # a valid model-registry or ChangeSet backend and must not leak into them.
         _apply_legacy_environment_fallback(
             environment_values,
             details,
@@ -571,6 +577,7 @@ class ConfigResolver:
             canonical="MODEL_REGISTRY_STORE",
             fallback="SESSION_REPOSITORY",
             current=values["model_registry_store"],
+            allowed_values=frozenset({"memory", "postgres"}),
         )
         _apply_legacy_environment_fallback(
             environment_values,
@@ -581,6 +588,7 @@ class ConfigResolver:
             canonical="CHANGE_SET_STORE",
             fallback="AGENT_RUN_STORE",
             current=values["change_set_store"],
+            allowed_values=frozenset({"memory", "postgres"}),
         )
         _apply_legacy_workspace_mode_fallback(
             environment_values,
@@ -904,19 +912,6 @@ def _validate_project_overrides(
             f"project_config cannot override process/security fields: {names}"
         )
 
-    if incoming.get("sandbox_mode") == "local" and current["sandbox_mode"] == "docker":
-        raise ConfigSecurityError(
-            "project_config cannot weaken process sandbox_mode=docker"
-        )
-
-    if "sandbox_allowed_commands" in incoming:
-        candidate = set(incoming["sandbox_allowed_commands"])
-        allowed = set(current["sandbox_allowed_commands"])
-        if not candidate.issubset(allowed):
-            raise ConfigSecurityError(
-                "project_config sandbox_allowed_commands may only remove commands"
-            )
-
     if "agent_approval_policy" in incoming:
         candidate = incoming["agent_approval_policy"]
         baseline = current["agent_approval_policy"]
@@ -1008,17 +1003,21 @@ def _apply_legacy_environment_fallback(
     canonical: str,
     fallback: str,
     current: object,
+    allowed_values: frozenset[str] | None = None,
 ) -> None:
     namespaced = f"{_ENV_PREFIX}{canonical}"
     if target in environment_values or namespaced in combined or canonical in combined:
         return
     if fallback not in combined:
         return
-    environment_values[target] = _parse_environment_value(
+    parsed = _parse_environment_value(
         target,
         combined[fallback],
         current,
     )
+    if allowed_values is not None and parsed not in allowed_values:
+        return
+    environment_values[target] = parsed
     location = "environment" if fallback in process_environment else ".env"
     details[target] = f"{location}:{fallback} (legacy fallback)"
 

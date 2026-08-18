@@ -211,16 +211,14 @@ class RuntimeBootstrapTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_runtime_rejects_non_atomic_query_store_pair(self) -> None:
+    def test_runtime_configuration_rejects_non_atomic_query_store_pair(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "same supported backend for atomic start",
+            "session_repository and agent_run_store must use the same backend",
         ):
-            build_runtime(
-                self.settings(
-                    session_repository="memory",
-                    agent_run_store="postgres",
-                )
+            self.settings(
+                session_repository="memory",
+                agent_run_store="postgres",
             )
 
     def test_runtime_only_applies_process_tool_cap_to_global_registry(self) -> None:

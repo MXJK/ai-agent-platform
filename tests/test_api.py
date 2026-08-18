@@ -402,12 +402,23 @@ class ApiTests(unittest.TestCase):
                     headers={
                         "X-Authenticated-User": "local-user",
                         "X-Gateway-Auth": "test-secret",
+                        "X-Gateway-Mode": "local",
+                    },
+                    json={"initial_path": str(allowed)},
+                )
+
+                oidc_gateway = client.post(
+                    "/api/v1/workspace-directory-picker",
+                    headers={
+                        "X-Authenticated-User": "remote-user",
+                        "X-Gateway-Auth": "test-secret",
                     },
                     json={"initial_path": str(allowed)},
                 )
 
             self.assertEqual(missing_identity.status_code, 401)
             self.assertEqual(selected.status_code, 200)
+            self.assertEqual(oidc_gateway.status_code, 403)
             self.assertEqual(
                 selected.json(),
                 {"path": str(project), "cancelled": False},

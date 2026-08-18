@@ -21,6 +21,11 @@ var (
 	errInvalidToken  = errors.New("bearer token is invalid")
 )
 
+const (
+	gatewayModeHeader = "X-Gateway-Mode"
+	localGatewayMode  = "local"
+)
+
 type oidcAuthenticator struct {
 	issuer      string
 	audience    string
@@ -78,12 +83,15 @@ func localIdentityMiddleware(userID, trustSecret string, next http.Handler) http
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		// Local mode is intentionally passwordless. Its security boundary is the
 		// loopback-only publish rule in docker-compose.yml, so caller-provided
-		// identity and credentials must never reach the trusted upstream.
+		// identity, capability assertions and credentials must never reach the
+		// trusted upstream.
 		request.Header.Del("Authorization")
 		request.Header.Del("X-Authenticated-User")
 		request.Header.Del("X-Gateway-Auth")
+		request.Header.Del(gatewayModeHeader)
 		request.Header.Set("X-Authenticated-User", userID)
 		request.Header.Set("X-Gateway-Auth", trustSecret)
+		request.Header.Set(gatewayModeHeader, localGatewayMode)
 		next.ServeHTTP(response, request)
 	})
 }
@@ -92,6 +100,7 @@ func (auth *oidcAuthenticator) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		request.Header.Del("X-Authenticated-User")
 		request.Header.Del("X-Gateway-Auth")
+		request.Header.Del(gatewayModeHeader)
 		token, err := bearerToken(request.Header.Get("Authorization"))
 		if err != nil {
 			writeJSON(response, http.StatusUnauthorized, "unauthorized", err.Error())

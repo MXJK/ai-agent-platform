@@ -15,6 +15,10 @@ from fastapi import HTTPException, Request
 from ai_agent_platform.core.config import Settings
 
 
+LOCAL_GATEWAY_MODE_HEADER = "X-Gateway-Mode"
+LOCAL_GATEWAY_MODE = "local"
+
+
 def request_user_id(
     request: Request,
     settings: Settings,
@@ -40,6 +44,42 @@ def request_user_id(
     return user_id
 
 
+def is_loopback_request(request: Request) -> bool:
+    """Return whether the HTTP peer itself is a loopback address."""
+    if request.client is None:
+        return False
+    normalized = request.client.host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def require_local_capability(
+    request: Request,
+    settings: Settings,
+    *,
+    detail: str,
+) -> str:
+    """Authorize a capability that may act only on the API host machine.
+
+    Unauthenticated development must arrive directly from loopback. Authenticated
+    deployments must first pass the shared-secret identity boundary and then carry
+    the local-mode assertion that the Go gateway strips and reissues itself.
+    """
+    if settings.auth_mode == "disabled":
+        if is_loopback_request(request):
+            return request_user_id(request, settings)
+        raise HTTPException(status_code=403, detail=detail)
+
+    user_id = request_user_id(request, settings)
+    if request.headers.get(LOCAL_GATEWAY_MODE_HEADER) == LOCAL_GATEWAY_MODE:
+        return user_id
+    raise HTTPException(status_code=403, detail=detail)
+
+
 def validate_bind_host(*, host: str, auth_mode: str) -> None:
     """Fail closed when unauthenticated local mode would listen off-machine."""
     if auth_mode != "disabled":
@@ -59,4 +99,11 @@ def validate_bind_host(*, host: str, auth_mode: str) -> None:
         )
 
 
-__all__ = ["request_user_id", "validate_bind_host"]
+__all__ = [
+    "LOCAL_GATEWAY_MODE",
+    "LOCAL_GATEWAY_MODE_HEADER",
+    "is_loopback_request",
+    "request_user_id",
+    "require_local_capability",
+    "validate_bind_host",
+]

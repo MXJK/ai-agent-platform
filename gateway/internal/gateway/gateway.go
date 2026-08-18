@@ -105,6 +105,7 @@ func stripUntrustedIdentityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		request.Header.Del("X-Authenticated-User")
 		request.Header.Del("X-Gateway-Auth")
+		request.Header.Del(gatewayModeHeader)
 		next.ServeHTTP(response, request)
 	})
 }

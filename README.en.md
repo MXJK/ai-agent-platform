@@ -107,11 +107,12 @@ startup.
     "mcp_allowed": true,
     "skills_allowed": true,
     "skill_allowlist": ["review"],
-    "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
+    "tool_allowlist": ["file_symbol_locator", "repo.search_code"],
+    "sandbox_mode": "docker",
+    "sandbox_allowed_commands": ["python", "pytest"]
   },
   "runtime": {
     "llm_model": "example-model",
-    "sandbox_mode": "docker",
     "session_token_budget": 50000
   },
   "project_session": {
@@ -126,11 +127,14 @@ startup.
 
 User files and the process environment establish trusted policy. Project files
 cannot change databases, authentication, API keys/secret backends, allowed roots,
-live-write switches, or the MCP config path. They also cannot weaken Docker to the
-local sandbox, choose the Docker image, reduce approval, expand command/tool/Skill
-allowlists, or bypass
-`mcp_allowed=false`/`skills_allowed=false`. The process Tool Registry remains the
-hard capability ceiling. Each Run builds an immutable `ToolCatalog` with explicit
+live-write switches, or the MCP config path. Sandbox mode, image, command allowlist,
+timeouts, output limit, workspace parent, and lifetime all construct the executor at
+process startup, so they belong to `process_security`. A project cannot create an
+override that changes only its snapshot while leaving execution unchanged. Projects
+may still tighten approval and select smaller tool/Skill/MCP subsets, but cannot
+bypass `mcp_allowed=false`, `skills_allowed=false`, or process allowlists. The
+process Tool Registry remains the hard capability ceiling. Each Run builds an
+immutable `ToolCatalog` with explicit
 base/local/MCP sources and namespaces, then a shared `ToolPoolBuilder` intersects
 project selection, Agent/mode, model capabilities, Workspace role, central display
 deny, explicit deny, Sandbox capabilities, and Skill requirements into an
@@ -138,6 +142,10 @@ deny, explicit deny, Sandbox capabilities, and Skill requirements into an
 
 Legacy unprefixed environment names and `.env` remain supported, including
 `GEMINI_API_KEY` and the old `SESSION_REPOSITORY`/`AGENT_RUN_STORE` fallback chains.
+Store fallback applies only when the target Store supports that backend, so local
+SQLite is not propagated into the memory/PostgreSQL-only model registry or ChangeSet
+Store. Session and Run Stores must also select the same backend; configuration fails
+before runtime resource construction when an atomic Query start would be impossible.
 The new `AI_AGENT_PLATFORM_<FIELD>` namespace rejects unknown names. The immutable
 `ResolvedConfig` exposes a compatible `settings` view, three frozen sections, and
 per-field provenance. `Settings.from_env()` still returns `Settings`. API/Worker
@@ -444,9 +452,11 @@ returned with `partial_response=true` and never replayed on another model.
 
 Registry configuration uses `MODEL_REGISTRY_STORE=postgres` for restart-safe
 global configuration and `MODEL_SECRET_BACKEND=keyring` for API keys. The
-write endpoints are available only in local `AUTH_MODE=disabled` mode, whose
-startup boundary is forced to loopback. Use the in-memory backends only for
-tests or explicit temporary runs.
+connection save/test/discovery and model mutation endpoints require a host-local
+capability: either a direct loopback request with `AUTH_MODE=disabled`, or a trusted
+local gateway request with both shared-secret identity and `X-Gateway-Mode: local`.
+Ordinary OIDC identities cannot perform these administration operations. Use the
+in-memory backends only for tests or explicit temporary runs.
 
 ## Dynamic model admission and Token budgets
 
@@ -672,8 +682,10 @@ immediately replaces that Server's connection and synchronizes the ToolRegistry.
 Otherwise the configuration is persisted and shown as awaiting restart. Literal
 environment variables/headers are separate from Secret inputs. Secret values go
 only to the shared `SecretStore`; the config file and later GET responses retain
-only references or key names. Management writes are exposed only in loopback
-local mode with `AUTH_MODE=disabled`.
+only references or key names. Management writes share the same host-local boundary
+as the model registry and native directory picker: direct unauthenticated loopback,
+or a trusted local gateway carrying both shared-secret identity and
+`X-Gateway-Mode: local`. OIDC and remote requests remain denied.
 
 The management API consists of `GET /api/v1/mcp/servers`,
 `PUT /api/v1/mcp/servers/{name}`,
@@ -758,9 +770,12 @@ roots explicitly.
 `NATIVE_DIRECTORY_PICKER_MODE` explicitly defines which HTTP boundary may open
 macOS Finder on the same machine that runs the Agent. The default `loopback` mode
 accepts only direct loopback requests with `AUTH_MODE=disabled`;
-`trusted_local_gateway` accepts requests authenticated by the existing
-`X-Gateway-Auth` shared secret, including local Docker gateways whose upstream
-address appears as `192.168.*`; and `disabled` turns the native dialog off. The
+`trusted_local_gateway` requires both the `X-Gateway-Auth` shared secret and
+`X-Gateway-Mode: local`, which only the local gateway reissues after stripping the
+caller's same-named header. OIDC and unauthenticated gateways remove that local
+capability assertion, so a valid remote identity cannot open Finder on the server.
+The mode still supports local Docker gateways whose upstream address appears as
+`192.168.*`; `disabled` turns the native dialog off. The
 frontend falls back to the constrained web directory browser when deployment
 policy or the system capability prevents the native dialog. Cancelling makes no
 changes, and every selected path must still pass `WORKSPACE_ALLOWED_ROOTS`.
@@ -1437,16 +1452,24 @@ go vet ./gateway/...
 In production, configure `GATEWAY_AUTH_MODE=oidc`, issuer, audience, JWKS URL,
 and a shared `GATEWAY_TRUST_SECRET`; configure FastAPI with
 `AUTH_MODE=trusted_header` and the same secret. The gateway removes forged
-identity headers, validates the bearer token, strips it, and injects the trusted
-subject. Read-only local development can keep both auth modes disabled. Direct
-local writes use `GATEWAY_AUTH_MODE=local`, which replaces caller identity and
-Authorization headers with `GATEWAY_LOCAL_USER_ID`; the standard Compose publish
-rule keeps this passwordless mode on loopback only. Set
+identity and mode headers, validates the bearer token, strips it, and injects the
+trusted subject. Read-only local development can keep both auth modes disabled. Direct
+local writes use `GATEWAY_AUTH_MODE=local`, which replaces caller identity, mode,
+and Authorization headers with `GATEWAY_LOCAL_USER_ID`, the shared secret, and
+`X-Gateway-Mode: local`; OIDC never issues this local capability assertion. The
+standard Compose publish rule keeps this passwordless mode on loopback only. This
+host-local assertion gates Finder, model-registry administration, and MCP-registry
+administration. Set
 `NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway` when that local gateway must
 also open Finder on the same machine; OIDC/shared services should keep it
 `disabled`. This is a trusted
 identity boundary for sessions and workspace memory, not a claim of complete
 multi-tenant authorization across every legacy knowledge-base endpoint.
+
+Compose fixes the container listener at `:8080` and reaches host FastAPI through
+`host.docker.internal:${APP_PORT}`. The body, concurrency, rate-limit, timeout, and
+logging settings advertised in `.env` are forwarded into the container. Port 8000
+is the standard loopback entry; 8080 remains a compatibility alias.
 
 ## Verification
 

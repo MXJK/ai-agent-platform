@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import Settings, require_local_capability
 from ai_agent_platform.integrations.mcp import (
     MCPClientError,
     MCPStdioClientError,
@@ -37,8 +37,9 @@ def create_mcp_registry_router(
     def upsert_server(
         server_name: str,
         request: MCPServerUpsertRequest,
+        http_request: Request,
     ) -> MCPServerResponse:
-        _require_local_admin(settings)
+        _require_local_admin(http_request, settings)
         values = request.model_dump(exclude={"env_secrets", "header_secrets"})
         values["env_secret_values"] = {
             key: secret.get_secret_value()
@@ -68,8 +69,9 @@ def create_mcp_registry_router(
     def set_enabled(
         server_name: str,
         request: MCPServerEnabledRequest,
+        http_request: Request,
     ) -> MCPServerResponse:
-        _require_local_admin(settings)
+        _require_local_admin(http_request, settings)
         try:
             result = registry.set_enabled(server_name, enabled=request.enabled)
         except MCPRegistryNotFoundError as exc:
@@ -84,8 +86,8 @@ def create_mcp_registry_router(
         "/mcp/servers/{server_name}/test",
         response_model=MCPServerResponse,
     )
-    def test_server(server_name: str) -> MCPServerResponse:
-        _require_local_admin(settings)
+    def test_server(server_name: str, request: Request) -> MCPServerResponse:
+        _require_local_admin(request, settings)
         try:
             result = registry.refresh_server(server_name)
         except MCPRegistryNotFoundError as exc:
@@ -104,8 +106,8 @@ def create_mcp_registry_router(
         "/mcp/servers/{server_name}",
         status_code=status.HTTP_204_NO_CONTENT,
     )
-    def delete_server(server_name: str) -> Response:
-        _require_local_admin(settings)
+    def delete_server(server_name: str, request: Request) -> Response:
+        _require_local_admin(request, settings)
         try:
             registry.delete_server(server_name)
         except MCPRegistryNotFoundError as exc:
@@ -117,9 +119,9 @@ def create_mcp_registry_router(
     return router
 
 
-def _require_local_admin(settings: Settings) -> None:
-    if settings.auth_mode != "disabled":
-        raise HTTPException(
-            status_code=403,
-            detail="MCP registry writes are available only in loopback local mode",
-        )
+def _require_local_admin(request: Request, settings: Settings) -> None:
+    require_local_capability(
+        request,
+        settings,
+        detail="MCP registry writes are available only in local mode",
+    )

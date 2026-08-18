@@ -428,7 +428,7 @@ class MCPLifecycleTests(unittest.TestCase):
                 "enabled": True,
                 "max_retries": 0,
             }
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 created = client.put(
                     "/api/v1/mcp/servers/frontend_demo",
                     json=payload,
@@ -513,7 +513,9 @@ class MCPLifecycleTests(unittest.TestCase):
             self.assertIn("/mcp/servers/${encodeURIComponent(name)}", frontend_js)
             self.assertIn("remove_env_secrets", frontend_js)
 
-    def test_frontend_registry_writes_are_local_only(self) -> None:
+    def test_frontend_registry_writes_accept_only_trusted_gateway_local_mode(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             settings = Settings(
                 llm_provider="fake",
@@ -523,17 +525,58 @@ class MCPLifecycleTests(unittest.TestCase):
                 gateway_trust_secret="test-gateway-secret",
                 mcp_config_path=str(Path(temp_dir) / "mcp.json"),
             )
-            with TestClient(create_app(settings=settings)) as client:
-                response = client.put(
+            with TestClient(
+                create_app(settings=settings),
+                client=("192.168.97.1", 50000),
+            ) as client:
+                oidc_gateway = client.put(
                     "/api/v1/mcp/servers/remote_forbidden",
+                    headers={
+                        "X-Authenticated-User": "remote-user",
+                        "X-Gateway-Auth": "test-gateway-secret",
+                    },
                     json={
                         "transport": "stdio",
                         "command": sys.executable,
+                        "enabled": False,
                     },
                 )
-            self.assertFalse((Path(temp_dir) / "mcp.json").exists())
+                forged_local = client.put(
+                    "/api/v1/mcp/servers/forged_local",
+                    headers={
+                        "X-Authenticated-User": "attacker",
+                        "X-Gateway-Auth": "wrong-secret",
+                        "X-Gateway-Mode": "local",
+                    },
+                    json={
+                        "transport": "stdio",
+                        "command": sys.executable,
+                        "enabled": False,
+                    },
+                )
+                local_gateway = client.put(
+                    "/api/v1/mcp/servers/local_allowed",
+                    headers={
+                        "X-Authenticated-User": "local-user",
+                        "X-Gateway-Auth": "test-gateway-secret",
+                        "X-Gateway-Mode": "local",
+                    },
+                    json={
+                        "transport": "stdio",
+                        "command": sys.executable,
+                        "enabled": False,
+                    },
+                )
+            persisted = Path(temp_dir) / "mcp.json"
 
-        self.assertEqual(response.status_code, 403)
+            self.assertEqual(oidc_gateway.status_code, 403)
+            self.assertEqual(forged_local.status_code, 401)
+            self.assertEqual(local_gateway.status_code, 200)
+            self.assertTrue(persisted.is_file())
+            saved = persisted.read_text(encoding="utf-8")
+            self.assertNotIn("remote_forbidden", saved)
+            self.assertNotIn("forged_local", saved)
+            self.assertIn("local_allowed", saved)
 
     def test_frontend_registry_registers_streamable_http_with_secret_header(self) -> None:
         server = _FakeHTTPMCPServer()
@@ -559,7 +602,7 @@ class MCPLifecycleTests(unittest.TestCase):
                     mcp_config_path=str(config_path),
                 )
             )
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 response = client.put(
                     "/api/v1/mcp/servers/frontend_http",
                     json={
@@ -595,7 +638,10 @@ class MCPLifecycleTests(unittest.TestCase):
             embedding_provider="local",
             model_secret_backend="memory",
         )
-        with TestClient(create_app(settings=settings)) as client:
+        with TestClient(
+            create_app(settings=settings),
+            client=("127.0.0.1", 50000),
+        ) as client:
             registry = client.get("/api/v1/mcp/servers")
             create = client.put(
                 "/api/v1/mcp/servers/not_writable",

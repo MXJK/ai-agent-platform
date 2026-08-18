@@ -1,10 +1,9 @@
 from pathlib import Path as FileSystemPath
 from collections import defaultdict
-from ipaddress import ip_address
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request, status
 
-from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.core import Settings, request_user_id, require_local_capability
 from ai_agent_platform.integrations import (
     DirectoryPicker,
     DirectoryPickerBusyError,
@@ -347,25 +346,16 @@ def _directory_name(directory: FileSystemPath) -> str:
     return directory.name or str(directory)
 
 
-def _is_loopback_request(request: Request) -> bool:
-    if request.client is None:
-        return False
-    try:
-        return ip_address(request.client.host).is_loopback
-    except ValueError:
-        return request.client.host == "localhost"
-
-
 def _authorize_native_directory_picker(request: Request, settings: Settings) -> None:
     mode = settings.native_directory_picker_mode
-    if mode == "trusted_local_gateway":
-        request_user_id(request, settings)
-        return
-    if (
-        mode == "loopback"
-        and settings.auth_mode == "disabled"
-        and _is_loopback_request(request)
+    if mode == "trusted_local_gateway" or (
+        mode == "loopback" and settings.auth_mode == "disabled"
     ):
+        require_local_capability(
+            request,
+            settings,
+            detail=_NATIVE_PICKER_LOCAL_ONLY_DETAIL,
+        )
         return
     raise HTTPException(
         status_code=403,

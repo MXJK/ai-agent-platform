@@ -91,14 +91,6 @@ values = {
 if gateway_auth_mode == "local":
     values.update(
         {
-            "GATEWAY_LISTEN_ADDRESS": os.getenv(
-                "LOCAL_GATEWAY_LISTEN_ADDRESS",
-                "127.0.0.1:8000",
-            ),
-            "GATEWAY_UPSTREAM_URL": os.getenv(
-                "LOCAL_GATEWAY_UPSTREAM_URL",
-                f"http://127.0.0.1:{app_port}",
-            ),
             "GATEWAY_LOCAL_USER_ID": os.getenv(
                 "GATEWAY_LOCAL_USER_ID",
                 dotenv.get("GATEWAY_LOCAL_USER_ID", "demo_user"),

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import Settings, require_local_capability
 from ai_agent_platform.model_registry import (
     ModelConnectionTestError,
     ModelDiscoveryError,
@@ -45,8 +45,9 @@ def create_model_registry_router(
     def upsert_connection(
         provider: str,
         request: ProviderConnectionUpsertRequest,
+        http_request: Request,
     ) -> ProviderConnectionResponse:
-        _require_local_admin(settings)
+        _require_local_admin(http_request, settings)
         try:
             value = model_registry.upsert_connection(
                 provider=provider,
@@ -62,8 +63,8 @@ def create_model_registry_router(
         "/model-registry/connections/{provider}",
         status_code=status.HTTP_204_NO_CONTENT,
     )
-    def delete_connection(provider: str) -> Response:
-        _require_local_admin(settings)
+    def delete_connection(provider: str, request: Request) -> Response:
+        _require_local_admin(request, settings)
         try:
             model_registry.delete_connection(provider)
         except ModelRegistryNotFoundError as exc:
@@ -76,8 +77,11 @@ def create_model_registry_router(
         "/model-registry/connections/{provider}/test",
         response_model=ModelConnectionTestResponse,
     )
-    def test_connection(provider: str) -> ModelConnectionTestResponse:
-        _require_local_admin(settings)
+    def test_connection(
+        provider: str,
+        request: Request,
+    ) -> ModelConnectionTestResponse:
+        _require_local_admin(request, settings)
         try:
             value = model_registry.test_provider_connection(provider)
         except ModelRegistryNotFoundError as exc:
@@ -90,8 +94,8 @@ def create_model_registry_router(
         "/model-registry/connections/{provider}/available-models",
         response_model=ModelDiscoveryResponse,
     )
-    def discover_models(provider: str) -> ModelDiscoveryResponse:
-        _require_local_admin(settings)
+    def discover_models(provider: str, request: Request) -> ModelDiscoveryResponse:
+        _require_local_admin(request, settings)
         try:
             value = model_registry.discover_models(provider)
         except ModelRegistryNotFoundError as exc:
@@ -107,8 +111,11 @@ def create_model_registry_router(
         response_model=RegisteredModelResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_model(request: RegisteredModelCreateRequest) -> RegisteredModelResponse:
-        _require_local_admin(settings)
+    def create_model(
+        request: RegisteredModelCreateRequest,
+        http_request: Request,
+    ) -> RegisteredModelResponse:
+        _require_local_admin(http_request, settings)
         try:
             value = model_registry.register_model(**request.model_dump())
         except ModelRegistryNotFoundError as exc:
@@ -126,8 +133,9 @@ def create_model_registry_router(
     def update_model(
         model_id: str,
         request: RegisteredModelUpdateRequest,
+        http_request: Request,
     ) -> RegisteredModelResponse:
-        _require_local_admin(settings)
+        _require_local_admin(http_request, settings)
         try:
             value = model_registry.update_model(model_id, **request.model_dump())
         except ModelRegistryNotFoundError as exc:
@@ -142,8 +150,8 @@ def create_model_registry_router(
         "/model-registry/models/{model_id}",
         status_code=status.HTTP_204_NO_CONTENT,
     )
-    def delete_model(model_id: str) -> Response:
-        _require_local_admin(settings)
+    def delete_model(model_id: str, request: Request) -> Response:
+        _require_local_admin(request, settings)
         try:
             model_registry.delete_model(model_id)
         except ModelRegistryNotFoundError as exc:
@@ -202,12 +210,12 @@ def create_model_registry_router(
     return router
 
 
-def _require_local_admin(settings: Settings) -> None:
-    if settings.auth_mode != "disabled":
-        raise HTTPException(
-            status_code=403,
-            detail="model registry writes are available only in loopback local mode",
-        )
+def _require_local_admin(request: Request, settings: Settings) -> None:
+    require_local_capability(
+        request,
+        settings,
+        detail="model registry writes are available only in local mode",
+    )
 
 
 def _require_session(session_service: SessionService, session_id: str):

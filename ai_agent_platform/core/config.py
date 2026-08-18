@@ -470,6 +470,11 @@ class Settings:
             raise ValueError(
                 "SQLite local state requires TASK_QUEUE_BACKEND=in_process"
             )
+        if self.session_repository != self.agent_run_store:
+            raise ValueError(
+                "session_repository and agent_run_store must use the same "
+                "backend for atomic Query start"
+            )
         if not self.local_state_path.strip():
             raise ValueError("local_state_path must not be empty")
         for name, value in (

@@ -307,6 +307,16 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "session_repository"):
             Settings(session_repository="redis")
 
+    def test_rejects_non_atomic_session_and_run_store_pair(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "session_repository and agent_run_store must use the same backend",
+        ):
+            Settings(
+                session_repository="memory",
+                agent_run_store="postgres",
+            )
+
     def test_rejects_invalid_rag_lexical_weight(self) -> None:
         with self.assertRaisesRegex(ValueError, "rag_lexical_weight"):
             Settings(rag_lexical_weight=1.1)

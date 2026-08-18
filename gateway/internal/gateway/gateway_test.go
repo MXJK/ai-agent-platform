@@ -99,13 +99,16 @@ func TestProxyStripsClientSuppliedTrustedIdentityHeaders(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, gateway.URL+"/resource", nil)
 	request.Header.Set("X-Authenticated-User", "mallory")
 	request.Header.Set("X-Gateway-Auth", "forged")
+	request.Header.Set(gatewayModeHeader, localGatewayMode)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
 	headers := <-received
-	if headers.Get("X-Authenticated-User") != "" || headers.Get("X-Gateway-Auth") != "" {
+	if headers.Get("X-Authenticated-User") != "" ||
+		headers.Get("X-Gateway-Auth") != "" ||
+		headers.Get(gatewayModeHeader) != "" {
 		t.Fatalf("trusted identity headers reached upstream: %v", headers)
 	}
 }

@@ -147,11 +147,12 @@ root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
     "mcp_allowed": true,
     "skills_allowed": true,
     "skill_allowlist": ["review"],
-    "tool_allowlist": ["file_symbol_locator", "repo.search_code"]
+    "tool_allowlist": ["file_symbol_locator", "repo.search_code"],
+    "sandbox_mode": "docker",
+    "sandbox_allowed_commands": ["python", "pytest"]
   },
   "runtime": {
     "llm_model": "example-model",
-    "sandbox_mode": "docker",
     "session_token_budget": 50000
   },
   "project_session": {
@@ -165,17 +166,21 @@ root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
 ```
 
 用户文件和进程环境可以建立进程策略；项目文件不能修改数据库、认证、API Key/
-Secret 后端、允许根目录、真实写入开关或 MCP 配置路径，也不能把 Docker sandbox
-镜像交给项目选择、把 Docker 降为 local、放宽审批语义、扩张命令/工具/Skill allowlist，
-或越过 `mcp_allowed=false`、
-`skills_allowed=false`。项目层允许选择更小的权限集合；进程 `tool_allowlist` 只在启动
+Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙箱模式、镜像、命令白名单、
+超时、输出上限、workspace parent 和生命周期都在进程启动时构造执行器，因此全部属于
+`process_security`，项目配置不能产生只在快照中变化、实际执行却不生效的覆盖值。项目层
+仍可收紧审批，并从进程允许的工具/Skill/MCP 集合中选择更小子集，但不能越过
+`mcp_allowed=false`、`skills_allowed=false` 或进程 allowlist。进程 `tool_allowlist` 只在启动
 时裁剪全局能力上限。每个 Run 再从进程 Registry 建立带 base/local/MCP 来源和 namespace
 的不可变 `ToolCatalog`，由共享 `ToolPoolBuilder` 将项目 `enabled_tools`、Agent/模式、模型
 能力、Workspace role、中央 display deny、显式 deny、Sandbox 和 Skill 依赖求交为
 `EffectiveToolPool`，不修改源 `ToolRegistry`。未知工具、大小写冲突、保留 namespace
 冒用、尝试突破进程上限或非法恢复都会 fail closed。环境变量
 继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
-`SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；新的
+`SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；存储回退只在目标 Store 支持该
+后端时生效，因此 local profile 的 SQLite 不会传播给只支持 memory/PostgreSQL 的模型
+注册表或 ChangeSet Store。Session 与 Run Store 还必须选择同一后端，否则配置解析阶段
+直接失败，避免把 Query 原子启动问题拖到运行时装配。新的
 `AI_AGENT_PLATFORM_<FIELD>` 命名空间提供未知字段检查。
 
 解析结果是冻结的 `ResolvedConfig`，包含兼容 `settings` 视图、三个冻结分区以及每个
@@ -445,8 +450,10 @@ Provider 回退。已经发出首个文本 delta 后，失败会以 `partial_res
 不会在其他模型上重放。
 
 重启安全的全局配置应使用 `MODEL_REGISTRY_STORE=postgres`，API Key 应使用
-`MODEL_SECRET_BACKEND=keyring`。写接口仅在本地 `AUTH_MODE=disabled` 模式开放，
-此模式会强制绑定回环地址。内存后端只应用于测试或明确的临时运行。
+`MODEL_SECRET_BACKEND=keyring`。模型连接保存/测试/发现和模型增删改只开放给本机能力：
+要么是 `AUTH_MODE=disabled` 的直连 loopback 请求，要么同时通过共享密钥身份验证和
+`X-Gateway-Mode: local` 证明的可信本地网关请求。普通 OIDC 身份不能执行这些管理操作。
+内存后端只应用于测试或明确的临时运行。
 
 ## 动态模型准入与 Token 预算
 
@@ -649,8 +656,9 @@ MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断�
 `MCP_CONFIG_PATH=/path/to/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
 同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
 否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
-写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。管理写接口仅在
-`AUTH_MODE=disabled` 的 loopback 本机模式开放。
+写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。管理写接口使用与
+模型注册表、原生目录选择器相同的本机能力边界：接受关闭认证的直连 loopback，或接受
+共享密钥身份与 `X-Gateway-Mode: local` 均有效的可信本地网关；OIDC/远端请求仍拒绝。
 
 管理 API 为 `GET /api/v1/mcp/servers`、
 `PUT /api/v1/mcp/servers/{name}`、
@@ -709,7 +717,8 @@ Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目�
 Effective Tool Pool 快照和额外目录，形成
 可 JSON 往返的深度不可变 `RunContextSnapshot`。用户消息、queued Run 及其中的模型/配置/
 上下文/工具快照在同一 Query UoW 中提交，提交成功后才派发只含 `run_id` 的 Worker 任务。
-内建运行时要求 Session 与 Run store 使用同一受支持后端，无法建立原子 UoW 时启动即失败。
+配置解析要求 Session 与 Run store 使用同一受支持后端；无法建立原子 UoW 的组合在运行时
+资源构造前就会失败。
 Worker 重启后从 Run store 恢复快照，不重新读取已经变化的会话历史、模型偏好或指令文件。
 v3 恢复会校验 catalog/pool 摘要与 hash、工具顺序、当前 Registry 中的 callable 以及
 Schema/provider/权限/超时/重试等定义；新增无关全局工具不会进入旧 Run，缺失、漂移或
@@ -741,8 +750,10 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 
 `NATIVE_DIRECTORY_PICKER_MODE` 明确描述哪个 HTTP 边界可以在运行 Agent 的同一台机器上
 打开 macOS Finder：默认 `loopback` 只接受 `AUTH_MODE=disabled` 的直连 loopback 请求；
-`trusted_local_gateway` 接受通过现有 `X-Gateway-Auth` 共享密钥验证的本机网关请求，适配
-Docker 网桥使上游看到 `192.168.*` 地址的情况；`disabled` 完全关闭原生窗口。请求不
+`trusted_local_gateway` 同时要求通过 `X-Gateway-Auth` 共享密钥验证，并携带只有 local
+网关会在剥离调用方同名 Header 后重新签发的 `X-Gateway-Mode: local`。OIDC 和未认证网关
+都会移除该本机能力声明，因此即使拥有正常远端身份也不能打开服务器 Finder；该模式仍
+适配 Docker 网桥使上游看到 `192.168.*` 地址的情况。`disabled` 完全关闭原生窗口。请求不
 满足配置策略或系统选择能力不可用时，前端回退受控网页目录浏览器。取消窗口不会
 产生变更，
 任何选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验。
@@ -1309,12 +1320,18 @@ go vet ./gateway/...
 
 生产环境应配置 `GATEWAY_AUTH_MODE=oidc`、Issuer、Audience、JWKS URL 和共享的
 `GATEWAY_TRUST_SECRET`；FastAPI 则配置 `AUTH_MODE=trusted_header` 和相同 Secret。
-网关会移除伪造身份 Header、验证 Bearer Token、剥离 Token，再注入可信 Subject。
+网关会移除伪造身份和模式 Header、验证 Bearer Token、剥离 Token，再注入可信 Subject。
 本地只读开发可以让两侧认证模式都保持关闭。需要真实写入时，使用
-`GATEWAY_AUTH_MODE=local`；它会移除调用方身份和 Authorization Header，再注入
-`GATEWAY_LOCAL_USER_ID`，且标准 Compose 只把端口发布到 `127.0.0.1`。local 模式不得
+`GATEWAY_AUTH_MODE=local`；它会移除调用方身份、模式和 Authorization Header，再注入
+`GATEWAY_LOCAL_USER_ID`、共享密钥以及 `X-Gateway-Mode: local`，且标准 Compose 只把端口
+发布到 `127.0.0.1`。该本机证明统一保护 Finder、模型注册表管理和 MCP 注册表管理；
+OIDC 模式绝不签发这个本机能力声明。local 模式不得
 暴露到局域网或公网。若该本机网关还需要打开同机 Finder，应同时设置
 `NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway`；OIDC/共享服务应保持 `disabled`。
+
+Compose 固定容器内监听 `:8080` 并通过 `host.docker.internal:${APP_PORT}` 访问宿主 FastAPI；
+`.env` 中公开的 body、并发、限流、超时和日志参数会透传给容器。8000 是标准 loopback
+入口，8080 仅保留兼容别名。
 
 这是会话和工作区记忆的可信身份边界，并不代表每一个旧版知识库接口都已具备完整的
 多租户授权。

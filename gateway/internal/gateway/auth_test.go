@@ -57,6 +57,7 @@ func TestOIDCMiddlewareValidatesJWTAndInjectsTrustedIdentity(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-Authenticated-User", "mallory")
 	request.Header.Set("X-Gateway-Auth", "forged")
+	request.Header.Set(gatewayModeHeader, localGatewayMode)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +75,9 @@ func TestOIDCMiddlewareValidatesJWTAndInjectsTrustedIdentity(t *testing.T) {
 	}
 	if headers.Get("X-Gateway-Auth") != "unit-test-trust-secret" {
 		t.Fatalf("gateway trust secret was not injected")
+	}
+	if headers.Get(gatewayModeHeader) != "" {
+		t.Fatalf("OIDC gateway forwarded local mode attestation")
 	}
 }
 
@@ -145,6 +149,7 @@ func TestLocalIdentityMiddlewareReplacesCallerIdentity(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer must-not-pass")
 	request.Header.Set("X-Authenticated-User", "mallory")
 	request.Header.Set("X-Gateway-Auth", "forged")
+	request.Header.Set(gatewayModeHeader, "oidc")
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -161,6 +166,13 @@ func TestLocalIdentityMiddlewareReplacesCallerIdentity(t *testing.T) {
 	}
 	if headers.Get("X-Gateway-Auth") != "unit-test-trust-secret" {
 		t.Fatal("gateway trust secret was not injected")
+	}
+	if headers.Get(gatewayModeHeader) != localGatewayMode {
+		t.Fatalf(
+			"gateway mode = %q, want %q",
+			headers.Get(gatewayModeHeader),
+			localGatewayMode,
+		)
 	}
 }
 

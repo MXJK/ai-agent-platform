@@ -278,7 +278,10 @@ class ModelRegistryApiTests(unittest.TestCase):
             embedding_provider="local",
             model_secret_backend="memory",
         )
-        with TestClient(create_app(settings=settings)) as client:
+        with TestClient(
+            create_app(settings=settings),
+            client=("127.0.0.1", 50000),
+        ) as client:
             client.put(
                 "/api/v1/model-registry/connections/openai",
                 json={
@@ -319,7 +322,10 @@ class ModelRegistryApiTests(unittest.TestCase):
                 model_secret_backend="memory",
                 workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
             )
-            with TestClient(create_app(settings=settings)) as client:
+            with TestClient(
+                create_app(settings=settings),
+                client=("127.0.0.1", 50000),
+            ) as client:
                 client.put(
                     "/api/v1/model-registry/connections/openai",
                     json={
@@ -363,7 +369,8 @@ class ModelRegistryApiTests(unittest.TestCase):
                 provider_adapters={"openai": provider_adapter},
             )
             with TestClient(
-                create_app(settings=settings, llm_client=llm_client)
+                create_app(settings=settings, llm_client=llm_client),
+                client=("127.0.0.1", 50000),
             ) as client:
                 session_id = client.post(
                     "/api/v1/sessions",
@@ -493,7 +500,9 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('"fallback_enabled": false', response.text)
 
-    def test_registry_writes_are_rejected_outside_local_auth_mode(self) -> None:
+    def test_registry_writes_accept_only_direct_or_trusted_gateway_local_mode(
+        self,
+    ) -> None:
         settings = Settings(
             llm_provider="fake",
             llm_model="demo-stream-model",
@@ -502,17 +511,73 @@ class ModelRegistryApiTests(unittest.TestCase):
             auth_mode="trusted_header",
             gateway_trust_secret="test-gateway-secret",
         )
-        with TestClient(create_app(settings=settings)) as client:
-            response = client.put(
+        with TestClient(
+            create_app(settings=settings),
+            client=("192.168.97.1", 50000),
+        ) as client:
+            oidc_gateway = client.put(
                 "/api/v1/model-registry/connections/openai",
+                headers={
+                    "X-Authenticated-User": "remote-user",
+                    "X-Gateway-Auth": "test-gateway-secret",
+                },
                 json={
                     "display_name": "OpenAI",
-                    "api_key": "must-not-be-stored",
+                    "api_key": "remote-key-must-not-be-stored",
+                    "enabled": True,
+                },
+            )
+            forged_local = client.put(
+                "/api/v1/model-registry/connections/openai",
+                headers={
+                    "X-Authenticated-User": "attacker",
+                    "X-Gateway-Auth": "wrong-secret",
+                    "X-Gateway-Mode": "local",
+                },
+                json={
+                    "display_name": "OpenAI",
+                    "api_key": "forged-key-must-not-be-stored",
+                    "enabled": True,
+                },
+            )
+            local_gateway = client.put(
+                "/api/v1/model-registry/connections/openai",
+                headers={
+                    "X-Authenticated-User": "local-user",
+                    "X-Gateway-Auth": "test-gateway-secret",
+                    "X-Gateway-Mode": "local",
+                },
+                json={
+                    "display_name": "OpenAI",
+                    "api_key": "local-test-key",
                     "enabled": True,
                 },
             )
 
-        self.assertEqual(response.status_code, 403)
+        remote_settings = Settings(
+            llm_provider="fake",
+            llm_model="demo-stream-model",
+            embedding_provider="local",
+            model_secret_backend="memory",
+        )
+        with TestClient(
+            create_app(settings=remote_settings),
+            client=("203.0.113.10", 50000),
+        ) as client:
+            remote_direct = client.put(
+                "/api/v1/model-registry/connections/openai",
+                json={
+                    "display_name": "OpenAI",
+                    "api_key": "remote-direct-key-must-not-be-stored",
+                    "enabled": True,
+                },
+            )
+
+        self.assertEqual(oidc_gateway.status_code, 403)
+        self.assertEqual(forged_local.status_code, 401)
+        self.assertEqual(local_gateway.status_code, 200)
+        self.assertNotIn("local-test-key", local_gateway.text)
+        self.assertEqual(remote_direct.status_code, 403)
 
 
 class PostgresModelRegistryTests(unittest.TestCase):
