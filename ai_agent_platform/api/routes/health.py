@@ -31,7 +31,7 @@ def create_health_router(
             status="ok" if ready and not degraded else ("degraded" if ready else "not_ready"),
             service=service_name,
             session_storage=session_storage,
-            persistent_sessions=session_storage == "postgres",
+            persistent_sessions=session_storage in {"postgres", "sqlite"},
             ready=ready,
             mcp_servers=mcp_servers,
         )

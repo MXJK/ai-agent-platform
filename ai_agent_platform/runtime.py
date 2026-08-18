@@ -39,6 +39,9 @@ from ai_agent_platform.integrations import (
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
+from ai_agent_platform.local_state import LocalStateDatabase
+from ai_agent_platform.memory import UserMemoryService
+from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
 from ai_agent_platform.model_registry import (
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
@@ -59,6 +62,9 @@ from ai_agent_platform.repositories import (
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
     PostgresWorkspaceRepository,
+    SQLiteAgentRunRepository,
+    SQLiteSessionRepository,
+    SQLiteWorkspaceRepository,
     create_query_unit_of_work,
 )
 from ai_agent_platform.services import (
@@ -79,6 +85,7 @@ from ai_agent_platform.skills import (
     SkillDiscovery,
     SkillService,
 )
+from ai_agent_platform.tools import register_memory_tools
 
 
 logger = logging.getLogger(__name__)
@@ -114,6 +121,7 @@ class RuntimeContainer:
     metrics: MetricsRegistry | None = None
     directory_picker: DirectoryPicker | None = None
     task_queue: Any = None
+    local_state_database: LocalStateDatabase | None = field(default=None, repr=False)
     session_repository: Any = None
     agent_run_store: Any = None
     change_set_store: Any = None
@@ -127,6 +135,7 @@ class RuntimeContainer:
     game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
     project_memory_service: ProjectMemoryService | None = None
+    user_memory_service: UserMemoryService | None = None
     permission_resolver: PermissionResolver | None = None
     change_set_service: ChangeSetService | None = None
     rag_service: RAGService | None = None
@@ -237,14 +246,45 @@ class ApplicationFactory:
             )
             container.register_cleanup("task_queue", container.task_queue.close)
 
-            container.session_repository = self.create_session_repository(settings)
-            container.agent_run_store = self.create_agent_run_store(settings)
+            if _uses_local_state(settings):
+                container.local_state_database = self.create_local_state_database(
+                    settings
+                )
+            session_kwargs: dict[str, Any] = {}
+            if "local_state_database" in inspect.signature(
+                self.create_session_repository
+            ).parameters:
+                session_kwargs["local_state_database"] = (
+                    container.local_state_database
+                )
+            container.session_repository = self.create_session_repository(
+                settings, **session_kwargs
+            )
+            run_store_kwargs: dict[str, Any] = {}
+            if "local_state_database" in inspect.signature(
+                self.create_agent_run_store
+            ).parameters:
+                run_store_kwargs["local_state_database"] = (
+                    container.local_state_database
+                )
+            container.agent_run_store = self.create_agent_run_store(
+                settings, **run_store_kwargs
+            )
             container.change_set_store = self.create_change_set_store(settings)
             container.document_store = self.create_document_store(settings)
             container.knowledge_base_store = self.create_knowledge_base_store(
                 settings
             )
-            container.workspace_store = self.create_workspace_store(settings)
+            workspace_kwargs: dict[str, Any] = {}
+            if "local_state_database" in inspect.signature(
+                self.create_workspace_store
+            ).parameters:
+                workspace_kwargs["local_state_database"] = (
+                    container.local_state_database
+                )
+            container.workspace_store = self.create_workspace_store(
+                settings, **workspace_kwargs
+            )
 
             container.usage_ledger = UsageLedgerService(
                 container.session_repository,
@@ -278,6 +318,7 @@ class ApplicationFactory:
                 llm_client=container.llm_client,
                 metrics=container.metrics,
                 usage_ledger=container.usage_ledger,
+                local_state_database=container.local_state_database,
             )
             container.project_memory_service.set_index_outbox_submitter(
                 lambda trigger_id: container.task_queue.submit(
@@ -285,6 +326,19 @@ class ApplicationFactory:
                     container.project_memory_service.process_index_outbox,
                     trigger_id=trigger_id,
                 )
+            )
+            container.project_memory_service.resume_index_outbox()
+            container.user_memory_service = UserMemoryService(
+                repository=(
+                    SQLiteUserMemoryRepository(
+                        database=container.local_state_database
+                    )
+                    if container.local_state_database is not None
+                    else None
+                ),
+                enabled=settings.user_memory_enabled,
+                default_mode=settings.user_memory_mode,
+                max_context_chars=settings.user_profile_max_context_chars,
             )
             container.permission_resolver = PermissionResolver()
             container.execution_workspace_runtime = ExecutionWorkspaceRuntime(
@@ -359,6 +413,12 @@ class ApplicationFactory:
             ).parameters:
                 tool_factory_kwargs["execution_workspace_runtime"] = (
                     container.execution_workspace_runtime
+                )
+            if "session_repository" in inspect.signature(
+                self.create_tool_registry
+            ).parameters:
+                tool_factory_kwargs["session_repository"] = (
+                    container.session_repository
                 )
             container.tool_registry = self.create_tool_registry(
                 settings,
@@ -475,6 +535,7 @@ class ApplicationFactory:
                 tool_pool_builder=container.tool_pool_builder,
                 model_registry=container.model_registry,
                 execution_workspace_runtime=container.execution_workspace_runtime,
+                user_memory_service=container.user_memory_service,
             )
             container.query_uow = create_query_unit_of_work(
                 session_service=container.session_service,
@@ -495,6 +556,7 @@ class ApplicationFactory:
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
                 project_memory_service=container.project_memory_service,
+                user_memory_service=container.user_memory_service,
                 metrics=container.metrics,
                 task_queue=container.task_queue,
                 max_context_messages=settings.llm_max_context_messages,
@@ -553,20 +615,41 @@ class ApplicationFactory:
             metrics=metrics,
         )
 
-    def create_session_repository(self, settings: Settings) -> Any:
+    def create_local_state_database(self, settings: Settings) -> LocalStateDatabase:
+        return LocalStateDatabase(settings.local_state_path)
+
+    def create_session_repository(
+        self,
+        settings: Settings,
+        *,
+        local_state_database: LocalStateDatabase | None = None,
+    ) -> Any:
         if settings.session_repository == "memory":
             return InMemorySessionRepository()
         if settings.session_repository == "postgres":
             return PostgresSessionRepository(database_url=settings.database_url)
+        if settings.session_repository == "sqlite":
+            if local_state_database is None:
+                raise ValueError("SESSION_REPOSITORY=sqlite requires local state")
+            return SQLiteSessionRepository(database=local_state_database)
         raise ValueError(
             f"unsupported session repository: {settings.session_repository}"
         )
 
-    def create_agent_run_store(self, settings: Settings) -> Any:
+    def create_agent_run_store(
+        self,
+        settings: Settings,
+        *,
+        local_state_database: LocalStateDatabase | None = None,
+    ) -> Any:
         if settings.agent_run_store == "memory":
             return InMemoryAgentRunStore()
         if settings.agent_run_store == "postgres":
             return PostgresAgentRunRepository(database_url=settings.database_url)
+        if settings.agent_run_store == "sqlite":
+            if local_state_database is None:
+                raise ValueError("AGENT_RUN_STORE=sqlite requires local state")
+            return SQLiteAgentRunRepository(database=local_state_database)
         raise ValueError(f"unsupported agent run store: {settings.agent_run_store}")
 
     def create_change_set_store(self, settings: Settings) -> Any:
@@ -594,11 +677,20 @@ class ApplicationFactory:
             f"unsupported knowledge-base store: {settings.document_store}"
         )
 
-    def create_workspace_store(self, settings: Settings) -> Any:
+    def create_workspace_store(
+        self,
+        settings: Settings,
+        *,
+        local_state_database: LocalStateDatabase | None = None,
+    ) -> Any:
         if settings.workspace_store == "memory":
             return InMemoryWorkspaceRepository()
         if settings.workspace_store == "postgres":
             return PostgresWorkspaceRepository(database_url=settings.database_url)
+        if settings.workspace_store == "sqlite":
+            if local_state_database is None:
+                raise ValueError("WORKSPACE_STORE=sqlite requires local state")
+            return SQLiteWorkspaceRepository(database=local_state_database)
         raise ValueError(f"unsupported workspace store: {settings.workspace_store}")
 
     def create_llm_client(self, settings: Settings) -> LLMClient:
@@ -675,6 +767,7 @@ class ApplicationFactory:
         llm_client: LLMClient,
         metrics: MetricsRegistry,
         usage_ledger: UsageLedgerService,
+        local_state_database: LocalStateDatabase | None = None,
     ) -> ProjectMemoryService:
         return create_project_memory_service(
             settings,
@@ -682,6 +775,7 @@ class ApplicationFactory:
             llm_client=llm_client,
             metrics=metrics,
             usage_ledger=usage_ledger,
+            local_state_database=local_state_database,
         )
 
     def create_rag_service(
@@ -721,6 +815,7 @@ class ApplicationFactory:
         *,
         mcp_providers: list[MCPToolProvider],
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
+        session_repository: Any | None = None,
     ) -> ToolRegistry:
         registry = create_coding_tool_registry(
             mcp_providers=mcp_providers,
@@ -735,6 +830,8 @@ class ApplicationFactory:
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
             execution_workspace_runtime=execution_workspace_runtime,
         )
+        if session_repository is not None:
+            register_memory_tools(registry, session_repository)
         if settings.tool_allowlist is not None:
             registry.restrict_to(settings.tool_allowlist)
         return registry
@@ -891,6 +988,19 @@ def build_runtime(
     container.resolved_config = resolved_config
     container.config_snapshot = resolved_config.safe_snapshot()
     return container
+
+
+def _uses_local_state(settings: Settings) -> bool:
+    return settings.user_memory_enabled or any(
+        value == "sqlite"
+        for value in (
+            settings.session_repository,
+            settings.agent_run_store,
+            settings.workspace_store,
+            settings.project_memory_store,
+            settings.project_memory_vector_store,
+        )
+    )
 
 
 __all__ = [

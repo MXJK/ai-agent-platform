@@ -8,6 +8,80 @@ from pathlib import Path
 import re
 
 
+RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "custom": {},
+    "local": {
+        "session_repository": "sqlite",
+        "agent_run_store": "sqlite",
+        "change_set_store": "memory",
+        "document_store": "memory",
+        "workspace_store": "sqlite",
+        "langgraph_checkpointer": "memory",
+        "model_registry_store": "memory",
+        "rag_vector_store": "memory",
+        "project_memory_store": "sqlite",
+        "project_memory_vector_store": "sqlite",
+        "project_memory_enabled": True,
+        "project_memory_mode": "review",
+        "user_memory_enabled": True,
+        "user_memory_mode": "review",
+        "rag_reranker_provider": "none",
+        "task_queue_backend": "in_process",
+    },
+    "production": {
+        "session_repository": "postgres",
+        "agent_run_store": "postgres",
+        "change_set_store": "postgres",
+        "document_store": "postgres",
+        "workspace_store": "postgres",
+        "langgraph_checkpointer": "postgres",
+        "model_registry_store": "postgres",
+        "rag_vector_store": "qdrant",
+        "project_memory_store": "postgres",
+        "project_memory_vector_store": "qdrant",
+        "project_memory_enabled": False,
+        "project_memory_mode": "off",
+        "user_memory_enabled": False,
+        "user_memory_mode": "off",
+        "task_queue_backend": "celery",
+    },
+}
+
+_RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
+    profile: {
+        name: value
+        for name, value in defaults.items()
+        if name
+        in {
+            "session_repository",
+            "agent_run_store",
+            "change_set_store",
+            "document_store",
+            "workspace_store",
+            "langgraph_checkpointer",
+            "model_registry_store",
+            "rag_vector_store",
+            "project_memory_store",
+            "project_memory_vector_store",
+            "task_queue_backend",
+        }
+    }
+    for profile, defaults in RUNTIME_PROFILE_DEFAULTS.items()
+}
+
+
+def runtime_profile_defaults(profile: str) -> dict[str, object]:
+    """Return a copy of the defaults owned by one deployment profile."""
+
+    try:
+        return dict(RUNTIME_PROFILE_DEFAULTS[profile])
+    except KeyError as exc:
+        supported = ", ".join(sorted(RUNTIME_PROFILE_DEFAULTS))
+        raise ValueError(
+            f"runtime_profile must be one of: {supported}"
+        ) from exc
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "ai-agent-platform"
@@ -23,6 +97,10 @@ class Settings:
     database_url: str = field(
         default="postgresql://localhost:5432/ai_agent_platform",
         repr=False,
+    )
+    runtime_profile: str = "custom"
+    local_state_path: str = str(
+        Path.home() / ".ai-agent-platform" / "state.sqlite3"
     )
     session_repository: str = "memory"
     agent_run_store: str = "memory"
@@ -68,6 +146,8 @@ class Settings:
     qdrant_collection_name: str = "knowledge_chunks"
     project_memory_enabled: bool = False
     project_memory_mode: str = "off"
+    project_memory_store: str = "memory"
+    project_memory_vector_store: str = "memory"
     project_memory_candidate_threshold: float = 0.60
     project_memory_auto_threshold: float = 0.85
     project_memory_recall_limit: int = 20
@@ -78,6 +158,9 @@ class Settings:
     project_memory_recency_weight: float = 0.20
     project_memory_importance_weight: float = 0.15
     project_memory_recency_half_life_days: float = 180.0
+    user_memory_enabled: bool = False
+    user_memory_mode: str = "off"
+    user_profile_max_context_chars: int = 1500
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
@@ -170,6 +253,11 @@ class Settings:
     gateway_trust_secret: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        _require_choice(
+            "runtime_profile",
+            self.runtime_profile,
+            set(RUNTIME_PROFILE_DEFAULTS),
+        )
         if not self.api_prefix.startswith("/"):
             raise ValueError("api_prefix must start with '/'")
         _require_choice(
@@ -238,9 +326,12 @@ class Settings:
         for name, value in (
             ("session_repository", self.session_repository),
             ("agent_run_store", self.agent_run_store),
+            ("workspace_store", self.workspace_store),
+        ):
+            _require_choice(name, value, {"memory", "postgres", "sqlite"})
+        for name, value in (
             ("change_set_store", self.change_set_store),
             ("document_store", self.document_store),
-            ("workspace_store", self.workspace_store),
         ):
             _require_choice(name, value, {"memory", "postgres"})
         _require_choice(
@@ -280,6 +371,21 @@ class Settings:
             "project_memory_mode",
             self.project_memory_mode,
             {"off", "shadow", "review", "auto"},
+        )
+        _require_choice(
+            "project_memory_store",
+            self.project_memory_store,
+            {"memory", "postgres", "sqlite"},
+        )
+        _require_choice(
+            "project_memory_vector_store",
+            self.project_memory_vector_store,
+            {"memory", "qdrant", "sqlite"},
+        )
+        _require_choice(
+            "user_memory_mode",
+            self.user_memory_mode,
+            {"off", "review"},
         )
         _require_choice(
             "auth_mode",
@@ -330,6 +436,36 @@ class Settings:
             self.task_queue_backend,
             {"celery", "in_process"},
         )
+        profile_requirements = _RUNTIME_PROFILE_BACKEND_REQUIREMENTS[
+            self.runtime_profile
+        ]
+        profile_mismatches = [
+            f"{name}={getattr(self, name)} (expected {expected})"
+            for name, expected in profile_requirements.items()
+            if getattr(self, name) != expected
+        ]
+        if profile_mismatches:
+            raise ValueError(
+                f"runtime_profile={self.runtime_profile} has incompatible backends: "
+                + ", ".join(profile_mismatches)
+                + "; use runtime_profile=custom for a manual combination"
+            )
+        sqlite_selected = any(
+            value == "sqlite"
+            for value in (
+                self.session_repository,
+                self.agent_run_store,
+                self.workspace_store,
+                self.project_memory_store,
+                self.project_memory_vector_store,
+            )
+        ) or self.user_memory_enabled
+        if sqlite_selected and self.task_queue_backend != "in_process":
+            raise ValueError(
+                "SQLite local state requires TASK_QUEUE_BACKEND=in_process"
+            )
+        if not self.local_state_path.strip():
+            raise ValueError("local_state_path must not be empty")
         for name, value in (
             ("llm_timeout_seconds", self.llm_timeout_seconds),
             ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
@@ -382,6 +518,10 @@ class Settings:
             (
                 "project_memory_max_context_chars",
                 self.project_memory_max_context_chars,
+            ),
+            (
+                "user_profile_max_context_chars",
+                self.user_profile_max_context_chars,
             ),
             (
                 "project_memory_recency_half_life_days",
@@ -694,6 +834,9 @@ class Settings:
                 dotenv,
             ),
             database_url=_env("DATABASE_URL", cls.database_url, dotenv),
+            local_state_path=_env(
+                "LOCAL_STATE_PATH", cls.local_state_path, dotenv
+            ),
             session_repository=_env(
                 "SESSION_REPOSITORY", cls.session_repository, dotenv
             ),
@@ -806,6 +949,16 @@ class Settings:
                 cls.project_memory_mode,
                 dotenv,
             ),
+            project_memory_store=_env(
+                "PROJECT_MEMORY_STORE",
+                cls.project_memory_store,
+                dotenv,
+            ),
+            project_memory_vector_store=_env(
+                "PROJECT_MEMORY_VECTOR_STORE",
+                cls.project_memory_vector_store,
+                dotenv,
+            ),
             project_memory_candidate_threshold=_float_env(
                 "PROJECT_MEMORY_CANDIDATE_THRESHOLD",
                 cls.project_memory_candidate_threshold,
@@ -854,6 +1007,21 @@ class Settings:
             project_memory_recency_half_life_days=_float_env(
                 "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS",
                 cls.project_memory_recency_half_life_days,
+                dotenv,
+            ),
+            user_memory_enabled=_bool_env(
+                "USER_MEMORY_ENABLED",
+                cls.user_memory_enabled,
+                dotenv,
+            ),
+            user_memory_mode=_env(
+                "USER_MEMORY_MODE",
+                cls.user_memory_mode,
+                dotenv,
+            ),
+            user_profile_max_context_chars=_int_env(
+                "USER_PROFILE_MAX_CONTEXT_CHARS",
+                cls.user_profile_max_context_chars,
                 dotenv,
             ),
             embedding_provider=_env(

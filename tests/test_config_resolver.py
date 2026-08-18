@@ -17,6 +17,127 @@ from ai_agent_platform.core import (
 
 
 class ConfigResolverTests(unittest.TestCase):
+    def test_default_env_template_selects_local_profile(self) -> None:
+        profile = Path(__file__).resolve().parents[1] / ".env.example"
+
+        settings = ConfigResolver.from_default_locations(
+            env={"AI_AGENT_PLATFORM_USER_CONFIG": "/tmp/missing-user-config.json"},
+            dotenv_path=profile,
+        ).resolve_process().settings
+
+        self.assertEqual(settings.runtime_profile, "local")
+        self.assertEqual(settings.session_repository, "sqlite")
+        self.assertEqual(settings.task_queue_backend, "in_process")
+
+    def test_production_env_template_selects_shared_backends(self) -> None:
+        profile = Path(__file__).resolve().parents[1] / ".env.production.example"
+
+        settings = ConfigResolver.from_default_locations(
+            env={"AI_AGENT_PLATFORM_USER_CONFIG": "/tmp/missing-user-config.json"},
+            dotenv_path=profile,
+        ).resolve_process().settings
+
+        self.assertEqual(settings.runtime_profile, "production")
+        self.assertEqual(settings.session_repository, "postgres")
+        self.assertEqual(settings.rag_vector_store, "qdrant")
+        self.assertEqual(settings.task_queue_backend, "celery")
+
+    def test_local_memory_profile_is_complete_and_enables_review_mode(self) -> None:
+        profile = Path(__file__).resolve().parents[1] / ".env.local-memory.example"
+
+        resolved = ConfigResolver.from_default_locations(
+            env={"AI_AGENT_PLATFORM_USER_CONFIG": "/tmp/missing-user-config.json"},
+            dotenv_path=profile,
+        ).resolve_process()
+        settings = resolved.settings
+
+        self.assertEqual(settings.runtime_profile, "local")
+        self.assertEqual(settings.session_repository, "sqlite")
+        self.assertEqual(settings.agent_run_store, "sqlite")
+        self.assertEqual(settings.workspace_store, "sqlite")
+        self.assertEqual(settings.project_memory_store, "sqlite")
+        self.assertEqual(settings.project_memory_vector_store, "sqlite")
+        self.assertTrue(settings.project_memory_enabled)
+        self.assertEqual(settings.project_memory_mode, "review")
+        self.assertTrue(settings.user_memory_enabled)
+        self.assertEqual(settings.user_memory_mode, "review")
+        self.assertEqual(settings.task_queue_backend, "in_process")
+        self.assertEqual(settings.model_registry_store, "memory")
+        self.assertEqual(settings.change_set_store, "memory")
+
+    def test_local_profile_expands_single_process_defaults(self) -> None:
+        resolved = ConfigResolver(
+            env={"RUNTIME_PROFILE": "local"},
+        ).resolve_process()
+        settings = resolved.settings
+
+        self.assertEqual(settings.runtime_profile, "local")
+        self.assertEqual(settings.session_repository, "sqlite")
+        self.assertEqual(settings.agent_run_store, "sqlite")
+        self.assertEqual(settings.workspace_store, "sqlite")
+        self.assertEqual(settings.project_memory_store, "sqlite")
+        self.assertEqual(settings.project_memory_vector_store, "sqlite")
+        self.assertEqual(settings.change_set_store, "memory")
+        self.assertEqual(settings.document_store, "memory")
+        self.assertEqual(settings.model_registry_store, "memory")
+        self.assertEqual(settings.langgraph_checkpointer, "memory")
+        self.assertEqual(settings.rag_vector_store, "memory")
+        self.assertEqual(settings.task_queue_backend, "in_process")
+        self.assertTrue(settings.project_memory_enabled)
+        self.assertTrue(settings.user_memory_enabled)
+        self.assertEqual(
+            resolved.provenance_for("session_repository").detail,
+            "environment:RUNTIME_PROFILE -> runtime_profile=local",
+        )
+
+    def test_production_profile_expands_shared_worker_defaults(self) -> None:
+        settings = ConfigResolver(
+            env={"RUNTIME_PROFILE": "production"},
+        ).resolve_process().settings
+
+        self.assertEqual(settings.runtime_profile, "production")
+        self.assertEqual(settings.session_repository, "postgres")
+        self.assertEqual(settings.agent_run_store, "postgres")
+        self.assertEqual(settings.change_set_store, "postgres")
+        self.assertEqual(settings.document_store, "postgres")
+        self.assertEqual(settings.workspace_store, "postgres")
+        self.assertEqual(settings.model_registry_store, "postgres")
+        self.assertEqual(settings.langgraph_checkpointer, "postgres")
+        self.assertEqual(settings.rag_vector_store, "qdrant")
+        self.assertEqual(settings.project_memory_store, "postgres")
+        self.assertEqual(settings.project_memory_vector_store, "qdrant")
+        self.assertEqual(settings.task_queue_backend, "celery")
+        self.assertFalse(settings.project_memory_enabled)
+        self.assertFalse(settings.user_memory_enabled)
+
+    def test_named_profile_rejects_manual_backend_mixing(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigSchemaError,
+            "runtime_profile=local has incompatible backends",
+        ):
+            ConfigResolver(
+                env={
+                    "RUNTIME_PROFILE": "local",
+                    "SESSION_REPOSITORY": "postgres",
+                }
+            ).resolve_process()
+
+        mixed = ConfigResolver(
+            env={
+                "RUNTIME_PROFILE": "custom",
+                "SESSION_REPOSITORY": "postgres",
+                "AGENT_RUN_STORE": "postgres",
+            }
+        ).resolve_process().settings
+        self.assertEqual(mixed.runtime_profile, "custom")
+        self.assertEqual(mixed.session_repository, "postgres")
+
+    def test_rejects_unknown_runtime_profile_from_environment(self) -> None:
+        with self.assertRaisesRegex(ConfigSchemaError, "runtime_profile"):
+            ConfigResolver(
+                env={"RUNTIME_PROFILE": "staging"},
+            ).resolve_process()
+
     def test_process_resolution_ignores_service_cwd_project_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

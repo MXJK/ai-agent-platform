@@ -90,6 +90,14 @@ const state = {
   },
   projectMemories: [],
   selectedMemoryId: "",
+  projectMemoryRequestGeneration: 0,
+  userMemories: [],
+  selectedUserMemoryId: "",
+  userMemoryRequestGeneration: 0,
+  conversationMemoryHits: [],
+  selectedConversationMemoryHit: -1,
+  conversationMemoryRequestGeneration: 0,
+  activeMemoryTab: "project",
   modelRegistry: {
     connections: [],
     models: [],
@@ -1130,7 +1138,7 @@ function switchView(viewName, updateHash = true) {
   saveUiPreferences();
   $("main-workspace").focus({ preventScroll: true });
   if (normalizedView === "memory") {
-    refreshProjectMemory();
+    refreshMemoryWorkbench();
   }
   if (normalizedView === "models") {
     loadModelRegistry().catch((error) => showToast(humanizeError(error), "error"));
@@ -5262,6 +5270,77 @@ function requireActiveWorkspace() {
   return workspace.id;
 }
 
+const MEMORY_STATUS_META = {
+  active: { label: "已生效", tone: "active", description: "会参与后续上下文召回" },
+  candidate: { label: "待审核", tone: "candidate", description: "确认后才会进入模型上下文" },
+  stale: { label: "已过期", tone: "stale", description: "来源变化，等待重新确认" },
+  superseded: { label: "已替代", tone: "superseded", description: "已由更新版本取代" },
+  rejected: { label: "已拒绝", tone: "rejected", description: "保留审计，但不会被召回" },
+};
+
+const PROJECT_MEMORY_KIND_LABELS = {
+  architecture_fact: "架构事实",
+  constraint: "项目约束",
+  decision: "技术决策",
+  convention: "项目规范",
+  task_outcome: "任务结果",
+  incident_lesson: "故障经验",
+};
+
+const USER_MEMORY_KIND_LABELS = {
+  profile_fact: "个人事实",
+  communication_preference: "沟通偏好",
+  tooling_preference: "工具偏好",
+  workflow_preference: "工作流偏好",
+  standing_goal: "长期目标",
+  personal_constraint: "个人约束",
+};
+
+function memoryStatusMeta(status) {
+  return MEMORY_STATUS_META[status] || {
+    label: status || "未知状态",
+    tone: "neutral",
+    description: "当前状态不会自动注入上下文",
+  };
+}
+
+function memoryStatusPill(status, version = null) {
+  const meta = memoryStatusMeta(status);
+  const versionText = version == null ? "" : ` · v${escapeHtml(version)}`;
+  return `<span class="memory-status-pill ${escapeHtml(meta.tone)}" title="${escapeHtml(meta.description)}">${escapeHtml(meta.label)}${versionText}</span>`;
+}
+
+function memoryLoadingMarkup(rows = 4) {
+  return `<div class="memory-skeleton" aria-label="正在加载记忆">${Array.from(
+    { length: rows },
+    () => '<span class="memory-skeleton-row"></span>',
+  ).join("")}</div>`;
+}
+
+function memoryCounts(items) {
+  return items.reduce(
+    (counts, item) => {
+      counts[item.status] = (counts[item.status] || 0) + 1;
+      return counts;
+    },
+    {},
+  );
+}
+
+function filteredMemories(items, statusFilterId, kindFilterId) {
+  const status = $(statusFilterId).value;
+  const kind = $(kindFilterId).value;
+  return items.filter(
+    (item) => (!status || item.status === status) && (!kind || item.kind === kind),
+  );
+}
+
+function setMemoryRuntimeStatus(text, tone = "ready") {
+  $("memory-status").textContent = text;
+  const container = $("memory-status").closest(".memory-runtime-status");
+  if (container) container.dataset.tone = tone;
+}
+
 function memoryPayload() {
   return {
     kind: $("memory-kind-input").value,
@@ -5278,13 +5357,17 @@ function selectedProjectMemory() {
 
 function clearMemorySelection() {
   state.selectedMemoryId = "";
+  $("memory-detail-heading").textContent = "创建项目记忆";
+  $("memory-detail-subtitle").textContent = "手工创建的项目事实会立即生效，并保留版本与证据。";
   $("memory-selection-label").textContent = "新记忆";
+  $("memory-selection-label").className = "memory-status-pill draft";
   $("memory-kind-input").value = "architecture_fact";
   $("memory-importance-input").value = "3";
   $("memory-title-input").value = "";
   $("memory-content-input").value = "";
   $("memory-evidence").innerHTML =
-    '<div class="empty-state">选择记忆后查看置信度、冲突状态和来源证据。</div>';
+    '<div class="memory-empty compact"><strong>证据与版本</strong><p>选择一条记忆后查看来源、置信度和确认时间。</p></div>';
+  syncProjectMemoryActions();
   renderProjectMemories();
 }
 
@@ -5294,59 +5377,90 @@ function selectProjectMemory(memory) {
     return;
   }
   state.selectedMemoryId = memory.id;
-  $("memory-selection-label").textContent = `${memory.status} · v${memory.version}`;
+  const meta = memoryStatusMeta(memory.status);
+  $("memory-detail-heading").textContent = memory.title;
+  $("memory-detail-subtitle").textContent = `${PROJECT_MEMORY_KIND_LABELS[memory.kind] || memory.kind} · ${meta.description}`;
+  $("memory-selection-label").textContent = `${meta.label} · v${memory.version}`;
+  $("memory-selection-label").className = `memory-status-pill ${meta.tone}`;
   $("memory-kind-input").value = memory.kind;
   $("memory-importance-input").value = memory.importance;
   $("memory-title-input").value = memory.title;
   $("memory-content-input").value = memory.content;
   const evidence = memory.evidence || [];
   $("memory-evidence").innerHTML = `
-    <div class="citation-card">
-      <strong>置信度 ${(Number(memory.confidence || 0) * 100).toFixed(0)}% · ${escapeHtml(memory.conflict ? "存在冲突" : "无冲突")}</strong>
-      <small>最后确认：${escapeHtml(formatDate(memory.last_confirmed_at))} · 访问 ${escapeHtml(memory.access_count || 0)} 次</small>
+    <div class="memory-evidence-summary">
+      <span><small>置信度</small><strong>${(Number(memory.confidence || 0) * 100).toFixed(0)}%</strong></span>
+      <span><small>冲突</small><strong>${escapeHtml(memory.conflict ? "待处理" : "无")}</strong></span>
+      <span><small>访问</small><strong>${escapeHtml(memory.access_count || 0)} 次</strong></span>
+      <span><small>最后确认</small><strong>${escapeHtml(formatDate(memory.last_confirmed_at))}</strong></span>
     </div>
     ${
       evidence.length
         ? evidence
             .map(
               (item) => `
-                <div class="citation-card">
-                  <strong>${escapeHtml(item.source_kind)} · ${escapeHtml(item.source_id)}</strong>
-                  <small>${escapeHtml(item.path || item.excerpt || "已记录来源")}</small>
+                <div class="memory-evidence-item">
+                  <span class="memory-source-kind">${escapeHtml(item.source_kind)}</span>
+                  <strong>${escapeHtml(item.source_id)}</strong>
+                  <p>${escapeHtml(item.path || item.excerpt || "已记录来源")}</p>
                 </div>
               `,
             )
             .join("")
-        : '<div class="empty-state">列表响应未携带证据；重新打开详情可查看完整来源。</div>'
+        : '<div class="memory-empty compact"><strong>暂无附加证据</strong><p>该事实仍保留版本和创建者审计信息。</p></div>'
     }
   `;
+  syncProjectMemoryActions();
   renderProjectMemories();
 }
 
 function renderProjectMemories() {
   const list = $("memory-list");
-  $("memory-count").textContent = state.projectMemories.length;
-  if (!state.projectMemories.length) {
-    list.innerHTML = '<div class="empty-state">当前 revision 暂无项目记忆。</div>';
+  const visible = filteredMemories(
+    state.projectMemories,
+    "memory-status-filter",
+    "memory-kind-filter",
+  );
+  const counts = memoryCounts(state.projectMemories);
+  $("memory-count").textContent = `${visible.length} / ${state.projectMemories.length}`;
+  $("memory-project-active-count").textContent = counts.active || 0;
+  $("memory-project-candidate-count").textContent = counts.candidate || 0;
+  if (!visible.length) {
+    list.innerHTML = state.projectMemories.length
+      ? '<div class="memory-empty"><strong>没有符合筛选的记忆</strong><p>调整状态或类型筛选查看其他记录。</p></div>'
+      : '<div class="memory-empty"><strong>还没有项目记忆</strong><p>明确说“记住”或手工创建一条稳定事实。</p></div>';
     return;
   }
-  list.innerHTML = state.projectMemories
+  list.innerHTML = visible
     .map(
-      (item) => `
+      (item) => {
+        const meta = memoryStatusMeta(item.status);
+        const kindLabel = PROJECT_MEMORY_KIND_LABELS[item.kind] || item.kind;
+        return `
         <button
-          class="session-row${item.id === state.selectedMemoryId ? " active" : ""}"
+          class="memory-asset-row${item.id === state.selectedMemoryId ? " active" : ""}"
           type="button"
           data-memory-id="${escapeHtml(item.id)}"
+          aria-pressed="${item.id === state.selectedMemoryId}"
         >
-          <span>
-            <strong>${escapeHtml(item.title)}</strong>
-            <small>${escapeHtml(item.kind)} · ${escapeHtml(item.status)} · v${escapeHtml(item.version)}</small>
-          </span>
-          <small>${escapeHtml(truncate(item.content, 100))}</small>
+          <span class="memory-asset-row-head"><strong>${escapeHtml(item.title)}</strong>${memoryStatusPill(item.status)}</span>
+          <span class="memory-asset-row-body">${escapeHtml(truncate(item.content, 108))}</span>
+          <span class="memory-asset-row-meta"><span>${escapeHtml(kindLabel)}</span><span>重要度 ${escapeHtml(item.importance)}/5</span><span>v${escapeHtml(item.version)}</span></span>
         </button>
-      `,
+      `;
+      },
     )
     .join("");
+}
+
+function syncProjectMemoryActions() {
+  const current = selectedProjectMemory();
+  const candidate = current?.status === "candidate" || current?.status === "stale";
+  $("create-memory-btn").hidden = Boolean(current);
+  $("update-memory-btn").disabled = !current;
+  $("confirm-memory-btn").disabled = !candidate;
+  $("reject-memory-btn").disabled = !candidate;
+  $("delete-memory-btn").disabled = !current;
 }
 
 function renderMemoryJobs(jobs) {
@@ -5373,7 +5487,7 @@ async function loadMemorySettings() {
     `/workspaces/${encodeURIComponent(workspaceId)}/memory-settings`,
   );
   $("memory-mode-input").value = body.mode;
-  $("memory-status").textContent = `${workspaceId} · ${body.mode}`;
+  setMemoryRuntimeStatus(`L1 已连接 · ${body.mode}`);
   return body;
 }
 
@@ -5386,24 +5500,26 @@ async function listProjectMemories() {
     return [];
   }
   const workspaceId = requireActiveWorkspace();
-  const params = new URLSearchParams();
-  if ($("memory-status-filter").value) {
-    params.set("status", $("memory-status-filter").value);
-  }
-  if ($("memory-kind-filter").value) {
-    params.set("kind", $("memory-kind-filter").value);
-  }
-  const suffix = params.toString() ? `?${params}` : "";
+  const generation = ++state.projectMemoryRequestGeneration;
+  $("memory-list").setAttribute("aria-busy", "true");
+  $("memory-list").innerHTML = memoryLoadingMarkup();
   const [memoryBody, jobBody] = await Promise.all([
-    fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/memories${suffix}`),
+    fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/memories?limit=200`),
     fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/memory-jobs?limit=20`),
   ]);
+  if (generation !== state.projectMemoryRequestGeneration) return state.projectMemories;
   state.projectMemories = memoryBody.memories || [];
   if (!state.projectMemories.some((item) => item.id === state.selectedMemoryId)) {
     state.selectedMemoryId = "";
   }
+  $("memory-list").setAttribute("aria-busy", "false");
   renderProjectMemories();
   renderMemoryJobs(jobBody.jobs || []);
+  if (!state.selectedMemoryId && state.projectMemories.length) {
+    selectProjectMemory(state.projectMemories[0]);
+  } else {
+    syncProjectMemoryActions();
+  }
   return state.projectMemories;
 }
 
@@ -5413,13 +5529,15 @@ async function refreshProjectMemory() {
     state.selectedMemoryId = "";
     renderProjectMemories();
     renderMemoryJobs([]);
-    $("memory-status").textContent = "请先选择可用工作区";
+    setMemoryRuntimeStatus("请先选择可用工作区", "warning");
     return;
   }
   try {
     await Promise.all([loadMemorySettings(), listProjectMemories()]);
   } catch (error) {
-    $("memory-status").textContent = "加载失败";
+    $("memory-list").setAttribute("aria-busy", "false");
+    $("memory-list").innerHTML = '<div class="memory-empty error"><strong>项目记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
+    setMemoryRuntimeStatus("项目记忆加载失败", "error");
     showToast(humanizeError(error), "error");
   }
 }
@@ -5434,7 +5552,7 @@ async function saveMemoryMode() {
         body: JSON.stringify({ mode: $("memory-mode-input").value }),
       },
     );
-    $("memory-status").textContent = `${workspaceId} · ${body.mode}`;
+    setMemoryRuntimeStatus(`L1 已连接 · ${body.mode}`);
     showToast("项目记忆模式已更新");
   } catch (error) {
     showToast(humanizeError(error), "error");
@@ -5539,6 +5657,364 @@ async function reindexProjectMemories() {
     );
     showToast(`已提交 ${body.queued_count || 0} 条索引事件`);
   } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+function setMemoryTab(tabName, { focus = false } = {}) {
+  const allowed = new Set(["project", "profile", "conversations"]);
+  const tab = allowed.has(tabName) ? tabName : "project";
+  state.activeMemoryTab = tab;
+  document.querySelectorAll("[data-memory-tab]").forEach((button) => {
+    const active = button.dataset.memoryTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    if (active && focus) button.focus();
+  });
+  document.querySelectorAll("[data-memory-tab-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.memoryTabPanel !== tab;
+  });
+  refreshMemoryWorkbench();
+}
+
+function refreshMemoryWorkbench() {
+  if (state.activeMemoryTab === "profile") {
+    return refreshUserMemory();
+  }
+  if (state.activeMemoryTab === "project") {
+    return refreshProjectMemory();
+  }
+  return Promise.resolve();
+}
+
+function userMemoryPayload() {
+  return {
+    kind: $("user-memory-kind-input").value,
+    title: $("user-memory-title-input").value.trim(),
+    content: $("user-memory-content-input").value.trim(),
+    importance: numberValue("user-memory-importance-input", 3),
+  };
+}
+
+function selectedUserMemory() {
+  return state.userMemories.find((item) => item.id === state.selectedUserMemoryId) || null;
+}
+
+function clearUserMemorySelection() {
+  state.selectedUserMemoryId = "";
+  $("user-memory-detail-heading").textContent = "创建个人事实";
+  $("user-memory-detail-subtitle").textContent = "手工创建会立即生效；自动提炼只进入待审核列表。";
+  $("user-memory-selection-label").textContent = "新记忆";
+  $("user-memory-selection-label").className = "memory-status-pill draft";
+  $("user-memory-kind-input").value = "profile_fact";
+  $("user-memory-importance-input").value = "3";
+  $("user-memory-title-input").value = "";
+  $("user-memory-content-input").value = "";
+  $("user-memory-evidence").innerHTML =
+    '<div class="memory-empty compact"><strong>证据与版本</strong><p>选择一条事实后查看来源与确认时间。</p></div>';
+  syncUserMemoryActions();
+  renderUserMemories();
+}
+
+function selectUserMemory(memory) {
+  if (!memory) {
+    clearUserMemorySelection();
+    return;
+  }
+  state.selectedUserMemoryId = memory.id;
+  const meta = memoryStatusMeta(memory.status);
+  $("user-memory-detail-heading").textContent = memory.title;
+  $("user-memory-detail-subtitle").textContent = `${USER_MEMORY_KIND_LABELS[memory.kind] || memory.kind} · ${meta.description}`;
+  $("user-memory-selection-label").textContent = `${meta.label} · v${memory.version}`;
+  $("user-memory-selection-label").className = `memory-status-pill ${meta.tone}`;
+  $("user-memory-kind-input").value = memory.kind;
+  $("user-memory-importance-input").value = memory.importance;
+  $("user-memory-title-input").value = memory.title;
+  $("user-memory-content-input").value = memory.content;
+  const evidence = memory.evidence || [];
+  $("user-memory-evidence").innerHTML = `
+    <div class="memory-evidence-summary">
+      <span><small>置信度</small><strong>${(Number(memory.confidence || 0) * 100).toFixed(0)}%</strong></span>
+      <span><small>重要度</small><strong>${escapeHtml(memory.importance)}/5</strong></span>
+      <span><small>版本</small><strong>v${escapeHtml(memory.version)}</strong></span>
+      <span><small>最后确认</small><strong>${escapeHtml(formatDate(memory.last_confirmed_at))}</strong></span>
+    </div>
+    ${evidence.length
+      ? evidence.map((item) => `<div class="memory-evidence-item"><span class="memory-source-kind">${escapeHtml(item.source_kind)}</span><strong>${escapeHtml(item.source_id)}</strong><p>${escapeHtml(item.excerpt || "已记录来源")}</p></div>`).join("")
+      : '<div class="memory-empty compact"><strong>暂无附加证据</strong><p>该事实仍保留版本和创建者审计信息。</p></div>'}
+  `;
+  syncUserMemoryActions();
+  renderUserMemories();
+}
+
+function renderUserMemories() {
+  const list = $("user-memory-list");
+  const visible = filteredMemories(
+    state.userMemories,
+    "user-memory-status-filter",
+    "user-memory-kind-filter",
+  );
+  const counts = memoryCounts(state.userMemories);
+  $("user-memory-count").textContent = `${visible.length} / ${state.userMemories.length}`;
+  $("user-memory-active-count").textContent = counts.active || 0;
+  $("user-memory-candidate-count").textContent = counts.candidate || 0;
+  if (!visible.length) {
+    list.innerHTML = state.userMemories.length
+      ? '<div class="memory-empty"><strong>没有符合筛选的事实</strong><p>调整状态或类型筛选查看其他记录。</p></div>'
+      : '<div class="memory-empty"><strong>还没有个人记忆</strong><p>明确说明“以后都这样”或手工添加一条偏好。</p></div>';
+    return;
+  }
+  list.innerHTML = visible.map((item) => `
+    <button class="memory-asset-row${item.id === state.selectedUserMemoryId ? " active" : ""}" type="button" data-user-memory-id="${escapeHtml(item.id)}" aria-pressed="${item.id === state.selectedUserMemoryId}">
+      <span class="memory-asset-row-head"><strong>${escapeHtml(item.title)}</strong>${memoryStatusPill(item.status)}</span>
+      <span class="memory-asset-row-body">${escapeHtml(truncate(item.content, 108))}</span>
+      <span class="memory-asset-row-meta"><span>${escapeHtml(USER_MEMORY_KIND_LABELS[item.kind] || item.kind)}</span><span>重要度 ${escapeHtml(item.importance)}/5</span><span>v${escapeHtml(item.version)}</span></span>
+    </button>
+  `).join("");
+}
+
+function syncUserMemoryActions() {
+  const current = selectedUserMemory();
+  const candidate = current?.status === "candidate";
+  $("create-user-memory-btn").hidden = Boolean(current);
+  $("update-user-memory-btn").disabled = !current;
+  $("confirm-user-memory-btn").disabled = !candidate;
+  $("reject-user-memory-btn").disabled = !candidate;
+  $("delete-user-memory-btn").disabled = !current;
+}
+
+function renderUserProfile(profile) {
+  $("user-profile-preview").innerHTML = profile.content
+    ? `<div class="memory-profile-meta"><span>画像 v${escapeHtml(profile.version)}</span><span>${escapeHtml(profile.source_memory_ids.length)} 条已确认事实</span><span>${escapeHtml(formatDate(profile.updated_at))}</span></div><div class="markdown-body">${renderMarkdown(profile.content)}</div>`
+    : '<div class="memory-empty"><strong>暂无已确认画像</strong><p>确认一条个人事实后，这里会显示模型可见的确定性快照。</p></div>';
+}
+
+async function listUserMemories() {
+  const generation = ++state.userMemoryRequestGeneration;
+  $("user-memory-list").setAttribute("aria-busy", "true");
+  $("user-memory-list").innerHTML = memoryLoadingMarkup();
+  const body = await fetchJson("/users/me/memories?limit=200");
+  if (generation !== state.userMemoryRequestGeneration) return state.userMemories;
+  state.userMemories = body.memories || [];
+  if (!state.userMemories.some((item) => item.id === state.selectedUserMemoryId)) {
+    state.selectedUserMemoryId = "";
+  }
+  $("user-memory-list").setAttribute("aria-busy", "false");
+  renderUserMemories();
+  if (!state.selectedUserMemoryId && state.userMemories.length) {
+    selectUserMemory(state.userMemories[0]);
+  } else {
+    syncUserMemoryActions();
+  }
+  return state.userMemories;
+}
+
+async function refreshUserMemory() {
+  try {
+    const [settings, profile] = await Promise.all([
+      fetchJson("/users/me/memory-settings"),
+      fetchJson("/users/me/profile"),
+      listUserMemories(),
+    ]);
+    $("user-memory-mode-input").value = settings.mode;
+    setMemoryRuntimeStatus(`L3 已连接 · ${settings.mode}`);
+    renderUserProfile(profile);
+  } catch (error) {
+    $("user-memory-list").setAttribute("aria-busy", "false");
+    $("user-memory-list").innerHTML = '<div class="memory-empty error"><strong>个人记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
+    setMemoryRuntimeStatus("个人记忆加载失败", "error");
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function saveUserMemoryMode() {
+  try {
+    const settings = await fetchJson("/users/me/memory-settings", {
+      method: "PATCH",
+      body: JSON.stringify({ mode: $("user-memory-mode-input").value }),
+    });
+    setMemoryRuntimeStatus(`L3 已连接 · ${settings.mode}`);
+    await refreshUserMemory();
+    showToast("个人记忆模式已更新");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function createUserMemory() {
+  const payload = userMemoryPayload();
+  if (!payload.title || !payload.content) {
+    showToast("记忆标题和内容不能为空", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson("/users/me/memories", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await listUserMemories();
+    selectUserMemory(body);
+    renderUserProfile(await fetchJson("/users/me/profile"));
+    showToast("个人记忆已创建并确认");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function updateUserMemory() {
+  const current = selectedUserMemory();
+  if (!current) {
+    showToast("请先选择一条个人记忆", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson(`/users/me/memories/${encodeURIComponent(current.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ...userMemoryPayload(), version: current.version }),
+    });
+    await listUserMemories();
+    selectUserMemory(body);
+    renderUserProfile(await fetchJson("/users/me/profile"));
+    showToast("个人记忆已更新");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function transitionUserMemory(action) {
+  const current = selectedUserMemory();
+  if (!current) {
+    showToast("请先选择一条个人记忆", "warning");
+    return;
+  }
+  try {
+    const body = await fetchJson(`/users/me/memories/${encodeURIComponent(current.id)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: current.version }),
+    });
+    await listUserMemories();
+    selectUserMemory(body);
+    renderUserProfile(await fetchJson("/users/me/profile"));
+    showToast(action === "confirm" ? "个人记忆已确认" : "个人记忆已拒绝");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function forgetUserMemory() {
+  const current = selectedUserMemory();
+  if (!current || !window.confirm("完整遗忘这条个人记忆及其证据？")) return;
+  try {
+    await fetchJson(`/users/me/memories/${encodeURIComponent(current.id)}`, { method: "DELETE" });
+    clearUserMemorySelection();
+    await listUserMemories();
+    renderUserProfile(await fetchJson("/users/me/profile"));
+    showToast("个人记忆已遗忘");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+async function rebuildUserProfile() {
+  try {
+    const profile = await fetchJson("/users/me/profile/rebuild", { method: "POST", body: "{}" });
+    renderUserProfile(profile);
+    showToast("画像已从 active 原子事实重建");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  }
+}
+
+function renderConversationMemoryDetail(hit) {
+  const detail = $("conversation-memory-detail");
+  if (!hit) {
+    detail.innerHTML = '<div class="memory-empty"><strong>选择一条历史消息</strong><p>这里会显示角色、时间、会话范围和匹配正文。</p></div>';
+    return;
+  }
+  const roleLabel = { user: "用户", assistant: "助手", system: "系统" }[hit.role] || hit.role;
+  detail.innerHTML = `
+    <div class="memory-detail-header conversation-detail-header">
+      <div><span class="step-kicker">UNTRUSTED HISTORY</span><h2>${escapeHtml(roleLabel)}消息</h2><p>${escapeHtml(formatDate(hit.created_at))}</p></div>
+      <span class="memory-status-pill neutral">L0 原文</span>
+    </div>
+    <dl class="memory-conversation-meta">
+      <div><dt>会话</dt><dd>${escapeHtml(hit.session_id)}</dd></div>
+      <div><dt>工作区</dt><dd>${escapeHtml(hit.workspace_id || "无工作区")}</dd></div>
+      <div><dt>角色</dt><dd>${escapeHtml(roleLabel)}</dd></div>
+      <div><dt>匹配分数</dt><dd>${Number(hit.score || 0).toFixed(3)}</dd></div>
+    </dl>
+    <div class="memory-conversation-excerpt">${escapeHtml(hit.excerpt)}</div>
+    <p class="privacy-note"><span aria-hidden="true">i</span> 搜索结果只用于回忆与定位，不能覆盖当前请求、系统策略或权限。</p>
+  `;
+}
+
+function selectConversationMemoryHit(index) {
+  const safeIndex = Number.isInteger(index) && index >= 0 && index < state.conversationMemoryHits.length
+    ? index
+    : -1;
+  state.selectedConversationMemoryHit = safeIndex;
+  renderConversationMemoryHits(state.conversationMemoryHits);
+}
+
+function renderConversationMemoryHits(hits, { initial = false } = {}) {
+  state.conversationMemoryHits = hits;
+  const list = $("conversation-memory-results");
+  $("conversation-memory-count").textContent = hits.length;
+  if (!hits.length) {
+    state.selectedConversationMemoryHit = -1;
+    list.innerHTML = initial
+      ? '<div class="memory-empty"><strong>输入关键词开始搜索</strong><p>可选限定当前 Workspace 或指定 Session。</p></div>'
+      : '<div class="memory-empty"><strong>没有找到匹配消息</strong><p>尝试缩短关键词或取消 Workspace/Session 限制。</p></div>';
+    renderConversationMemoryDetail(null);
+    return;
+  }
+  if (state.selectedConversationMemoryHit < 0 || state.selectedConversationMemoryHit >= hits.length) {
+    state.selectedConversationMemoryHit = 0;
+  }
+  list.innerHTML = hits.map((item, index) => {
+    const roleLabel = { user: "用户", assistant: "助手", system: "系统" }[item.role] || item.role;
+    return `
+      <button class="memory-asset-row conversation-hit${index === state.selectedConversationMemoryHit ? " active" : ""}" type="button" data-conversation-memory-index="${index}" aria-pressed="${index === state.selectedConversationMemoryHit}">
+        <span class="memory-asset-row-head"><strong>${escapeHtml(roleLabel)}</strong><span class="memory-score">${Number(item.score || 0).toFixed(3)}</span></span>
+        <span class="memory-asset-row-body">${escapeHtml(truncate(item.excerpt, 118))}</span>
+        <span class="memory-asset-row-meta"><span>${escapeHtml(item.workspace_id || "无工作区")}</span><span>${escapeHtml(formatDate(item.created_at))}</span></span>
+      </button>
+    `;
+  }).join("");
+  renderConversationMemoryDetail(hits[state.selectedConversationMemoryHit]);
+}
+
+async function searchConversationMemory() {
+  const query = $("conversation-memory-query").value.trim();
+  if (!query) {
+    showToast("请输入搜索关键词", "warning");
+    return;
+  }
+  const params = new URLSearchParams({ q: query, limit: "30" });
+  const sessionId = $("conversation-memory-session").value.trim();
+  if (sessionId) params.set("session_id", sessionId);
+  if ($("conversation-memory-current-workspace").checked) {
+    if (!state.activeWorkspaceId) {
+      showToast("当前没有选中的工作区", "warning");
+      return;
+    }
+    params.set("workspace_id", state.activeWorkspaceId);
+  }
+  const generation = ++state.conversationMemoryRequestGeneration;
+  try {
+    $("conversation-memory-results").setAttribute("aria-busy", "true");
+    $("conversation-memory-results").innerHTML = memoryLoadingMarkup(5);
+    const body = await fetchJson(`/memory/conversations/search?${params}`);
+    if (generation !== state.conversationMemoryRequestGeneration) return;
+    $("conversation-memory-results").setAttribute("aria-busy", "false");
+    state.selectedConversationMemoryHit = -1;
+    renderConversationMemoryHits(body.hits || []);
+    setMemoryRuntimeStatus(`L0 搜索完成 · ${(body.hits || []).length} 条`);
+  } catch (error) {
+    if (generation !== state.conversationMemoryRequestGeneration) return;
+    $("conversation-memory-results").setAttribute("aria-busy", "false");
+    $("conversation-memory-results").innerHTML = '<div class="memory-empty error"><strong>对话搜索失败</strong><p>检查关键词和本地 SQLite 状态后重试。</p></div>';
+    setMemoryRuntimeStatus("L0 搜索失败", "error");
     showToast(humanizeError(error), "error");
   }
 }
@@ -6404,7 +6880,28 @@ function bindEvents() {
   $("search-rag-btn").addEventListener("click", searchRag);
   $("ask-rag-btn").addEventListener("click", askRag);
   $("rag-rerank-toggle").addEventListener("click", toggleRerank);
+  document.querySelectorAll("[data-memory-tab]").forEach((tab) => {
+    tab.addEventListener("click", () => setMemoryTab(tab.dataset.memoryTab));
+    tab.addEventListener("keydown", (event) => {
+      if (!new Set(["ArrowLeft", "ArrowRight", "Home", "End"]).has(event.key)) return;
+      const tabs = [...document.querySelectorAll("[data-memory-tab]")];
+      const current = tabs.indexOf(event.currentTarget);
+      const target = event.key === "Home"
+        ? tabs[0]
+        : event.key === "End"
+          ? tabs.at(-1)
+          : tabs[(current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+      if (target) {
+        event.preventDefault();
+        setMemoryTab(target.dataset.memoryTab, { focus: true });
+      }
+    });
+  });
   $("refresh-memory-btn").addEventListener("click", refreshProjectMemory);
+  $("new-project-memory-btn").addEventListener("click", () => {
+    clearMemorySelection();
+    $("memory-title-input").focus();
+  });
   $("save-memory-mode-btn").addEventListener("click", saveMemoryMode);
   $("reindex-memory-btn").addEventListener("click", reindexProjectMemories);
   $("create-memory-btn").addEventListener("click", createProjectMemory);
@@ -6416,8 +6913,8 @@ function bindEvents() {
     transitionProjectMemory("reject"),
   );
   $("delete-memory-btn").addEventListener("click", forgetProjectMemory);
-  $("memory-status-filter").addEventListener("change", listProjectMemories);
-  $("memory-kind-filter").addEventListener("change", listProjectMemories);
+  $("memory-status-filter").addEventListener("change", renderProjectMemories);
+  $("memory-kind-filter").addEventListener("change", renderProjectMemories);
   $("memory-list").addEventListener("click", async (event) => {
     const row = event.target.closest("[data-memory-id]");
     if (!row) {
@@ -6431,6 +6928,43 @@ function bindEvents() {
     } catch (error) {
       showToast(humanizeError(error), "error");
     }
+  });
+  $("refresh-user-memory-btn").addEventListener("click", refreshUserMemory);
+  $("new-user-memory-btn").addEventListener("click", () => {
+    clearUserMemorySelection();
+    $("user-memory-title-input").focus();
+  });
+  $("save-user-memory-mode-btn").addEventListener("click", saveUserMemoryMode);
+  $("rebuild-profile-btn").addEventListener("click", rebuildUserProfile);
+  $("create-user-memory-btn").addEventListener("click", createUserMemory);
+  $("update-user-memory-btn").addEventListener("click", updateUserMemory);
+  $("confirm-user-memory-btn").addEventListener("click", () => transitionUserMemory("confirm"));
+  $("reject-user-memory-btn").addEventListener("click", () => transitionUserMemory("reject"));
+  $("delete-user-memory-btn").addEventListener("click", forgetUserMemory);
+  $("user-memory-status-filter").addEventListener("change", renderUserMemories);
+  $("user-memory-kind-filter").addEventListener("change", renderUserMemories);
+  $("user-memory-list").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-user-memory-id]");
+    if (!row) return;
+    selectUserMemory(state.userMemories.find((item) => item.id === row.dataset.userMemoryId));
+  });
+  $("search-conversation-memory-btn").addEventListener("click", searchConversationMemory);
+  $("conversation-memory-results").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-conversation-memory-index]");
+    if (!row) return;
+    selectConversationMemoryHit(Number(row.dataset.conversationMemoryIndex));
+  });
+  $("clear-conversation-memory-btn").addEventListener("click", () => {
+    state.conversationMemoryRequestGeneration += 1;
+    $("conversation-memory-results").setAttribute("aria-busy", "false");
+    $("conversation-memory-query").value = "";
+    $("conversation-memory-session").value = "";
+    state.selectedConversationMemoryHit = -1;
+    renderConversationMemoryHits([], { initial: true });
+    setMemoryRuntimeStatus("L0 按需搜索已就绪");
+  });
+  $("conversation-memory-query").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") searchConversationMemory();
   });
 
   $("refresh-mcp-registry-btn").addEventListener("click", () => {

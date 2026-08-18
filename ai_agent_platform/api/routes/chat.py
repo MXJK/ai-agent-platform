@@ -39,6 +39,7 @@ from ai_agent_platform.model_registry import (
     ModelSelection,
     model_selection_scope,
 )
+from ai_agent_platform.memory import UserMemoryService
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def create_chat_router(
     project_memory_service: ProjectMemoryService | None = None,
     task_queue: TaskQueue | None = None,
     model_registry: ModelRegistryService | None = None,
+    user_memory_service: UserMemoryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -137,6 +139,16 @@ def create_chat_router(
                     user_message=request.message,
                     max_context_messages=settings.llm_max_context_messages,
                 )
+                user_profile_context = (
+                    user_memory_service.context_for_user(user_id=actor_user_id)
+                    if user_memory_service is not None
+                    else None
+                )
+                if user_profile_context:
+                    prepared_messages.insert(
+                        0,
+                        {"role": "system", "content": user_profile_context},
+                    )
                 if retrieved_memories:
                     prepared_messages.insert(
                         0,
@@ -185,6 +197,7 @@ def create_chat_router(
                 settings=settings,
                 metrics=metrics,
                 project_memory_service=project_memory_service,
+                user_memory_service=user_memory_service,
                 task_queue=task_queue,
                 actor_user_id=actor_user_id,
                 retrieved_memories=retrieved_memories,
@@ -211,6 +224,7 @@ def chat_stream_events(
     settings: Settings,
     metrics: MetricsRegistry,
     project_memory_service: ProjectMemoryService | None = None,
+    user_memory_service: UserMemoryService | None = None,
     task_queue: TaskQueue | None = None,
     actor_user_id: str = "demo_user",
     retrieved_memories: list[RetrievedMemory] | None = None,
@@ -464,6 +478,25 @@ def chat_stream_events(
                 except TaskQueueError:
                     metrics.increment(
                         "project_memory_extraction_enqueue_failed_total"
+                    )
+            if (
+                user_memory_service is not None
+                and user_memory_service.enabled
+                and task_queue is not None
+            ):
+                try:
+                    task_queue.submit(
+                        "user_memory_extraction",
+                        user_memory_service.capture_user_message,
+                        user_id=actor_user_id,
+                        message=request.message,
+                        source_type="chat",
+                        source_id=request_id,
+                        workspace_id=request.workspace_id,
+                    )
+                except TaskQueueError:
+                    metrics.increment(
+                        "user_memory_extraction_enqueue_failed_total"
                     )
         _record_usage_metrics(
             metrics,

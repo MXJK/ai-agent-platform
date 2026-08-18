@@ -85,6 +85,7 @@ class ExecutionContextFactory:
         tool_pool_builder: ToolPoolBuilder | None = None,
         model_registry: Any = None,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
+        user_memory_service: Any = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -105,6 +106,7 @@ class ExecutionContextFactory:
         self._execution_workspace_runtime = (
             execution_workspace_runtime or ExecutionWorkspaceRuntime()
         )
+        self._user_memory_service = user_memory_service
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -272,6 +274,15 @@ class ExecutionContextFactory:
                 {"role": item.role, "content": item.content}
                 for item in messages[-context_message_limit:]
             ]
+        if self._user_memory_service is not None:
+            profile_context = self._user_memory_service.context_for_user(
+                user_id=actor
+            )
+            if profile_context:
+                raw_history = [
+                    {"role": "system", "content": profile_context},
+                    *raw_history,
+                ]
         history = tuple(
             ConversationMessageSnapshot(
                 role=str(item.get("role") or ""),

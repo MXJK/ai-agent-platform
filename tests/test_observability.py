@@ -1,6 +1,8 @@
 import json
 import logging
 from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from fastapi.testclient import TestClient
@@ -127,6 +129,22 @@ class RequestObservabilityTests(unittest.TestCase):
             metrics["timings"]["http_request_duration_ms"]["count"],
             2,
         )
+
+    def test_reports_sqlite_sessions_as_persistent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                session_repository="sqlite",
+                agent_run_store="sqlite",
+                local_state_path=str(Path(temp_dir) / "state.sqlite3"),
+            )
+            with TestClient(create_app(settings=settings)) as client:
+                response = client.get("/api/v1/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["session_storage"], "sqlite")
+        self.assertTrue(response.json()["persistent_sessions"])
 
 
 if __name__ == "__main__":

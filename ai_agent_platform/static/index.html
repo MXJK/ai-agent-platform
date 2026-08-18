@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260816-direct-workspaces-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260818-memory-workbench-2" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -91,7 +91,7 @@
           </button>
           <button class="nav-item" type="button" data-view="memory">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
-            <span><strong>项目记忆</strong><small>跨会话决策与经验</small></span>
+            <span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span>
           </button>
           <button class="nav-item" type="button" data-view="models">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
@@ -439,113 +439,165 @@
           </div>
         </section>
 
-        <section id="memory-view" class="view-panel" data-view-panel="memory" aria-labelledby="memory-title" hidden>
-          <header class="view-header compact">
+        <section id="memory-view" class="view-panel memory-view" data-view-panel="memory" aria-labelledby="memory-title" hidden>
+          <header class="view-header compact memory-view-header">
             <div>
-              <p class="eyebrow">Workspace Memory</p>
-              <h1 id="memory-title">项目记忆</h1>
-              <p>管理当前工作区跨会话复用的架构事实、约束、决策、规范与任务经验。</p>
+              <p class="eyebrow">Local Memory Console</p>
+              <h1 id="memory-title">记忆工作台</h1>
+              <p>看清 Agent 记住了什么、为什么记住，以及哪些内容会进入下一次回答。</p>
             </div>
-            <span id="memory-status" class="meta-badge">等待加载</span>
+            <div class="memory-runtime-status" aria-live="polite">
+              <span class="memory-live-dot" aria-hidden="true"></span>
+              <span id="memory-status">本地记忆正在连接</span>
+            </div>
           </header>
 
-          <article class="surface">
-            <div class="surface-heading">
-              <div><span class="step-kicker">01 · 策略</span><h2>记忆模式</h2></div>
-              <button id="refresh-memory-btn" class="text-button" type="button">刷新</button>
-            </div>
-            <div class="field-grid">
-              <label for="memory-mode-input">工作区模式
-                <select id="memory-mode-input">
-                  <option value="off">off · 关闭</option>
-                  <option value="shadow">shadow · 只提炼不注入</option>
-                  <option value="review">review · 仅使用已确认记忆</option>
-                  <option value="auto">auto · 高置信度自动生效</option>
-                </select>
-              </label>
-              <div class="field-control">
-                <label>索引维护</label>
-                <div class="button-row">
-                  <button id="save-memory-mode-btn" class="button secondary" type="button">保存模式</button>
-                  <button id="reindex-memory-btn" class="button ghost" type="button">重建索引</button>
-                </div>
-              </div>
-            </div>
-          </article>
-
-          <div class="content-grid equal-grid">
-            <article class="surface">
-              <div class="surface-heading">
-                <div><span class="step-kicker">02 · 治理</span><h2>编辑记忆</h2></div>
-                <span id="memory-selection-label" class="meta-badge">新记忆</span>
-              </div>
-              <div class="field-grid">
-                <label for="memory-kind-input">类型
-                  <select id="memory-kind-input">
-                    <option value="architecture_fact">架构事实</option>
-                    <option value="constraint">项目约束</option>
-                    <option value="decision">技术决策</option>
-                    <option value="convention">项目规范</option>
-                    <option value="task_outcome">任务结果</option>
-                    <option value="incident_lesson">故障经验</option>
-                  </select>
-                </label>
-                <label for="memory-importance-input">重要度
-                  <input id="memory-importance-input" type="number" min="1" max="5" value="3" />
-                </label>
-              </div>
-              <label for="memory-title-input">标题</label>
-              <input id="memory-title-input" maxlength="160" placeholder="例如：数据库事实源选择" />
-              <label for="memory-content-input">内容</label>
-              <textarea id="memory-content-input" rows="7" maxlength="2000" placeholder="记录稳定、可复用且不含密钥的项目事实"></textarea>
-              <div id="memory-evidence" class="citation-list">
-                <div class="empty-state">选择记忆后查看置信度、冲突状态和来源证据。</div>
-              </div>
-              <div class="button-row">
-                <button id="create-memory-btn" class="button primary" type="button">新建</button>
-                <button id="update-memory-btn" class="button secondary" type="button">保存修改</button>
-                <button id="confirm-memory-btn" class="button ghost" type="button">确认生效</button>
-                <button id="reject-memory-btn" class="button ghost" type="button">拒绝</button>
-                <button id="delete-memory-btn" class="button ghost" type="button">遗忘</button>
-              </div>
-              <p class="privacy-note"><span aria-hidden="true">i</span> 遗忘会删除记忆正文、证据和向量，但不会删除来源会话消息。</p>
-            </article>
-
-            <article class="surface">
-              <div class="surface-heading">
-                <div><span class="step-kicker">03 · 检视</span><h2>当前 revision</h2></div>
-                <span id="memory-count" class="meta-badge">0</span>
-              </div>
-              <div class="field-grid">
-                <label for="memory-status-filter">状态
-                  <select id="memory-status-filter">
-                    <option value="">全部状态</option>
-                    <option value="active">active</option>
-                    <option value="candidate">candidate</option>
-                    <option value="stale">stale</option>
-                    <option value="superseded">superseded</option>
-                    <option value="rejected">rejected</option>
-                  </select>
-                </label>
-                <label for="memory-kind-filter">类型
-                  <select id="memory-kind-filter">
-                    <option value="">全部类型</option>
-                    <option value="architecture_fact">architecture_fact</option>
-                    <option value="constraint">constraint</option>
-                    <option value="decision">decision</option>
-                    <option value="convention">convention</option>
-                    <option value="task_outcome">task_outcome</option>
-                    <option value="incident_lesson">incident_lesson</option>
-                  </select>
-                </label>
-              </div>
-              <div id="memory-list" class="session-list"><div class="empty-state">暂无项目记忆</div></div>
-              <details class="advanced-options">
-                <summary>最近提炼任务</summary>
-                <div id="memory-job-list" class="request-list"><div class="empty-state">暂无提炼任务</div></div>
-              </details>
-            </article>
+          <div class="knowledge-tabs memory-scope-tabs" role="tablist" aria-label="记忆范围">
+            <button id="memory-project-tab" class="knowledge-tab active" type="button" role="tab" aria-selected="true" aria-controls="memory-project-panel" data-memory-tab="project"><span class="memory-tab-code">L1</span><span>项目记忆</span><small>当前 Workspace</small></button>
+            <button id="memory-profile-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-profile-panel" data-memory-tab="profile"><span class="memory-tab-code">L3</span><span>我的画像</span><small>跨项目偏好</small></button>
+            <button id="memory-conversations-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-conversations-panel" data-memory-tab="conversations"><span class="memory-tab-code">L0</span><span>对话搜索</span><small>仅按需读取</small></button>
           </div>
+
+          <section id="memory-project-panel" role="tabpanel" aria-labelledby="memory-project-tab" data-memory-tab-panel="project">
+            <article class="surface memory-command-bar">
+              <div class="memory-command-copy">
+                <span class="step-kicker">CURRENT WORKSPACE</span>
+                <h2>项目事实与决策</h2>
+                <p>只把稳定、可复用的事实带入当前 revision；候选内容必须先审核。</p>
+              </div>
+              <div class="memory-command-controls">
+                <label class="memory-mode-control" for="memory-mode-input">工作区模式
+                  <select id="memory-mode-input">
+                    <option value="off">off · 关闭</option>
+                    <option value="shadow">shadow · 只提炼</option>
+                    <option value="review">review · 审核后生效</option>
+                    <option value="auto">auto · 高置信度生效</option>
+                  </select>
+                </label>
+                <button id="save-memory-mode-btn" class="button secondary" type="button">保存模式</button>
+                <button id="reindex-memory-btn" class="button ghost" type="button">重建索引</button>
+                <button id="refresh-memory-btn" class="button ghost" type="button">刷新</button>
+              </div>
+            </article>
+
+            <div class="memory-layer-rail" aria-label="本地分层记忆边界">
+              <div class="memory-layer-node l0"><span>L0</span><strong>对话原文</strong><small>保存消息；跨会话只按需搜索</small></div>
+              <div class="memory-layer-node l1"><span>L1</span><strong>项目原子记忆</strong><small><b id="memory-project-active-count">0</b> 已生效 · <b id="memory-project-candidate-count">0</b> 待审核</small></div>
+              <div class="memory-layer-gap"><span>L2 不存储</span><small>任务状态以源码、Run 与 checkpoint 为准</small></div>
+              <div class="memory-layer-node l3"><span>L3</span><strong>个人画像</strong><small>只注入已确认的跨项目偏好</small></div>
+            </div>
+
+            <div class="memory-split-layout">
+              <aside class="surface memory-list-pane" aria-labelledby="project-memory-list-title">
+                <div class="memory-pane-heading">
+                  <div><span class="step-kicker">MEMORY ASSETS</span><h2 id="project-memory-list-title">当前 revision</h2></div>
+                  <span id="memory-count" class="memory-pane-count">0 / 0</span>
+                </div>
+                <div class="memory-filter-grid">
+                  <label for="memory-status-filter">状态<select id="memory-status-filter"><option value="">全部状态</option><option value="candidate">待审核</option><option value="active">已生效</option><option value="stale">已过期</option><option value="superseded">已替代</option><option value="rejected">已拒绝</option></select></label>
+                  <label for="memory-kind-filter">类型<select id="memory-kind-filter"><option value="">全部类型</option><option value="architecture_fact">架构事实</option><option value="constraint">项目约束</option><option value="decision">技术决策</option><option value="convention">项目规范</option><option value="task_outcome">任务结果</option><option value="incident_lesson">故障经验</option></select></label>
+                </div>
+                <button id="new-project-memory-btn" class="button primary memory-new-button" type="button">＋ 新建项目记忆</button>
+                <div id="memory-list" class="memory-asset-list" aria-live="polite"><div class="memory-empty"><strong>还没有项目记忆</strong><p>明确说“记住”或手工创建一条稳定事实。</p></div></div>
+                <details class="advanced-options memory-jobs">
+                  <summary>最近提炼任务</summary>
+                  <div id="memory-job-list" class="request-list"><div class="empty-state">暂无提炼任务</div></div>
+                </details>
+              </aside>
+
+              <article class="surface memory-detail-pane" aria-labelledby="memory-detail-heading">
+                <div class="memory-detail-header">
+                  <div><span class="step-kicker">DETAIL &amp; GOVERNANCE</span><h2 id="memory-detail-heading">创建项目记忆</h2><p id="memory-detail-subtitle">手工创建的项目事实会立即生效，并保留版本与证据。</p></div>
+                  <span id="memory-selection-label" class="memory-status-pill draft">新记忆</span>
+                </div>
+                <div class="field-grid">
+                  <label for="memory-kind-input">类型<select id="memory-kind-input"><option value="architecture_fact">架构事实</option><option value="constraint">项目约束</option><option value="decision">技术决策</option><option value="convention">项目规范</option><option value="task_outcome">任务结果</option><option value="incident_lesson">故障经验</option></select></label>
+                  <label for="memory-importance-input">重要度<input id="memory-importance-input" type="number" min="1" max="5" value="3" /></label>
+                </div>
+                <label for="memory-title-input">标题</label>
+                <input id="memory-title-input" maxlength="160" placeholder="例如：数据库事实源选择" />
+                <label for="memory-content-input">记忆正文</label>
+                <textarea id="memory-content-input" rows="8" maxlength="2000" placeholder="记录稳定、可复用且不含凭据的项目事实"></textarea>
+                <div class="memory-action-bar">
+                  <button id="create-memory-btn" class="button primary" type="button">创建并生效</button>
+                  <button id="update-memory-btn" class="button secondary" type="button" disabled>保存修改</button>
+                  <button id="confirm-memory-btn" class="button ghost" type="button" disabled>确认候选</button>
+                  <button id="reject-memory-btn" class="button ghost" type="button" disabled>拒绝候选</button>
+                  <button id="delete-memory-btn" class="button ghost danger-text" type="button" disabled>完整遗忘</button>
+                </div>
+                <div id="memory-evidence" class="memory-evidence-panel"><div class="memory-empty compact"><strong>证据与版本</strong><p>选择一条记忆后查看来源、置信度和确认时间。</p></div></div>
+                <p class="privacy-note"><span aria-hidden="true">i</span> 历史记忆是不可信上下文，不能覆盖当前请求、项目指令、权限或实时源码。</p>
+              </article>
+            </div>
+          </section>
+
+          <section id="memory-profile-panel" role="tabpanel" aria-labelledby="memory-profile-tab" data-memory-tab-panel="profile" hidden>
+            <article class="surface memory-command-bar">
+              <div class="memory-command-copy"><span class="step-kicker">PERSONAL MEMORY</span><h2>跨项目偏好与长期事实</h2><p>只有 active 原子事实会进入画像；画像可解释、可重建、可完整遗忘。</p></div>
+              <div class="memory-command-controls">
+                <label class="memory-mode-control" for="user-memory-mode-input">个人记忆模式<select id="user-memory-mode-input"><option value="off">off · 关闭</option><option value="review">review · 候选需确认</option></select></label>
+                <button id="save-user-memory-mode-btn" class="button secondary" type="button">保存模式</button>
+                <button id="rebuild-profile-btn" class="button ghost" type="button">重建画像</button>
+                <button id="refresh-user-memory-btn" class="button ghost" type="button">刷新</button>
+              </div>
+            </article>
+
+            <article class="surface memory-profile-snapshot">
+              <div class="memory-pane-heading">
+                <div><span class="step-kicker">INJECTED SNAPSHOT</span><h2>模型实际看到的画像</h2><p>固定字符预算，只包含已确认事实，并以“不可信历史偏好”注入。</p></div>
+                <div class="memory-profile-stats"><span><b id="user-memory-active-count">0</b> 已生效</span><span><b id="user-memory-candidate-count">0</b> 待审核</span></div>
+              </div>
+              <div id="user-profile-preview" class="memory-profile-preview"><div class="memory-empty"><strong>暂无已确认画像</strong><p>确认一条个人事实后，这里会显示模型可见的确定性快照。</p></div></div>
+            </article>
+
+            <div class="memory-split-layout">
+              <aside class="surface memory-list-pane" aria-labelledby="user-memory-list-title">
+                <div class="memory-pane-heading"><div><span class="step-kicker">ATOMIC FACTS</span><h2 id="user-memory-list-title">我的记忆</h2></div><span id="user-memory-count" class="memory-pane-count">0 / 0</span></div>
+                <div class="memory-filter-grid">
+                  <label for="user-memory-status-filter">状态<select id="user-memory-status-filter"><option value="">全部状态</option><option value="candidate">待审核</option><option value="active">已生效</option><option value="superseded">已替代</option><option value="rejected">已拒绝</option></select></label>
+                  <label for="user-memory-kind-filter">类型<select id="user-memory-kind-filter"><option value="">全部类型</option><option value="profile_fact">个人事实</option><option value="communication_preference">沟通偏好</option><option value="tooling_preference">工具偏好</option><option value="workflow_preference">工作流偏好</option><option value="standing_goal">长期目标</option><option value="personal_constraint">个人约束</option></select></label>
+                </div>
+                <button id="new-user-memory-btn" class="button primary memory-new-button" type="button">＋ 新建个人事实</button>
+                <div id="user-memory-list" class="memory-asset-list" aria-live="polite"><div class="memory-empty"><strong>还没有个人记忆</strong><p>明确说明“以后都这样”或手工添加一条偏好。</p></div></div>
+              </aside>
+
+              <article class="surface memory-detail-pane" aria-labelledby="user-memory-detail-heading">
+                <div class="memory-detail-header"><div><span class="step-kicker">DETAIL &amp; GOVERNANCE</span><h2 id="user-memory-detail-heading">创建个人事实</h2><p id="user-memory-detail-subtitle">手工创建会立即生效；自动提炼只进入待审核列表。</p></div><span id="user-memory-selection-label" class="memory-status-pill draft">新记忆</span></div>
+                <div class="field-grid">
+                  <label for="user-memory-kind-input">类型<select id="user-memory-kind-input"><option value="profile_fact">个人事实</option><option value="communication_preference">沟通偏好</option><option value="tooling_preference">工具偏好</option><option value="workflow_preference">工作流偏好</option><option value="standing_goal">长期目标</option><option value="personal_constraint">个人约束</option></select></label>
+                  <label for="user-memory-importance-input">重要度<input id="user-memory-importance-input" type="number" min="1" max="5" value="3" /></label>
+                </div>
+                <label for="user-memory-title-input">标题</label><input id="user-memory-title-input" maxlength="160" placeholder="例如：默认回答语言" />
+                <label for="user-memory-content-input">事实正文</label><textarea id="user-memory-content-input" rows="8" maxlength="1000" placeholder="不保存密钥、完整环境变量、Prompt 注入或权限提升要求"></textarea>
+                <div class="memory-action-bar"><button id="create-user-memory-btn" class="button primary" type="button">创建并生效</button><button id="update-user-memory-btn" class="button secondary" type="button" disabled>保存修改</button><button id="confirm-user-memory-btn" class="button ghost" type="button" disabled>确认候选</button><button id="reject-user-memory-btn" class="button ghost" type="button" disabled>拒绝候选</button><button id="delete-user-memory-btn" class="button ghost danger-text" type="button" disabled>完整遗忘</button></div>
+                <div id="user-memory-evidence" class="memory-evidence-panel"><div class="memory-empty compact"><strong>证据与版本</strong><p>选择一条事实后查看来源与确认时间。</p></div></div>
+                <p class="privacy-note"><span aria-hidden="true">i</span> 关闭个人记忆后停止提炼和注入，但已有事实仍可查看和治理。</p>
+              </article>
+            </div>
+          </section>
+
+          <section id="memory-conversations-panel" role="tabpanel" aria-labelledby="memory-conversations-tab" data-memory-tab-panel="conversations" hidden>
+            <article class="surface memory-command-bar memory-search-command">
+              <div class="memory-command-copy"><span class="step-kicker">L0 · ON-DEMAND SEARCH</span><h2>搜索自己的历史对话</h2><p>结果按当前用户隔离，不会自动跨会话注入，也不会获得更高指令优先级。</p></div>
+              <div class="memory-search-controls">
+                <label for="conversation-memory-query">关键词<input id="conversation-memory-query" maxlength="500" placeholder="例如：SQLite 迁移" /></label>
+                <label for="conversation-memory-session">会话 ID（可选）<input id="conversation-memory-session" maxlength="64" placeholder="sess_..." /></label>
+                <label class="inline-check"><input id="conversation-memory-current-workspace" type="checkbox" /> 仅当前工作区</label>
+                <button id="search-conversation-memory-btn" class="button primary" type="button">搜索对话</button>
+                <button id="clear-conversation-memory-btn" class="button ghost" type="button">清空</button>
+              </div>
+            </article>
+
+            <div class="memory-conversation-layout">
+              <aside class="surface memory-list-pane" aria-labelledby="conversation-memory-list-title">
+                <div class="memory-pane-heading"><div><span class="step-kicker">SEARCH RESULTS</span><h2 id="conversation-memory-list-title">匹配消息</h2></div><span id="conversation-memory-count" class="memory-pane-count">0</span></div>
+                <div id="conversation-memory-results" class="memory-asset-list" aria-live="polite"><div class="memory-empty"><strong>输入关键词开始搜索</strong><p>可选限定当前 Workspace 或指定 Session。</p></div></div>
+              </aside>
+              <article id="conversation-memory-detail" class="surface memory-conversation-detail" aria-live="polite">
+                <div class="memory-empty"><strong>选择一条历史消息</strong><p>这里会显示角色、时间、会话范围和匹配正文。</p></div>
+              </article>
+            </div>
+          </section>
         </section>
 
         <section id="models-view" class="view-panel" data-view-panel="models" aria-labelledby="models-title" hidden>
@@ -965,6 +1017,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260816-direct-workspaces-1" defer></script>
+    <script src="/static/app.js?v=20260818-memory-workbench-2" defer></script>
   </body>
 </html>

@@ -246,6 +246,64 @@ class PostgresQueryUnitOfWork:
             )
 
 
+class SQLiteQueryUnitOfWork:
+    """Commits the initial Run, user message, and preferences in one SQLite transaction."""
+
+    atomic = True
+
+    def __init__(self, *, session_repository, run_store) -> None:
+        self._sessions = session_repository
+        self._runs = run_store
+
+    def persist_start(
+        self,
+        *,
+        record: AgentRunRecord,
+        message_id: str,
+        message: str,
+        preferences: UserPreferences,
+    ) -> Message:
+        with self._runs.database.transaction(immediate=True) as conn:
+            self._runs.save_in_transaction(conn, record)
+            stored = self._sessions.add_message_in_transaction(
+                conn,
+                session_id=record.conversation_id,
+                role="user",
+                content=message,
+                message_id=message_id,
+                source_run_id=record.run_id,
+            )
+            if stored is None:
+                raise RuntimeError("Query start message already exists")
+            self._sessions._save_user_preferences(
+                conn,
+                replace(
+                    preferences,
+                    last_active_session_id=record.conversation_id,
+                    updated_at=stored.created_at,
+                ),
+            )
+        return stored
+
+    def persist_assistant_once(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        message_id: str,
+        content: str,
+    ) -> Message | None:
+        with self._runs.database.transaction(immediate=True) as conn:
+            return self._sessions.add_message_in_transaction(
+                conn,
+                session_id=conversation_id,
+                role="assistant",
+                content=content,
+                message_id=message_id,
+                source_run_id=run_id,
+            )
+
+
 def create_query_unit_of_work(
     *,
     session_service,
@@ -257,6 +315,10 @@ def create_query_unit_of_work(
     from ai_agent_platform.repositories.postgres import (
         PostgresAgentRunRepository,
         PostgresSessionRepository,
+    )
+    from ai_agent_platform.repositories.sqlite import (
+        SQLiteAgentRunRepository,
+        SQLiteSessionRepository,
     )
 
     if isinstance(session_repository, InMemorySessionRepository) and isinstance(
@@ -273,6 +335,15 @@ def create_query_unit_of_work(
         if session_repository._database_url != run_store._database_url:
             raise ValueError("Query stores must use the same PostgreSQL database")
         return PostgresQueryUnitOfWork(
+            session_repository=session_repository,
+            run_store=run_store,
+        )
+    if isinstance(session_repository, SQLiteSessionRepository) and isinstance(
+        run_store, SQLiteAgentRunRepository
+    ):
+        if session_repository.database.path != run_store.database.path:
+            raise ValueError("Query stores must use the same SQLite database")
+        return SQLiteQueryUnitOfWork(
             session_repository=session_repository,
             run_store=run_store,
         )
