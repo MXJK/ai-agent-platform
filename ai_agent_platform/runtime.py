@@ -70,6 +70,7 @@ from ai_agent_platform.services import (
     UsageLedgerService,
     WorkspaceService,
     ExecutionContextFactory,
+    ExecutionWorkspaceRuntime,
     create_conversation_compressor,
 )
 from ai_agent_platform.skills import (
@@ -142,6 +143,7 @@ class RuntimeContainer:
     coding_agent_runtime: CodingAgentRuntime | None = None
     session_service: SessionService | None = None
     execution_context_factory: ExecutionContextFactory | None = None
+    execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None
     query_uow: Any = None
     query_service: QueryService | None = None
     agent_run_service: AgentRunService | None = None
@@ -285,6 +287,12 @@ class ApplicationFactory:
                 )
             )
             container.permission_resolver = PermissionResolver()
+            container.execution_workspace_runtime = ExecutionWorkspaceRuntime(
+                runtime_parent=settings.sandbox_workspace_parent,
+                worktree_parent=settings.change_set_worktree_parent,
+                branch_prefix=settings.change_set_branch_prefix,
+                command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+            )
             container.change_set_service = ChangeSetService(
                 repository=container.change_set_store,
                 workspace_service=container.workspace_service,
@@ -343,9 +351,18 @@ class ApplicationFactory:
                     )
             container.checkpoint("mcp_ready")
 
+            tool_factory_kwargs: dict[str, Any] = {
+                "mcp_providers": container.mcp_providers,
+            }
+            if "execution_workspace_runtime" in inspect.signature(
+                self.create_tool_registry
+            ).parameters:
+                tool_factory_kwargs["execution_workspace_runtime"] = (
+                    container.execution_workspace_runtime
+                )
             container.tool_registry = self.create_tool_registry(
                 settings,
-                mcp_providers=container.mcp_providers,
+                **tool_factory_kwargs,
             )
             attach_permission_resolver = getattr(
                 container.tool_registry,
@@ -399,6 +416,9 @@ class ApplicationFactory:
                     project_memory_service=container.project_memory_service,
                     change_set_service=container.change_set_service,
                     tool_pool_builder=container.tool_pool_builder,
+                    execution_workspace_runtime=(
+                        container.execution_workspace_runtime
+                    ),
                 )
             else:
                 container.coding_agent_runtime = coding_agent_runtime
@@ -454,6 +474,7 @@ class ApplicationFactory:
                 tool_registry=container.tool_registry,
                 tool_pool_builder=container.tool_pool_builder,
                 model_registry=container.model_registry,
+                execution_workspace_runtime=container.execution_workspace_runtime,
             )
             container.query_uow = create_query_unit_of_work(
                 session_service=container.session_service,
@@ -699,6 +720,7 @@ class ApplicationFactory:
         settings: Settings,
         *,
         mcp_providers: list[MCPToolProvider],
+        execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
     ) -> ToolRegistry:
         registry = create_coding_tool_registry(
             mcp_providers=mcp_providers,
@@ -711,6 +733,7 @@ class ApplicationFactory:
             sandbox_workspace_parent=settings.sandbox_workspace_parent,
             sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
+            execution_workspace_runtime=execution_workspace_runtime,
         )
         if settings.tool_allowlist is not None:
             registry.restrict_to(settings.tool_allowlist)
@@ -805,6 +828,7 @@ class ApplicationFactory:
         project_memory_service: ProjectMemoryService,
         change_set_service: ChangeSetService,
         tool_pool_builder: ToolPoolBuilder,
+        execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
     ) -> CodingAgentRuntime:
         return CodingAgentRuntime(
             tool_registry=tool_registry,
@@ -835,6 +859,7 @@ class ApplicationFactory:
             max_rag_context_chars=settings.rag_max_prompt_chars,
             change_set_service=change_set_service,
             tool_pool_builder=tool_pool_builder,
+            execution_workspace_runtime=execution_workspace_runtime,
         )
 
 

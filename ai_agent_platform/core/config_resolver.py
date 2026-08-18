@@ -237,6 +237,8 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "sandbox_docker_image",
         "sandbox_workspace_parent",
         "live_workspace_writes_enabled",
+        "agent_workspace_default_mode",
+        "agent_workspace_allowed_modes",
         "change_set_apply_mode",
         "change_set_worktree_parent",
         "change_set_branch_prefix",
@@ -274,6 +276,7 @@ _TUPLE_FIELDS = frozenset(
         "workspace_allowed_roots",
         "sandbox_allowed_commands",
         "project_instructions",
+        "agent_workspace_allowed_modes",
     }
 )
 _OPTIONAL_TUPLE_FIELDS = frozenset(
@@ -569,6 +572,13 @@ class ConfigResolver:
             canonical="CHANGE_SET_STORE",
             fallback="AGENT_RUN_STORE",
             current=values["change_set_store"],
+        )
+        _apply_legacy_workspace_mode_fallback(
+            environment_values,
+            details,
+            combined,
+            self._env,
+            provenance=provenance,
         )
 
         for field_name, raw_value in environment_values.items():
@@ -983,6 +993,40 @@ def _apply_legacy_environment_fallback(
     )
     location = "environment" if fallback in process_environment else ".env"
     details[target] = f"{location}:{fallback} (legacy fallback)"
+
+
+def _apply_legacy_workspace_mode_fallback(
+    environment_values: dict[str, object],
+    details: dict[str, str],
+    combined: Mapping[str, str],
+    process_environment: Mapping[str, str],
+    *,
+    provenance: Mapping[str, ConfigFieldSource],
+) -> None:
+    """Map the old promotion mode only when the new execution settings are absent."""
+
+    legacy_name = "CHANGE_SET_APPLY_MODE"
+    if legacy_name not in combined:
+        return
+    legacy_mode = str(combined[legacy_name]).strip()
+    location = "environment" if legacy_name in process_environment else ".env"
+    if (
+        "agent_workspace_default_mode" not in environment_values
+        and provenance["agent_workspace_default_mode"].source is ConfigSource.DEFAULT
+    ):
+        environment_values["agent_workspace_default_mode"] = legacy_mode
+        details["agent_workspace_default_mode"] = (
+            f"{location}:{legacy_name} (deprecated workspace-mode fallback)"
+        )
+    if (
+        "agent_workspace_allowed_modes" not in environment_values
+        and provenance["agent_workspace_allowed_modes"].source is ConfigSource.DEFAULT
+    ):
+        modes = tuple(dict.fromkeys(("patch_only", legacy_mode)))
+        environment_values["agent_workspace_allowed_modes"] = modes
+        details["agent_workspace_allowed_modes"] = (
+            f"{location}:{legacy_name} (deprecated workspace-mode fallback)"
+        )
 
 
 def _validate_namespaced_environment(environment: Mapping[str, str]) -> None:

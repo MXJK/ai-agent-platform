@@ -281,8 +281,8 @@ Token 时才作为后备。
   配置最小允许根目录；
 - Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
   要求，运行中也可就地暂停、取消或发送转向；终态消息内显示修改文件、逐文件增删行、
-  可展开完整 Diff、ChangeSet 校验状态和拒绝/应用操作。`patch_only` 会明确标记“尚未写入
-  磁盘”并禁用应用；`direct` / `worktree` 只有在二次确认后才调用受保护的应用 API。
+  可展开完整 Diff、ChangeSet 校验状态和安全回滚。`patch_only` 会明确标记“尚未写入
+  真实工作区”；`direct` / `worktree` 显示执行时已经写入的位置，回滚需二次确认摘要。
   刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
   `waiting_approval` 误认为卡死，也避免误以为 Sandbox 文件已经进入真实工作区；
 - 对话输入框随内容自动增高，按会话保存未发送草稿；发送可用性会即时反映空输入、
@@ -502,13 +502,12 @@ setup_workspace
 为 3,000 字符。未显式指向知识库的通用“项目介绍”问题强制使用 `repo`，先发现并
 读取 README、项目清单和入口文件，避免无关托管文档填补源码证据真空。
 
-`merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。变更任务继续
-使用人工审批、每次运行独立的沙箱副本、验证、一次有界修复，以及 Diff/测试产物；
-终态会在沙箱清理前把完整补丁持久化为 ChangeSet。默认 `patch_only` 不修改源工作区；
-只有显式启用真实写入、可信身份 editor 二次批准且补丁摘要与逐文件基线哈希均通过时，
-服务才按 `direct` 或 `worktree` 模式应用。浏览器不再把这一闭环放在独立 Agent 页面：
-对应对话消息会恢复并读取 ChangeSet，呈现文件账本和完整 Diff，再由用户点击“应用到真实
-工作区”。
+`merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。变更任务在 Run
+开始前冻结 `patch_only`、`direct` 或 `worktree` 执行根，继续使用精确工具审批、验证、
+有界修复以及 Diff/测试产物。终态把完整补丁、写前/写后哈希和执行位置持久化为
+ChangeSet：`patch_only` 不修改源工作区；`direct`/`worktree` 在工具执行时已经写入，
+并要求 trusted editor、真实写入开关、基线冲突检查和 mutation journal。浏览器在对应
+消息呈现文件账本、完整 Diff、实际位置和摘要绑定的安全回滚。
 
 运行中的 Agent 状态以产品运行存储为事实源，并把最近的 LangGraph checkpoint 作为
 只读进度叠加，因此 API 可以在任务仍执行时暴露已经完成的 Trace 节点，GET 查询本身
@@ -815,14 +814,14 @@ SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接�
 `score` 来源字段。已经移除的 `repository_id` 和 `rag_context` Agent 字段不会被接受
 或返回。
 
-ChangeSet 是模型工具审批之后的独立落盘边界。读取/拒绝/应用也进入同一
+ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒绝/历史应用/回滚也进入同一
 `PermissionResolver` 的 Workspace role/root 判定，同时保留服务内纵深校验。它保存不可
 截断补丁、SHA-256、变更文件、
-Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 可查看，editor 才能
-拒绝或应用；apply 还会重新校验登记根、符号链接、敏感/二进制路径、文件并发修改和用户
-确认的摘要。重复应用同一已完成 ChangeSet 返回相同结果；冲突不会覆盖用户的新修改。
-`direct` 失败会恢复原文件，`worktree` 从捕获的 Git HEAD 创建受控 `codex/` 分支和
-工作树，源目录保持不变。应用不会自动 commit、push、建 PR、merge 或部署。
+写前/写后哈希、source/execution root、workspace revision、Git/分支/worktree、验证摘要
+和状态。viewer 可查看，editor 才能拒绝或回滚。新 `direct`/`worktree` 记录捕获即为
+`applied`，不能二次应用；回滚复核摘要和写后哈希，冲突不会覆盖用户的新修改，重复回滚
+幂等。旧版 ready ChangeSet 保留 apply 兼容。系统不会自动 commit、push、建 PR、merge
+或部署。
 
 ### 实时源码工具
 
@@ -835,13 +834,23 @@ Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 
 目录、真实 `.env`、私钥及常见凭据文件。文件列举会逐项跳过符号链接、越界解析目标
 及 `.venv-*` 等忽略目录，不会因单个不安全条目让整个目录发现失败。
 
-### 沙箱边界
+### 执行工作区与命令隔离边界
 
-变更任务会把普通、非敏感工作区文件复制到每次运行独立的目录。真实 `.env`、凭据、
-私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件会被跳过，并记录在
-`copy_warnings` 中。完成、失败或拒绝的运行会删除沙箱；启动时还会清理超过
-`SANDBOX_WORKSPACE_TTL_SECONDS` 的目录。发生变更时，清理前会先通过服务端内部导出器
-保存完整 ChangeSet；展示用截断 Diff 不会被用于真实落盘。
+每个 Run 在读取项目指令和构建工具池之前就确定一个执行工作区，并把来源根、模式、
+执行根、Git HEAD、分支和清理策略冻结到 RunContext v4。仓库读取、文件写入、命令、
+状态和 Diff 始终使用同一个执行根；登记的来源根只负责授权边界，不能由模型或请求参数
+替换。三种模式是：
+
+- `patch_only`：把普通、非敏感文件复制到每 Run 临时目录，终态导出 ChangeSet 后删除；
+- `direct`：直接在登记源码根中读取、写入和执行，修改立即对其他本机进程可见；
+- `worktree`：只接受干净 Git 仓库，从冻结 HEAD 创建并保留 `codex/` 分支 worktree，
+  当前源码检出保持不变。
+
+真实 `.env`、凭据、私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件都会被
+拒绝或跳过并记录。写文件接受可选 `expected_sha256`，所有已存在目标都校验 Run 基线和
+当前哈希；补丁还校验路径、上下文和写前哈希。写入使用同目录临时文件、`fsync` 和原子
+替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施单写者
+锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
 
 真实写入默认关闭。最小配置如下；`LIVE_WORKSPACE_WRITES_ENABLED=true` 只能与
 `AUTH_MODE=trusted_header` 一起使用：
@@ -849,7 +858,9 @@ Sandbox 基线哈希、workspace root/revision、验证摘要和状态。viewer 
 ```dotenv
 CHANGE_SET_STORE=postgres
 LIVE_WORKSPACE_WRITES_ENABLED=false
-CHANGE_SET_APPLY_MODE=patch_only  # patch_only | direct | worktree
+AGENT_WORKSPACE_DEFAULT_MODE=patch_only
+AGENT_WORKSPACE_ALLOWED_MODES=patch_only
+CHANGE_SET_APPLY_MODE=patch_only  # 仅供旧 ChangeSet apply 配置兼容
 CHANGE_SET_MAX_FILES=100
 CHANGE_SET_MAX_PATCH_CHARS=1000000
 CHANGE_SET_WORKTREE_PARENT=
@@ -862,25 +873,33 @@ gateway 身份模式，并为网关和 FastAPI 配置同一个随机信任密钥
 ```dotenv
 AUTH_MODE=trusted_header
 LIVE_WORKSPACE_WRITES_ENABLED=true
-CHANGE_SET_APPLY_MODE=direct
+AGENT_WORKSPACE_DEFAULT_MODE=direct
+AGENT_WORKSPACE_ALLOWED_MODES=patch_only,direct,worktree
+CHANGE_SET_APPLY_MODE=direct  # 可选：旧配置/历史 ChangeSet 兼容
 GATEWAY_AUTH_MODE=local
 GATEWAY_LOCAL_USER_ID=demo_user
 GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
 ```
 
-浏览器应从 `http://127.0.0.1:8000` 进入；`8080` 只是兼容别名。Agent 仍只修改每次
-Run 的沙箱；完成后对话内显示文件列表与完整 Diff，用户再次确认“应用到真实工作区”
-才会写入注册根目录。原来以 `patch_only` 生成的 ChangeSet 不会因配置切换而变为可
-应用，必须重新运行任务。
+浏览器应从 `http://127.0.0.1:8000` 进入；`8080` 只是兼容别名。Compose 只承载网关和
+基础设施，宿主 FastAPI 从同一 `.env` 读取上述模式配置。前端只展示服务端允许且对当前
+身份/Workspace 可用的模式；`direct`/`worktree` 还要求 trusted-header 身份、
+editor/admin、真实写入开关和精确工具审批，`worktree` 额外要求 Git 干净。
+
+`direct`/`worktree` 的 ChangeSet 是已发生写入的审计记录，捕获时即为 `applied`，不会
+再次应用；对话会明确显示实际源码根或 worktree 路径/分支，并可调用
+`POST /agent/runs/{run_id}/changes/revert`。回滚重新校验补丁摘要和写后文件哈希，冲突时
+保留较新的用户内容，重复回滚幂等。`patch_only` 明确标记尚未写入且不能推广；旧版
+待应用 ChangeSet 仍保留原 apply 语义，不需要数据库迁移。
 
 `SANDBOX_MODE=local` 只适用于由本地用户拥有并信任的仓库。它在最小环境中执行
 `SANDBOX_ALLOWED_COMMANDS` 里的可执行文件基本名，使用固定最大超时、有界输出捕获和
 进程组终止。`sh -c`、`bash -c` 等 Shell 包装器会被拒绝。进入白名单的解释器仍能
 执行任意受信仓库代码，所以本地模式不是面向恶意代码的宿主隔离边界。
 
-Docker 模式还会禁用网络、使用只读容器根目录和调用方的非 root UID/GID，移除 Linux
-capability，启用 `no-new-privileges`，并限制 PID、CPU、内存及 tmpfs。只有复制后的
-`/workspace` 挂载点可写。
+`SANDBOX_MODE` 只决定命令进程隔离，不决定文件目标。Docker 模式会把同一个 Run 执行根
+挂载为 `/workspace`，并禁用网络、使用只读容器根目录和调用方的非 root UID/GID，移除
+Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmpfs。
 
 ## 项目记忆
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_agent_platform.integrations.sandbox import SandboxRuntime
+from ai_agent_platform.integrations.execution_workspace import ExecutionWorkspaceRuntime
 from ai_agent_platform.integrations.tools import ToolExecutionContext, ToolRegistry
 
 
@@ -20,11 +21,13 @@ class SandboxToolKit:
         self,
         path: str,
         content: str,
+        expected_sha256: str | None = None,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         return self._runtime.write_file(
             path=path,
             content=content,
+            expected_sha256=expected_sha256,
             context=context,
         )
 
@@ -73,6 +76,7 @@ def register_sandbox_tools(
     workspace_parent: str | None = None,
     workspace_ttl_seconds: float = 86400.0,
     allowed_commands: tuple[str, ...] | None = None,
+    execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
 ) -> SandboxRuntime:
     runtime = SandboxRuntime(
         mode=mode,
@@ -82,7 +86,9 @@ def register_sandbox_tools(
         workspace_parent=workspace_parent,
         workspace_ttl_seconds=workspace_ttl_seconds,
         allowed_commands=allowed_commands,
+        execution_workspace_runtime=execution_workspace_runtime,
     )
+    setattr(registry, "execution_workspace_runtime", runtime.execution_workspace_runtime)
     registry.register_context_cleanup(
         lambda context: runtime.cleanup(context=context)
     )
@@ -92,7 +98,7 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.workspace_status",
         toolkit.workspace_status,
-        description="Inspect the per-run sandbox workspace and changed files.",
+        description="Inspect the current Run execution workspace and changed files.",
         input_schema={"type": "object"},
         provider=f"sandbox:{mode}",
         permission_level="read_only",
@@ -101,28 +107,32 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.write_file",
         toolkit.write_file,
-        description="Write a UTF-8 file inside the isolated sandbox workspace.",
+        description="Write a UTF-8 file inside the current Run execution workspace.",
         input_schema={
             "type": "object",
             "required": ["path", "content"],
             "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+                "expected_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                },
             },
         },
         provider=f"sandbox:{mode}",
         permission_level="write_safe",
         requires_approval=True,
         risk_summary=(
-            "Writes only inside the per-run sandbox workspace; review the path "
-            "and final diff before applying changes outside the sandbox."
+            "Writes only inside the server-selected Run execution workspace; "
+            "the exact call still requires approval and conflict checks."
         ),
         max_output_chars=12000,
     )
     registry.register(
         "sandbox.apply_patch",
         toolkit.apply_patch,
-        description="Apply a unified diff inside the isolated sandbox workspace.",
+        description="Apply a unified diff inside the current Run execution workspace.",
         input_schema={
             "type": "object",
             "required": ["patch"],
@@ -132,8 +142,8 @@ def register_sandbox_tools(
         permission_level="write_safe",
         requires_approval=True,
         risk_summary=(
-            "Applies a patch only inside the per-run sandbox workspace; human "
-            "approval is required before executing the patch."
+            "Applies a contextual patch only inside the server-selected Run "
+            "execution workspace; human approval is required."
         ),
         max_output_chars=12000,
     )
@@ -141,7 +151,7 @@ def register_sandbox_tools(
         "sandbox.run_command",
         toolkit.run_command,
         description=(
-            "Run an allowlisted validation command in the sandbox workspace. "
+            "Run an allowlisted validation command in the Run execution workspace. "
             "Use this after a workspace mutation; use repo.list_files for directory "
             "inventory instead of shell commands such as ls. Allowed executable "
             f"basenames: {', '.join(runtime.allowed_commands)}."
@@ -168,14 +178,14 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.git_diff",
         toolkit.git_diff,
-        description="Return the unified diff between the sandbox baseline and current workspace.",
+        description="Return the unified diff between the Run baseline and execution workspace.",
         input_schema={
             "type": "object",
             "properties": {"max_chars": {"type": "integer"}},
         },
         provider=f"sandbox:{mode}",
         permission_level="read_only",
-        risk_summary="Reads sandbox changes and returns a unified diff without side effects.",
+        risk_summary="Reads execution-workspace changes and returns a unified diff without side effects.",
         max_output_chars=24000,
     )
     return runtime

@@ -119,6 +119,9 @@ const state = {
     skill_commands: [],
     mcp_tools: [],
     diagnostics: [],
+    allowed_workspace_modes: ["patch_only"],
+    default_workspace_mode: "patch_only",
+    workspace_mode_unavailable_reasons: {},
   },
   slashCapabilityKey: "",
   slashLoading: false,
@@ -130,6 +133,8 @@ const state = {
   followConversation: true,
   currentView: "chat",
   composerMode: "chat",
+  workspaceMode: "patch_only",
+  workspaceModeLocked: false,
   chatController: null,
   agentPollGeneration: 0,
   changeSetRequestGeneration: 0,
@@ -478,6 +483,7 @@ function humanizeStatus(value) {
     ready: "待审阅",
     applying: "应用中",
     applied: "已应用",
+    reverted: "已回滚",
     rejected: "已拒绝",
     conflicted: "存在冲突",
   };
@@ -659,9 +665,64 @@ function invalidateSlashCapabilities() {
     skill_commands: [],
     mcp_tools: [],
     diagnostics: [],
+    allowed_workspace_modes: ["patch_only"],
+    default_workspace_mode: "patch_only",
+    workspace_mode_unavailable_reasons: {},
   };
+  state.workspaceMode = "patch_only";
   state.slashLoading = false;
   state.slashError = "";
+  renderWorkspaceModeControl();
+}
+
+const WORKSPACE_MODE_COPY = {
+  direct: {
+    label: "当前源码",
+    hint: "工具、命令与 Diff 都针对注册源码根；修改会立即可见。",
+  },
+  worktree: {
+    label: "Git Worktree",
+    hint: "在服务创建并保留的干净 Git worktree 中执行，不改动当前检出。",
+  },
+  patch_only: {
+    label: "仅生成补丁",
+    hint: "在临时副本中执行；真实工作区保持不变。",
+  },
+};
+
+function renderWorkspaceModeControl() {
+  const control = $("agent-workspace-mode-control");
+  const select = $("agent-workspace-mode-select");
+  const hint = $("agent-workspace-mode-hint");
+  if (!control || !select || !hint) return;
+  control.hidden = state.composerMode !== "agent";
+  const capabilities = state.slashCapabilities || {};
+  const allowed = new Set(capabilities.allowed_workspace_modes || ["patch_only"]);
+  const reasons = capabilities.workspace_mode_unavailable_reasons || {};
+  const options = [...select.options];
+  options.forEach((option) => {
+    const reason = reasons[option.value];
+    option.disabled = !allowed.has(option.value) || Boolean(reason);
+    option.title = reason || WORKSPACE_MODE_COPY[option.value]?.hint || "";
+  });
+  const selectedOption = options.find((option) => option.value === state.workspaceMode);
+  if (!selectedOption || selectedOption.disabled) {
+    const fallback = capabilities.default_workspace_mode || "patch_only";
+    const fallbackOption = options.find(
+      (option) => option.value === fallback && !option.disabled,
+    ) || options.find((option) => !option.disabled);
+    state.workspaceMode = fallbackOption?.value || "patch_only";
+  }
+  select.value = state.workspaceMode;
+  select.disabled = state.workspaceModeLocked
+    || state.composerMode !== "agent"
+    || Boolean(state.currentSession?.archived_at)
+    || Boolean(state.chatController);
+  const selectedReason = reasons[state.workspaceMode];
+  hint.textContent = selectedReason
+    ? `不可用：${selectedReason}`
+    : WORKSPACE_MODE_COPY[state.workspaceMode]?.hint || "运行开始后将锁定本次选择。";
+  control.title = selectedReason || "运行开始后将锁定本次选择";
 }
 
 function slashQueryContext() {
@@ -829,7 +890,10 @@ async function loadSlashCapabilities() {
     generation = ++state.slashRequestGeneration;
     state.slashLoading = true;
     const key = `${conversationId}:${workspace.id}`;
-    if (state.slashCapabilityKey === key) return;
+    if (state.slashCapabilityKey === key) {
+      renderWorkspaceModeControl();
+      return;
+    }
     const params = new URLSearchParams({
       conversation_id: conversationId,
       workspace_id: workspace.id,
@@ -838,6 +902,7 @@ async function loadSlashCapabilities() {
     if (generation !== state.slashRequestGeneration) return;
     state.slashCapabilities = body;
     state.slashCapabilityKey = key;
+    state.workspaceMode = body.default_workspace_mode || "patch_only";
   } catch (error) {
     if (generation && generation !== state.slashRequestGeneration) return;
     state.slashError = `能力加载失败：${humanizeError(error)}`;
@@ -845,6 +910,7 @@ async function loadSlashCapabilities() {
     if (!generation || generation === state.slashRequestGeneration) {
       state.slashLoading = false;
       renderSlashCommandMenu();
+      renderWorkspaceModeControl();
     }
   }
 }
@@ -1177,6 +1243,16 @@ function setActiveWorkspace(workspaceId) {
   updateComposerAvailability();
   renderWorkspaceManager();
   renderWorkspaceCatalog();
+  if (
+    state.conversationId
+    && state.composerMode === "agent"
+    && workspaceIsReady(currentWorkspace())
+  ) {
+    loadSlashCapabilities().catch((error) => {
+      state.slashError = `能力加载失败：${humanizeError(error)}`;
+      renderWorkspaceModeControl();
+    });
+  }
 }
 
 function applyConfigurationToInputs(source, defaults = false) {
@@ -1202,12 +1278,25 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("send-chat-btn").innerHTML = isAgent
     ? `交给 Agent ${iconMarkup("arrow-right")}`
     : `发送 ${iconMarkup("arrow-up")}`;
+  renderWorkspaceModeControl();
+  if (state.conversationId && isAgent && workspaceIsReady(currentWorkspace())) {
+    loadSlashCapabilities().catch((error) => {
+      state.slashError = `能力加载失败：${humanizeError(error)}`;
+      renderWorkspaceModeControl();
+    });
+  }
   updateComposerAvailability();
 }
 
 async function persistComposerMode(mode) {
   updateComposerMode(mode);
   try {
+    if (
+      state.composerMode === "agent"
+      && workspaceIsReady(currentWorkspace())
+    ) {
+      await loadSlashCapabilities();
+    }
     if (state.currentSession) {
       state.currentSession = await fetchJson(
         `/sessions/${encodeURIComponent(state.currentSession.id)}`,
@@ -1240,6 +1329,7 @@ function updateComposerAvailability() {
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
+  renderWorkspaceModeControl();
   $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace || empty;
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
@@ -3183,22 +3273,44 @@ function renderInlineChangeReview(contentNode, changeSet) {
   const files = changeSetFileStats(changeSet);
   const ready = changeSet.status === "ready";
   const patchOnly = changeSet.apply_mode === "patch_only";
+  const liveMode = ["direct", "worktree"].includes(changeSet.apply_mode);
   const totalAdditions = files.reduce((sum, file) => sum + file.additions, 0);
   const totalDeletions = files.reduce((sum, file) => sum + file.deletions, 0);
   const applied = changeSet.status === "applied";
+  const reverted = changeSet.status === "reverted";
   const rejected = changeSet.status === "rejected";
+  const postWriteHashes = changeSet.validation_summary?.post_write_file_hashes || {};
+  const recordedLive = liveMode
+    && (applied || reverted)
+    && files.length > 0
+    && files.every((file) => Object.hasOwn(postWriteHashes, file.path));
   const modeNote = patchOnly
-    ? "当前为 patch-only：修改只保存在 ChangeSet，不会写入真实工作区。启用真实写入后，需要重新运行任务生成可应用的 ChangeSet。"
-    : changeSet.apply_mode === "worktree"
-      ? "应用前会校验补丁摘要、Workspace revision 和文件基线，并写入隔离 worktree。"
-      : "应用前会重新校验补丁摘要、Workspace revision 和文件基线；确认后才会写入真实工作区。";
+    ? "本次运行只修改临时副本；ChangeSet 用于审计和下载，真实工作区保持不变。"
+    : reverted
+      ? "服务已校验写后哈希并反向应用原补丁；再次回滚会安全返回当前结果。"
+      : recordedLive && changeSet.apply_mode === "worktree"
+        ? `变更已在 Agent 执行时写入并保留于 Git worktree；当前源码检出未被修改。${changeSet.worktree_path ? ` 路径：${changeSet.worktree_path}` : ""}`
+        : recordedLive
+          ? "变更已在 Agent 执行时直接写入注册源码根，文件现在对本机其他进程可见；可在下方安全回滚。"
+          : changeSet.apply_mode === "worktree"
+            ? "这是旧版待应用 ChangeSet；应用前会校验摘要、Git HEAD 和文件基线，并创建隔离 worktree。"
+            : "这是旧版待应用 ChangeSet；应用前会重新校验摘要、Workspace revision 和文件基线。";
   const applyLabel = patchOnly
-    ? "真实写入未启用"
+    ? "仅生成补丁"
     : applied
-      ? changeSet.apply_mode === "worktree" ? "已创建隔离 Worktree" : "已应用到真实工作区"
+      ? recordedLive ? "回滚已写入变更" : "已应用"
+      : reverted
+        ? "已安全回滚"
       : rejected
         ? "变更已拒绝"
-        : changeSet.apply_mode === "worktree" ? "创建隔离 Worktree" : "应用到真实工作区";
+        : changeSet.apply_mode === "worktree" ? "应用旧版 ChangeSet" : "应用旧版 ChangeSet";
+  const safetyTitle = patchOnly
+    ? "尚未写入真实工作区"
+    : reverted
+      ? "已回滚"
+      : recordedLive
+        ? "已在执行时写入"
+        : "历史 ChangeSet 待确认";
   card.dataset.changeSetId = changeSet.id;
   card.dataset.runId = changeSet.run_id;
   card.dataset.status = changeSet.status;
@@ -3230,15 +3342,21 @@ function renderInlineChangeReview(contentNode, changeSet) {
       <pre class="change-set-patch"><code>${escapeHtml(changeSet.patch || "没有可显示的补丁")}</code></pre>
     </details>
     <div class="change-safety-note ${patchOnly ? "patch-only" : "writable"}">
-      <span aria-hidden="true">${patchOnly ? "!" : "✓"}</span>
-      <p><strong>${patchOnly ? "尚未写入磁盘" : "应用操作受保护"}</strong>${escapeHtml(modeNote)}</p>
+      <span aria-hidden="true">${patchOnly ? "!" : reverted ? "↶" : "✓"}</span>
+      <p><strong>${escapeHtml(safetyTitle)}</strong>${escapeHtml(modeNote)}</p>
     </div>
+    ${changeSet.branch_name || changeSet.worktree_path ? `
+      <div class="change-execution-location">
+        ${changeSet.branch_name ? `<span>分支 <code>${escapeHtml(changeSet.branch_name)}</code></span>` : ""}
+        ${changeSet.worktree_path ? `<span>Worktree <code title="${escapeHtml(changeSet.worktree_path)}">${escapeHtml(changeSet.worktree_path)}</code></span>` : ""}
+      </div>
+    ` : ""}
     ${changeSet.error ? `<p class="change-review-error" role="alert">${escapeHtml(changeSet.error)}</p>` : ""}
     <div class="change-review-actions">
       <span>${escapeHtml(changeSet.apply_mode)} · ${escapeHtml(changeSet.validation_status)}</span>
       <div>
         <button class="button ghost" type="button" data-inline-change-action="reject" ${ready ? "" : "disabled"}>拒绝变更</button>
-        <button class="button primary" type="button" data-inline-change-action="apply" ${ready && !patchOnly ? "" : "disabled"}>${applyLabel}</button>
+        <button class="button primary" type="button" data-inline-change-action="${recordedLive && applied ? "revert" : "apply"}" ${recordedLive && applied ? "" : ready && !patchOnly ? "" : "disabled"}>${applyLabel}</button>
       </div>
     </div>
   `;
@@ -3300,6 +3418,9 @@ async function handleInlineChangeAction(contentNode, changeSet, action, card) {
       ? `确认从捕获的 Git HEAD 创建隔离 worktree，并应用 ${changeSet.changed_files.length} 个文件？\n补丁摘要：${changeSet.patch_sha256}`
       : `确认将 ${changeSet.changed_files.length} 个文件写入真实工作区？\n补丁摘要：${changeSet.patch_sha256}`,
   )) return;
+  if (action === "revert" && !window.confirm(
+    `确认回滚 Agent 已写入的 ${changeSet.changed_files.length} 个文件？当前文件必须仍与写入后哈希一致。\n补丁摘要：${changeSet.patch_sha256}`,
+  )) return;
   card.setAttribute("aria-busy", "true");
   card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
   try {
@@ -3307,14 +3428,21 @@ async function handleInlineChangeAction(contentNode, changeSet, action, card) {
       `/agent/runs/${encodeURIComponent(changeSet.run_id)}/changes/${action}`,
       {
         method: "POST",
-        body: JSON.stringify(action === "apply"
+        body: JSON.stringify(["apply", "revert"].includes(action)
           ? { change_set_id: changeSet.id, patch_sha256: changeSet.patch_sha256 }
           : { change_set_id: changeSet.id }),
       },
     );
     state.currentChangeSet = updated;
     renderInlineChangeReview(contentNode, updated);
-    showToast(action === "apply" ? "ChangeSet 已应用到真实工作区" : "ChangeSet 已拒绝", "success");
+    showToast(
+      action === "apply"
+        ? "ChangeSet 已应用到真实工作区"
+        : action === "revert"
+          ? "Agent 写入的变更已安全回滚"
+          : "ChangeSet 已拒绝",
+      "success",
+    );
   } catch (error) {
     await loadInlineChangeSet(changeSet.run_id, contentNode, { force: true }).catch(() => null);
     showToast(humanizeError(error), "error");
@@ -3556,11 +3684,21 @@ async function runAgentFromComposer() {
     return;
   }
 
+  const expectedCapabilityKey = state.conversationId && state.activeWorkspaceId
+    ? `${state.conversationId}:${state.activeWorkspaceId}`
+    : "";
+  if (!expectedCapabilityKey || state.slashCapabilityKey !== expectedCapabilityKey) {
+    await loadSlashCapabilities();
+  }
+
   const sendButton = $("send-chat-btn");
   const modeInput = $("composer-mode-input");
+  const submittedWorkspaceMode = $("agent-workspace-mode-select").value;
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
+  state.workspaceModeLocked = true;
+  renderWorkspaceModeControl();
   clearComposerInput();
   let submitted = false;
   let assistantContent = null;
@@ -3571,6 +3709,7 @@ async function runAgentFromComposer() {
     const run = await runAgent({
       message: submission.message,
       focusFiles: [],
+      workspaceMode: submittedWorkspaceMode,
       skillName: submission.skillName,
       skillArguments: submission.skillArguments,
       preferredToolName: submission.preferredToolName,
@@ -3619,6 +3758,7 @@ async function runAgentFromComposer() {
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
+    state.workspaceModeLocked = false;
     updateComposerAvailability();
   }
 }
@@ -3946,6 +4086,7 @@ function parseSseBlock(block) {
 async function runAgent({
   message = "",
   focusFiles = [],
+  workspaceMode = "patch_only",
   skillName = null,
   skillArguments = [],
   preferredToolName = null,
@@ -3974,6 +4115,7 @@ async function runAgent({
       conversation_id: conversationId,
       message: normalizedMessage,
       workspace_id: workspace.id,
+      workspace_mode: workspaceMode,
       ...optionalModelFields(),
       focus_files: focusFiles,
       ...(skillName ? {
@@ -6049,6 +6191,10 @@ function bindEvents() {
   $("stop-chat-btn").addEventListener("click", stopChat);
   $("composer-mode-input").addEventListener("change", (event) => {
     persistComposerMode(event.target.value);
+  });
+  $("agent-workspace-mode-select").addEventListener("change", (event) => {
+    state.workspaceMode = event.target.value;
+    renderWorkspaceModeControl();
   });
   $("auto-model-toggle").addEventListener("change", async (event) => {
     state.modelPreference.mode = event.target.checked ? "auto" : "manual";

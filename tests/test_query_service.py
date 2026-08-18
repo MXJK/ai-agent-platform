@@ -210,7 +210,10 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 persisted_run.context_snapshot.metadata.schema_version,
-                3,
+                4,
+            )
+            self.assertIsNotNone(
+                persisted_run.context_snapshot.execution_workspace
             )
             self.assertTrue(
                 persisted_run.context_snapshot.tools.catalog_hash.startswith(

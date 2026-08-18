@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Optional
 from uuid import uuid4
@@ -136,6 +137,7 @@ class CodingAgentRuntime:
         max_rag_context_chars: int = 6000,
         change_set_service: Any = None,
         tool_pool_builder: ToolPoolBuilder | None = None,
+        execution_workspace_runtime: Any = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -164,6 +166,10 @@ class CodingAgentRuntime:
         self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
         self._change_set_service = change_set_service
+        self._execution_workspace_runtime = (
+            execution_workspace_runtime
+            or getattr(self._tools, "execution_workspace_runtime", None)
+        )
         self._tool_access = ToolAccessCoordinator(
             tools=self._tools,
             default_approval_policy=self._approval_policy,
@@ -212,6 +218,8 @@ class CodingAgentRuntime:
         workspace_role = "admin"
         approval_policy = self._approval_policy
         cwd = workspace_root
+        execution_root = workspace_root
+        execution_workspace_mode = "patch_only"
         if run_context is not None:
             run_id = run_context.metadata.run_id
             conversation_id = run_context.session.conversation_id
@@ -219,6 +227,19 @@ class CodingAgentRuntime:
             workspace_id = run_context.project.workspace_id
             workspace_root = run_context.project.workspace_root
             cwd = run_context.project.cwd
+            if run_context.execution_workspace is not None:
+                execution_root = run_context.execution_workspace.execution_root
+                execution_workspace_mode = run_context.execution_workspace.mode
+                cwd = _execution_path(
+                    workspace_root,
+                    execution_root,
+                    run_context.project.cwd,
+                )
+                if self._execution_workspace_runtime is not None:
+                    self._execution_workspace_runtime.restore(
+                        run_context.execution_workspace.to_dict(),
+                        authorized_source_root=workspace_root,
+                    )
             actor_user_id = run_context.identity.actor_user_id
             workspace_role = run_context.identity.workspace_role
             approval_policy = _snapshot_config_value(
@@ -276,6 +297,8 @@ class CodingAgentRuntime:
             "user_input": user_input,
             "workspace_id": workspace_id,
             "workspace_root": workspace_root,
+            "execution_root": execution_root,
+            "execution_workspace_mode": execution_workspace_mode,
             "actor_user_id": actor_user_id,
             "workspace_role": workspace_role,
             "authorized_workspace_root": workspace_root,
@@ -754,6 +777,14 @@ class CodingAgentRuntime:
             action=action,
             actor_user_id=actor_user_id,
         )
+
+
+def _execution_path(source_root: str, execution_root: str, source_path: str) -> str:
+    relative = Path(source_path).resolve().relative_to(Path(source_root).resolve())
+    target = (Path(execution_root).resolve() / relative).resolve()
+    if not target.exists() or not target.is_dir():
+        raise ValueError("frozen cwd is unavailable in the execution workspace")
+    return str(target)
 
 
 def _snapshot_config_value(

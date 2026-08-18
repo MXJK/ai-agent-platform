@@ -105,6 +105,8 @@ class ToolAccessCoordinator:
             workspace_id=state["workspace_id"],
             workspace_root=state["workspace_root"],
             authorized_workspace_root=state.get("authorized_workspace_root"),
+            execution_root=state.get("execution_root"),
+            execution_workspace_mode=state.get("execution_workspace_mode"),
             run_id=state.get("run_id"),
             actor_user_id=state.get("actor_user_id", ""),
             workspace_role=state.get("workspace_role", "viewer"),

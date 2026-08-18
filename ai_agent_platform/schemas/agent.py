@@ -48,6 +48,10 @@ class AgentRunRequest(BaseModel):
         max_length=256,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
+    workspace_mode: Optional[str] = Field(
+        default=None,
+        pattern=r"^(patch_only|direct|worktree)$",
+    )
 
     @field_validator("additional_workspace_ids")
     @classmethod
@@ -95,6 +99,9 @@ class ComposerCapabilitiesResponse(BaseModel):
     skill_commands: list[ComposerSkillCommandResponse]
     mcp_tools: list[ComposerToolResponse]
     diagnostics: list[str]
+    allowed_workspace_modes: list[str]
+    default_workspace_mode: str
+    workspace_mode_unavailable_reasons: dict[str, Optional[str]]
 
 
 class AgentRunResumeRequest(BaseModel):
@@ -195,6 +202,10 @@ class AgentRunResponse(BaseModel):
     artifacts: list[dict[str, Any]]
     change_set_id: Optional[str]
     pending_approval: Optional[dict[str, Any]]
+    workspace_mode: str
+    execution_root: Optional[str]
+    branch_name: Optional[str]
+    worktree_path: Optional[str]
 
     @classmethod
     def from_domain(cls, result: AgentRunResult) -> "AgentRunResponse":
@@ -265,6 +276,10 @@ class AgentRunResponse(BaseModel):
             artifacts=result.artifacts,
             change_set_id=result.change_set_id,
             pending_approval=result.pending_approval,
+            workspace_mode=result.workspace_mode,
+            execution_root=result.execution_root,
+            branch_name=result.branch_name,
+            worktree_path=result.worktree_path,
         )
 
 
@@ -284,9 +299,18 @@ class AgentRunStatusResponse(BaseModel):
     steering_message_count: int
     trace: list[AgentTraceStepResponse]
     result: Optional[AgentRunResponse]
+    workspace_mode: str
+    execution_root: Optional[str]
+    branch_name: Optional[str]
+    worktree_path: Optional[str]
 
     @classmethod
     def from_domain(cls, record: AgentRunRecord) -> "AgentRunStatusResponse":
+        execution = (
+            record.context_snapshot.execution_workspace
+            if record.context_snapshot is not None
+            else None
+        )
         return cls(
             run_id=record.run_id,
             thread_id=record.thread_id,
@@ -315,6 +339,12 @@ class AgentRunStatusResponse(BaseModel):
                 if record.result is not None
                 else None
             ),
+            workspace_mode=(execution.mode if execution is not None else "patch_only"),
+            execution_root=(
+                execution.execution_root if execution is not None else None
+            ),
+            branch_name=(execution.branch_name if execution is not None else None),
+            worktree_path=(execution.worktree_path if execution is not None else None),
         )
 
 

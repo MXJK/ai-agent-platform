@@ -29,6 +29,41 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_soft_tool_calls, 36)
         self.assertEqual(settings.agent_max_tool_calls, 72)
         self.assertEqual(settings.agent_approval_policy, "on_request")
+        self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
+        self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
+
+    def test_workspace_mode_environment_precedence_and_legacy_mapping(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CHANGE_SET_APPLY_MODE": "direct",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ):
+            legacy = Settings.from_env()
+        self.assertEqual(legacy.agent_workspace_default_mode, "direct")
+        self.assertEqual(
+            legacy.agent_workspace_allowed_modes,
+            ("patch_only", "direct"),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "CHANGE_SET_APPLY_MODE": "worktree",
+                "AGENT_WORKSPACE_DEFAULT_MODE": "direct",
+                "AGENT_WORKSPACE_ALLOWED_MODES": "patch_only,direct",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ):
+            explicit = Settings.from_env()
+        self.assertEqual(explicit.agent_workspace_default_mode, "direct")
+        self.assertEqual(
+            explicit.agent_workspace_allowed_modes,
+            ("patch_only", "direct"),
+        )
 
     def test_blank_allowed_roots_falls_back_to_user_home_directory(self) -> None:
         with patch.dict(

@@ -1283,6 +1283,20 @@ body.inspector-hidden .app-shell {
   font-weight: 750;
 }
 
+.workspace-mode-control {
+  position: relative;
+}
+
+.workspace-mode-control small {
+  max-width: 310px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-mode-control.model-auto-control {
   min-height: 30px;
   padding: 0 9px;
@@ -1889,6 +1903,23 @@ body.inspector-hidden .app-shell {
   margin: 0;
   color: var(--red);
   font-size: 10px;
+}
+
+.change-execution-location {
+  display: grid;
+  gap: 5px;
+  padding: 0 14px 12px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.change-execution-location code {
+  display: inline-block;
+  max-width: min(100%, 620px);
+  overflow: hidden;
+  vertical-align: bottom;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inline-change-review {

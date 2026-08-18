@@ -8,8 +8,8 @@ import json
 from typing import Any, Mapping
 
 
-RUN_CONTEXT_SCHEMA_VERSION = 3
-SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+RUN_CONTEXT_SCHEMA_VERSION = 4
+SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 
 
 @dataclass(frozen=True)
@@ -173,6 +173,38 @@ class RunMetadata:
 
 
 @dataclass(frozen=True)
+class ExecutionWorkspaceContext:
+    run_id: str
+    workspace_id: str
+    source_root: str
+    execution_root: str
+    mode: str
+    baseline: str
+    base_git_head: str | None
+    branch_name: str | None
+    worktree_path: str | None
+    cleanup_policy: str
+    created_at: str
+    status: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "workspace_id": self.workspace_id,
+            "source_root": self.source_root,
+            "execution_root": self.execution_root,
+            "mode": self.mode,
+            "baseline": self.baseline,
+            "base_git_head": self.base_git_head,
+            "branch_name": self.branch_name,
+            "worktree_path": self.worktree_path,
+            "cleanup_policy": self.cleanup_policy,
+            "created_at": self.created_at,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
 class RunContextSnapshot:
     identity: IdentityContext
     session: SessionContext
@@ -181,6 +213,7 @@ class RunContextSnapshot:
     additional_directories: tuple[AdditionalDirectoryContext, ...]
     tools: ToolSelectionContext
     metadata: RunMetadata
+    execution_workspace: ExecutionWorkspaceContext | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return a fresh JSON-serializable representation of the snapshot."""
@@ -292,6 +325,11 @@ class RunContextSnapshot:
                 "schema_version": self.metadata.schema_version,
                 "entrypoint_metadata": self.metadata.entrypoint_metadata,
             },
+            "execution_workspace": (
+                self.execution_workspace.to_dict()
+                if self.execution_workspace is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -339,6 +377,9 @@ class RunContextSnapshot:
         if not isinstance(tool_value, Mapping):
             raise ValueError("Run context tools must be an object")
         enabled_tool_values = tool_value.get("enabled_tools")
+        execution_value = value.get("execution_workspace")
+        if schema_version >= 4 and not isinstance(execution_value, Mapping):
+            raise ValueError("Run context execution_workspace must be an object")
         if enabled_tool_values is not None and not isinstance(
             enabled_tool_values, list
         ):
@@ -396,6 +437,31 @@ class RunContextSnapshot:
                 tool_value,
                 enabled_tools=tuple(str(item) for item in enabled_tool_values or []),
             )
+        project_workspace_root = str(project_value.get("workspace_root") or "")
+        project_workspace_id = str(project_value.get("workspace_id") or "")
+        if isinstance(execution_value, Mapping):
+            execution_workspace = ExecutionWorkspaceContext(
+                run_id=str(execution_value.get("run_id") or ""),
+                workspace_id=str(execution_value.get("workspace_id") or ""),
+                source_root=str(execution_value.get("source_root") or ""),
+                execution_root=str(execution_value.get("execution_root") or ""),
+                mode=str(execution_value.get("mode") or ""),
+                baseline=str(execution_value.get("baseline") or ""),
+                base_git_head=_optional_string(execution_value.get("base_git_head")),
+                branch_name=_optional_string(execution_value.get("branch_name")),
+                worktree_path=_optional_string(execution_value.get("worktree_path")),
+                cleanup_policy=str(execution_value.get("cleanup_policy") or ""),
+                created_at=str(execution_value.get("created_at") or ""),
+                status=str(execution_value.get("status") or ""),
+            )
+            _validate_execution_workspace(
+                execution_workspace,
+                metadata_run_id=str(metadata_value.get("run_id") or ""),
+                project_workspace_id=project_workspace_id,
+                project_workspace_root=project_workspace_root,
+            )
+        else:
+            execution_workspace = None
         return cls(
             identity=IdentityContext(
                 actor_user_id=str(identity_value.get("actor_user_id") or ""),
@@ -418,8 +484,8 @@ class RunContextSnapshot:
                 ),
             ),
             project=ProjectContext(
-                workspace_id=str(project_value.get("workspace_id") or ""),
-                workspace_root=str(project_value.get("workspace_root") or ""),
+                workspace_id=project_workspace_id,
+                workspace_root=project_workspace_root,
                 workspace_revision=int(project_value.get("workspace_revision", 1)),
                 cwd=str(project_value.get("cwd") or ""),
                 git=GitContext(
@@ -522,7 +588,29 @@ class RunContextSnapshot:
                     metadata_value.get("entrypoint_metadata") or {}
                 ),
             ),
+            execution_workspace=execution_workspace,
         )
+
+
+def _validate_execution_workspace(
+    value: ExecutionWorkspaceContext,
+    *,
+    metadata_run_id: str,
+    project_workspace_id: str,
+    project_workspace_root: str,
+) -> None:
+    if value.mode not in {"patch_only", "direct", "worktree"}:
+        raise ValueError("Run context execution workspace mode is invalid")
+    if value.run_id != metadata_run_id or value.workspace_id != project_workspace_id:
+        raise ValueError("Run context execution workspace binding is invalid")
+    if value.source_root != project_workspace_root:
+        raise ValueError("Run context execution source root is invalid")
+    if not value.execution_root or not value.baseline:
+        raise ValueError("Run context execution workspace is incomplete")
+    if value.mode == "direct" and value.execution_root != value.source_root:
+        raise ValueError("Run context direct execution root is invalid")
+    if value.mode == "worktree" and value.worktree_path != value.execution_root:
+        raise ValueError("Run context worktree execution root is invalid")
 
 
 def canonical_project_config(value: Mapping[str, object]) -> str:

@@ -159,6 +159,8 @@ class Settings:
     agent_graph_recursion_limit: int = 128
     agent_approval_policy: str = "on_request"
     live_workspace_writes_enabled: bool = False
+    agent_workspace_default_mode: str = "patch_only"
+    agent_workspace_allowed_modes: tuple[str, ...] = ("patch_only",)
     change_set_apply_mode: str = "patch_only"
     change_set_max_files: int = 100
     change_set_max_patch_chars: int = 1_000_000
@@ -284,6 +286,30 @@ class Settings:
             self.auth_mode,
             {"disabled", "trusted_header"},
         )
+        _require_choice(
+            "agent_workspace_default_mode",
+            self.agent_workspace_default_mode,
+            {"patch_only", "direct", "worktree"},
+        )
+        if not self.agent_workspace_allowed_modes:
+            raise ValueError("agent_workspace_allowed_modes must not be empty")
+        invalid_workspace_modes = set(self.agent_workspace_allowed_modes).difference(
+            {"patch_only", "direct", "worktree"}
+        )
+        if invalid_workspace_modes:
+            raise ValueError(
+                "agent_workspace_allowed_modes contains unsupported modes: "
+                + ", ".join(sorted(invalid_workspace_modes))
+            )
+        if len(set(self.agent_workspace_allowed_modes)) != len(
+            self.agent_workspace_allowed_modes
+        ):
+            raise ValueError("agent_workspace_allowed_modes must contain unique modes")
+        if self.agent_workspace_default_mode not in self.agent_workspace_allowed_modes:
+            raise ValueError(
+                "agent_workspace_default_mode must be included in "
+                "agent_workspace_allowed_modes"
+            )
         _require_choice(
             "change_set_apply_mode",
             self.change_set_apply_mode,

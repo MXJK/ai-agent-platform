@@ -19,6 +19,7 @@ from ai_agent_platform.domain import (
     AdditionalDirectoryContext,
     ConversationMessageSnapshot,
     ConversationSummarySnapshot,
+    ExecutionWorkspaceContext,
     GitContext,
     GitDirtySummary,
     IdentityContext,
@@ -41,6 +42,10 @@ from ai_agent_platform.integrations.tool_pool import (
 )
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.model_registry import ModelSelection
+from ai_agent_platform.integrations.execution_workspace import (
+    EXECUTION_WORKSPACE_MODES,
+    ExecutionWorkspaceRuntime,
+)
 
 
 _SENSITIVE_FIELD_PARTS = frozenset(
@@ -79,6 +84,7 @@ class ExecutionContextFactory:
         tool_registry: ToolRegistry | None = None,
         tool_pool_builder: ToolPoolBuilder | None = None,
         model_registry: Any = None,
+        execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -96,6 +102,9 @@ class ExecutionContextFactory:
             self._tool_registry
         )
         self._model_registry = model_registry
+        self._execution_workspace_runtime = (
+            execution_workspace_runtime or ExecutionWorkspaceRuntime()
+        )
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -128,6 +137,8 @@ class ExecutionContextFactory:
         skill_name: str | None = None,
         skill_arguments: Sequence[str] = (),
         preferred_tool_name: str | None = None,
+        workspace_mode: str | None = None,
+        prepare_execution_workspace: bool = True,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
@@ -140,6 +151,35 @@ class ExecutionContextFactory:
         effective_config, config_json, config_version = self._workspace_config(
             workspace_root
         )
+        git_context = _capture_git_context(workspace_root)
+        mode_capabilities = self.workspace_mode_capabilities(
+            workspace_id=workspace_id,
+            actor_user_id=actor,
+            workspace_root=workspace_root,
+            workspace_role=workspace_role,
+            effective_config=effective_config,
+            git_context=git_context,
+        )
+        effective_workspace_mode = _select_workspace_mode(
+            workspace_mode,
+            mode_capabilities,
+        )
+        if prepare_execution_workspace:
+            execution_record = self._execution_workspace_runtime.prepare(
+                run_id=resolved_run_id,
+                workspace_id=workspace_id,
+                source_root=workspace_root,
+                mode=effective_workspace_mode,
+            )
+        else:
+            execution_record = _preview_execution_workspace(
+                run_id=resolved_run_id,
+                workspace_id=workspace_id,
+                source_root=workspace_root,
+                mode=effective_workspace_mode,
+                git_context=git_context,
+            )
+        execution_root = str(execution_record.execution_root)
         agent_type = "coding"
         run_mode = "default"
         skill_enabled = bool(
@@ -164,7 +204,7 @@ class ExecutionContextFactory:
         )
         skill_catalog = (
             self._skill_service.discover(
-                workspace_root=workspace_root,
+                workspace_root=execution_root,
                 enabled=skill_enabled,
             )
             if self._skill_service is not None
@@ -175,6 +215,8 @@ class ExecutionContextFactory:
             conversation_id=conversation_id,
             workspace_id=workspace_id,
             workspace_root=workspace_root,
+            execution_root=execution_root,
+            execution_workspace_mode=effective_workspace_mode,
             run_id=resolved_run_id,
             actor_user_id=actor,
             workspace_role=workspace_role,
@@ -195,6 +237,7 @@ class ExecutionContextFactory:
             else self._max_instruction_chars
         )
         resolved_cwd = _resolve_cwd(workspace_root, cwd)
+        _resolve_execution_cwd(workspace_root, execution_root, cwd)
         normalized_focus = tuple(
             _validate_focus_path(workspace_root, item) for item in focus_files
         )
@@ -263,8 +306,17 @@ class ExecutionContextFactory:
                 )
             except ValueError:
                 continue
+        if execution_root != workspace_root:
+            # Preparation happens first, but unsafe instruction nodes in the source
+            # checkout still fail closed instead of disappearing during a filtered
+            # patch-only copy or Git worktree checkout.
+            load_project_instructions(
+                workspace_root=workspace_root,
+                focus_files=unique(instruction_focus),
+                max_chars=1,
+            )
         file_instructions = load_project_instructions(
-            workspace_root=workspace_root,
+            workspace_root=execution_root,
             focus_files=unique(instruction_focus),
             max_chars=instruction_char_limit,
         )
@@ -373,7 +425,7 @@ class ExecutionContextFactory:
                 raise ValueError("Skills are unavailable")
             invoked_skill = self._skill_service.require_skill(
                 skill_name,
-                workspace_root=workspace_root,
+                workspace_root=execution_root,
                 agent=agent_type,
                 mode=run_mode,
                 enabled=skill_enabled,
@@ -401,7 +453,7 @@ class ExecutionContextFactory:
             if selected_skill_names is not None:
                 skill_options["selected_skill_names"] = selected_skill_names
             selection = self._skill_service.build_context(
-                workspace_root=workspace_root,
+                workspace_root=execution_root,
                 agent=agent_type,
                 mode=run_mode,
                 max_chars=remaining_instruction_chars,
@@ -468,7 +520,7 @@ class ExecutionContextFactory:
                 workspace_root=workspace_root,
                 workspace_revision=int(workspace.revision),
                 cwd=resolved_cwd,
-                git=_capture_git_context(workspace_root),
+                git=git_context,
                 _project_config_json=config_json,
             ),
             instructions=InstructionContext(
@@ -487,6 +539,9 @@ class ExecutionContextFactory:
                 _entrypoint_metadata_json=canonical_project_config(
                     resolved_entrypoint_metadata
                 ),
+            ),
+            execution_workspace=ExecutionWorkspaceContext(
+                **execution_record.to_dict(),
             ),
         )
 
@@ -524,7 +579,61 @@ class ExecutionContextFactory:
             actor_user_id=actor_user_id,
             entrypoint_type=self._entrypoint_type,
             entrypoint_metadata={"adapter": "effective_context_preview"},
+            prepare_execution_workspace=False,
         )
+
+    def workspace_mode_capabilities(
+        self,
+        *,
+        workspace_id: str,
+        actor_user_id: str,
+        workspace_root: str,
+        workspace_role: str,
+        effective_config: ResolvedConfig | None = None,
+        git_context: GitContext | None = None,
+    ) -> dict[str, object]:
+        config = effective_config
+        allowed = tuple(
+            config.agent_workspace_allowed_modes
+            if config is not None
+            else ("patch_only",)
+        )
+        configured_default = str(
+            config.agent_workspace_default_mode if config is not None else "patch_only"
+        )
+        git = git_context or _capture_git_context(workspace_root)
+        reasons: dict[str, str | None] = {}
+        for mode in sorted(EXECUTION_WORKSPACE_MODES):
+            reason: str | None = None
+            if mode not in allowed:
+                reason = "mode is outside the server allowlist"
+            elif mode in {"direct", "worktree"}:
+                if self._auth_mode == "disabled":
+                    reason = "authenticated identity is required for live workspaces"
+                elif config is None or not config.live_workspace_writes_enabled:
+                    reason = "LIVE_WORKSPACE_WRITES_ENABLED is false"
+                elif workspace_role not in {"editor", "admin"}:
+                    reason = "Workspace role editor or admin is required"
+                elif mode == "worktree" and not git.is_repository:
+                    reason = "the registered Workspace is not a Git repository"
+                elif mode == "worktree" and git.dirty.is_dirty:
+                    reason = (
+                        "the Git checkout is dirty; choose direct or patch_only"
+                    )
+            reasons[mode] = reason
+        default_mode = configured_default
+        if reasons.get(default_mode) is not None:
+            default_mode = next(
+                (mode for mode in allowed if reasons.get(mode) is None),
+                configured_default,
+            )
+        return {
+            "workspace_id": workspace_id,
+            "allowed_modes": list(allowed),
+            "configured_default_mode": configured_default,
+            "default_mode": default_mode,
+            "unavailable_reasons": reasons,
+        }
 
     def restore_tool_access(self, snapshot: RunContextSnapshot):
         if snapshot.metadata.schema_version >= 3:
@@ -554,7 +663,11 @@ class ExecutionContextFactory:
                 config, "process_security", "skill_allowlist"
             )
         return self._skill_service.effective_catalog(
-            workspace_root=snapshot.project.workspace_root,
+            workspace_root=(
+                snapshot.execution_workspace.execution_root
+                if snapshot.execution_workspace is not None
+                else snapshot.project.workspace_root
+            ),
             agent="coding",
             mode="default",
             enabled=bool(skills_allowed is not False and skills_enabled),
@@ -595,6 +708,8 @@ class ExecutionContextFactory:
         conversation_id: str,
         workspace_id: str,
         workspace_root: str,
+        execution_root: str,
+        execution_workspace_mode: str,
         run_id: str,
         actor_user_id: str,
         workspace_role: str,
@@ -624,6 +739,8 @@ class ExecutionContextFactory:
             workspace_id=workspace_id,
             workspace_root=workspace_root,
             authorized_workspace_root=workspace_root,
+            execution_root=execution_root,
+            execution_workspace_mode=execution_workspace_mode,
             run_id=run_id,
             actor_user_id=actor_user_id,
             workspace_role=workspace_role,
@@ -834,6 +951,67 @@ def _resolve_cwd(workspace_root: str, cwd: str | None) -> str:
     if resolved != root and root not in resolved.parents:
         raise ValueError("cwd escapes the registered workspace root")
     return str(resolved)
+
+
+def _resolve_execution_cwd(
+    source_root: str,
+    execution_root: str,
+    cwd: str | None,
+) -> str:
+    source = Path(source_root).resolve()
+    source_cwd = Path(_resolve_cwd(source_root, cwd))
+    relative = source_cwd.relative_to(source)
+    candidate = (Path(execution_root).resolve() / relative).resolve(strict=True)
+    if not candidate.is_dir():
+        raise ValueError("cwd is unavailable in the execution workspace")
+    return str(candidate)
+
+
+def _select_workspace_mode(
+    requested: str | None,
+    capabilities: Mapping[str, object],
+) -> str:
+    mode = str(requested or capabilities["default_mode"])
+    if mode not in EXECUTION_WORKSPACE_MODES:
+        raise ValueError(f"unsupported workspace_mode: {mode}")
+    allowed = tuple(str(item) for item in capabilities.get("allowed_modes", []))
+    if mode not in allowed:
+        raise PermissionError("requested workspace_mode is outside the server allowlist")
+    reasons = capabilities.get("unavailable_reasons")
+    reason = reasons.get(mode) if isinstance(reasons, Mapping) else None
+    if reason:
+        raise PermissionError(str(reason))
+    return mode
+
+
+def _preview_execution_workspace(
+    *,
+    run_id: str,
+    workspace_id: str,
+    source_root: str,
+    mode: str,
+    git_context: GitContext,
+):
+    from ai_agent_platform.integrations.execution_workspace import (
+        ExecutionWorkspaceRecord,
+    )
+
+    source = Path(source_root).resolve()
+    return ExecutionWorkspaceRecord(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        source_root=source,
+        execution_root=source,
+        mode=mode,
+        baseline={},
+        baseline_digest="sha256:preview",
+        base_git_head=git_context.head,
+        branch_name=None,
+        worktree_path=(source if mode == "worktree" else None),
+        cleanup_policy="preview",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        status="preview",
+    )
 
 
 def _instruction_file_priority(path: str) -> int:

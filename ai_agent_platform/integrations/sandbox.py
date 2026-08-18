@@ -19,6 +19,10 @@ from typing import Any
 from uuid import uuid4
 
 from ai_agent_platform.integrations.tools import ToolExecutionContext
+from ai_agent_platform.integrations.execution_workspace import (
+    ExecutionWorkspaceRecord,
+    ExecutionWorkspaceRuntime,
+)
 
 
 DEFAULT_SANDBOX_IGNORES = {
@@ -135,6 +139,7 @@ class SandboxRuntime:
         workspace_parent: Path | str | None = None,
         workspace_ttl_seconds: float = 86400.0,
         allowed_commands: set[str] | tuple[str, ...] | None = None,
+        execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
     ) -> None:
         if mode not in {"local", "docker"}:
             raise ValueError("sandbox mode must be local or docker")
@@ -166,6 +171,10 @@ class SandboxRuntime:
         self._workspaces: dict[str, SandboxWorkspace] = {}
         self._lock = Lock()
         self._workspace_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._execution_workspaces = execution_workspace_runtime or ExecutionWorkspaceRuntime(
+            runtime_parent=self._workspace_parent,
+            command_timeout_seconds=command_timeout_seconds,
+        )
         self.prune_stale_workspaces()
 
     @property
@@ -178,36 +187,33 @@ class SandboxRuntime:
 
         return tuple(sorted(self._allowed_commands))
 
+    @property
+    def execution_workspace_runtime(self) -> ExecutionWorkspaceRuntime:
+        return self._execution_workspaces
+
     def workspace_status(
         self,
         *,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        workspace = self._workspace_for(context)
-        return {
-            "mode": self._mode,
-            "workspace": str(workspace.path),
-            "root": str(workspace.source_root),
-            "changed_files": self.changed_files(context=context),
-            "copy_warnings": list(workspace.copy_warnings),
-        }
+        result = self._execution_workspaces.workspace_status(context)
+        result["sandbox_mode"] = self._mode
+        return result
 
     def write_file(
         self,
         *,
         path: str,
         content: str,
+        expected_sha256: str | None = None,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        workspace = self._workspace_for(context)
-        target = _resolve_inside(workspace.path, path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return {
-            "path": _relative_to(target, workspace.path),
-            "bytes": len(content.encode("utf-8")),
-            "workspace": str(workspace.path),
-        }
+        return self._execution_workspaces.write_file(
+            path=path,
+            content=content,
+            expected_sha256=expected_sha256,
+            context=context,
+        )
 
     def apply_patch(
         self,
@@ -215,27 +221,7 @@ class SandboxRuntime:
         patch: str,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        if not patch.strip():
-            raise ValueError("patch must not be empty")
-        workspace = self._workspace_for(context)
-        _validate_patch_paths(patch)
-        result = subprocess.run(
-            ["git", "apply", "--whitespace=nowarn", "-"],
-            input=patch,
-            text=True,
-            cwd=workspace.path,
-            capture_output=True,
-            timeout=self._command_timeout_seconds,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "git apply failed")
-        return {
-            "workspace": str(workspace.path),
-            "changed_files": self.changed_files(context=context),
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
+        return self._execution_workspaces.apply_patch(patch=patch, context=context)
 
     def run_command(
         self,
@@ -255,22 +241,29 @@ class SandboxRuntime:
         if timeout <= 0:
             raise ValueError("timeout_seconds must be positive")
         timeout = min(timeout, self._command_timeout_seconds)
+        self._execution_workspaces.prepare_command(context)
 
-        if self._mode == "docker":
-            result = self._run_docker_command(
-                args=args,
-                working_dir=working_dir,
-                workspace=workspace,
-                timeout=timeout,
-            )
-        else:
-            result = _run_bounded_process(
-                args,
-                cwd=working_dir,
-                timeout=timeout,
-                output_max_chars=self._command_output_max_chars,
-                env=_local_sandbox_environment(workspace),
-            )
+        try:
+            if self._mode == "docker":
+                result = self._run_docker_command(
+                    args=args,
+                    working_dir=working_dir,
+                    workspace=workspace,
+                    timeout=timeout,
+                )
+            else:
+                result = _run_bounded_process(
+                    args,
+                    cwd=working_dir,
+                    timeout=timeout,
+                    output_max_chars=self._command_output_max_chars,
+                    env=_local_sandbox_environment(
+                        workspace,
+                        scratch=self._execution_workspaces.command_scratch(context),
+                    ),
+                )
+        finally:
+            self._execution_workspaces.complete_command(context)
         output = {
             "mode": self._mode,
             "command": args,
@@ -279,6 +272,7 @@ class SandboxRuntime:
             "timed_out": result.timed_out,
             "output_truncated": result.output_truncated,
             "workspace": str(workspace.path),
+            "workspace_mode": workspace.mode,
         }
         if result.output_truncated:
             output["truncated_output_preview"] = _combined_output_preview(
@@ -297,82 +291,31 @@ class SandboxRuntime:
         context: ToolExecutionContext | None = None,
         max_chars: int = 20000,
     ) -> dict[str, Any]:
-        workspace = self._workspace_for(context)
-        diff_text = _workspace_diff(workspace)
-        truncated = len(diff_text) > max_chars
-        return {
-            "workspace": str(workspace.path),
-            "changed_files": self.changed_files(context=context),
-            "diff": diff_text[:max_chars],
-            "truncated": truncated,
-        }
+        return self._execution_workspaces.diff(context, max_chars=max_chars)
 
     def changed_files(
         self,
         *,
         context: ToolExecutionContext | None = None,
     ) -> list[str]:
-        workspace = self._workspace_for(context)
-        current = _snapshot_files(workspace.path)
-        paths = sorted(set(workspace.baseline) | set(current))
-        return [path for path in paths if workspace.baseline.get(path) != current.get(path)]
+        return self._execution_workspaces.changed_files(context)
 
     def export_change_set(
         self,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        """Return the untruncated, server-side snapshot used for promotion."""
-        workspace = self._workspace_for(context)
-        current = _snapshot_files(workspace.path)
-        changed_files = sorted(set(workspace.baseline) | set(current))
-        changed_files = [
-            path
-            for path in changed_files
-            if workspace.baseline.get(path) != current.get(path)
-        ]
-        binary_files = [
-            path
-            for path in changed_files
-            if _decode_for_diff(workspace.baseline.get(path)) is None
-            or _decode_for_diff(current.get(path)) is None
-        ]
-        return {
-            "source_root": str(workspace.source_root),
-            "changed_files": changed_files,
-            "patch": _workspace_diff(workspace),
-            "baseline_file_hashes": {
-                path: (
-                    hashlib.sha256(workspace.baseline[path]).hexdigest()
-                    if path in workspace.baseline
-                    else None
-                )
-                for path in changed_files
-            },
-            "binary_files": binary_files,
-            "copy_warnings": list(workspace.copy_warnings),
-            "base_git_head": _git_head(workspace.source_root),
-            "base_git_dirty": _git_dirty(workspace.source_root),
-        }
+        """Return the untruncated server-side snapshot used for ChangeSet audit."""
+        return self._execution_workspaces.export_change_set(context)
 
     def cleanup(
         self,
         *,
         context: ToolExecutionContext | None = None,
     ) -> bool:
-        key = _workspace_key(context)
-        with self._lock:
-            workspace = self._workspaces.pop(key, None)
-        if workspace is None:
-            return False
-        _remove_sandbox_directory(workspace.path, parent=self._workspace_parent)
-        return True
+        return self._execution_workspaces.cleanup(context)
 
     def cleanup_all(self) -> None:
-        with self._lock:
-            workspaces = list(self._workspaces.values())
-            self._workspaces.clear()
-        for workspace in workspaces:
-            _remove_sandbox_directory(workspace.path, parent=self._workspace_parent)
+        self._execution_workspaces.cleanup_all()
 
     def prune_stale_workspaces(self) -> int:
         cutoff = time.time() - self._workspace_ttl_seconds
@@ -404,43 +347,18 @@ class SandboxRuntime:
             removed += 1
         return removed
 
-    def _workspace_for(self, context: ToolExecutionContext | None) -> SandboxWorkspace:
-        key = _workspace_key(context)
-        source_root = _source_root(context)
-        if (
-            self._workspace_parent == source_root
-            or source_root in self._workspace_parent.parents
-        ):
-            raise ValueError(
-                "sandbox workspace parent must not be inside the source workspace"
-            )
-        with self._lock:
-            existing = self._workspaces.get(key)
-            if existing is not None:
-                return existing
-            workspace_path = Path(
-                tempfile.mkdtemp(
-                    prefix=f"{SANDBOX_DIRECTORY_PREFIX}{_safe_key(key)}-",
-                    dir=str(self._workspace_parent),
-                )
-            )
-            copy_warnings = _copy_source_tree(source_root, workspace_path)
-            workspace = SandboxWorkspace(
-                key=key,
-                path=workspace_path,
-                source_root=source_root,
-                baseline=_snapshot_files(workspace_path),
-                copy_warnings=tuple(copy_warnings),
-            )
-            self._workspaces[key] = workspace
-            return workspace
+    def _workspace_for(
+        self,
+        context: ToolExecutionContext | None,
+    ) -> ExecutionWorkspaceRecord:
+        return self._execution_workspaces.for_context(context)
 
     def _run_docker_command(
         self,
         *,
         args: list[str],
         working_dir: Path,
-        workspace: SandboxWorkspace,
+        workspace: ExecutionWorkspaceRecord,
         timeout: float,
     ) -> BoundedProcessResult:
         relative_cwd = _relative_to(working_dir, workspace.path)
@@ -859,9 +777,14 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
             pass
 
 
-def _local_sandbox_environment(workspace: SandboxWorkspace) -> dict[str, str]:
-    sandbox_home = workspace.path / ".sandbox-home"
-    sandbox_temp = workspace.path / ".sandbox-tmp"
+def _local_sandbox_environment(
+    workspace: SandboxWorkspace | ExecutionWorkspaceRecord,
+    *,
+    scratch: Path | None = None,
+) -> dict[str, str]:
+    scratch_root = scratch or workspace.path
+    sandbox_home = scratch_root / ".sandbox-home"
+    sandbox_temp = scratch_root / ".sandbox-tmp"
     sandbox_home.mkdir(mode=0o700, exist_ok=True)
     sandbox_temp.mkdir(mode=0o700, exist_ok=True)
     environment = {

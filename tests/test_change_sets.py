@@ -428,6 +428,228 @@ class ChangeSetServiceTests(unittest.TestCase):
                     actor_user_id="editor-1",
                 )
 
+    def test_recorded_direct_change_reverts_safely_and_idempotently(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, workspace_service = _workspace(temp_dir)
+            target = root / "app.py"
+            target.write_text("after\n", encoding="utf-8")
+            service = _service(
+                workspace_service,
+                live_writes_enabled=True,
+                auth_mode="trusted_header",
+                authorize=lambda **kwargs: None,
+            )
+            patch_text = _diff("app.py", "before\n", "after\n")
+            record = service.capture(
+                run_id="run-recorded-direct",
+                conversation_id="conversation-1",
+                workspace_id="workspace-1",
+                workspace_root=str(root),
+                created_by="editor-1",
+                snapshot={
+                    "mode": "direct",
+                    "source_root": str(root),
+                    "execution_root": str(root),
+                    "changed_files": ["app.py"],
+                    "patch": patch_text,
+                    "baseline_file_hashes": {"app.py": _sha256(b"before\n")},
+                    "post_write_file_hashes": {"app.py": _sha256(b"after\n")},
+                    "binary_files": [],
+                },
+                validation_status="passed",
+                validation_summary={"passed": True},
+            )
+            assert record is not None
+            self.assertEqual(record.status, "applied")
+
+            reverted = service.revert(
+                record.id,
+                expected_patch_sha256=record.patch_sha256,
+                actor_user_id="editor-1",
+            )
+            repeated = service.revert(
+                record.id,
+                expected_patch_sha256=record.patch_sha256,
+                actor_user_id="editor-1",
+            )
+
+            self.assertEqual(reverted.status, "reverted")
+            self.assertEqual(repeated, reverted)
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+    def test_recorded_direct_revert_preserves_a_newer_external_edit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, workspace_service = _workspace(temp_dir)
+            target = root / "app.py"
+            target.write_text("after\n", encoding="utf-8")
+            service = _service(
+                workspace_service,
+                live_writes_enabled=True,
+                auth_mode="trusted_header",
+                authorize=lambda **kwargs: None,
+            )
+            patch_text = _diff("app.py", "before\n", "after\n")
+            record = service.capture(
+                run_id="run-recorded-conflict",
+                conversation_id="conversation-1",
+                workspace_id="workspace-1",
+                workspace_root=str(root),
+                created_by="editor-1",
+                snapshot={
+                    "mode": "direct",
+                    "source_root": str(root),
+                    "execution_root": str(root),
+                    "changed_files": ["app.py"],
+                    "patch": patch_text,
+                    "baseline_file_hashes": {"app.py": _sha256(b"before\n")},
+                    "post_write_file_hashes": {"app.py": _sha256(b"after\n")},
+                    "binary_files": [],
+                },
+                validation_status="passed",
+                validation_summary={"passed": True},
+            )
+            assert record is not None
+            target.write_text("newer user edit\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ChangeSetConflictError, "changed after"):
+                service.revert(
+                    record.id,
+                    expected_patch_sha256=record.patch_sha256,
+                    actor_user_id="editor-1",
+                )
+
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), "newer user edit\n"
+            )
+            self.assertEqual(
+                service.get(record.id, actor_user_id="editor-1").status,
+                "applied",
+            )
+
+    def test_live_capture_records_an_already_written_change_even_if_validation_failed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, workspace_service = _workspace(temp_dir)
+            (root / "app.py").write_text("after\n", encoding="utf-8")
+            service = _service(workspace_service)
+            patch_text = _diff("app.py", "before\n", "after\n")
+
+            record = service.capture(
+                run_id="run-recorded-invalid",
+                conversation_id="conversation-1",
+                workspace_id="workspace-1",
+                workspace_root=str(root),
+                created_by="editor-1",
+                snapshot={
+                    "mode": "direct",
+                    "source_root": str(root),
+                    "execution_root": str(root),
+                    "changed_files": ["app.py"],
+                    "patch": patch_text,
+                    "baseline_file_hashes": {"app.py": _sha256(b"before\n")},
+                    "post_write_file_hashes": {},
+                    "binary_files": [],
+                },
+                validation_status="failed",
+                validation_summary={"passed": False},
+            )
+
+            assert record is not None
+            self.assertEqual(record.status, "applied")
+            self.assertIsNotNone(record.error)
+            self.assertIn("post-write hashes", record.error or "")
+            self.assertEqual(
+                (root / "app.py").read_text(encoding="utf-8"), "after\n"
+            )
+
+    def test_recorded_worktree_change_reverts_without_touching_source_checkout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, workspace_service = _workspace(temp_dir)
+            source = root / "app.py"
+            source.write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test Runner"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "baseline"], cwd=root, check=True
+            )
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            worktree_parent = Path(temp_dir) / "worktrees"
+            worktree_parent.mkdir()
+            worktree = worktree_parent / "agent-worktree-run-revert"
+            subprocess.run(
+                [
+                    "git",
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "codex/run-revert",
+                    str(worktree),
+                    head,
+                ],
+                cwd=root,
+                check=True,
+            )
+            target = worktree / "app.py"
+            target.write_text("after\n", encoding="utf-8")
+            service = _service(
+                workspace_service,
+                live_writes_enabled=True,
+                auth_mode="trusted_header",
+                authorize=lambda **kwargs: None,
+                worktree_parent=str(worktree_parent),
+            )
+            patch_text = _diff("app.py", "before\n", "after\n")
+            record = service.capture(
+                run_id="run-recorded-worktree",
+                conversation_id="conversation-1",
+                workspace_id="workspace-1",
+                workspace_root=str(root),
+                created_by="editor-1",
+                snapshot={
+                    "mode": "worktree",
+                    "source_root": str(root),
+                    "execution_root": str(worktree),
+                    "changed_files": ["app.py"],
+                    "patch": patch_text,
+                    "baseline_file_hashes": {"app.py": _sha256(b"before\n")},
+                    "post_write_file_hashes": {"app.py": _sha256(b"after\n")},
+                    "binary_files": [],
+                    "base_git_head": head,
+                    "branch_name": "codex/run-revert",
+                    "worktree_path": str(worktree),
+                    "cleanup_policy": "retain_worktree",
+                },
+                validation_status="passed",
+                validation_summary={"passed": True},
+            )
+            assert record is not None
+
+            reverted = service.revert(
+                record.id,
+                expected_patch_sha256=record.patch_sha256,
+                actor_user_id="editor-1",
+            )
+
+            self.assertEqual(reverted.status, "reverted")
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+            self.assertEqual(source.read_text(encoding="utf-8"), "before\n")
+
 
 def _workspace(temp_dir: str) -> tuple[Path, WorkspaceService]:
     allowed = Path(temp_dir)

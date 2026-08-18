@@ -32,6 +32,8 @@ class CodingAgentState(TypedDict, total=False):
     user_input: str
     workspace_id: str
     workspace_root: str
+    execution_root: str
+    execution_workspace_mode: str
     actor_user_id: str
     workspace_role: str
     authorized_workspace_root: str
@@ -218,6 +220,10 @@ class AgentRunResult:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     change_set_id: str | None = None
     pending_approval: Optional[dict[str, Any]] = None
+    workspace_mode: str = "patch_only"
+    execution_root: str | None = None
+    branch_name: str | None = None
+    worktree_path: str | None = None
 
 
 @dataclass(frozen=True)

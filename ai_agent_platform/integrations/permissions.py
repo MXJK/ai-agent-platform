@@ -96,6 +96,8 @@ class ToolUseContext:
     actor_user_id: str = ""
     workspace_role: str = "admin"
     authorized_workspace_root: str | None = None
+    execution_root: str | None = None
+    execution_workspace_mode: str | None = None
     approval_policy: str = "on_request"
     process_allowed_tools: tuple[str, ...] | None = None
     project_allowed_tools: tuple[str, ...] | None = None
