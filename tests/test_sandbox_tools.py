@@ -14,10 +14,245 @@ from ai_agent_platform.integrations.sandbox import (
     BoundedProcessResult,
     SandboxRuntime,
 )
+from ai_agent_platform.services.execution_workspace import ExecutionWorkspaceRuntime
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 
 
 class SandboxToolTests(unittest.TestCase):
+    def test_pending_command_journal_restores_direct_baseline_after_restart(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("before\n", encoding="utf-8")
+            (root / ".env").write_text(
+                "SECRET=must-not-enter-journal\n", encoding="utf-8"
+            )
+            first = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            record = first.prepare(
+                run_id="run_command_restart",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            context = _context(
+                root, run_id="run_command_restart", mode="direct"
+            )
+            first.prepare_command(context)
+            (root / "app.py").write_text("after crash\n", encoding="utf-8")
+            (root / "generated.py").write_text("generated\n", encoding="utf-8")
+
+            restored_runtime = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            restored_runtime.restore(
+                record.to_dict(), authorized_source_root=str(root)
+            )
+            restored = restored_runtime.export_change_set(context)
+            journal_text = record.journal_path.read_text(encoding="utf-8")
+
+            self.assertEqual(
+                restored["changed_files"], ["app.py", "generated.py"]
+            )
+            self.assertIn("+after crash", restored["patch"])
+            self.assertNotIn("must-not-enter-journal", journal_text)
+            first.cleanup(context)
+            restored_runtime.cleanup(context)
+
+    def test_worktree_repo_write_command_and_diff_share_one_retained_root(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            target = root / "app.py"
+            target.write_text("print('source')\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test Runner"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "baseline"], cwd=root, check=True
+            )
+            execution = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            record = execution.prepare(
+                run_id="run_worktree",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="worktree",
+            )
+            registry = self._registry(execution_workspace_runtime=execution)
+            context = _context(
+                root,
+                run_id="run_worktree",
+                mode="worktree",
+                execution_root=record.execution_root,
+            )
+
+            written = registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "print('worktree')\n",
+                        "expected_sha256": hashlib.sha256(
+                            b"print('source')\n"
+                        ).hexdigest(),
+                    },
+                ),
+                context=context,
+            )
+            read_back = registry.execute(
+                ToolCall(name="repo.read_file", arguments={"path": "app.py"}),
+                context=context,
+            )
+            command = registry.execute(
+                ToolCall(
+                    name="sandbox.run_command",
+                    arguments={"command": f"{shlex.quote(sys.executable)} app.py"},
+                ),
+                context=context,
+            )
+            diff = registry.execute(
+                ToolCall(name="sandbox.git_diff", arguments={}), context=context
+            )
+
+            self.assertTrue(written.ok, written.error)
+            self.assertTrue(read_back.ok, read_back.error)
+            self.assertIn("print('worktree')", read_back.result["content"])
+            self.assertTrue(command.ok, command.error)
+            self.assertEqual(command.result["stdout"], "worktree\n")
+            self.assertIn("+print('worktree')", diff.result["diff"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "print('source')\n")
+            self.assertTrue(record.execution_root.exists())
+            self.assertTrue(record.branch_name.startswith("codex/"))
+            self.assertEqual(registry.cleanup_context(context), [])
+            self.assertTrue(record.execution_root.exists())
+
+    def test_direct_mode_allows_only_one_active_writer_per_workspace(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            target = root / "app.py"
+            target.write_text("before\n", encoding="utf-8")
+            execution = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            execution.prepare(
+                run_id="run_writer_one",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            execution.prepare(
+                run_id="run_writer_two",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            registry = self._registry(execution_workspace_runtime=execution)
+            expected = hashlib.sha256(b"before\n").hexdigest()
+
+            first = registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "first\n",
+                        "expected_sha256": expected,
+                    },
+                ),
+                context=_context(root, run_id="run_writer_one", mode="direct"),
+            )
+            second = registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "second\n",
+                        "expected_sha256": expected,
+                    },
+                ),
+                context=_context(root, run_id="run_writer_two", mode="direct"),
+            )
+
+            self.assertTrue(first.ok, first.error)
+            self.assertFalse(second.ok)
+            self.assertEqual(second.error_code, "workspace_conflict")
+            self.assertIn("already writing this Workspace", second.error)
+            self.assertEqual(target.read_text(encoding="utf-8"), "first\n")
+
+    def test_direct_workspace_write_and_command_share_the_source_root(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            target = root / "app.py"
+            target.write_text("print('old')\n", encoding="utf-8")
+            execution = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            execution.prepare(
+                run_id="run_direct",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            registry = self._registry(execution_workspace_runtime=execution)
+            context = _context(root, run_id="run_direct", mode="direct")
+
+            written = registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "print('new')\n",
+                        "expected_sha256": hashlib.sha256(
+                            b"print('old')\n"
+                        ).hexdigest(),
+                    },
+                ),
+                context=context,
+            )
+            command = registry.execute(
+                ToolCall(
+                    name="sandbox.run_command",
+                    arguments={"command": f"{shlex.quote(sys.executable)} app.py"},
+                ),
+                context=context,
+            )
+
+            self.assertTrue(written.ok, written.error)
+            self.assertEqual(target.read_text(encoding="utf-8"), "print('new')\n")
+            self.assertTrue(command.ok, command.error)
+            self.assertEqual(command.result["stdout"], "new\n")
+            self.assertEqual(Path(command.result["workspace"]), root.resolve())
+
+    def test_direct_write_detects_an_external_edit_before_overwrite(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            target = root / "app.py"
+            target.write_text("before\n", encoding="utf-8")
+            execution = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+            execution.prepare(
+                run_id="run_conflict",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            registry = self._registry(execution_workspace_runtime=execution)
+            context = _context(root, run_id="run_conflict", mode="direct")
+            target.write_text("user edit\n", encoding="utf-8")
+
+            result = registry.execute(
+                ToolCall(
+                    name="sandbox.write_file",
+                    arguments={
+                        "path": "app.py",
+                        "content": "agent edit\n",
+                        "expected_sha256": hashlib.sha256(b"before\n").hexdigest(),
+                    },
+                ),
+                context=context,
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "workspace_conflict")
+            self.assertEqual(target.read_text(encoding="utf-8"), "user edit\n")
     def test_sandbox_tool_specs_mark_writes_and_commands_for_approval(self) -> None:
         with TemporaryDirectory() as temp_dir:
             registry = self._registry()
@@ -454,12 +689,20 @@ class SandboxToolTests(unittest.TestCase):
         return registry
 
 
-def _context(root: Path, *, run_id: str) -> ToolExecutionContext:
+def _context(
+    root: Path,
+    *,
+    run_id: str,
+    mode: str = "patch_only",
+    execution_root: Path | None = None,
+) -> ToolExecutionContext:
     return ToolExecutionContext(
         conversation_id="sess_1",
         workspace_id="workspace_main",
         workspace_root=str(root),
         run_id=run_id,
+        execution_workspace_mode=mode,
+        execution_root=(str(execution_root) if execution_root is not None else None),
     )
 
 

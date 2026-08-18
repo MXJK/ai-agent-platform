@@ -13,6 +13,89 @@ from ai_agent_platform.main import create_app
 
 
 class ChangeSetApiTests(unittest.TestCase):
+    def test_revert_recorded_direct_change_is_authenticated_and_idempotent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "project"
+            project.mkdir()
+            target = project / "app.py"
+            target.write_text("after\n", encoding="utf-8")
+            settings = Settings(
+                workspace_allowed_roots=(str(root),),
+                auth_mode="trusted_header",
+                gateway_trust_secret="test-gateway-secret",
+                live_workspace_writes_enabled=True,
+                agent_workspace_default_mode="direct",
+                agent_workspace_allowed_modes=("patch_only", "direct", "worktree"),
+            )
+            app = create_app(settings=settings)
+            headers = {
+                "X-Authenticated-User": "editor-1",
+                "X-Gateway-Auth": "test-gateway-secret",
+            }
+            with TestClient(app) as client:
+                registered = client.put(
+                    "/api/v1/workspaces/workspace-1",
+                    headers=headers,
+                    json={"root_path": str(project)},
+                )
+                self.assertEqual(registered.status_code, 200, registered.text)
+                patch_text = _diff("app.py", "before\n", "after\n")
+                record = app.state.change_set_service.capture(
+                    run_id="run-direct-api",
+                    conversation_id="conversation-1",
+                    workspace_id="workspace-1",
+                    workspace_root=str(project),
+                    created_by="editor-1",
+                    snapshot={
+                        "mode": "direct",
+                        "source_root": str(project),
+                        "execution_root": str(project),
+                        "changed_files": ["app.py"],
+                        "patch": patch_text,
+                        "baseline_file_hashes": {
+                            "app.py": hashlib.sha256(b"before\n").hexdigest()
+                        },
+                        "post_write_file_hashes": {
+                            "app.py": hashlib.sha256(b"after\n").hexdigest()
+                        },
+                        "binary_files": [],
+                    },
+                    validation_status="passed",
+                    validation_summary={"passed": True},
+                )
+                assert record is not None
+
+                unauthenticated = client.post(
+                    "/api/v1/agent/runs/run-direct-api/changes/revert",
+                    json={
+                        "change_set_id": record.id,
+                        "patch_sha256": record.patch_sha256,
+                    },
+                )
+                reverted = client.post(
+                    "/api/v1/agent/runs/run-direct-api/changes/revert",
+                    headers=headers,
+                    json={
+                        "change_set_id": record.id,
+                        "patch_sha256": record.patch_sha256,
+                    },
+                )
+                repeated = client.post(
+                    "/api/v1/agent/runs/run-direct-api/changes/revert",
+                    headers=headers,
+                    json={
+                        "change_set_id": record.id,
+                        "patch_sha256": record.patch_sha256,
+                    },
+                )
+
+            self.assertEqual(unauthenticated.status_code, 401)
+            self.assertEqual(reverted.status_code, 200, reverted.text)
+            self.assertEqual(reverted.json()["status"], "reverted")
+            self.assertEqual(repeated.json()["status"], "reverted")
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
     def test_get_apply_and_reject_change_set_contract(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

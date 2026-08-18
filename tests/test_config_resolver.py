@@ -466,6 +466,27 @@ class ConfigResolverTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual(settings.google_api_key, "canonical-key")
 
+    def test_new_workspace_mode_config_wins_over_legacy_environment_fallback(self) -> None:
+        resolved = ConfigResolver(
+            user_config={
+                "process_security": {
+                    "agent_workspace_default_mode": "patch_only",
+                    "agent_workspace_allowed_modes": ["patch_only"],
+                }
+            },
+            env={"CHANGE_SET_APPLY_MODE": "direct"},
+        ).resolve_process()
+
+        self.assertEqual(resolved.agent_workspace_default_mode, "patch_only")
+        self.assertEqual(
+            resolved.agent_workspace_allowed_modes,
+            ("patch_only",),
+        )
+        self.assertEqual(
+            resolved.source_for("agent_workspace_default_mode"),
+            ConfigSource.USER_CONFIG,
+        )
+
     def test_explicit_flat_overrides_remain_available_for_entry_points(self) -> None:
         resolved = ConfigResolver(env={}).resolve(
             explicit_overrides={"llm_model": "entry-model"}

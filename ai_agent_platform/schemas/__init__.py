@@ -19,6 +19,7 @@ from .chat import ChatStreamRequest
 from .change_set import (
     ChangeSetApplyRequest,
     ChangeSetRejectRequest,
+    ChangeSetRevertRequest,
     ChangeSetResponse,
 )
 from .health import HealthResponse, MetricsResponse, TimingMetricResponse
@@ -120,6 +121,7 @@ __all__ = [
     "ChatStreamRequest",
     "ChangeSetApplyRequest",
     "ChangeSetRejectRequest",
+    "ChangeSetRevertRequest",
     "ChangeSetResponse",
     "ContextTokenUsageResponse",
     "CreateSessionRequest",

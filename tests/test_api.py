@@ -522,14 +522,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260815-slash-composer-1',
+            '/static/styles.css?v=20260816-direct-workspaces-1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260815-slash-composer-1',
+            '/static/app.js?v=20260816-direct-workspaces-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
+        self.assertIn('id="agent-workspace-mode-select"', response.text)
+        self.assertIn('value="direct"', response.text)
+        self.assertIn('value="worktree"', response.text)
+        self.assertIn('value="patch_only"', response.text)
         self.assertIn('id="slash-command-menu"', response.text)
         self.assertIn('id="slash-command-options"', response.text)
         self.assertIn('id="jump-to-latest-btn"', response.text)
@@ -587,8 +591,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data-inline-run-action", script_response.text)
         self.assertIn("inline-change-review", script_response.text)
         self.assertIn("data-inline-change-action", script_response.text)
-        self.assertIn("应用到真实工作区", script_response.text)
-        self.assertIn("修改只保存在 ChangeSet，不会写入真实工作区", script_response.text)
+        self.assertIn("已在执行时写入", script_response.text)
+        self.assertIn("本次运行只修改临时副本", script_response.text)
+        self.assertIn("Agent 写入的变更已安全回滚", script_response.text)
         self.assertIn('viewName === "agent" ? "chat"', script_response.text)
         self.assertNotIn("代码 Agent 页面", script_response.text)
         self.assertIn("已提交补充信息", script_response.text)
@@ -657,6 +662,8 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn("workspace_id", script_response.text)
+        self.assertIn("workspace_mode: workspaceMode", script_response.text)
+        self.assertIn('data-inline-change-action="${recordedLive && applied ? "revert" : "apply"}"', script_response.text)
         self.assertIn("browseWorkspaceDirectories", script_response.text)
         self.assertIn("/workspace-directories", script_response.text)
         self.assertIn("body.directories?.length === 1", script_response.text)
@@ -737,6 +744,20 @@ Inspect the requested code before reporting findings.
                     }],
                 )
                 self.assertEqual(capabilities.json()["mcp_tools"], [])
+                self.assertEqual(
+                    capabilities.json()["allowed_workspace_modes"],
+                    ["patch_only"],
+                )
+                self.assertEqual(
+                    capabilities.json()["default_workspace_mode"],
+                    "patch_only",
+                )
+                self.assertIn(
+                    "outside the server allowlist",
+                    capabilities.json()["workspace_mode_unavailable_reasons"][
+                        "direct"
+                    ],
+                )
 
                 started = client.post(
                     "/api/v1/agent/runs",
@@ -770,6 +791,77 @@ Inspect the requested code before reporting findings.
                         for item in record.context_snapshot.instructions.sources
                     ],
                 )
+
+    def test_trusted_editor_can_select_direct_workspace_mode_via_api(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(root.resolve()),),
+                background_task_workers=1,
+                auth_mode="trusted_header",
+                gateway_trust_secret="test-gateway-secret",
+                live_workspace_writes_enabled=True,
+                agent_workspace_default_mode="direct",
+                agent_workspace_allowed_modes=(
+                    "patch_only",
+                    "direct",
+                    "worktree",
+                ),
+            )
+            headers = {
+                "X-Authenticated-User": "editor-1",
+                "X-Gateway-Auth": "test-gateway-secret",
+            }
+            with TestClient(create_app(settings=settings)) as client:
+                client.put(
+                    "/api/v1/workspaces/project",
+                    headers=headers,
+                    json={"root_path": str(workspace)},
+                ).raise_for_status()
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    headers=headers,
+                    json={"user_id": "ignored"},
+                ).json()["id"]
+                capabilities = client.get(
+                    "/api/v1/agent/composer-capabilities",
+                    headers=headers,
+                    params={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                    },
+                )
+                started = client.post(
+                    "/api/v1/agent/runs",
+                    headers=headers,
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "workspace_mode": "direct",
+                        "message": "inspect app.py",
+                    },
+                )
+
+                self.assertEqual(capabilities.status_code, 200, capabilities.text)
+                self.assertEqual(
+                    capabilities.json()["default_workspace_mode"], "direct"
+                )
+                self.assertIsNone(
+                    capabilities.json()["workspace_mode_unavailable_reasons"][
+                        "direct"
+                    ]
+                )
+                self.assertEqual(started.status_code, 202, started.text)
+                self.assertEqual(started.json()["workspace_mode"], "direct")
+                self.assertEqual(
+                    started.json()["execution_root"], str(workspace.resolve())
+                )
+
     def test_chat_request_accepts_google_provider(self) -> None:
         request = ChatStreamRequest(
             conversation_id="sess_google",

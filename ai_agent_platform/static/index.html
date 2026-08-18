@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260815-slash-composer-1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260816-direct-workspaces-1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -196,6 +196,15 @@
                       <option value="chat">快速对话</option>
                       <option value="agent">代码 Agent</option>
                     </select>
+                  </label>
+                  <label id="agent-workspace-mode-control" class="composer-mode-control workspace-mode-control" for="agent-workspace-mode-select" hidden>
+                    <span>执行位置</span>
+                    <select id="agent-workspace-mode-select" aria-label="Agent 执行工作区模式">
+                      <option value="direct">当前源码</option>
+                      <option value="worktree">Git Worktree</option>
+                      <option value="patch_only" selected>仅生成补丁</option>
+                    </select>
+                    <small id="agent-workspace-mode-hint">运行开始后将锁定本次选择</small>
                   </label>
                   <label class="composer-mode-control model-auto-control" for="auto-model-toggle">
                     <input id="auto-model-toggle" type="checkbox" checked />
@@ -956,6 +965,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260815-slash-composer-1" defer></script>
+    <script src="/static/app.js?v=20260816-direct-workspaces-1" defer></script>
   </body>
 </html>

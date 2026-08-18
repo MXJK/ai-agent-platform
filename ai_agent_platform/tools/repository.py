@@ -43,7 +43,7 @@ MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
 
 
 class RepositoryToolKit:
-    """Read the live filesystem rooted at the workspace captured for this run."""
+    """Read the server-selected execution workspace captured for this run."""
 
     def list_files(
         self,
@@ -190,7 +190,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
     registry.register(
         "repo.list_files",
         toolkit.list_files,
-        description="List files under the current run's registered workspace.",
+        description="List files under the current Run execution workspace.",
         input_schema={
             "type": "object",
             "properties": {
@@ -198,7 +198,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
                 "max_results": {"type": "integer"},
             },
         },
-        risk_summary="Lists paths inside the captured workspace root.",
+        risk_summary="Lists paths inside the server-selected execution root.",
         **shared,
     )
     registry.register(
@@ -220,7 +220,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
     registry.register(
         "repo.read_file",
         toolkit.read_file,
-        description="Read a UTF-8 line range from a workspace file.",
+        description="Read a UTF-8 line range from an execution-workspace file.",
         input_schema={
             "type": "object",
             "required": ["path"],
@@ -238,7 +238,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
     registry.register(
         "repo.search_code",
         toolkit.search_code,
-        description="Search live workspace text using ripgrep with a Python fallback.",
+        description="Search execution-workspace text using ripgrep with a Python fallback.",
         input_schema={
             "type": "object",
             "required": ["query"],
@@ -258,7 +258,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
 def _workspace_root(context: ToolExecutionContext | None) -> Path:
     if context is None or not context.workspace_root:
         raise ValueError("workspace context is required")
-    root = Path(context.workspace_root).expanduser().resolve()
+    root = Path(context.execution_root or context.workspace_root).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError("workspace_unavailable: captured workspace root is inaccessible")
     return root

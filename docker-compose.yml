@@ -1,4 +1,7 @@
 services:
+  # FastAPI runs on the host and reads AGENT_WORKSPACE_DEFAULT_MODE and
+  # AGENT_WORKSPACE_ALLOWED_MODES from .env. Compose owns the gateway trust
+  # boundary only; its safe default remains unauthenticated/loopback.
   gateway:
     profiles: ["gateway"]
     build:

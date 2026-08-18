@@ -2,6 +2,13 @@ from .agent_run_service import AgentRunService
 from .query_service import AgentRunExecutionError, QueryService
 from .query_events import AgentEventEncoder, EventStore, RuntimeEventStore
 from .execution_context import ExecutionContextFactory
+from .execution_workspace import (
+    EXECUTION_WORKSPACE_MODES,
+    ExecutionWorkspaceConflictError,
+    ExecutionWorkspaceError,
+    ExecutionWorkspaceRecord,
+    ExecutionWorkspaceRuntime,
+)
 from .change_set_service import (
     ChangeSetConflictError,
     ChangeSetInvalidStateError,
@@ -50,6 +57,11 @@ __all__ = [
     "RuntimeEventStore",
     "QueryService",
     "ExecutionContextFactory",
+    "EXECUTION_WORKSPACE_MODES",
+    "ExecutionWorkspaceConflictError",
+    "ExecutionWorkspaceError",
+    "ExecutionWorkspaceRecord",
+    "ExecutionWorkspaceRuntime",
     "ChangeSetConflictError",
     "ChangeSetInvalidStateError",
     "ChangeSetNotFoundError",

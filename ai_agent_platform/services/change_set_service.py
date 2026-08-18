@@ -12,7 +12,7 @@ import stat
 import subprocess
 import tempfile
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from ai_agent_platform.domain import ChangeSetRecord
@@ -139,12 +139,39 @@ class ChangeSetService:
         }
         workspace = self._workspace_service.get(workspace_id)
         authoritative_root = self._workspace_service.resolve_for_run(workspace_id)
+        execution_mode = str(snapshot.get("mode") or self._apply_mode)
+        if execution_mode not in {"patch_only", "direct", "worktree"}:
+            execution_mode = self._apply_mode
+        execution_root = str(
+            Path(snapshot.get("execution_root") or authoritative_root)
+            .expanduser()
+            .resolve()
+        )
+        recorded_live_change = bool(
+            snapshot.get("mode") in {"direct", "worktree"}
+        )
         validation_error = self._validate_capture(
             changed_files=changed_files,
             patch=patch,
             baseline_hashes=baseline_hashes,
             binary_files=[str(item) for item in snapshot.get("binary_files") or []],
         )
+        post_write_hashes = {
+            str(path): (str(value) if value is not None else None)
+            for path, value in dict(
+                snapshot.get("post_write_file_hashes") or {}
+            ).items()
+        }
+        if recorded_live_change and (
+            set(post_write_hashes) != set(changed_files)
+            or any(
+                value is not None and re.fullmatch(r"[a-f0-9]{64}", value) is None
+                for value in post_write_hashes.values()
+            )
+        ):
+            validation_error = validation_error or (
+                "live ChangeSet post-write hashes are incomplete or invalid"
+            )
         supplied_roots = {
             str(Path(value).expanduser().resolve())
             for value in (workspace_root, snapshot.get("source_root"))
@@ -155,16 +182,35 @@ class ChangeSetService:
                 validation_error
                 or "ChangeSet workspace root does not match the registered workspace"
             )
+        validation_diagnostic = None
         if validation_status not in {"passed", "validated", "changes_ready"}:
-            validation_error = validation_error or (
-                f"ChangeSet is not promotable from validation status {validation_status}"
+            validation_diagnostic = (
+                f"ChangeSet validation ended with status {validation_status}"
             )
+            if not recorded_live_change:
+                validation_error = validation_error or (
+                    f"ChangeSet is not promotable from validation status {validation_status}"
+                )
         if validation_status in {"passed", "validated"} and not bool(
             validation_summary.get("passed")
         ):
-            validation_error = validation_error or (
+            validation_diagnostic = (
                 "ChangeSet validation summary does not confirm a passing result"
             )
+            if not recorded_live_change:
+                validation_error = validation_error or validation_diagnostic
+        if recorded_live_change and execution_mode == "direct" and execution_root != authoritative_root:
+            validation_error = validation_error or (
+                "direct ChangeSet execution root does not match the source workspace"
+            )
+        if recorded_live_change and execution_mode == "worktree":
+            worktree_value = snapshot.get("worktree_path")
+            if not worktree_value or execution_root != str(
+                Path(str(worktree_value)).expanduser().resolve()
+            ):
+                validation_error = validation_error or (
+                    "worktree ChangeSet is missing its frozen execution root"
+                )
         base_git_head = (
             str(snapshot["base_git_head"])
             if snapshot.get("base_git_head")
@@ -184,7 +230,7 @@ class ChangeSetService:
             workspace_root=authoritative_root,
             workspace_revision=workspace.revision,
             created_by=created_by,
-            apply_mode=self._apply_mode,
+            apply_mode=execution_mode,
             base_git_head=base_git_head,
             baseline_file_hashes=baseline_hashes,
             changed_files=changed_files,
@@ -195,11 +241,36 @@ class ChangeSetService:
                 **validation_summary,
                 "copy_warnings": list(snapshot.get("copy_warnings") or []),
                 "base_git_dirty": snapshot.get("base_git_dirty"),
+                "execution_root": execution_root,
+                "post_write_file_hashes": {
+                    **post_write_hashes
+                },
+                "cleanup_policy": snapshot.get("cleanup_policy"),
+                "mutation_journal": snapshot.get("mutation_journal"),
+                "validation_diagnostic": validation_diagnostic,
             },
-            status="failed" if validation_error else "ready",
+            status=(
+                "applied"
+                if recorded_live_change
+                else "failed"
+                if validation_error
+                else "ready"
+            ),
             created_at=now,
             updated_at=now,
+            applied_by=(created_by if recorded_live_change else None),
+            applied_at=(now if recorded_live_change else None),
             error=validation_error,
+            branch_name=(
+                str(snapshot.get("branch_name"))
+                if snapshot.get("branch_name")
+                else None
+            ),
+            worktree_path=(
+                str(snapshot.get("worktree_path"))
+                if snapshot.get("worktree_path")
+                else None
+            ),
         )
         existing = self._repository.create(record)
         if existing.patch_sha256 != record.patch_sha256:
@@ -385,6 +456,151 @@ class ChangeSetService:
                     self._audit(saved_failed, "failed", actor_user_id)
                 raise
 
+    def revert(
+        self,
+        change_set_id: str,
+        *,
+        expected_patch_sha256: str,
+        actor_user_id: str | None,
+    ) -> ChangeSetRecord:
+        current = self.get(change_set_id, actor_user_id=actor_user_id)
+        self._authorize_role(
+            current,
+            actor_user_id,
+            "editor",
+            action="changeset.revert",
+            arguments={
+                "change_set_id": change_set_id,
+                "patch_sha256": expected_patch_sha256,
+            },
+        )
+        if not hmac.compare_digest(current.patch_sha256, expected_patch_sha256):
+            raise ChangeSetConflictError("approved patch digest does not match")
+        if current.status == "reverted":
+            return current
+        if current.apply_mode == "patch_only":
+            raise ChangeSetInvalidStateError(
+                "patch_only ChangeSet did not write an execution target"
+            )
+        if current.status != "applied":
+            raise ChangeSetInvalidStateError(
+                f"ChangeSet cannot be reverted from status {current.status}"
+            )
+        if not self._live_writes_enabled:
+            raise ChangeSetPermissionError("live workspace writes are disabled")
+        if self._auth_mode == "disabled" or actor_user_id is None:
+            raise ChangeSetPermissionError("authenticated editor identity is required")
+        if not hmac.compare_digest(_sha256_text(current.patch), current.patch_sha256):
+            raise ChangeSetConflictError("stored ChangeSet patch digest is invalid")
+
+        with self._workspace_lock(current.workspace_id):
+            current = self._repository.get(change_set_id) or current
+            if current.status == "reverted":
+                return current
+            if current.status != "applied":
+                raise ChangeSetInvalidStateError(
+                    f"ChangeSet cannot be reverted from status {current.status}"
+                )
+            try:
+                root = self._revert_target(current)
+                post_hashes = {
+                    str(path): (str(value) if value is not None else None)
+                    for path, value in dict(
+                        current.validation_summary.get("post_write_file_hashes")
+                        or {}
+                    ).items()
+                }
+                if set(post_hashes) != set(current.changed_files):
+                    raise ChangeSetValidationError(
+                        "ChangeSet post-write hashes are incomplete"
+                    )
+                _validate_file_hashes(
+                    root,
+                    post_hashes,
+                    conflict_prefix="execution target changed after the Agent run",
+                )
+                backups = _backup_targets(root, current.changed_files)
+                _run_git_apply_reverse(
+                    root,
+                    current.patch,
+                    check=True,
+                    timeout=self._command_timeout_seconds,
+                )
+                try:
+                    _run_git_apply_reverse(
+                        root,
+                        current.patch,
+                        check=False,
+                        timeout=self._command_timeout_seconds,
+                    )
+                    _validate_file_hashes(
+                        root,
+                        current.baseline_file_hashes,
+                        conflict_prefix="revert did not restore the Agent baseline",
+                    )
+                except Exception:
+                    _restore_targets(root, backups)
+                    raise
+            except ChangeSetConflictError as exc:
+                conflicted = replace(current, updated_at=_now(), error=str(exc))
+                saved = self._repository.compare_and_set(
+                    conflicted,
+                    expected_status="applied",
+                )
+                if saved is not None:
+                    self._audit(saved, "revert_conflicted", actor_user_id)
+                raise
+
+            now = _now()
+            reverted = replace(
+                current,
+                status="reverted",
+                updated_at=now,
+                error=None,
+                validation_summary={
+                    **current.validation_summary,
+                    "reverted_at": now.isoformat(),
+                    "reverted_by": actor_user_id,
+                },
+            )
+            saved = self._repository.compare_and_set(
+                reverted,
+                expected_status="applied",
+            )
+            if saved is None:
+                raise ChangeSetInvalidStateError(
+                    "ChangeSet status changed concurrently"
+                )
+            self._audit(saved, "reverted", actor_user_id)
+            return saved
+
+    def _revert_target(self, record: ChangeSetRecord) -> Path:
+        workspace = self._workspace_service.get(record.workspace_id)
+        source = Path(
+            self._workspace_service.resolve_for_run(record.workspace_id)
+        ).resolve()
+        if (
+            str(source) != record.workspace_root
+            or workspace.revision != record.workspace_revision
+        ):
+            raise ChangeSetConflictError(
+                "workspace registration changed after the Agent run"
+            )
+        if record.apply_mode == "direct":
+            return source
+        if not record.worktree_path:
+            raise ChangeSetValidationError("worktree ChangeSet path is unavailable")
+        worktree = Path(record.worktree_path).expanduser().resolve()
+        if (
+            self._worktree_parent not in worktree.parents
+            or not worktree.name.startswith("agent-worktree-")
+            or worktree.is_symlink()
+            or not worktree.exists()
+            or not worktree.is_dir()
+        ):
+            raise ChangeSetConflictError("Agent worktree is no longer available")
+        return worktree
+
     def _validate_capture(
         self,
         *,
@@ -400,14 +616,15 @@ class ChangeSetService:
                 raise ChangeSetValidationError("ChangeSet patch is empty or too large")
             if binary_files:
                 raise ChangeSetValidationError(
-                    "binary changes cannot be promoted: " + ", ".join(binary_files)
+                    "binary changes cannot be represented safely: "
+                    + ", ".join(binary_files)
                 )
             if any(
                 marker in patch
                 for marker in ("GIT binary patch", "Binary files ", " mode 120000")
             ):
                 raise ChangeSetValidationError(
-                    "binary or symbolic-link patches cannot be promoted"
+                    "binary or symbolic-link patches cannot be represented safely"
                 )
             normalized = [_validate_relative_path(path) for path in changed_files]
             if len(set(normalized)) != len(normalized):
@@ -566,8 +783,8 @@ class ChangeSetService:
             workspace_role=role,
             approval_policy="on_request",
             process_denied_tools=(
-                ("changeset.apply",)
-                if not self._live_writes_enabled or self._apply_mode == "patch_only"
+                ("changeset.apply", "changeset.revert")
+                if not self._live_writes_enabled
                 else ()
             ),
         ).bind(
@@ -787,6 +1004,50 @@ def _run_git_apply(root: Path, patch: str, *, check: bool, timeout: float) -> No
         raise ChangeSetValidationError(
             result.stderr.strip() or "git apply failed"
         )
+
+
+def _run_git_apply_reverse(
+    root: Path,
+    patch: str,
+    *,
+    check: bool,
+    timeout: float,
+) -> None:
+    command = ["git", "apply", "--reverse", "--whitespace=nowarn"]
+    if check:
+        command.append("--check")
+    command.append("-")
+    result = subprocess.run(
+        command,
+        cwd=root,
+        input=patch,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ChangeSetConflictError(
+            result.stderr.strip() or "ChangeSet reverse patch no longer applies"
+        )
+
+
+def _validate_file_hashes(
+    root: Path,
+    expected: Mapping[str, str | None],
+    *,
+    conflict_prefix: str,
+) -> None:
+    for relative, expected_hash in expected.items():
+        target = _safe_target(root, relative)
+        if expected_hash is None:
+            if target.exists() or target.is_symlink():
+                raise ChangeSetConflictError(f"{conflict_prefix}: {relative}")
+            continue
+        if not target.exists() or not target.is_file() or target.is_symlink():
+            raise ChangeSetConflictError(f"{conflict_prefix}: {relative}")
+        if _sha256_bytes(target.read_bytes()) != expected_hash:
+            raise ChangeSetConflictError(f"{conflict_prefix}: {relative}")
 
 
 def _run_command(command: list[str], *, timeout: float) -> None:

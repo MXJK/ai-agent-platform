@@ -15,6 +15,13 @@ class ChangeSetApplyRequest(BaseModel):
     patch_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class ChangeSetRevertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    change_set_id: str = Field(min_length=1, max_length=64)
+    patch_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ChangeSetRejectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -308,6 +308,12 @@ class RunRecorder:
         state: CodingAgentState,
         pending_approval: Optional[dict[str, Any]] = None,
     ) -> AgentRunResult:
+        context_snapshot = self._context_snapshot_for_run(run_id)
+        execution = (
+            context_snapshot.execution_workspace
+            if context_snapshot is not None
+            else None
+        )
         return AgentRunResult(
             run_id=run_id,
             thread_id=thread_id,
@@ -341,4 +347,10 @@ class RunRecorder:
             artifacts=state.get("artifacts", []),
             change_set_id=state.get("change_set_id") or None,
             pending_approval=pending_approval,
+            workspace_mode=(execution.mode if execution is not None else "patch_only"),
+            execution_root=(
+                execution.execution_root if execution is not None else None
+            ),
+            branch_name=(execution.branch_name if execution is not None else None),
+            worktree_path=(execution.worktree_path if execution is not None else None),
         )

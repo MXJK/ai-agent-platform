@@ -98,23 +98,38 @@ class ContextRetrievalNodes:
         self._tools_for_state = runtime._tools_for_state
         self._tool_use_context = runtime._tool_use_context
         self._visible_tool_specs = runtime._visible_tool_specs
+        self._execution_workspace_runtime = runtime._execution_workspace_runtime
 
     def _setup_workspace(self, state: CodingAgentState) -> CodingAgentState:
-        root = Path(state["workspace_root"]).resolve()
-        if not root.exists() or not root.is_dir():
+        source_root = Path(state["workspace_root"]).resolve()
+        if not source_root.exists() or not source_root.is_dir():
             raise ValueError(
                 "workspace_unavailable: captured workspace root is inaccessible"
             )
+        root = Path(state.get("execution_root") or source_root).resolve()
+        if self._execution_workspace_runtime is not None:
+            record = self._execution_workspace_runtime.for_context(
+                self._tool_use_context(state)
+            )
+            root = record.execution_root
+            mode = record.mode
+        else:
+            mode = state.get("execution_workspace_mode", "patch_only")
+        if not root.exists() or not root.is_dir():
+            raise ValueError("workspace_unavailable: execution root is inaccessible")
         for path in state.get("focus_files", []):
             _validate_relative_workspace_path(path, root)
         return {
-            "workspace_root": str(root),
+            "execution_root": str(root),
+            "execution_workspace_mode": mode,
             "trace": _append_trace(
                 state,
                 node="setup_workspace",
-                summary="固定本次 run 的工作区根路径快照并校验边界。",
+                summary="恢复并固定本次 Run 的 execution workspace，校验服务端映射。",
                 output={
                     "workspace_id": state["workspace_id"],
+                    "workspace_mode": mode,
+                    "execution_root": str(root),
                     "focus_files": state.get("focus_files", []),
                 },
             ),
@@ -128,7 +143,7 @@ class ContextRetrievalNodes:
             source = "RunContextSnapshot"
         else:
             instructions = load_project_instructions(
-                workspace_root=state["workspace_root"],
+                workspace_root=state.get("execution_root") or state["workspace_root"],
                 focus_files=unique(
                     state.get("focus_files", []) + extract_paths(state["user_input"])
                 ),

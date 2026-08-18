@@ -255,9 +255,9 @@ The browser workspace also includes:
 - approval, input, and pause checkpoints rendered inside the matching assistant
   message, with inline approve, reject, feedback, continue, steer, pause, and cancel
   actions; terminal messages include a changed-file ledger, line counts, expandable
-  Diff, validation state, and reject/apply actions. `patch_only` explicitly says the
-  files are not on disk and disables apply; `direct` / `worktree` requires a second
-  confirmation before calling the protected API. Reopening a session restores its
+  Diff, validation state, and safe revert actions. `patch_only` explicitly says the
+  real workspace is unchanged; `direct` / `worktree` show where the Run already
+  wrote and require digest confirmation to revert. Reopening a session restores its
   latest Run and ChangeSet so `waiting_approval` or Sandbox-only output is not
   mistaken for a stalled or already-applied change;
 - an auto-growing conversation input with per-session unsent drafts, availability
@@ -511,12 +511,14 @@ Project memory contributes at most six current-revision active records within a
 managed knowledge base is forced to `repo`; it discovers and reads README files,
 project manifests, and entry points instead of filling a live-evidence gap with
 unrelated managed documents. `merge_evidence` preserves all provenance types before
-tool/change planning or answer generation. Change runs retain human approval,
-per-run sandbox copying, validation, one bounded repair attempt, and Diff/test
-artifacts. Before sandbox cleanup, a terminal run persists the complete patch as
-a ChangeSet. The default `patch_only` mode never changes the source workspace;
-`direct` or `worktree` promotion additionally requires explicitly enabled live
-writes, a trusted editor approval, the approved digest, and unchanged file hashes.
+tool/change planning or answer generation. Before tools are built, a change Run
+freezes a `patch_only`, `direct`, or `worktree` execution root and retains exact
+tool approval, validation, bounded repair, and Diff/test artifacts. Terminal
+capture persists the full patch, pre/post hashes, and execution location as a
+ChangeSet. `patch_only` never changes the source workspace; `direct`/`worktree`
+write during approved tool execution and require live writes, a trusted editor,
+baseline conflict checks, and a mutation journal. The matching conversation
+message shows the ledger, full Diff, actual location, and digest-bound safe revert.
 
 Running Agent status uses the product run store as its source of truth and adds
 the latest LangGraph checkpoint as a read-only progress overlay. The API can
@@ -837,17 +839,14 @@ optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
 The removed `repository_id` and `rag_context` Agent fields are not accepted or
 returned.
 
-A ChangeSet is a separate promotion boundary after tool-plan approval. It stores
-the untruncated patch, SHA-256, changed paths, sandbox baseline hashes, workspace
-root/revision, validation summary, and lifecycle status. Viewers may inspect it;
-only editors may reject or apply it. Apply revalidates the registered root,
-symlinks, sensitive/binary paths, concurrent file edits, and the user-approved
-digest. Reapplying the same completed ChangeSet is idempotent and conflicts never
-overwrite newer user edits. `direct` restores original files on failure;
-`worktree` creates a controlled `codex/` branch from the captured Git HEAD while
-leaving the source directory untouched. No commit, push, PR, merge, or deployment
-is performed automatically. The browser exposes this promotion boundary directly
-inside the matching Agent conversation message rather than on a separate page.
+A ChangeSet is an audit and recovery boundary after tool approval. It stores the
+untruncated patch, SHA-256, changed paths, pre/post hashes, source/execution roots,
+workspace revision, Git/branch/worktree metadata, validation summary, and status.
+Viewers may inspect it; only editors may reject or revert it. New `direct` and
+`worktree` records are captured as already `applied` and cannot be applied twice.
+Revert validates the digest and post-write hashes, preserves newer user edits on
+conflict, and is idempotent. Historical ready ChangeSets retain apply compatibility.
+No commit, push, PR, merge, or deployment is performed automatically.
 
 ### Live source tools
 
@@ -862,16 +861,30 @@ and common credential files. File listing skips symlinks, resolved paths outside
 the workspace, and ignored directories such as `.venv-*` per entry, so one unsafe
 path does not abort the whole inventory.
 
-### Sandbox boundary
+### Execution workspaces and command isolation
 
-Change runs copy regular, non-sensitive workspace files into a per-run
-directory. Real `.env` files, credentials, private keys, symbolic links,
-unreadable paths, sockets, FIFOs, and other special files are skipped and
-reported in `copy_warnings`. Completed, failed, or rejected runs remove their
-Sandbox; startup also prunes directories older than
-`SANDBOX_WORKSPACE_TTL_SECONDS`. If files changed, a server-internal exporter
-persists the full ChangeSet before cleanup; a truncated display Diff is never
-used for workspace promotion.
+Before project instructions or the tool pool are built, every Run selects an
+execution workspace and freezes its source root, mode, execution root, Git HEAD,
+branch, and cleanup policy in RunContext v4. Repository reads, mutations,
+commands, status, and Diff always use that same execution root. The registered
+source root remains the authorization boundary and cannot be replaced by model
+or request parameters. The modes are:
+
+- `patch_only`: copy regular, non-sensitive files into a disposable per-Run
+  directory, export a ChangeSet at terminal state, then delete it;
+- `direct`: read, write, and execute in the registered source root, with changes
+  immediately visible to other local processes;
+- `worktree`: require a clean Git repository, create and retain a `codex/`
+  branch worktree from the frozen HEAD, and leave the current checkout unchanged.
+
+Real `.env` files, credentials, private keys, symbolic links, unreadable paths,
+sockets, FIFOs, and other special files are rejected or skipped and recorded.
+Writes accept an optional `expected_sha256` and validate both the Run baseline
+and current bytes; patches additionally validate paths, context, and pre-write
+hashes. Same-directory temporary files, `fsync`, atomic replacement, and a
+durable pre-write mutation journal protect updates. `direct` has a per-Workspace
+single-writer lock, so external edits and concurrent Agent writers fail without
+overwriting content.
 
 Live writes are disabled by default. `LIVE_WORKSPACE_WRITES_ENABLED=true`
 requires `AUTH_MODE=trusted_header`:
@@ -879,7 +892,9 @@ requires `AUTH_MODE=trusted_header`:
 ```dotenv
 CHANGE_SET_STORE=postgres
 LIVE_WORKSPACE_WRITES_ENABLED=false
-CHANGE_SET_APPLY_MODE=patch_only  # patch_only | direct | worktree
+AGENT_WORKSPACE_DEFAULT_MODE=patch_only
+AGENT_WORKSPACE_ALLOWED_MODES=patch_only
+CHANGE_SET_APPLY_MODE=patch_only  # historical ChangeSet apply compatibility only
 CHANGE_SET_MAX_FILES=100
 CHANGE_SET_MAX_PATCH_CHARS=1000000
 CHANGE_SET_WORKTREE_PARENT=
@@ -893,17 +908,29 @@ by the gateway and FastAPI:
 ```dotenv
 AUTH_MODE=trusted_header
 LIVE_WORKSPACE_WRITES_ENABLED=true
-CHANGE_SET_APPLY_MODE=direct
+AGENT_WORKSPACE_DEFAULT_MODE=direct
+AGENT_WORKSPACE_ALLOWED_MODES=patch_only,direct,worktree
+CHANGE_SET_APPLY_MODE=direct  # optional legacy compatibility
 GATEWAY_AUTH_MODE=local
 GATEWAY_LOCAL_USER_ID=demo_user
 GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
 ```
 
-Open the canonical UI on port 8000; port 8080 is only a compatibility alias. The
-Agent still writes only to its per-Run Sandbox. The conversation shows the file
-list and full Diff, and the registered workspace changes only after the user
-confirms “Apply to real workspace.” Existing `patch_only` ChangeSets remain
-non-applicable and require a fresh Run.
+Open the canonical UI on port 8000; port 8080 is only a compatibility alias.
+Compose hosts the gateway and infrastructure, while host FastAPI reads these
+mode settings from the same `.env`. The UI exposes only server-allowed modes
+that are available to the current identity and Workspace. `direct`/`worktree`
+also require trusted-header identity, editor/admin, the live-write flag, and
+exact tool approval; `worktree` additionally requires a clean Git checkout.
+
+For `direct` and `worktree`, the ChangeSet records a write that already happened:
+it is captured as `applied` and is never applied twice. The conversation shows
+the actual source or worktree path and branch and can call
+`POST /agent/runs/{run_id}/changes/revert`. Revert revalidates the patch digest
+and post-write hashes, preserves newer user content on conflict, and is
+idempotent. `patch_only` explicitly remains unwritten and non-promotable.
+Historical ready ChangeSets retain their original apply contract without a
+database migration.
 
 `SANDBOX_MODE=local` is intended only for repositories owned and trusted by the
 local user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
@@ -912,10 +939,11 @@ process-group termination. Shell wrappers such as `sh -c` and `bash -c` are
 rejected. An allowlisted interpreter can still execute arbitrary trusted
 repository code, so local mode is not an adversarial host boundary.
 
-Docker mode additionally uses no network, a read-only container root, the
-calling non-root UID/GID, dropped Linux capabilities, `no-new-privileges`, a
-PID limit, CPU/memory limits, and a bounded tmpfs. Only the copied `/workspace`
-mount remains writable.
+`SANDBOX_MODE` controls command-process isolation, not the file target. Docker
+mounts the same Run execution root at `/workspace`, disables networking, uses a
+read-only container root and the caller's non-root UID/GID, drops Linux
+capabilities, enables `no-new-privileges`, and applies PID, CPU, memory, and
+tmpfs limits.
 
 ## Project memory
 

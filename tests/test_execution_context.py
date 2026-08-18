@@ -26,6 +26,7 @@ from ai_agent_platform.schemas import AgentRunRequest
 from ai_agent_platform.services import (
     AgentRunService,
     ExecutionContextFactory,
+    ExecutionWorkspaceRuntime,
     WorkspaceNotFoundError,
     WorkspaceService,
 )
@@ -88,6 +89,87 @@ class _Authorizer:
 
 
 class ExecutionContextFactoryTests(unittest.TestCase):
+    def test_direct_mode_is_capability_gated_and_frozen_in_run_context(self) -> None:
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "tests@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test Runner"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "baseline"], cwd=root, check=True
+            )
+            process = ConfigResolver(
+                env={
+                    "AUTH_MODE": "trusted_header",
+                    "GATEWAY_TRUST_SECRET": "test-gateway-secret",
+                    "LIVE_WORKSPACE_WRITES_ENABLED": "true",
+                    "AGENT_WORKSPACE_DEFAULT_MODE": "direct",
+                    "AGENT_WORKSPACE_ALLOWED_MODES": "patch_only,direct,worktree",
+                },
+                user_config={},
+            ).resolve_process()
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                workspace_authorizer=_Authorizer({("main", "alice"): "editor"}),
+                auth_mode="trusted_header",
+                process_config=process,
+                execution_workspace_runtime=ExecutionWorkspaceRuntime(
+                    runtime_parent=runtime_dir
+                ),
+            )
+
+            capabilities = factory.workspace_mode_capabilities(
+                workspace_id="main",
+                actor_user_id="alice",
+                workspace_root=str(root),
+                workspace_role="editor",
+                effective_config=process,
+            )
+            snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="edit app.py",
+                workspace_id="main",
+                actor_user_id="alice",
+                model_selection=ModelSelection(),
+                workspace_mode="direct",
+                run_id="run_direct_context",
+            )
+
+            self.assertIsNone(capabilities["unavailable_reasons"]["direct"])
+            self.assertIsNone(capabilities["unavailable_reasons"]["worktree"])
+            self.assertEqual(snapshot.metadata.schema_version, 4)
+            self.assertIsNotNone(snapshot.execution_workspace)
+            assert snapshot.execution_workspace is not None
+            self.assertEqual(snapshot.execution_workspace.mode, "direct")
+            self.assertEqual(
+                snapshot.execution_workspace.execution_root, str(root.resolve())
+            )
+            self.assertEqual(
+                RunContextSnapshot.from_dict(snapshot.to_dict()), snapshot
+            )
+
+            (root / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+            dirty = factory.workspace_mode_capabilities(
+                workspace_id="main",
+                actor_user_id="alice",
+                workspace_root=str(root),
+                workspace_role="editor",
+                effective_config=process,
+            )
+            self.assertIn("dirty", dirty["unavailable_reasons"]["worktree"])
+            self.assertIsNone(dirty["unavailable_reasons"]["direct"])
+
     def test_api_accepts_additional_workspace_ids_not_raw_paths(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
