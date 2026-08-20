@@ -2,56 +2,57 @@
 
 [简体中文](README.md) | **English**
 
-FastAPI backend with streaming chat, a task-driven code Agent, managed document
-knowledge bases, workspace-scoped project memory, approval-aware sandbox
-execution, and optional PostgreSQL, Celery, Redis, and Qdrant infrastructure.
-A native browser workspace and an optional OIDC-validating Go gateway provide
-the product and traffic boundaries.
+Single-user FastAPI self-hosted AI Agent platform with streaming chat, a
+task-driven code Agent, managed document knowledge bases, workspace-scoped
+project memory, and approval-aware controlled execution. The current product runs
+the App, PostgreSQL, and Qdrant through Docker Compose with an in-process queue.
 
 The code Agent does not index a repository and does not use embeddings. A run
 captures a registered workspace root, searches the live filesystem for the
 current task, reads only necessary source ranges, and places those original
 snippets in the current model context.
 
-## Local start
+## Single-node Docker start
 
-The default configuration targets personal local use: one API process, one SQLite
-file, and an in-process task queue, with no PostgreSQL/Qdrant/Redis/Celery data
-services. Python 3.10 or newer is required by the Google Gen AI SDK:
+The only supported product path is single-user, single-instance Docker Compose
+self-hosting. The persistent services are the FastAPI/Web UI App, PostgreSQL, and
+Qdrant; a one-shot `migrate` service applies the existing Alembic chain. Agent work
+uses the in-process bounded queue, so no Go gateway, Redis, Celery Worker, or
+Adminer is started.
+The App image installs `requirements.self-hosted.txt`, excluding Celery/Redis,
+Chroma, OS keyring, and local SentenceTransformer/Torch dependencies that the
+current topology never loads. Those adapters remain in the full development set.
 
 ```bash
-python3.10 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m pip install -e .
 cp -n .env.example .env
-./scripts/start-local.sh --check
-./scripts/start-local.sh
+mkdir -p workspaces
+docker compose up -d --build
+docker compose ps
 ```
 
-`RUNTIME_PROFILE=local` locks Session/Run/Workspace/L1/L3 and memory vectors to
-SQLite and selects the `in_process` queue. ChangeSets, documents, the model
-registry, LangGraph checkpoints, and document RAG still use process memory and do
-not survive restart. Trusted local direct/worktree mode starts only the loopback Go
-gateway container; it does not start production data services.
+Open `http://127.0.0.1:8000`. Only the App is published to host loopback;
+PostgreSQL and Qdrant remain private to the Compose network. Set
+`WORKSPACE_HOST_PATH` to one trusted host directory, mounted as `/workspaces`; the
+existing web directory browser registers projects below that root without trying
+to open the host Finder from a container.
 
-Open the UI at `http://127.0.0.1:8001` without authentication, or at
-`http://127.0.0.1:8000` when the trusted local gateway is enabled.
+The official `RUNTIME_PROFILE=custom` combination reuses the existing PostgreSQL
+repositories, Qdrant vector stores, and `in_process` task queue. Project memory is
+enabled and user memory is disabled. Provider keys come from the local `.env` and
+use the existing `env:*` references; keys entered through the UI are not promised
+to survive an App-container restart. The default Fake LLM keeps the stack offline
+until a real provider and its key are selected.
 
-The future shared deployment is documented in [`.env.production.example`](.env.production.example)
-with `RUNTIME_PROFILE=production`. Credentials, OIDC, mounts, backups, migrations,
-capacity, and operations remain explicit `TODO(PRODUCTION)` items. Only after review:
+`AUTH_MODE=single_user` ignores caller-controlled identities and assigns every
+request to `SINGLE_USER_ID=owner`, who may administer models and MCP. It is not
+public-network authentication: do not publish this port on LAN or Internet
+interfaces. Commands execute inside the App container and the MVP supports only
+repositories the owner already trusts; workspace mode stays `patch_only`.
 
-```bash
-cp .env.production.example .env  # Future deployment only; replace every placeholder/TODO first.
-./scripts/start.sh --check
-./scripts/start.sh --apply-migrations  # Explicitly authorizes pending Alembic revisions.
-```
-
-The production script accepts only the production profile and starts PostgreSQL,
-Qdrant, Redis, the Go gateway, Celery Worker, and FastAPI. A local profile gets an
-actionable `start-local.sh` error. An early single-instance product may deliberately
-use a `custom` PostgreSQL/Qdrant + `in_process` combination without claiming the
-multi-worker production profile.
+SQLite, Celery, Go gateway, OIDC, and multi-worker implementations remain as
+compatibility and test code, not supported deployment paths. `start-local.sh` now
+forwards to the same Compose entrypoint; `./scripts/start.sh --check` performs a
+static Compose check.
 
 ## CLI, REPL, SDK, and process entrypoints
 
@@ -61,7 +62,7 @@ The installed entrypoints are thin adapters over `RuntimeContainer` and
 ```bash
 .venv/bin/ai-agent --workspace /absolute/path/to/project print "Explain the entrypoints"
 .venv/bin/ai-agent --workspace /absolute/path/to/project repl
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8001
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
 ```
 
 Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
@@ -71,25 +72,29 @@ of that Run; signal handling exists only in the process-owning CLI, never in the
 or Query Kernel.
 
 `AgentSDK.query()` and `resume()` return `AsyncIterator[AgentEvent]`, while
-`control()` and `result()` return `QueryResult`. The API console entrypoint owns only
-uvicorn/HTTP/lifespan behavior. Celery creates its process-local `RuntimeContainer`
-from `worker_process_init` and closes it from `worker_process_shutdown`; task handlers
-do not assemble dependencies. The startup script now targets
-`ai_agent_platform.api.entrypoint:app`.
+`control()` and `result()` return `QueryResult`. The official App image starts
+FastAPI from `ai_agent_platform.api.entrypoint` and lifespan closes the same
+`RuntimeContainer`. The Celery process lifecycle adapter remains as compatibility
+code, but the current Compose stack does not start it.
 
 ## Layered runtime configuration
 
-`RUNTIME_PROFILE` classifies process infrastructure and rejects accidental mixing:
+The official Compose stack uses `RUNTIME_PROFILE=custom` and locks the following
+single-node product contract in service-owned environment values:
 
-| Profile | Structured state | Vectors | Tasks | Intended use |
-| --- | --- | --- | --- | --- |
-| `local` | SQLite core state; unsupported SQLite domains temporarily use memory | SQLite memory vectors; document RAG temporarily uses memory | `in_process` | Current personal default |
-| `production` | PostgreSQL | Qdrant | Redis/Celery | Future shared deployment after its TODO checklist |
-| `custom` | Explicit per-store choices | Explicit choice | Celery still requires shared stores | Tests or a single-instance transition |
+| Boundary | Current MVP |
+| --- | --- |
+| Structured facts, checkpoints, model registry | PostgreSQL |
+| Document and project-memory vectors | Qdrant |
+| Agent, compression, and memory tasks | Bounded queue in the API process |
+| Identity | Fixed `single_user` owner |
+| Workspace | `/workspaces` bind mount and `patch_only` |
+| Sandbox | Local execution inside the App container for trusted repositories |
 
-Named profiles may repeat their expanded values but cannot select incompatible
-backends. Intentional mixed configurations must use `custom`; validation fails
-before database connections or migrations.
+The named `local` and `production` profiles remain compatibility implementations,
+not public startup paths. Existing Celery validation still requires fully shared
+PostgreSQL/Qdrant state; this Compose stack does not select Celery and therefore
+does not require Redis or a separate Worker.
 
 `ConfigResolver` resolves configuration in one fixed order: `Settings` defaults,
 user JSON, project JSON, environment/`.env`, then explicit entry-point overrides.
@@ -271,11 +276,10 @@ The browser workspace also includes:
   including current/default selection, invalid-path relinking, and safe removal;
   the shared composer omits a duplicate code-context strip, while the sidebar
   and settings manage the current workspace; there is no separate Code Agent page;
-  on local macOS, Add Folder opens the Finder system folder dialog through either
-  a direct loopback request or an explicitly trusted local gateway and otherwise
-  falls back to the web directory browser; when unset locally, the allowed root
-  defaults to the current user's home directory, while deployments should set
-  explicit minimal roots;
+  current Compose disables the container-native picker, and the web directory
+  browser only exposes content mounted under `/workspaces`; every selection still
+  passes the allowed-root check. The macOS Finder picker remains a non-default
+  local-development compatibility implementation;
 - approval, input, and pause checkpoints rendered inside the matching assistant
   message, with inline approve, reject, feedback, continue, steer, pause, and cancel
   actions; terminal messages include a changed-file ledger, line counts, expandable
@@ -450,13 +454,13 @@ first non-empty text `delta` are buffered, so a 429, timeout, or transport failu
 can safely fall back across providers. After the first text delta, failures are
 returned with `partial_response=true` and never replayed on another model.
 
-Registry configuration uses `MODEL_REGISTRY_STORE=postgres` for restart-safe
-global configuration and `MODEL_SECRET_BACKEND=keyring` for API keys. The
-connection save/test/discovery and model mutation endpoints require a host-local
-capability: either a direct loopback request with `AUTH_MODE=disabled`, or a trusted
-local gateway request with both shared-secret identity and `X-Gateway-Mode: local`.
-Ordinary OIDC identities cannot perform these administration operations. Use the
-in-memory backends only for tests or explicit temporary runs.
+The Compose stack uses `MODEL_REGISTRY_STORE=postgres` for restart-safe model
+catalog state. Provider keys are injected from the host `.env` and read through
+existing references such as `env:OPENAI_API_KEY`; `MODEL_SECRET_BACKEND=memory`
+holds only temporary keys entered during the current App lifetime. The fixed
+`single_user` owner may save/test/discover connections and mutate models, and
+caller identity headers cannot replace that owner. A container-appropriate Secret
+Store is still required before UI-entered keys can be promised across restarts.
 
 ## Dynamic model admission and Token budgets
 
@@ -671,7 +675,7 @@ stdio variables, and inherited API keys are blocked. All MCP permission
 annotations pass through the central `PermissionResolver`; missing or high-risk
 hints conservatively become external side effects rather than authorization.
 
-In local administration mode, open **MCP Connections** (`/#mcp`) to register,
+When MCP is enabled, open **MCP Connections** (`/#mcp`) to register,
 edit, test/refresh, enable, disable, or delete a Server. The UI supports current
 stdio, current Streamable HTTP, and both explicit compatibility paths while
 showing per-Server state, protocol version, retry errors, and discovered versus
@@ -682,10 +686,7 @@ immediately replaces that Server's connection and synchronizes the ToolRegistry.
 Otherwise the configuration is persisted and shown as awaiting restart. Literal
 environment variables/headers are separate from Secret inputs. Secret values go
 only to the shared `SecretStore`; the config file and later GET responses retain
-only references or key names. Management writes share the same host-local boundary
-as the model registry and native directory picker: direct unauthenticated loopback,
-or a trusted local gateway carrying both shared-secret identity and
-`X-Gateway-Mode: local`. OIDC and remote requests remain denied.
+only references or key names.
 
 The management API consists of `GET /api/v1/mcp/servers`,
 `PUT /api/v1/mcp/servers/{name}`,
@@ -693,7 +694,10 @@ The management API consists of `GET /api/v1/mcp/servers`,
 `POST /api/v1/mcp/servers/{name}/test`, and
 `DELETE /api/v1/mcp/servers/{name}`. Each mutation affects only its target
 Server; disable/delete closes that connection and atomically removes its dynamic
-tools without rebuilding other Server lifecycles.
+tools without rebuilding other Server lifecycles. Under the current
+`AUTH_MODE=single_user`, management writes always belong to the fixed `owner` and
+rely on Compose publishing only a loopback port. Direct unauthenticated loopback
+and trusted local-gateway proofs remain compatibility modes, not the product path.
 
 ```json
 {
@@ -755,30 +759,19 @@ take precedence.
 
 ## Workspace API
 
-`workspace_id` uses letters, digits, `_`, `-`, and `.`. Root paths are
-canonical absolute paths and must remain under `WORKSPACE_ALLOWED_ROOTS` after
-symbolic links are resolved. One canonical root can belong to only one
-workspace; registering the same root under another ID returns `409`. List and
-detail responses also expose `status`, `role`, and `can_update` so clients can
-render path availability and the current user's capability. When
-`WORKSPACE_ALLOWED_ROOTS` is unset or blank for local use, it defaults to the
-current user's home directory so the folder picker can reach Desktop, Documents,
-and other projects below it; dot-directories are hidden from the picker by
-default. Container, multi-user, and remote deployments should configure narrower
-roots explicitly.
+`workspace_id` uses letters, digits, `_`, `-`, and `.`. Root paths are canonical
+absolute paths and must remain under `WORKSPACE_ALLOWED_ROOTS` after symbolic
+links are resolved. One canonical root can belong to only one workspace;
+registering the same root under another ID returns `409`. List and detail
+responses expose `status`, `role`, and `can_update`. The official Compose stack
+fixes `WORKSPACE_ALLOWED_ROOTS=/workspaces` and maps `WORKSPACE_HOST_PATH` there;
+the browser hides dot-directories and out-of-bound symbolic links.
 
-`NATIVE_DIRECTORY_PICKER_MODE` explicitly defines which HTTP boundary may open
-macOS Finder on the same machine that runs the Agent. The default `loopback` mode
-accepts only direct loopback requests with `AUTH_MODE=disabled`;
-`trusted_local_gateway` requires both the `X-Gateway-Auth` shared secret and
-`X-Gateway-Mode: local`, which only the local gateway reissues after stripping the
-caller's same-named header. OIDC and unauthenticated gateways remove that local
-capability assertion, so a valid remote identity cannot open Finder on the server.
-The mode still supports local Docker gateways whose upstream address appears as
-`192.168.*`; `disabled` turns the native dialog off. The
-frontend falls back to the constrained web directory browser when deployment
-policy or the system capability prevents the native dialog. Cancelling makes no
-changes, and every selected path must still pass `WORKSPACE_ALLOWED_ROOTS`.
+Containers cannot open the host Finder on behalf of a browser user, so the
+official Compose stack fixes `NATIVE_DIRECTORY_PICKER_MODE=disabled`. The frontend
+uses the existing constrained web directory browser under `/workspaces`, and each
+selected path still passes `WORKSPACE_ALLOWED_ROOTS`. The loopback and trusted
+local-gateway native picker implementations remain compatibility code only.
 
 A Workspace root belongs to the filesystem that actually executes the Agent. If
 a future control plane runs in the cloud while code remains on a user's computer,
@@ -803,12 +796,10 @@ context before registration succeeds, and one token-usage request failure does
 not turn successful registration into an error. Agent submission is blocked
 client-side until a usable workspace is selected.
 
-With `AUTH_MODE=trusted_header`, directory browsing also requires trusted
-gateway identity. Session configuration and user defaults may reference only a
-workspace where the actor has at least viewer access. A viewer may start
-read-only analysis, but approving a plan containing writes or external side
-effects requires editor access; the worker checks that access again before
-execution.
+In `single_user` mode every session and Workspace operation belongs to the fixed
+owner; request bodies, `X-User-ID`, and `X-Authenticated-User` cannot switch
+identity. Workspace RBAC and Worker reauthorization remain implemented underneath,
+but multi-user collaboration is outside this MVP.
 
 The `available` response field reports whether the saved path can currently be
 read. `DELETE` performs a soft removal: it removes the workspace from selection
@@ -925,8 +916,8 @@ durable pre-write mutation journal protect updates. `direct` has a per-Workspace
 single-writer lock, so external edits and concurrent Agent writers fail without
 overwriting content.
 
-Live writes are disabled by default. `LIVE_WORKSPACE_WRITES_ENABLED=true`
-requires `AUTH_MODE=trusted_header`:
+The current product supports only `patch_only`: a Run creates a ChangeSet in an
+isolated copy and the owner reviews it before applying. Its defaults are:
 
 ```dotenv
 CHANGE_SET_STORE=postgres
@@ -940,27 +931,10 @@ CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
 
-For local direct writes, use the passwordless local gateway that Compose
-publishes only on `127.0.0.1:8000`, and configure one random trust secret shared
-by the gateway and FastAPI:
-
-```dotenv
-AUTH_MODE=trusted_header
-LIVE_WORKSPACE_WRITES_ENABLED=true
-AGENT_WORKSPACE_DEFAULT_MODE=direct
-AGENT_WORKSPACE_ALLOWED_MODES=patch_only,direct,worktree
-CHANGE_SET_APPLY_MODE=direct  # optional legacy compatibility
-GATEWAY_AUTH_MODE=local
-GATEWAY_LOCAL_USER_ID=demo_user
-GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
-```
-
-Open the canonical UI on port 8000; port 8080 is only a compatibility alias.
-Compose hosts the gateway and infrastructure, while host FastAPI reads these
-mode settings from the same `.env`. The UI exposes only server-allowed modes
-that are available to the current identity and Workspace. `direct`/`worktree`
-also require trusted-header identity, editor/admin, the live-write flag, and
-exact tool approval; `worktree` additionally requires a clean Git checkout.
+The `direct`/`worktree` implementations, trusted-header identity, and their audit
+paths remain as compatibility code. Compose locks
+`LIVE_WORKSPACE_WRITES_ENABLED=false` and `patch_only`, so those modes are not
+exposed to current product users.
 
 For `direct` and `worktree`, the ChangeSet records a write that already happened:
 it is captured as `applied` and is never applied twice. The conversation shows
@@ -971,14 +945,17 @@ idempotent. `patch_only` explicitly remains unwritten and non-promotable.
 Historical ready ChangeSets retain their original apply contract without a
 database migration.
 
-`SANDBOX_MODE=local` is intended only for repositories owned and trusted by the
-local user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
+`SANDBOX_MODE=local` executes inside the App container and is intended only for
+repositories owned and trusted by the user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with
 a minimal environment, fixed maximum timeout, bounded output capture, and
 process-group termination. Shell wrappers such as `sh -c` and `bash -c` are
 rejected. An allowlisted interpreter can still execute arbitrary trusted
-repository code, so local mode is not an adversarial host boundary.
+repository code, so the App container is not an adversarial isolation boundary.
+The current Compose stack does not mount the Docker Socket and makes no claim of
+supporting untrusted repositories.
 
-`SANDBOX_MODE` controls command-process isolation, not the file target. Docker
+The retained `SANDBOX_MODE=docker` implementation controls command-process isolation,
+not the file target. It
 mounts the same Run execution root at `/workspace`, disables networking, uses a
 read-only container root and the caller's non-root UID/GID, drops Linux
 capabilities, enables `no-new-privileges`, and applies PID, CPU, memory, and
@@ -1105,13 +1082,14 @@ full message detail panel. The UI explicitly marks L2 as not stored and keeps
 loading, empty, and error states distinct so review candidates are not mistaken
 for injected memory.
 
-Configuration defaults keep the subsystem disabled:
+The Docker MVP enables project memory with PostgreSQL facts/evidence/jobs/Outbox
+and rebuildable Qdrant vectors. Cross-project user memory remains disabled:
 
 ```dotenv
-PROJECT_MEMORY_ENABLED=false
-PROJECT_MEMORY_MODE=off
-PROJECT_MEMORY_STORE=memory
-PROJECT_MEMORY_VECTOR_STORE=memory
+PROJECT_MEMORY_ENABLED=true
+PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_STORE=postgres
+PROJECT_MEMORY_VECTOR_STORE=qdrant
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
 PROJECT_MEMORY_AUTO_THRESHOLD=0.85
 PROJECT_MEMORY_RECALL_LIMIT=20
@@ -1127,16 +1105,11 @@ USER_MEMORY_MODE=off
 USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
 
-The default [`.env.example`](.env.example) selects the local profile, while
-[`.env.local-memory.example`](.env.local-memory.example) remains as a focused
-compatibility example. It persists Sessions, summaries, Workspaces, Agent Runs,
-L1/L3 facts, profile snapshots, Outbox events, and memory vectors in
-`~/.ai-agent-platform/state.sqlite3`, with WAL, foreign keys, `busy_timeout`,
-versioned migrations, and restricted permissions. This profile supports one
-API process with `TASK_QUEUE_BACKEND=in_process`; it starts no PostgreSQL,
-Qdrant, or Redis service and provides no cross-store import. ChangeSets, documents,
-the model registry, checkpoints, and document RAG have no SQLite adapter yet and
-are not restart-persistent in this profile.
+The default [`.env.example`](.env.example) describes the official single-node
+Compose combination. [`.env.local-memory.example`](.env.local-memory.example)
+and the SQLite repositories remain focused compatibility/test implementations;
+they are not the current product data path and provide no import into
+PostgreSQL/Qdrant.
 
 Conversation compression is configured independently:
 
@@ -1336,11 +1309,10 @@ Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
 
-For Celery, configure shared storage and identical mounts and allowed roots in
-API and workers:
+The current single-node product does not start Celery. Its official combination is:
 
 ```dotenv
-TASK_QUEUE_BACKEND=celery
+TASK_QUEUE_BACKEND=in_process
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
@@ -1348,11 +1320,11 @@ DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
-PROJECT_MEMORY_ENABLED=false
-PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_ENABLED=true
+PROJECT_MEMORY_MODE=review
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
-WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
+WORKSPACE_ALLOWED_ROOTS=/workspaces
 ```
 
 The persistent runtime assigns one responsibility to each database:
@@ -1361,63 +1333,36 @@ The persistent runtime assigns one responsibility to each database:
 | --- | --- |
 | PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
-| SQLite (local profile) | Single-file Session/summary/Workspace/Run/L1/L3/profile/Outbox persistence, with FTS5/LIKE lexical search and float32-BLOB vector recall for small local scopes |
-| Redis | Celery broker and result backend; it is not the source of truth for business records |
-| Chroma | Optional embedded/single-node vector-store alternative to Qdrant |
+| SQLite | Retained compatibility/test adapters; the product may use it only for the not-yet-migrated single-node user-memory implementation |
+| Redis/Celery | Retained multi-Worker extension; not started by current Compose |
+| Chroma | Retained embedded vector alternative; not selected by current Compose |
 
-`RAG_VECTOR_STORE` selects either Qdrant or Chroma. They implement the same
-vector-store boundary and are not written simultaneously. The production
-example selects Qdrant; the local profile temporarily keeps document RAG in process.
+`RAG_VECTOR_STORE` still supports Qdrant, Chroma, or memory, but official Compose
+locks Qdrant and does not dual-write another vector backend.
 
-Before starting the API and Celery worker, start the backing services and apply
-the schema migration:
+At product startup, the one-shot `migrate` service reuses the existing Alembic
+chain; the App starts only after migration succeeds:
 
 ```bash
-docker compose --profile production up -d postgres adminer qdrant redis
-.venv/bin/alembic upgrade head
-.venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
+docker compose up -d --build
+docker compose ps
 ```
 
-The Compose ports for Gateway, PostgreSQL, Qdrant, Redis, and Adminer are bound
-to `127.0.0.1`. PostgreSQL credentials come from `.env`; `scripts/start.sh`
-derives the Compose variables from `DATABASE_URL`, while direct
-`docker compose` usage requires the matching `POSTGRES_DB`, `POSTGRES_USER`,
-and `POSTGRES_PASSWORD` entries shown in `.env.production.example`.
+Only the App publishes `127.0.0.1:${SELF_HOSTED_PORT}`. PostgreSQL and Qdrant
+have no host ports. Database credentials come from the user's local `.env` and
+are injected only into the private Compose network. Adminer, Gateway, Redis, and
+Celery are absent from the current service set.
 
-### Browse PostgreSQL with Adminer
-
-The Compose stack includes an Adminer web interface bound to the local machine
-only. After starting `postgres` and `adminer`, open
-<http://localhost:8081> and use:
-
-| Field | Value |
-| --- | --- |
-| System | PostgreSQL |
-| Server | `postgres` |
-| Username | the local `POSTGRES_USER` value |
-| Password | the local `POSTGRES_PASSWORD` value |
-| Database | the local `POSTGRES_DB` value |
-
-The server name must be `postgres`, not `localhost`, because Adminer connects to
-PostgreSQL over the internal Compose network. The local-only port binding is
-intended for development; do not publish Adminer without adding appropriate
-access controls.
-
-Workers register Agent run/resume, idempotent conversation compression, memory
-extraction, and independent project-memory index-Outbox consumption tasks. An
-Agent start task carries only a persisted Run ID; the Worker restores the
-validated submission snapshot, whose configuration fields are redacted, from
-the Run store. Additional
-directories accept registered `additional_workspace_ids`, never raw paths, and
-require the actor's Workspace access. Resolved cwd, focused paths, and symlinks
-must stay inside the primary Workspace root. An inaccessible captured root fails with the structured
-`workspace_unavailable` message.
-Failed memory-extraction jobs retain their attempt count; Celery can retry the
-same source, while a completed `source_type + source_id` remains idempotent.
+The in-process queue registers Agent run/resume, conversation compression, memory
+extraction, and project-memory index-Outbox tasks with the same task semantics as
+the retained Celery adapter. Workspace, configuration, and tool context are still
+frozen before execution. Restarting the App interrupts work that is running or
+queued at that moment; persisted Runs, events, and Outbox evidence remain, but
+this MVP does not promise automatic recovery of every interrupted Run.
 
 ### Runtime assembly and lifecycle
 
-FastAPI `create_app()` and the process-local Celery Worker singleton both enter
+FastAPI `create_app()` and the retained process-local Celery Worker adapter both enter
 the same `ApplicationFactory` through
 `build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
 registry, Workspace, RAG, MCP, Tool Registry, LangGraph checkpointer, Agent
@@ -1437,11 +1382,12 @@ is closed at most once. Tests can still inject the LLM, RAG service, Agent
 runtime, and directory picker into `create_app()`, or override component
 builders on `ApplicationFactory`.
 
-## Optional Go gateway
+## Retained extension implementations
 
-The `gateway/` service provides request admission, request-ID propagation, a
-fixed local identity mode or OIDC/JWT validation through RS256 JWKS,
-health/readiness probes, SSE-safe proxying, and graceful shutdown:
+The `gateway/`, Celery/Redis, and local SQLite profile code and tests remain to
+demonstrate later multi-user, multi-Worker, or alternate-storage evolution. They
+are not services in the current Docker MVP. The Go gateway can still be tested
+independently:
 
 ```bash
 go run ./gateway/cmd/gateway
@@ -1449,37 +1395,26 @@ go test ./gateway/...
 go vet ./gateway/...
 ```
 
-In production, configure `GATEWAY_AUTH_MODE=oidc`, issuer, audience, JWKS URL,
-and a shared `GATEWAY_TRUST_SECRET`; configure FastAPI with
-`AUTH_MODE=trusted_header` and the same secret. The gateway removes forged
-identity and mode headers, validates the bearer token, strips it, and injects the
-trusted subject. Read-only local development can keep both auth modes disabled. Direct
-local writes use `GATEWAY_AUTH_MODE=local`, which replaces caller identity, mode,
-and Authorization headers with `GATEWAY_LOCAL_USER_ID`, the shared secret, and
-`X-Gateway-Mode: local`; OIDC never issues this local capability assertion. The
-standard Compose publish rule keeps this passwordless mode on loopback only. This
-host-local assertion gates Finder, model-registry administration, and MCP-registry
-administration. Set
-`NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway` when that local gateway must
-also open Finder on the same machine; OIDC/shared services should keep it
-`disabled`. This is a trusted
-identity boundary for sessions and workspace memory, not a claim of complete
-multi-tenant authorization across every legacy knowledge-base endpoint.
-
-Compose fixes the container listener at `:8080` and reaches host FastAPI through
-`host.docker.internal:${APP_PORT}`. The body, concurrency, rate-limit, timeout, and
-logging settings advertised in `.env` are forwarded into the container. Port 8000
-is the standard loopback entry; 8080 remains a compatibility alias.
+`AUTH_MODE=trusted_header`, OIDC/JWKS, local-gateway assertions, and multi-Worker
+reliability tests remain valid implemented extension evidence, but they are not
+the default deployment and do not demonstrate production-scale operation. A
+future public or multi-user deployment must revisit authentication, tenant
+authorization, secrets, backups, observability, and untrusted execution instead
+of exposing the `single_user` stack.
 
 ## Verification
 
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
+docker compose --env-file .env.example config --quiet
+bash -n scripts/start.sh scripts/start-local.sh
 node --check ai_agent_platform/static/app.js
-go test ./gateway/...
 git diff --check
 ```
+
+After changing the retained Go gateway compatibility implementation, also run
+`go test ./gateway/...`.
 
 Run offline Agent evaluations with:
 

@@ -250,6 +250,7 @@ class Settings:
     change_set_worktree_parent: str | None = None
     change_set_branch_prefix: str = "codex/"
     auth_mode: str = "disabled"
+    single_user_id: str = "owner"
     native_directory_picker_mode: str = "loopback"
     gateway_trust_secret: str | None = field(default=None, repr=False)
 
@@ -391,8 +392,10 @@ class Settings:
         _require_choice(
             "auth_mode",
             self.auth_mode,
-            {"disabled", "trusted_header"},
+            {"disabled", "single_user", "trusted_header"},
         )
+        if not self.single_user_id.strip() or len(self.single_user_id) > 256:
+            raise ValueError("single_user_id must contain 1-256 non-blank characters")
         _require_choice(
             "native_directory_picker_mode",
             self.native_directory_picker_mode,
@@ -1282,6 +1285,7 @@ class Settings:
                 dotenv,
             ),
             auth_mode=_env("AUTH_MODE", cls.auth_mode, dotenv),
+            single_user_id=_env("SINGLE_USER_ID", cls.single_user_id, dotenv),
             native_directory_picker_mode=_env(
                 "NATIVE_DIRECTORY_PICKER_MODE",
                 cls.native_directory_picker_mode,

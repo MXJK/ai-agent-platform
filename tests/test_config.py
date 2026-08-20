@@ -426,6 +426,12 @@ class SettingsTests(unittest.TestCase):
             Settings(native_directory_picker_mode="remote")
         with self.assertRaisesRegex(ValueError, "auth_mode=trusted_header"):
             Settings(native_directory_picker_mode="trusted_local_gateway")
+        settings = Settings(auth_mode="single_user", single_user_id="owner")
+        self.assertEqual(settings.single_user_id, "owner")
+        with self.assertRaisesRegex(ValueError, "single_user_id"):
+            Settings(auth_mode="single_user", single_user_id="   ")
+        with self.assertRaisesRegex(ValueError, "single_user_id"):
+            Settings(auth_mode="single_user", single_user_id="x" * 257)
         with self.assertRaisesRegex(ValueError, "weights must sum to 1"):
             Settings(
                 project_memory_relevance_weight=0.5,
@@ -442,6 +448,7 @@ class SettingsTests(unittest.TestCase):
                 validate_bind_host(host=host, auth_mode="disabled")
 
         validate_bind_host(host="0.0.0.0", auth_mode="trusted_header")
+        validate_bind_host(host="0.0.0.0", auth_mode="single_user")
 
     def test_rejects_invalid_sandbox_command_allowlist(self) -> None:
         with self.assertRaisesRegex(ValueError, "must not be empty"):

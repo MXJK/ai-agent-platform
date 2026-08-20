@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "LOCAL-GATEWAY-ADMIN-CHAIN"
-next_action: "Review and commit the verified local runtime fixes when ready."
+active_task: "SINGLE-NODE-SELF-HOSTED-MVP"
+next_action: "Review the verified single-node self-hosted MVP changes and commit when ready."
 blockers: []
 last_verified_commit: "21a02f49433f198c83d56133b7481a0e22a9bad0"
-updated_at: "2026-08-18T12:36:48+08:00"
+updated_at: "2026-08-20T14:33:14+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

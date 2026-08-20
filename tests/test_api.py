@@ -51,6 +51,30 @@ def upload_document(
 
 
 class ApiTests(unittest.TestCase):
+    def test_single_user_sessions_always_belong_to_fixed_owner(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with self._client(
+                Path(temp_dir),
+                auth_mode="single_user",
+                single_user_id="owner",
+                native_directory_picker_mode="disabled",
+            ) as client:
+                created = client.post(
+                    "/api/v1/sessions",
+                    headers={"X-User-ID": "header-attacker"},
+                    json={"user_id": "body-attacker"},
+                )
+                fetched = client.get(
+                    f"/api/v1/sessions/{created.json()['id']}",
+                    headers={"X-User-ID": "another-attacker"},
+                )
+
+            self.assertEqual(created.status_code, 201)
+            self.assertEqual(created.json()["user_id"], "owner")
+            self.assertEqual(fetched.status_code, 200)
+            self.assertEqual(fetched.json()["id"], created.json()["id"])
+            self.assertEqual(fetched.json()["user_id"], "owner")
+
     def test_chat_rolls_old_turns_into_summary_visible_from_api(self) -> None:
         with TemporaryDirectory() as temp_dir:
             settings = Settings(

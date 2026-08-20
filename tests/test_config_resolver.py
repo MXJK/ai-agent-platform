@@ -17,7 +17,7 @@ from ai_agent_platform.core import (
 
 
 class ConfigResolverTests(unittest.TestCase):
-    def test_default_env_template_selects_local_profile(self) -> None:
+    def test_default_env_template_selects_single_node_self_hosting(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.example"
 
         settings = ConfigResolver.from_default_locations(
@@ -25,10 +25,23 @@ class ConfigResolverTests(unittest.TestCase):
             dotenv_path=profile,
         ).resolve_process().settings
 
-        self.assertEqual(settings.runtime_profile, "local")
-        self.assertEqual(settings.session_repository, "sqlite")
+        self.assertEqual(settings.runtime_profile, "custom")
+        self.assertEqual(settings.session_repository, "postgres")
+        self.assertEqual(settings.agent_run_store, "postgres")
+        self.assertEqual(settings.change_set_store, "postgres")
+        self.assertEqual(settings.document_store, "postgres")
+        self.assertEqual(settings.workspace_store, "postgres")
+        self.assertEqual(settings.model_registry_store, "postgres")
+        self.assertEqual(settings.langgraph_checkpointer, "postgres")
+        self.assertEqual(settings.rag_vector_store, "qdrant")
+        self.assertEqual(settings.project_memory_store, "postgres")
+        self.assertEqual(settings.project_memory_vector_store, "qdrant")
         self.assertEqual(settings.task_queue_backend, "in_process")
-        self.assertEqual(settings.native_directory_picker_mode, "loopback")
+        self.assertTrue(settings.project_memory_enabled)
+        self.assertFalse(settings.user_memory_enabled)
+        self.assertEqual(settings.auth_mode, "single_user")
+        self.assertEqual(settings.single_user_id, "owner")
+        self.assertEqual(settings.native_directory_picker_mode, "disabled")
 
     def test_production_env_template_selects_shared_backends(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.production.example"

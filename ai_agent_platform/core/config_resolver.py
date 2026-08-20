@@ -255,6 +255,7 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "change_set_worktree_parent",
         "change_set_branch_prefix",
         "auth_mode",
+        "single_user_id",
         "native_directory_picker_mode",
         "gateway_trust_secret",
     }

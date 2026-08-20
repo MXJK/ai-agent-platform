@@ -573,11 +573,35 @@ class ModelRegistryApiTests(unittest.TestCase):
                 },
             )
 
+        single_user_settings = Settings(
+            llm_provider="fake",
+            llm_model="demo-stream-model",
+            embedding_provider="local",
+            model_secret_backend="memory",
+            auth_mode="single_user",
+            single_user_id="owner",
+        )
+        with TestClient(
+            create_app(settings=single_user_settings),
+            client=("172.20.0.1", 50000),
+        ) as client:
+            single_user = client.put(
+                "/api/v1/model-registry/connections/openai",
+                headers={"X-Authenticated-User": "attacker"},
+                json={
+                    "display_name": "OpenAI",
+                    "api_key": "single-user-test-key",
+                    "enabled": True,
+                },
+            )
+
         self.assertEqual(oidc_gateway.status_code, 403)
         self.assertEqual(forged_local.status_code, 401)
         self.assertEqual(local_gateway.status_code, 200)
         self.assertNotIn("local-test-key", local_gateway.text)
         self.assertEqual(remote_direct.status_code, 403)
+        self.assertEqual(single_user.status_code, 200)
+        self.assertNotIn("single-user-test-key", single_user.text)
 
 
 class PostgresModelRegistryTests(unittest.TestCase):

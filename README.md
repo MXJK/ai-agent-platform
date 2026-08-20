@@ -2,10 +2,9 @@
 
 **简体中文** | [English](README.en.md)
 
-基于 FastAPI 的 AI Agent 平台，提供流式对话、任务驱动的代码 Agent、托管文档
-知识库、工作区级项目记忆，以及带审批机制的沙箱执行能力。项目可选接入
-PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可选的 Go 网关
-划分产品和流量边界。
+基于 FastAPI 的单用户自托管 AI Agent 平台，提供流式对话、任务驱动的代码 Agent、
+托管文档知识库、工作区级项目记忆，以及带审批机制的受控执行能力。当前产品通过
+Docker Compose 运行 App、PostgreSQL 和 Qdrant，并以进程内队列保持单实例边界。
 
 代码 Agent 不会预先索引代码仓库，也不依赖向量嵌入。每次运行都会捕获已注册的
 工作区根目录，围绕当前任务搜索实时文件系统，只读取必要的源码区间，并把原始
@@ -13,7 +12,7 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 
 ## 目录
 
-- [本地启动](#本地启动)
+- [Docker 单实例启动](#docker-单实例启动)
 - [CLI、REPL、SDK 与进程入口](#clireplsdk-与进程入口)
 - [分层运行时配置](#分层运行时配置)
 - [Skill 发现与 slash command](#skill-发现与-slash-command)
@@ -26,45 +25,43 @@ PostgreSQL、Celery、Redis 和 Qdrant，并通过原生浏览器工作台与可
 - [项目记忆](#项目记忆)
 - [独立知识库](#独立知识库)
 - [存储与数据库迁移](#存储与数据库迁移)
-- [可选 Go 网关](#可选-go-网关)
+- [保留的扩展实现](#保留的扩展实现)
 - [验证](#验证)
 
-## 本地启动
+## Docker 单实例启动
 
-默认配置面向本地个人使用：单个 API 进程、单文件 SQLite 和进程内任务队列，
-不启动 PostgreSQL、Qdrant 或 Redis/Celery。Google Gen AI SDK 要求 Python 3.10 或更高版本：
+当前唯一公开支持的产品运行路径是单用户、单实例 Docker Compose 自托管。常驻服务只有
+FastAPI/Web UI、PostgreSQL 和 Qdrant；Alembic 迁移由一次性 `migrate` 服务执行。后台
+Agent 任务复用进程内有界队列，不启动 Go 网关、Redis、Celery Worker 或 Adminer。
+App 镜像使用 `requirements.self-hosted.txt`，不安装当前拓扑不会加载的 Celery/Redis、
+Chroma、OS keyring 和本地 SentenceTransformer/Torch 依赖；这些 Adapter 仍保留在完整
+开发依赖中。
 
 ```bash
-python3.10 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m pip install -e .
 cp -n .env.example .env
-./scripts/start-local.sh --check
-./scripts/start-local.sh
+mkdir -p workspaces
+docker compose up -d --build
+docker compose ps
 ```
 
-`RUNTIME_PROFILE=local` 自动锁定 SQLite Session/Run/Workspace/L1/L3、SQLite 记忆向量
-与 `in_process` 队列。ChangeSet、文档、模型注册表、LangGraph checkpoint 和文档 RAG
-当前使用进程内实现，重启后不保留；这是明确边界，不是完整本地持久化。启用可信本地
-direct/worktree 模式时，启动脚本只额外构建 loopback Go 网关容器，数据服务仍不会启动。
+浏览器入口是 <http://127.0.0.1:8000>。Compose 只把 App 发布到宿主机 loopback；
+PostgreSQL 和 Qdrant 只在私有 Compose 网络可达。`WORKSPACE_HOST_PATH` 指向用户信任的
+宿主机目录，并统一挂载到容器 `/workspaces`；页面复用现有网页目录浏览器登记项目，
+不会尝试从容器打开 macOS Finder。
 
-Web UI 在未认证模式从 <http://127.0.0.1:8001> 进入；启用本地可信网关时从
-<http://127.0.0.1:8000> 进入。页面不需要单独构建，示例使用 Fake LLM 和本地嵌入。
+默认 `RUNTIME_PROFILE=custom` 组合现有 PostgreSQL Repository、Qdrant Vector Store 和
+`in_process` TaskQueue。项目记忆开启，用户记忆关闭；模型密钥从本机 `.env` 注入并通过
+既有 `env:*` 引用使用，页面临时写入的密钥不承诺跨容器重启持久化。默认模型仍是 Fake
+LLM，接入真实 Provider 前只需替换 `.env` 中的模型选择和对应 API Key。
 
-未来共享产品部署使用 [`.env.production.example`](.env.production.example) 的
-`RUNTIME_PROFILE=production`。该文件中的凭据、OIDC、共享挂载、备份、迁移、容量和
-运维事项均为 `TODO(PRODUCTION)`，当前没有执行。只有完成审阅后才运行：
+`AUTH_MODE=single_user` 忽略请求体与 Header 中的用户声明，所有请求都归属固定
+`SINGLE_USER_ID=owner`，并允许 owner 管理模型和 MCP。该模式没有公网认证能力；不得把
+App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App 容器内执行，当前产品只
+支持用户自己信任的仓库，Workspace 写入默认保持 `patch_only`。
 
-```bash
-cp .env.production.example .env  # 未来部署时再做，并先替换全部 TODO/占位值
-./scripts/start.sh --check
-./scripts/start.sh --apply-migrations  # 必须显式授权待处理的 Alembic revision
-```
-
-生产脚本只接受 production profile，启动 PostgreSQL、Qdrant、Redis、Go 网关、Celery
-Worker 和 FastAPI；本地 profile 会收到改用 `start-local.sh` 的明确提示。若产品早期只需
-单实例 PostgreSQL/Qdrant + `in_process`，应显式使用 `custom` profile，而不是冒充已经
-具备 Celery 多 Worker 的 production profile。
+兼容的 SQLite、Celery、Go gateway、OIDC 和多 Worker 实现仍保留在代码中，供测试与后续
+演进使用，但不属于当前 MVP 的支持部署面。旧 `start-local.sh` 仅转发到同一个 Compose
+入口；可用 `./scripts/start.sh --check` 做静态配置检查。
 
 ## CLI、REPL、SDK 与进程入口
 
@@ -77,8 +74,8 @@ Worker 和 FastAPI；本地 profile 会收到改用 `start-local.sh` 的明确�
 # 同一 conversation 的多轮交互。
 .venv/bin/ai-agent --workspace /absolute/path/to/project repl
 
-# 只启动 FastAPI/uvicorn HTTP 入口；未认证模式仍强制 loopback。
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8001
+# 兼容的非 Docker 直启入口；未认证模式仍强制 loopback。
+.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
 ```
 
 REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
@@ -109,23 +106,27 @@ async def run() -> None:
 
 `AgentSDK.query()`/`resume()` 返回 `AsyncIterator[AgentEvent]`，`control()`/`result()`
 返回 `QueryResult`。SDK 不拥有进程信号；只有 `AgentSDK.from_settings()` 创建的 facade
-会在 `close()` 时释放自己的容器。FastAPI 只在 lifespan 关闭容器；Celery 则在
-`worker_process_init` 后创建每进程单例，并在 `worker_process_shutdown` 关闭，避免 fork
-前创建连接或在 task handler 中重组依赖。`scripts/start.sh` 的 uvicorn target 也已收敛到
-`ai_agent_platform.api.entrypoint:app`。
+会在 `close()` 时释放自己的容器。官方 App 镜像从
+`ai_agent_platform.api.entrypoint` 启动 FastAPI，并由 lifespan 关闭同一个 RuntimeContainer。
+Celery Worker 生命周期适配器仍保留为兼容实现，但当前 Compose 不启动它。
 
 ## 分层运行时配置
 
-`RUNTIME_PROFILE` 是进程级配置分类，先提供一致默认值，再由解析器校验后端没有混搭：
+官方 Compose 使用 `RUNTIME_PROFILE=custom`，并在服务环境中锁定下面这组单实例产品
+组合，避免用户 `.env` 意外切回另一套拓扑：
 
-| Profile | 结构化状态 | 向量 | 任务 | 用途 |
-| --- | --- | --- | --- | --- |
-| `local` | SQLite 核心状态；未补 SQLite adapter 的域暂用 memory | SQLite 记忆向量；文档 RAG 暂用 memory | `in_process` | 当前个人单机默认 |
-| `production` | PostgreSQL | Qdrant | Redis/Celery | 未来共享部署，仍需完成配置中的上线 TODO |
-| `custom` | 显式逐项选择 | 显式逐项选择 | Celery 仍强制共享存储 | 测试或单实例产品过渡配置 |
+| 边界 | 当前 MVP |
+| --- | --- |
+| 结构化事实、Checkpoint、模型注册表 | PostgreSQL |
+| 文档与项目记忆向量 | Qdrant |
+| Agent、压缩和记忆任务 | API 进程内有界队列 |
+| 身份 | 固定 `single_user` owner |
+| Workspace | `/workspaces` bind mount + `patch_only` |
+| Sandbox | App 容器内本地执行，仅限可信仓库 |
 
-命名 profile 的底层 Store 可显式重复，但不能改成另一套后端；确需混合时必须把 profile
-改为 `custom`。这一约束会在建立数据库连接或执行迁移前失败。
+`local` 与 `production` 命名 profile 及其 Adapter 暂时保留为兼容实现，不再是公开启动
+路径。Celery 的既有 fail-fast 校验仍要求全部事实使用共享 PostgreSQL/Qdrant；当前
+Compose 不选择 Celery，因此不需要 Redis 或独立 Worker。
 
 `ConfigResolver.resolve_process()` 只解析 `Settings` 默认值 → 用户 JSON → 环境变量/
 `.env` → 显式入口覆盖，不从服务进程 cwd 自动发现项目文件。默认用户路径是
@@ -294,10 +295,9 @@ Token 时才作为后备。
   拒绝、遗忘和索引修复；
 - 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区文件夹管理，可切换当前工作区、设置
   新会话默认值、重新关联失效路径和安全移除注册；统一输入框不重复展开代码上下文，
-  当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；本机 macOS
-  点击“添加文件夹”会打开 Finder 系统文件夹窗口，系统窗口不可用
-  时才回退网页目录浏览器；未配置该变量时默认从当前用户主目录选择，部署环境应显式
-  配置最小允许根目录；
+  当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；当前 Compose
+  禁用容器原生目录选择器，网页目录浏览器只展示挂载到 `/workspaces` 的内容，所有选中
+  路径仍经过允许根校验；macOS Finder 选择器仅作为非默认本机开发兼容实现保留；
 - Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
   要求，运行中也可就地暂停、取消或发送转向；终态消息内显示修改文件、逐文件增删行、
   可展开完整 Diff、ChangeSet 校验状态和安全回滚。`patch_only` 会明确标记“尚未写入
@@ -449,11 +449,12 @@ Provider 健康状态只在当前进程中维护。系统根据有界的近期�
 Provider 回退。已经发出首个文本 delta 后，失败会以 `partial_response=true` 返回，
 不会在其他模型上重放。
 
-重启安全的全局配置应使用 `MODEL_REGISTRY_STORE=postgres`，API Key 应使用
-`MODEL_SECRET_BACKEND=keyring`。模型连接保存/测试/发现和模型增删改只开放给本机能力：
-要么是 `AUTH_MODE=disabled` 的直连 loopback 请求，要么同时通过共享密钥身份验证和
-`X-Gateway-Mode: local` 证明的可信本地网关请求。普通 OIDC 身份不能执行这些管理操作。
-内存后端只应用于测试或明确的临时运行。
+当前 Compose 使用 `MODEL_REGISTRY_STORE=postgres` 持久化模型目录。Provider API Key 从
+本机 `.env` 注入，并通过已有 `env:OPENAI_API_KEY` 等引用读取；
+`MODEL_SECRET_BACKEND=memory` 只承接页面在当前 App 生命周期内写入的临时密钥。固定的
+`single_user` owner 可以执行模型连接保存、测试/发现和模型增删改，调用方提交的身份
+Header 不会改变 owner。若要让页面写入的密钥跨重启持久化，需要另外实现适合容器的
+Secret Store；当前 MVP 不把 OS keyring 或明文数据库当作该问题的答案。
 
 ## 动态模型准入与 Token 预算
 
@@ -650,15 +651,16 @@ HTTP Server 必须使用显式 host allowlist；HTTPS 是默认要求，重定�
 MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断。MCP 权限注解始终先
 进入中央 `PermissionResolver`，缺失或高风险提示按外部副作用保守处理，不能直接授权。
 
-本机管理模式可直接打开工作台的「MCP 连接」（`/#mcp`）注册、编辑、测试/刷新、启停
+启用 MCP 后可直接打开工作台的「MCP 连接」（`/#mcp`）注册、编辑、测试/刷新、启停
 或删除 Server。前端支持当前 stdio、当前 Streamable HTTP 以及两条显式兼容路径，展示
 独立连接状态、协议版本、重试错误和发现/注册工具数。启用界面写入至少要设置
 `MCP_CONFIG_PATH=/path/to/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
 同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
 否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
-写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。管理写接口使用与
-模型注册表、原生目录选择器相同的本机能力边界：接受关闭认证的直连 loopback，或接受
-共享密钥身份与 `X-Gateway-Mode: local` 均有效的可信本地网关；OIDC/远端请求仍拒绝。
+写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。当前
+`AUTH_MODE=single_user` 下管理写接口统一归属固定 `owner`，并依靠 Compose 只发布
+loopback 端口；关闭认证的直连 loopback 和带本机证明的可信网关是保留兼容模式，
+不是当前产品链路。
 
 管理 API 为 `GET /api/v1/mcp/servers`、
 `PUT /api/v1/mcp/servers/{name}`、
@@ -743,20 +745,14 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 `workspace_id` 只允许字母、数字、`_`、`-` 和 `.`。根路径必须是规范化绝对路径，
 解析符号链接后仍要位于 `WORKSPACE_ALLOWED_ROOTS` 内。同一个规范化根路径只能登记为
 一个工作区；使用另一个 ID 重复登记会返回 `409`。列表与详情响应还会返回 `status`、
-`role` 和 `can_update`，供客户端区分路径可用性和当前用户能力。本机未设置或留空
-`WORKSPACE_ALLOWED_ROOTS` 时，默认允许当前用户主目录，因此“添加文件夹”可直接浏览
-桌面、文稿和主目录下的其他项目；选择列表默认隐藏点目录。容器、多用户或远端部署
-应显式收紧此配置。
+`role` 和 `can_update`，供客户端区分路径可用性和当前用户能力。官方 Compose 固定
+`WORKSPACE_ALLOWED_ROOTS=/workspaces`，并把 `WORKSPACE_HOST_PATH` 映射到该目录；选择列表
+默认隐藏点目录和越界符号链接。
 
-`NATIVE_DIRECTORY_PICKER_MODE` 明确描述哪个 HTTP 边界可以在运行 Agent 的同一台机器上
-打开 macOS Finder：默认 `loopback` 只接受 `AUTH_MODE=disabled` 的直连 loopback 请求；
-`trusted_local_gateway` 同时要求通过 `X-Gateway-Auth` 共享密钥验证，并携带只有 local
-网关会在剥离调用方同名 Header 后重新签发的 `X-Gateway-Mode: local`。OIDC 和未认证网关
-都会移除该本机能力声明，因此即使拥有正常远端身份也不能打开服务器 Finder；该模式仍
-适配 Docker 网桥使上游看到 `192.168.*` 地址的情况。`disabled` 完全关闭原生窗口。请求不
-满足配置策略或系统选择能力不可用时，前端回退受控网页目录浏览器。取消窗口不会
-产生变更，
-任何选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验。
+容器无法代表浏览器用户打开宿主机 Finder，因此官方 Compose 固定
+`NATIVE_DIRECTORY_PICKER_MODE=disabled`。前端直接使用受控网页目录浏览器浏览
+`/workspaces`；任何选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验。旧的 loopback
+与 trusted-local-gateway 原生选择器实现仍留在代码中，但不属于当前产品入口。
 
 Workspace 根路径属于实际执行 Agent 的文件系统。若未来控制面部署在云端而代码仍在
 用户电脑上，需要本地 Agent/桌面 companion 负责目录授权和执行；云端服务自身的 Finder
@@ -778,9 +774,9 @@ curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 提前改变 Agent 上下文，登记成功后才显式激活；单个工作区 Token 用量加载失败也不会
 把登记结果误报为失败。Agent 模式没有可用工作区时会在请求发送前阻止提交。
 
-在 `AUTH_MODE=trusted_header` 下，目录浏览也要求可信网关身份；会话配置和用户默认值
-只能引用当前用户至少拥有 viewer 权限的工作区。viewer 可以启动只读分析，但批准包含
-写入或外部副作用工具的计划至少需要 editor 权限，且 Worker 执行前会再次授权。
+`single_user` 模式下所有会话和工作区操作都归属固定 owner；请求体、`X-User-ID` 与
+`X-Authenticated-User` 不能切换身份。底层 Workspace RBAC 和 Worker 二次授权实现仍
+保留，但多用户角色协作不是当前 MVP 的支持能力。
 
 工作区响应中的 `available` 表示已保存路径当前是否仍可读取。`DELETE` 是软移除：它只
 让工作区退出可选列表，不删除本地文件，也不级联删除历史会话、用量或项目记忆；再次
@@ -883,8 +879,8 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
 替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施单写者
 锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
 
-真实写入默认关闭。最小配置如下；`LIVE_WORKSPACE_WRITES_ENABLED=true` 只能与
-`AUTH_MODE=trusted_header` 一起使用：
+当前产品只支持 `patch_only`：Run 在隔离副本产生 ChangeSet，用户审阅后再应用。默认配置
+如下：
 
 ```dotenv
 CHANGE_SET_STORE=postgres
@@ -898,24 +894,9 @@ CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
 
-本机需要真实落盘时，使用 Compose 已限制到 `127.0.0.1:8000` 的 passwordless local
-gateway 身份模式，并为网关和 FastAPI 配置同一个随机信任密钥：
-
-```dotenv
-AUTH_MODE=trusted_header
-LIVE_WORKSPACE_WRITES_ENABLED=true
-AGENT_WORKSPACE_DEFAULT_MODE=direct
-AGENT_WORKSPACE_ALLOWED_MODES=patch_only,direct,worktree
-CHANGE_SET_APPLY_MODE=direct  # 可选：旧配置/历史 ChangeSet 兼容
-GATEWAY_AUTH_MODE=local
-GATEWAY_LOCAL_USER_ID=demo_user
-GATEWAY_TRUST_SECRET=<paste-64-hex-characters-from-openssl-rand-hex-32>
-```
-
-浏览器应从 `http://127.0.0.1:8000` 进入；`8080` 只是兼容别名。Compose 只承载网关和
-基础设施，宿主 FastAPI 从同一 `.env` 读取上述模式配置。前端只展示服务端允许且对当前
-身份/Workspace 可用的模式；`direct`/`worktree` 还要求 trusted-header 身份、
-editor/admin、真实写入开关和精确工具审批，`worktree` 额外要求 Git 干净。
+`direct`/`worktree`、trusted-header 身份和对应审计实现仍保留为兼容代码，但官方 Compose
+通过环境锁定 `LIVE_WORKSPACE_WRITES_ENABLED=false` 和 `patch_only`，不会向产品用户暴露
+这些模式。
 
 `direct`/`worktree` 的 ChangeSet 是已发生写入的审计记录，捕获时即为 `applied`，不会
 再次应用；对话会明确显示实际源码根或 worktree 路径/分支，并可调用
@@ -923,10 +904,11 @@ editor/admin、真实写入开关和精确工具审批，`worktree` 额外要求
 保留较新的用户内容，重复回滚幂等。`patch_only` 明确标记尚未写入且不能推广；旧版
 待应用 ChangeSet 仍保留原 apply 语义，不需要数据库迁移。
 
-`SANDBOX_MODE=local` 只适用于由本地用户拥有并信任的仓库。它在最小环境中执行
+`SANDBOX_MODE=local` 在 App 容器内部执行，只适用于用户拥有并信任的仓库。它在最小环境中执行
 `SANDBOX_ALLOWED_COMMANDS` 里的可执行文件基本名，使用固定最大超时、有界输出捕获和
 进程组终止。`sh -c`、`bash -c` 等 Shell 包装器会被拒绝。进入白名单的解释器仍能
-执行任意受信仓库代码，所以本地模式不是面向恶意代码的宿主隔离边界。
+执行任意受信仓库代码，所以 App 容器不是面向恶意代码的强隔离边界；当前 Compose 不挂载
+Docker Socket，也不声称支持不可信仓库。
 
 `SANDBOX_MODE` 只决定命令进程隔离，不决定文件目标。Docker 模式会把同一个 Run 执行根
 挂载为 `/workspace`，并禁用网络、使用只读容器根目录和调用方的非 root UID/GID，移除
@@ -1043,13 +1025,14 @@ GET       /api/v1/memory/conversations/search
 展示用户隔离的命中列表与原文详情。页面显式标出“L2 不存储”，并为加载、空结果和失败
 提供独立状态，避免把未确认候选误解为已注入记忆。
 
-默认配置保持该子系统关闭：
+当前 Docker MVP 默认启用项目记忆，并使用 PostgreSQL 保存事实、证据、任务与 Outbox，
+使用 Qdrant 保存可重建向量；跨项目用户记忆暂时关闭：
 
 ```dotenv
-PROJECT_MEMORY_ENABLED=false
-PROJECT_MEMORY_MODE=off
-PROJECT_MEMORY_STORE=memory
-PROJECT_MEMORY_VECTOR_STORE=memory
+PROJECT_MEMORY_ENABLED=true
+PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_STORE=postgres
+PROJECT_MEMORY_VECTOR_STORE=qdrant
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
 PROJECT_MEMORY_AUTO_THRESHOLD=0.85
 PROJECT_MEMORY_RECALL_LIMIT=20
@@ -1065,13 +1048,10 @@ USER_MEMORY_MODE=off
 USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
 
-默认 [`.env.example`](.env.example) 使用 local profile；
-[`.env.local-memory.example`](.env.local-memory.example) 保留为兼容的记忆聚焦示例。
-它把 Session、Agent Run、Workspace、L1、L3、证据、Outbox 和记忆向量写入默认
-`~/.ai-agent-platform/state.sqlite3`，启用 WAL、外键、`busy_timeout`、版本化迁移和受限
-权限。该 profile 只支持单个 API 进程与 `TASK_QUEUE_BACKEND=in_process`，不启动
-PostgreSQL、Qdrant 或 Redis，也不提供与它们之间的数据导入。当前未实现 SQLite adapter
-的 ChangeSet、文档、模型注册表、checkpoint 和文档 RAG 不具备跨进程重启持久化。
+默认 [`.env.example`](.env.example) 使用官方单实例 Compose 组合。
+[`.env.local-memory.example`](.env.local-memory.example) 与 SQLite Repository 仍保留为兼容
+和聚焦测试实现，不属于当前产品的数据路径，也不提供与 PostgreSQL/Qdrant 之间的数据
+导入。
 
 会话压缩单独配置：
 
@@ -1219,10 +1199,10 @@ RAG_RERANK_DEFAULT_ENABLED=false
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
 
-Celery 运行要求 API 和 Worker 使用共享存储、相同挂载及相同允许根目录：
+当前单实例产品不启动 Celery。官方组合是：
 
 ```dotenv
-TASK_QUEUE_BACKEND=celery
+TASK_QUEUE_BACKEND=in_process
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
@@ -1230,11 +1210,11 @@ DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
-PROJECT_MEMORY_ENABLED=false
-PROJECT_MEMORY_MODE=off
+PROJECT_MEMORY_ENABLED=true
+PROJECT_MEMORY_MODE=review
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
-WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
+WORKSPACE_ALLOWED_ROOTS=/workspaces
 ```
 
 持久化运行时各数据库职责如下：
@@ -1243,54 +1223,32 @@ WORKSPACE_ALLOWED_ROOTS=/srv/workspaces
 | --- | --- |
 | PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
 | Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
-| SQLite（本地 profile） | 单文件持久化 Session/摘要/Workspace/Run/L1/L3/画像与 Outbox；FTS5/LIKE 负责词法搜索，float32 BLOB 负责小数据集向量召回 |
-| Redis | Celery Broker 和结果后端；不是业务记录的事实来源 |
-| Chroma | 可选的嵌入式/单节点向量存储，用于替代 Qdrant |
+| SQLite | 保留的兼容/测试 Adapter；当前产品只可选用于尚未迁移的单实例用户记忆 |
+| Redis/Celery | 保留的多 Worker 扩展实现；当前 Compose 不启动 |
+| Chroma | 保留的可选嵌入式向量实现；当前 Compose 不选择 |
 
-`RAG_VECTOR_STORE` 在 Qdrant 和 Chroma 中二选一。二者实现同一向量存储边界，不会
-被同时写入。production 示例使用 Qdrant；local profile 的文档 RAG 暂用进程内实现。
+`RAG_VECTOR_STORE` 实现仍支持 Qdrant、Chroma 或 memory，但官方 Compose 锁定 Qdrant，
+不会双写另一套向量存储。
 
-启动 API 和 Celery Worker 前，先启动依赖；审阅 revision 后由操作者明确授权并应用迁移：
+产品启动时，一次性 `migrate` 服务复用现有 Alembic revision，成功后 App 才会启动：
 
 ```bash
-docker compose --profile production up -d postgres adminer qdrant redis
-.venv/bin/alembic upgrade head
-.venv/bin/celery -A ai_agent_platform.workers.celery_app:celery_app worker
+docker compose up -d --build
+docker compose ps
 ```
 
-Compose 中 Gateway、PostgreSQL、Qdrant、Redis 和 Adminer 的端口都绑定到
-`127.0.0.1`。PostgreSQL 凭据来自 `.env`；`scripts/start.sh` 会根据 `DATABASE_URL`
-推导 Compose 变量，直接运行 `docker compose` 则需要 `.env.production.example` 所示且相互匹配
-的 `POSTGRES_DB`、`POSTGRES_USER` 和 `POSTGRES_PASSWORD`。
+只有 App 发布 `127.0.0.1:${SELF_HOSTED_PORT}`；PostgreSQL 与 Qdrant 没有宿主机端口。
+数据库凭据来自用户本机 `.env`，并只注入私有 Compose 网络。Adminer、Gateway、Redis 和
+Celery 不在当前服务集合中。
 
-### 使用 Adminer 浏览 PostgreSQL
-
-Compose 栈包含仅绑定本机的 Adminer Web 界面。启动 `postgres` 和 `adminer` 后打开
-<http://localhost:8081>，填写：
-
-| 字段 | 值 |
-| --- | --- |
-| 系统 | PostgreSQL |
-| 服务器 | `postgres` |
-| 用户名 | 本地 `POSTGRES_USER` 的值 |
-| 密码 | 本地 `POSTGRES_PASSWORD` 的值 |
-| 数据库 | 本地 `POSTGRES_DB` 的值 |
-
-服务器名必须填写 `postgres` 而不是 `localhost`，因为 Adminer 通过 Compose 内部网络
-连接 PostgreSQL。此本机端口绑定只面向开发；未添加适当访问控制前不要公开 Adminer。
-
-Worker 会注册 Agent 启动/恢复、幂等会话压缩、记忆抽取和独立的项目记忆索引 Outbox
-消费任务。Agent 启动任务的业务载荷只有持久化 Run ID；Worker 从 Run store 恢复提交时
-已验证且配置字段已脱敏的上下文快照；项目文件、指令文件和环境不会在 Worker 中重读。
-额外目录只能通过 `additional_workspace_ids` 引用已登记且
-当前 actor 有权查看的 Workspace，不能提交任意路径；`cwd`、focus path 和符号链接的
-真实路径都必须留在主 Workspace 根内。运行开始时捕获的根目录无法访问时，任务会以结构化
-`workspace_unavailable` 消息失败。失败的记忆抽取任务保留尝试次数，Celery 可以重试
-同一个来源；已完成的 `source_type + source_id` 保持幂等。
+进程内队列注册 Agent 启动/恢复、会话压缩、记忆抽取和项目记忆索引 Outbox 消费任务，
+并复用与 Celery Adapter 相同的任务语义。运行开始前仍冻结 Workspace、配置和工具上下文；
+应用重启会中断当时正在执行或排队的任务，这是当前单实例 MVP 的明确边界。持久化 Run、
+事件和 Outbox 仍保留恢复与幂等证据，但当前版本不承诺自动恢复所有被重启打断的运行。
 
 ### 运行时装配与生命周期
 
-FastAPI `create_app()` 与 Celery Worker 进程单例都通过
+FastAPI `create_app()` 与保留的 Celery Worker 进程适配器都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
 checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；正式 CLI print、REPL
@@ -1307,10 +1265,11 @@ lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`�
 创建登记的逆序执行且每个资源最多关闭一次。测试仍可向 `create_app()` 注入 LLM、RAG、
 Agent runtime 和目录选择器，也可覆写 `ApplicationFactory` 的组件构造器。
 
-## 可选 Go 网关
+## 保留的扩展实现
 
-`gateway/` 服务提供请求准入、Request ID 传递、本机固定身份或 RS256 JWKS OIDC/JWT
-校验、健康与就绪探针、SSE 安全代理和优雅停机：
+`gateway/`、Celery/Redis 和 local SQLite profile 的代码及测试仍保留，用于说明后续
+多用户、多 Worker 或不同存储拓扑的演进边界；它们不在当前 Docker MVP 的 Compose
+服务集合中。Go gateway 仍可独立运行和验证：
 
 ```bash
 go run ./gateway/cmd/gateway
@@ -1318,33 +1277,23 @@ go test ./gateway/...
 go vet ./gateway/...
 ```
 
-生产环境应配置 `GATEWAY_AUTH_MODE=oidc`、Issuer、Audience、JWKS URL 和共享的
-`GATEWAY_TRUST_SECRET`；FastAPI 则配置 `AUTH_MODE=trusted_header` 和相同 Secret。
-网关会移除伪造身份和模式 Header、验证 Bearer Token、剥离 Token，再注入可信 Subject。
-本地只读开发可以让两侧认证模式都保持关闭。需要真实写入时，使用
-`GATEWAY_AUTH_MODE=local`；它会移除调用方身份、模式和 Authorization Header，再注入
-`GATEWAY_LOCAL_USER_ID`、共享密钥以及 `X-Gateway-Mode: local`，且标准 Compose 只把端口
-发布到 `127.0.0.1`。该本机证明统一保护 Finder、模型注册表管理和 MCP 注册表管理；
-OIDC 模式绝不签发这个本机能力声明。local 模式不得
-暴露到局域网或公网。若该本机网关还需要打开同机 Finder，应同时设置
-`NATIVE_DIRECTORY_PICKER_MODE=trusted_local_gateway`；OIDC/共享服务应保持 `disabled`。
-
-Compose 固定容器内监听 `:8080` 并通过 `host.docker.internal:${APP_PORT}` 访问宿主 FastAPI；
-`.env` 中公开的 body、并发、限流、超时和日志参数会透传给容器。8000 是标准 loopback
-入口，8080 仅保留兼容别名。
-
-这是会话和工作区记忆的可信身份边界，并不代表每一个旧版知识库接口都已具备完整的
-多租户授权。
+`AUTH_MODE=trusted_header`、OIDC/JWKS、local gateway 证明和多 Worker 可靠性测试仍可以作为
+面试中的已实现扩展能力说明，但不得描述为当前默认部署或真实生产规模经验。若未来恢复
+多用户/公网部署，必须重新设计认证、租户授权、密钥、备份、可观测性和不可信执行隔离，
+不能直接把 `single_user` Compose 暴露出去。
 
 ## 验证
 
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
+docker compose --env-file .env.example config --quiet
+bash -n scripts/start.sh scripts/start-local.sh
 node --check ai_agent_platform/static/app.js
-go test ./gateway/...
 git diff --check
 ```
+
+修改保留的 Go gateway 兼容实现后，再额外运行 `go test ./gateway/...`。
 
 运行离线 Agent 评估：
 

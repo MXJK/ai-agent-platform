@@ -1,50 +1,46 @@
-services:
-  # FastAPI runs on the host and reads AGENT_WORKSPACE_DEFAULT_MODE and
-  # AGENT_WORKSPACE_ALLOWED_MODES from .env. Compose owns the gateway trust
-  # boundary only; its safe default remains unauthenticated/loopback.
-  gateway:
-    profiles: ["gateway"]
-    build:
-      context: .
-      dockerfile: gateway/Dockerfile
-    environment:
-      GATEWAY_LISTEN_ADDRESS: ":8080"
-      GATEWAY_UPSTREAM_URL: "http://host.docker.internal:${APP_PORT:-8001}"
-      GATEWAY_MAX_BODY_BYTES: "${GATEWAY_MAX_BODY_BYTES:-2097152}"
-      GATEWAY_MAX_CONCURRENT_REQUESTS: "${GATEWAY_MAX_CONCURRENT_REQUESTS:-256}"
-      GATEWAY_REQUESTS_PER_SECOND: "${GATEWAY_REQUESTS_PER_SECOND:-0}"
-      GATEWAY_RATE_LIMIT_BURST: "${GATEWAY_RATE_LIMIT_BURST:-100}"
-      GATEWAY_READ_HEADER_TIMEOUT: "${GATEWAY_READ_HEADER_TIMEOUT:-5s}"
-      GATEWAY_IDLE_TIMEOUT: "${GATEWAY_IDLE_TIMEOUT:-2m}"
-      GATEWAY_UPSTREAM_DIAL_TIMEOUT: "${GATEWAY_UPSTREAM_DIAL_TIMEOUT:-5s}"
-      GATEWAY_UPSTREAM_HEADER_TIMEOUT: "${GATEWAY_UPSTREAM_HEADER_TIMEOUT:-30s}"
-      GATEWAY_READINESS_TIMEOUT: "${GATEWAY_READINESS_TIMEOUT:-2s}"
-      GATEWAY_SHUTDOWN_TIMEOUT: "${GATEWAY_SHUTDOWN_TIMEOUT:-10s}"
-      GATEWAY_LOG_LEVEL: "${GATEWAY_LOG_LEVEL:-info}"
-      GATEWAY_AUTH_MODE: "${GATEWAY_AUTH_MODE:-disabled}"
-      GATEWAY_LOCAL_USER_ID: "${GATEWAY_LOCAL_USER_ID:-demo_user}"
-      GATEWAY_OIDC_ISSUER: "${GATEWAY_OIDC_ISSUER:-}"
-      GATEWAY_OIDC_AUDIENCE: "${GATEWAY_OIDC_AUDIENCE:-}"
-      GATEWAY_OIDC_JWKS_URL: "${GATEWAY_OIDC_JWKS_URL:-}"
-      GATEWAY_OIDC_JWKS_CACHE_TTL: "${GATEWAY_OIDC_JWKS_CACHE_TTL:-5m}"
-      GATEWAY_TRUST_SECRET: "${GATEWAY_TRUST_SECRET:-}"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "127.0.0.1:8000:8080"
-      - "127.0.0.1:8080:8080"
-    restart: unless-stopped
+x-app-environment: &app-environment
+  RUNTIME_PROFILE: "custom"
+  APP_HOST: "0.0.0.0"
+  APP_PORT: "8000"
+  APP_RELOAD: "0"
+  DATABASE_URL: "postgresql://${POSTGRES_USER:-ai_agent}:${POSTGRES_PASSWORD:-local-only-change-me}@postgres:5432/${POSTGRES_DB:-ai_agent_platform}"
+  QDRANT_URL: "http://qdrant:6333"
+  SESSION_REPOSITORY: "postgres"
+  AGENT_RUN_STORE: "postgres"
+  CHANGE_SET_STORE: "postgres"
+  DOCUMENT_STORE: "postgres"
+  WORKSPACE_STORE: "postgres"
+  LANGGRAPH_CHECKPOINTER: "postgres"
+  MODEL_REGISTRY_STORE: "postgres"
+  MODEL_SECRET_BACKEND: "memory"
+  RAG_VECTOR_STORE: "qdrant"
+  PROJECT_MEMORY_STORE: "postgres"
+  PROJECT_MEMORY_VECTOR_STORE: "qdrant"
+  PROJECT_MEMORY_ENABLED: "true"
+  PROJECT_MEMORY_MODE: "review"
+  USER_MEMORY_ENABLED: "false"
+  USER_MEMORY_MODE: "off"
+  TASK_QUEUE_BACKEND: "in_process"
+  AUTH_MODE: "single_user"
+  SINGLE_USER_ID: "${SINGLE_USER_ID:-owner}"
+  NATIVE_DIRECTORY_PICKER_MODE: "disabled"
+  WORKSPACE_ALLOWED_ROOTS: "/workspaces"
+  LOCAL_STATE_PATH: "/var/lib/ai-agent-platform/state.sqlite3"
+  LIVE_WORKSPACE_WRITES_ENABLED: "false"
+  AGENT_WORKSPACE_DEFAULT_MODE: "patch_only"
+  AGENT_WORKSPACE_ALLOWED_MODES: "patch_only"
+  CHANGE_SET_APPLY_MODE: "patch_only"
+  CHANGE_SET_WORKTREE_PARENT: "/var/lib/ai-agent-platform/worktrees"
+  SANDBOX_MODE: "local"
+  SANDBOX_WORKSPACE_PARENT: "/var/lib/ai-agent-platform/sandboxes"
 
+services:
   postgres:
-    profiles: ["production"]
     image: postgres:16
-    container_name: ai-agent-platform-postgres
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-ai_agent_platform}"
       POSTGRES_USER: "${POSTGRES_USER:-ai_agent}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
-    ports:
-      - "127.0.0.1:5432:5432"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-local-only-change-me}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -55,57 +51,63 @@ services:
         ]
       interval: 5s
       timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
-  adminer:
-    profiles: ["production"]
-    image: adminer:5.5.0-standalone
-    container_name: ai-agent-platform-adminer
-    environment:
-      ADMINER_DEFAULT_SERVER: postgres
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:8081:8080"
+      retries: 20
     restart: unless-stopped
 
   qdrant:
-    profiles: ["production"]
     image: qdrant/qdrant:v1.16.1
-    container_name: ai-agent-platform-qdrant
-    ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
-  redis:
-    profiles: ["production"]
-    image: redis:7-alpine
-    container_name: ai-agent-platform-redis
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-      - --maxmemory-policy
-      - noeviction
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment: *app-environment
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${SELF_HOSTED_PORT:-8000}:8000"
     volumes:
-      - redis_data:/data
+      - "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces"
+      - app_state:/var/lib/ai-agent-platform
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2)",
+        ]
+      interval: 10s
       timeout: 3s
-      retries: 10
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 30s
     restart: unless-stopped
 
 volumes:
+  app_state:
   postgres_data:
   qdrant_data:
-  redis_data:

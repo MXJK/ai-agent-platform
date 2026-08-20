@@ -25,6 +25,8 @@ def request_user_id(
     *,
     claimed_user_id: str | None = None,
 ) -> str:
+    if settings.auth_mode == "single_user":
+        return settings.single_user_id.strip()
     if settings.auth_mode == "disabled":
         return (
             claimed_user_id
@@ -63,12 +65,16 @@ def require_local_capability(
     *,
     detail: str,
 ) -> str:
-    """Authorize a capability that may act only on the API host machine.
+    """Authorize a capability owned by the trusted self-hosted operator.
 
-    Unauthenticated development must arrive directly from loopback. Authenticated
-    deployments must first pass the shared-secret identity boundary and then carry
-    the local-mode assertion that the Go gateway strips and reissues itself.
+    Single-user self-hosting has one fixed owner and is published to host loopback by
+    the Compose contract. Unauthenticated development must arrive directly from
+    loopback. Trusted-header deployments must first pass the shared-secret identity
+    boundary and then carry the local-mode assertion that the Go gateway strips and
+    reissues itself.
     """
+    if settings.auth_mode == "single_user":
+        return request_user_id(request, settings)
     if settings.auth_mode == "disabled":
         if is_loopback_request(request):
             return request_user_id(request, settings)
@@ -81,7 +87,11 @@ def require_local_capability(
 
 
 def validate_bind_host(*, host: str, auth_mode: str) -> None:
-    """Fail closed when unauthenticated local mode would listen off-machine."""
+    """Fail closed when unauthenticated development would listen off-machine.
+
+    ``single_user`` may bind inside a container because its Compose port is fixed to
+    host loopback. It is not a public-network authentication mode.
+    """
     if auth_mode != "disabled":
         return
     normalized = host.strip().strip("[]").lower()
