@@ -195,6 +195,7 @@ class ModelRegistryService:
         *,
         provider: str,
         model: str,
+        max_output_tokens: int | None = None,
         enabled: bool = True,
         auto_eligible: bool = True,
     ) -> dict[str, Any]:
@@ -212,6 +213,11 @@ class ModelRegistryService:
             model=profile.model,
             display_name=profile.display_name,
             context_window_tokens=profile.context_window_tokens,
+            max_output_tokens=(
+                max_output_tokens
+                if max_output_tokens is not None
+                else profile.max_output_tokens
+            ),
             tool_calling=profile.tool_calling,
             structured_output=profile.structured_output,
             input_cost_per_million=profile.input_cost_per_million,
@@ -229,6 +235,10 @@ class ModelRegistryService:
         model_name = str(values["model"]).strip()
         if self._repository.get_model_by_key(provider, model_name) is not None:
             raise ModelRegistryConflictError(f"model already exists: {provider}:{model_name}")
+        values.setdefault(
+            "max_output_tokens",
+            build_registration_profile(provider, model_name).max_output_tokens,
+        )
         now = _now()
         model = _registered_model(
             model_id=_stable_model_id(provider, model_name),
@@ -253,6 +263,9 @@ class ModelRegistryService:
             "display_name": values.get("display_name", existing.display_name),
             "context_window_tokens": values.get(
                 "context_window_tokens", existing.context_window_tokens
+            ),
+            "max_output_tokens": values.get(
+                "max_output_tokens", existing.max_output_tokens
             ),
             "tool_calling": values.get("tool_calling", existing.tool_calling),
             "structured_output": values.get(
@@ -419,6 +432,7 @@ class ModelRegistryService:
                     provider=model.provider,
                     model=model.model,
                     context_window_tokens=model.context_window_tokens,
+                    max_output_tokens=model.max_output_tokens,
                     capabilities=ModelCapabilities(
                         tool_calling=model.tool_calling,
                         structured_output=model.structured_output,
@@ -548,6 +562,16 @@ class ModelRegistryService:
                     model=config.model,
                     display_name=config.model,
                     context_window_tokens=config.context_window_tokens,
+                    max_output_tokens=(
+                        config.max_output_tokens
+                        or min(
+                            config.context_window_tokens,
+                            build_registration_profile(
+                                config.provider,
+                                config.model,
+                            ).max_output_tokens,
+                        )
+                    ),
                     tool_calling=config.capabilities.tool_calling,
                     structured_output=config.capabilities.structured_output,
                     input_cost_per_million=config.input_cost_per_million,
@@ -648,6 +672,7 @@ class ModelRegistryService:
                 "structured_output": model.structured_output,
             },
             "context_window_tokens": model.context_window_tokens,
+            "max_output_tokens": model.max_output_tokens,
             "input_cost_per_million": model.input_cost_per_million,
             "output_cost_per_million": model.output_cost_per_million,
             "quality_score": model.quality_score,
@@ -704,6 +729,7 @@ class ModelRegistryService:
             "model": profile.model,
             "display_name": profile.display_name,
             "context_window_tokens": profile.context_window_tokens,
+            "max_output_tokens": profile.max_output_tokens,
             "capabilities": {
                 "tool_calling": profile.tool_calling,
                 "structured_output": profile.structured_output,
@@ -741,6 +767,7 @@ def _registered_model(
     model: str,
     display_name: str,
     context_window_tokens: int,
+    max_output_tokens: int,
     tool_calling: bool,
     structured_output: bool,
     input_cost_per_million: float,
@@ -760,6 +787,10 @@ def _registered_model(
         raise ValueError("model ID must not be blank")
     if int(context_window_tokens) <= 0:
         raise ValueError("context window must be positive")
+    if int(max_output_tokens) <= 0:
+        raise ValueError("maximum output tokens must be positive")
+    if int(max_output_tokens) > int(context_window_tokens):
+        raise ValueError("maximum output tokens must not exceed the context window")
     if float(input_cost_per_million) < 0 or float(output_cost_per_million) < 0:
         raise ValueError("model prices must not be negative")
     if not 0 <= float(quality_score) <= 1:
@@ -772,6 +803,7 @@ def _registered_model(
         model=model,
         display_name=str(display_name).strip() or model,
         context_window_tokens=int(context_window_tokens),
+        max_output_tokens=int(max_output_tokens),
         tool_calling=bool(tool_calling),
         structured_output=bool(structured_output),
         input_cost_per_million=float(input_cost_per_million),

@@ -354,8 +354,9 @@ one UI re-entry after upgrade and are never resolved from the environment.
 After a Provider is saved, Model Management calls that Provider's official
 model-list endpoint, filters the text-generation models available to the current
 API key, and marks models that are already registered. Registration now requires
-only a Provider/model selection plus enabled and automatic-routing preferences.
-The display name, context, capabilities, and cold-start routing profile come from
+only a Provider/model selection, a per-model maximum output-token capability,
+plus enabled and automatic-routing preferences. The display name, context,
+capabilities, and cold-start routing profile come from
 Provider metadata and backend priors. A manual model-ID fallback remains for
 catalog gaps, without exposing quality, price, or latency inputs.
 
@@ -431,6 +432,7 @@ formatted for readability; `.env` values must keep the JSON array on one line:
     "model": "your-quality-model",
     "capabilities": {"tool_calling": true, "structured_output": true},
     "context_window_tokens": 200000,
+    "max_output_tokens": 16384,
     "input_cost_per_million": 2.0,
     "output_cost_per_million": 8.0,
     "quality_score": 0.92,
@@ -442,6 +444,7 @@ formatted for readability; `.env` values must keep the JSON array on one line:
     "model": "your-low-latency-model",
     "capabilities": {"tool_calling": true, "structured_output": true},
     "context_window_tokens": 128000,
+    "max_output_tokens": 16384,
     "input_cost_per_million": 0.4,
     "output_cost_per_million": 1.6,
     "quality_score": 0.76,
@@ -493,6 +496,15 @@ count or generation request leaves the process.
 registry and preserve compatibility; they do not create a second admission
 policy. After the persistent registry exists, frontend enable/disable changes
 update the runtime catalog immediately without a restart.
+
+Each registry row stores the context window and a separate maximum output-token
+capability, editable in Model Management. Normal Chat requests
+`LLM_MAX_OUTPUT_TOKENS`; the coding Agent requests phase budgets of
+`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`, `AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384`,
+and `AGENT_FINAL_MAX_OUTPUT_TOKENS=4096`. The provider receives the minimum of
+the phase request, model capability, remaining context, and Usage Ledger
+authorization. The 16K mutation budget therefore never overrides a smaller
+registered model limit.
 
 Session and workspace budgets count every ledger record attributed to that
 scope:
@@ -595,7 +607,7 @@ evidence-free exhaustion is recorded as a warning and answered with uncertainty.
 
 ### Native tool-calling loop
 
-OpenAI, Anthropic, and Google adapters send `ToolSpec` definitions through each
+OpenAI, DeepSeek, Anthropic, and Google adapters send `ToolSpec` definitions through each
 provider's native Function/Tool Calling API. The Agent no longer asks production
 models to manufacture a JSON tool plan in prompt text. Provider-specific
 function calls are normalized to `LLMToolDecision`, including a stable tool-call
@@ -622,6 +634,21 @@ replayed as native function calls with their `thought_signature`; calls and
 results from other providers become explicit text observations, preserving
 evidence without fabricating a Gemini signature.
 
+The production planner accepts at most one tool call per turn. OpenAI also uses
+`parallel_tool_calls=false`; extra calls returned by another provider are not
+executed and receive a synthetic `single_tool_turn` result. Mutation prompts ask
+for one file and a small `sandbox.apply_patch` at a time instead of embedding
+multiple complete files in one JSON argument. Provider adapters still use their
+native structured-argument formats; this does not claim freeform OpenAI
+`apply_patch` custom-tool support for DeepSeek, Anthropic, or Google.
+
+Malformed tool-argument JSON is retryable. Output-limit finish reasons are
+classified as truncation, and `LLMClient` retries within `LLM_MAX_RETRIES` after
+adding a corrective one-tool/one-file/small-patch instruction and rerunning token
+preflight and authorization. Failed-attempt usage still reaches the unified
+ledger. Run errors retain only safe diagnostics—finish reason, argument length,
+and JSON parse position—not the source-bearing raw argument.
+
 Native models use one bounded observe/decide/act loop. Repository reads,
 Sandbox mutations, validation commands, status, and diffs are selected in model
 order inside the same tool transcript instead of isolated fixed phases:
@@ -643,8 +670,11 @@ tool-disabled text finalization, so exhaustion becomes `partial` or `blocked`
 instead of a false `completed`. Configure these with
 `AGENT_SOFT_TOOL_ROUNDS`, `AGENT_MAX_TOOL_ROUNDS`, `AGENT_SOFT_TOOL_CALLS`,
 `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ELAPSED_SECONDS`,
-`AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Older complete
-assistant/tool groups are compacted above `AGENT_NATIVE_CONTEXT_MAX_CHARS`, and
+`AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Model-output
+phase limits use `AGENT_PLAN_MAX_OUTPUT_TOKENS`,
+`AGENT_MUTATION_MAX_OUTPUT_TOKENS`, and `AGENT_FINAL_MAX_OUTPUT_TOKENS`.
+Older complete assistant/tool groups are compacted above
+`AGENT_NATIVE_CONTEXT_MAX_CHARS`, and
 `AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.
 
 Every successful or failed result is returned under its call ID. Completed
@@ -1328,6 +1358,14 @@ Revision `20260810_0020` adds the immutable `run_context_snapshot` JSONB column
 to `agent_runs`, persisting identity, session/summary/model, Workspace/Git,
 safe configuration, instructions, and authorized additional directories for
 Run-ID-only Worker recovery.
+
+Revision `20260813_0021` adds `messages.source_run_id` and a per-Run/role unique
+constraint for atomic Query starts and idempotent final-assistant recovery.
+
+Revision `20260820_0022` adds `registered_models.max_output_tokens`. Existing
+DeepSeek rows are backfilled to 8192, fake rows to 4096, and other rows to
+16384. The revision ships with this change but was not applied to the current
+database by this task.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

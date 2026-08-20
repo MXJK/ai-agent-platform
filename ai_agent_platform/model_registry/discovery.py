@@ -17,6 +17,7 @@ class DiscoveredModel:
     model: str
     display_name: str
     context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
     tool_calling: bool | None = None
     structured_output: bool | None = None
 
@@ -174,6 +175,7 @@ def _parse_anthropic_models(
                 display_name=str(raw.get("display_name") or "").strip()
                 or _humanize_model_id(model_id),
                 context_window_tokens=max_input_tokens,
+                max_output_tokens=_positive_int(raw.get("max_output_tokens")),
                 tool_calling=True,
                 structured_output=structured_supported,
             )
@@ -202,6 +204,7 @@ def _parse_google_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, .
                 display_name=str(raw.get("displayName") or "").strip()
                 or _humanize_model_id(model_id),
                 context_window_tokens=_positive_int(raw.get("inputTokenLimit")),
+                max_output_tokens=_positive_int(raw.get("outputTokenLimit")),
                 tool_calling=True,
                 structured_output=True,
             )

@@ -32,6 +32,7 @@ class RegisteredModel:
     model: str
     display_name: str
     context_window_tokens: int
+    max_output_tokens: int
     tool_calling: bool
     structured_output: bool
     input_cost_per_million: float

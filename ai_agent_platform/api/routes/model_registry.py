@@ -117,7 +117,9 @@ def create_model_registry_router(
     ) -> RegisteredModelResponse:
         _require_local_admin(http_request, settings)
         try:
-            value = model_registry.register_model(**request.model_dump())
+            value = model_registry.register_model(
+                **request.model_dump(exclude_none=True)
+            )
         except ModelRegistryNotFoundError as exc:
             raise HTTPException(status_code=404, detail="provider connection not found") from exc
         except ModelRegistryConflictError as exc:
@@ -137,7 +139,10 @@ def create_model_registry_router(
     ) -> RegisteredModelResponse:
         _require_local_admin(http_request, settings)
         try:
-            value = model_registry.update_model(model_id, **request.model_dump())
+            value = model_registry.update_model(
+                model_id,
+                **request.model_dump(exclude_none=True),
+            )
         except ModelRegistryNotFoundError as exc:
             raise HTTPException(status_code=404, detail="model or provider not found") from exc
         except ModelRegistryConflictError as exc:

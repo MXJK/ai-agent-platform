@@ -129,6 +129,9 @@ class CodingAgentRuntime:
         max_consecutive_failures: int = 3,
         native_context_max_chars: int = 48000,
         native_context_keep_messages: int = 10,
+        plan_max_output_tokens: int = 4096,
+        mutation_max_output_tokens: int = 16384,
+        final_max_output_tokens: int = 4096,
         graph_recursion_limit: int = 128,
         approval_policy: str = "on_request",
         max_history_messages: int = 12,
@@ -157,6 +160,9 @@ class CodingAgentRuntime:
         self._max_consecutive_failures = max_consecutive_failures
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
+        self._plan_max_output_tokens = plan_max_output_tokens
+        self._mutation_max_output_tokens = mutation_max_output_tokens
+        self._final_max_output_tokens = final_max_output_tokens
         self._graph_recursion_limit = graph_recursion_limit
         if approval_policy not in {"always", "on_request", "never"}:
             raise ValueError("unsupported approval_policy")

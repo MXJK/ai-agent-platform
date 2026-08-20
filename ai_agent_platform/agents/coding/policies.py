@@ -118,9 +118,16 @@ class BudgetPolicy:
 class CompletionPolicy:
     """Finalize native sessions and compose terminal graph answers."""
 
-    def __init__(self, *, planner: Any, visible_tool_specs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        planner: Any,
+        visible_tool_specs: Any,
+        final_max_output_tokens: int,
+    ) -> None:
         self._planner = planner
         self._visible_tool_specs = visible_tool_specs
+        self._final_max_output_tokens = final_max_output_tokens
 
     def finalize_native_session(
         self,
@@ -133,11 +140,13 @@ class CompletionPolicy:
             finalize = getattr(self._planner, "finalize_tool_session", None)
             if callable(finalize):
                 if "tool_specs" in inspect.signature(finalize).parameters:
-                    decision = finalize(
-                        native_messages,
-                        reason=reason,
-                        tool_specs=self._visible_tool_specs(state),
-                    )
+                    kwargs: dict[str, Any] = {
+                        "reason": reason,
+                        "tool_specs": self._visible_tool_specs(state),
+                    }
+                    if "max_output_tokens" in inspect.signature(finalize).parameters:
+                        kwargs["max_output_tokens"] = self._final_max_output_tokens
+                    decision = finalize(native_messages, **kwargs)
                 else:
                     decision = finalize(native_messages, reason=reason)
             else:
@@ -282,4 +291,5 @@ class AgentLoopPolicies:
         self.completion = CompletionPolicy(
             planner=runtime._planner,
             visible_tool_specs=runtime._visible_tool_specs,
+            final_max_output_tokens=runtime._final_max_output_tokens,
         )

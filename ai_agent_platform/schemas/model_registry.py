@@ -32,6 +32,7 @@ class ProviderConnectionResponse(BaseModel):
 class RegisteredModelCreateRequest(BaseModel):
     provider: ProviderName
     model: str = Field(min_length=1, max_length=128)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     enabled: bool = True
     auto_eligible: bool = True
 
@@ -39,6 +40,7 @@ class RegisteredModelCreateRequest(BaseModel):
 class RegisteredModelUpdateRequest(BaseModel):
     enabled: bool
     auto_eligible: bool
+    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 class DiscoveredModelResponse(BaseModel):
@@ -46,6 +48,7 @@ class DiscoveredModelResponse(BaseModel):
     model: str
     display_name: str
     context_window_tokens: int
+    max_output_tokens: int
     capabilities: dict[str, bool]
     quality_tier: str
     cost_tier: str
@@ -65,6 +68,7 @@ class RegisteredModelResponse(BaseModel):
     display_name: str
     capabilities: dict[str, bool]
     context_window_tokens: int
+    max_output_tokens: int
     input_cost_per_million: float
     output_cost_per_million: float
     quality_score: float

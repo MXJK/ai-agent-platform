@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "PERSISTENT-PROVIDER-SECRETS"
-next_action: "Review the verified diff, then rebuild the App and re-enter Provider API Keys through Model Management"
+active_task: "CODING-AGENT-OUTPUT-BUDGETS"
+next_action: "Review the diff, then explicitly authorize migration 20260820_0022 before restarting the PostgreSQL runtime"
 blockers: []
 last_verified_commit: "ccb4f15ac6f1a78a2b39e9720cc70c5c4006c965"
-updated_at: "2026-08-20T21:45:16+08:00"
+updated_at: "2026-08-20T22:49:37+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

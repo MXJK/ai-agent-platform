@@ -643,6 +643,9 @@
                 <label class="check-field"><input id="registered-model-enabled-input" type="checkbox" checked /> 启用</label>
                 <label class="check-field"><input id="registered-model-auto-input" type="checkbox" checked /> 允许自动选择</label>
               </div>
+              <label for="registered-model-output-limit-input">模型最大输出 token
+                <input id="registered-model-output-limit-input" type="number" min="1" max="1000000" step="1" value="16384" />
+              </label>
               <div class="surface-actions">
                 <p>冷启动使用后端先验；产生真实请求后，路由自动采用实测延迟。</p>
                 <button id="save-registered-model-btn" class="button primary" type="button">注册所选模型</button>

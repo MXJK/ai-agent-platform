@@ -136,12 +136,18 @@ class LLMProviderError(Exception):
         code: str = "llm_provider_error",
         finish_reason: str | None = None,
         route_trace: dict[str, Any] | None = None,
+        usage: LLMUsage | None = None,
+        tool_argument_chars: int | None = None,
+        json_error_position: int | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.code = code
         self.finish_reason = finish_reason
         self.route_trace = route_trace
+        self.usage = usage
+        self.tool_argument_chars = tool_argument_chars
+        self.json_error_position = json_error_position
 
 
 class LLMProviderAdapter(Protocol):
@@ -289,6 +295,7 @@ class LLMClient:
         structured_output: bool = False,
         min_context_tokens: int = 0,
         alias_tools: list[ToolSpec] | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMToolDecision:
         (
             provider,
@@ -303,6 +310,13 @@ class LLMClient:
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
+        requested_output_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self._settings.llm_max_output_tokens
+        )
+        if requested_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
         estimated_input_tokens = _estimate_tokens(_join_any_message_text(messages))
         complexity, complexity_reasons = _assess_task_complexity(
             _join_any_message_text(messages),
@@ -315,10 +329,10 @@ class LLMClient:
             structured_output=structured_output,
             min_context_tokens=max(
                 min_context_tokens,
-                estimated_input_tokens + self._settings.llm_max_output_tokens,
+                estimated_input_tokens + 1,
             ),
             estimated_input_tokens=estimated_input_tokens,
-            expected_output_tokens=self._settings.llm_max_output_tokens,
+            expected_output_tokens=requested_output_tokens,
             task_complexity=complexity,
             complexity_reasons=complexity_reasons,
         )
@@ -348,6 +362,7 @@ class LLMClient:
                     candidate=routed_candidate,
                     requirements=requirements,
                     trace=trace,
+                    requested_max_output_tokens=requested_output_tokens,
                 )
             except LLMProviderError as exc:
                 if exc.code == "token_budget_exceeded":
@@ -366,23 +381,25 @@ class LLMClient:
             trace = request_plan.route_trace or trace
             candidate = request_plan.candidate or routed_candidate
             candidate_error: LLMProviderError | None = None
+            attempt_messages = list(messages)
             for attempt in range(self._settings.llm_max_retries + 1):
                 attempt_started = time.perf_counter()
                 try:
                     if attempt > 0:
                         request_plan = self._prepare_tool_candidate(
-                            messages,
+                            attempt_messages,
                             tools,
                             aliases,
                             candidate=candidate,
                             requirements=requirements,
                             trace=trace,
+                            requested_max_output_tokens=requested_output_tokens,
                         )
                         trace = request_plan.route_trace or trace
                         candidate = request_plan.candidate or candidate
                     decision = self._decide_tools_once(
                         candidate,
-                        messages,
+                        attempt_messages,
                         tools,
                         aliases,
                         max_output_tokens=request_plan.max_output_tokens,
@@ -414,6 +431,7 @@ class LLMClient:
                         route_trace=trace.to_dict(),
                     )
                 except LLMProviderError as exc:
+                    self._record_failed_tool_usage(request_plan, exc, candidate)
                     self._observe_failure(
                         candidate,
                         started_at=attempt_started,
@@ -425,6 +443,11 @@ class LLMClient:
                         or attempt >= self._settings.llm_max_retries
                     ):
                         break
+                    attempt_messages = _tool_retry_messages(
+                        messages,
+                        exc,
+                        attempt=attempt + 2,
+                    )
                     time.sleep(min(0.2 * (2**attempt), 2.0))
             assert candidate_error is not None
             last_error = candidate_error
@@ -699,6 +722,7 @@ class LLMClient:
         *,
         reason: str,
         tools: list[ToolSpec] | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMToolDecision:
         """Produce one final, text-only turn over the complete tool transcript."""
         final_messages = list(messages) + [
@@ -715,6 +739,7 @@ class LLMClient:
             final_messages,
             [],
             alias_tools=tools or [],
+            max_output_tokens=max_output_tokens,
         )
         if decision.tool_calls:
             raise LLMProviderError(
@@ -957,7 +982,7 @@ class LLMClient:
                 for spec in tools
                 ],
                 "tool_choice": "auto",
-                "parallel_tool_calls": True,
+                "parallel_tool_calls": False,
             })
         body = self._post_json(
             "https://api.openai.com/v1/responses",
@@ -969,6 +994,17 @@ class LLMClient:
         )
         output = body.get("output", [])
         output = output if isinstance(output, list) else []
+        usage = _usage_from_mapping(body.get("usage"))
+        status = str(body.get("status") or "completed")
+        incomplete_details = body.get("incomplete_details")
+        incomplete_details = (
+            incomplete_details if isinstance(incomplete_details, dict) else {}
+        )
+        finish_reason = (
+            str(incomplete_details.get("reason") or "incomplete")
+            if status == "incomplete"
+            else status
+        )
         calls: list[ToolCall] = []
         text_parts: list[str] = []
         for item in output:
@@ -979,7 +1015,11 @@ class LLMClient:
                     ToolCall(
                         call_id=str(item.get("call_id") or f"tool_{uuid4().hex[:12]}"),
                         name=aliases.get(str(item.get("name") or ""), str(item.get("name") or "")),
-                        arguments=_json_arguments(item.get("arguments")),
+                        arguments=_json_arguments(
+                            item.get("arguments"),
+                            finish_reason=finish_reason,
+                            usage=usage,
+                        ),
                         source="openai_native",
                     )
                 )
@@ -990,13 +1030,14 @@ class LLMClient:
                         "refusal",
                     }:
                         text_parts.append(str(block.get("text") or block.get("refusal") or ""))
-        usage = _usage_from_mapping(body.get("usage"))
+        if not calls:
+            _raise_truncated_tool_turn(finish_reason, usage)
         return LLMToolDecision(
             text="".join(text_parts).strip(),
             tool_calls=calls,
             model=str(body.get("model") or model),
             provider="openai",
-            stop_reason="tool_use" if calls else str(body.get("status") or "completed"),
+            stop_reason="tool_use" if calls else finish_reason,
             usage=usage,
             provider_items=[dict(item) for item in output if isinstance(item, dict)],
         )
@@ -1034,7 +1075,10 @@ class LLMClient:
                 }
                 for spec in tools
                 ],
-                "tool_choice": {"type": "auto"},
+                "tool_choice": {
+                    "type": "auto",
+                    "disable_parallel_tool_use": True,
+                },
             })
         if system:
             payload["system"] = "\n\n".join(system)
@@ -1065,13 +1109,19 @@ class LLMClient:
                 )
             elif block.get("type") == "text":
                 text_parts.append(str(block.get("text") or ""))
+        usage = _usage_from_mapping(body.get("usage"))
+        finish_reason = str(
+            body.get("stop_reason") or ("tool_use" if calls else "end_turn")
+        )
+        if not calls:
+            _raise_truncated_tool_turn(finish_reason, usage)
         return LLMToolDecision(
             text="".join(text_parts).strip(),
             tool_calls=calls,
             model=str(body.get("model") or model),
             provider="anthropic",
-            stop_reason=str(body.get("stop_reason") or ("tool_use" if calls else "end_turn")),
-            usage=_usage_from_mapping(body.get("usage")),
+            stop_reason=finish_reason,
+            usage=usage,
             provider_items=[dict(block) for block in content if isinstance(block, dict)],
         )
 
@@ -1123,6 +1173,10 @@ class LLMClient:
         first = choices[0] if isinstance(choices, list) and choices else {}
         message = first.get("message") if isinstance(first, dict) else {}
         message = message if isinstance(message, dict) else {}
+        finish_reason = str(
+            first.get("finish_reason") or "stop"
+        )
+        usage = _chat_usage_from_mapping(body.get("usage"))
         calls: list[ToolCall] = []
         for item in message.get("tool_calls") or []:
             if not isinstance(item, dict):
@@ -1134,17 +1188,23 @@ class LLMClient:
                 ToolCall(
                     call_id=str(item.get("id") or f"tool_{uuid4().hex[:12]}"),
                     name=aliases.get(alias, alias),
-                    arguments=_json_arguments(function.get("arguments")),
+                    arguments=_json_arguments(
+                        function.get("arguments"),
+                        finish_reason=finish_reason,
+                        usage=usage,
+                    ),
                     source="deepseek_native",
                 )
             )
+        if not calls:
+            _raise_truncated_tool_turn(finish_reason, usage)
         return LLMToolDecision(
             text=str(message.get("content") or "").strip(),
             tool_calls=calls,
             model=str(body.get("model") or model),
             provider="deepseek",
-            stop_reason=str(first.get("finish_reason") or ("tool_calls" if calls else "stop")),
-            usage=_chat_usage_from_mapping(body.get("usage")),
+            stop_reason=finish_reason,
+            usage=usage,
             provider_items=[message] if message else [],
         )
 
@@ -1242,13 +1302,16 @@ class LLMClient:
             if callable(dump):
                 provider_items.append(dump(mode="json", by_alias=False))
         finish_reason = _google_candidate_finish_reason(candidate)
+        usage = _google_usage(getattr(response, "usage_metadata", None))
+        if not calls:
+            _raise_truncated_tool_turn(finish_reason, usage)
         return LLMToolDecision(
             text="".join(text_parts).strip(),
             tool_calls=calls,
             model=model,
             provider="google",
             stop_reason="tool_use" if calls else (finish_reason or "STOP"),
-            usage=_google_usage(getattr(response, "usage_metadata", None)),
+            usage=usage,
             provider_items=provider_items,
         )
 
@@ -1405,12 +1468,14 @@ class LLMClient:
         candidate: ModelConfig,
         requirements: RoutingRequirements,
         trace: ModelRouteTrace,
+        requested_max_output_tokens: int,
     ) -> LLMRequestPlan:
         return self._authorize_candidate(
             candidate=candidate,
             requirements=requirements,
             trace=trace,
             fallback_candidates=(),
+            requested_max_output_tokens=requested_max_output_tokens,
             count_tokens=lambda provider, model: self._count_tool_input_tokens(
                 messages,
                 tools,
@@ -1429,6 +1494,7 @@ class LLMClient:
         fallback_candidates: tuple[ModelConfig, ...],
         count_tokens: Callable[[str, str], tuple[int, str]],
         usage_context: Any = None,
+        requested_max_output_tokens: int | None = None,
     ) -> LLMRequestPlan:
         usage_context = usage_context or current_model_usage_context()
         self._require_model_available(candidate.provider, candidate.model)
@@ -1437,7 +1503,16 @@ class LLMClient:
             candidate.model,
         )
         actual_candidate = candidate
-        max_output_tokens = self._settings.llm_max_output_tokens
+        requested_output_tokens = (
+            requested_max_output_tokens
+            if requested_max_output_tokens is not None
+            else self._settings.llm_max_output_tokens
+        )
+        max_output_tokens = _effective_model_output_limit(
+            candidate,
+            input_tokens=input_tokens,
+            requested_output_tokens=requested_output_tokens,
+        )
         budget_decision = "allowed"
         budget_reason: str | None = None
         if self._usage_ledger is not None:
@@ -1470,12 +1545,31 @@ class LLMClient:
                     authorization.provider,
                     authorization.model,
                 )
+                target_candidate = next(
+                    (
+                        item
+                        for item in self._model_router.models
+                        if item.provider == authorization.provider
+                        and item.model == authorization.model
+                    ),
+                    None,
+                )
+                if target_candidate is None:
+                    raise LLMProviderError(
+                        "budget downgrade target is not a catalog model",
+                        code="budget_fallback_ineligible",
+                    )
+                target_max_output_tokens = _effective_model_output_limit(
+                    target_candidate,
+                    input_tokens=input_tokens,
+                    requested_output_tokens=requested_output_tokens,
+                )
                 try:
                     authorization = self._usage_ledger.authorize(
                         requested_provider=candidate.provider,
                         requested_model=candidate.model,
                         input_tokens=input_tokens,
-                        max_output_tokens=self._settings.llm_max_output_tokens,
+                        max_output_tokens=target_max_output_tokens,
                         input_count_method=count_method,
                         context=usage_context,
                     )
@@ -1935,6 +2029,23 @@ class LLMClient:
             budget_decision=plan.budget_decision,
             context=plan.usage_context,
         )
+
+    def _record_failed_tool_usage(
+        self,
+        plan: LLMRequestPlan,
+        error: LLMProviderError,
+        candidate: ModelConfig,
+    ) -> None:
+        usage = error.usage
+        if usage is None:
+            return
+        if usage.input_tokens <= 0 or candidate.provider == "fake":
+            usage = replace(usage, input_tokens=plan.input_tokens)
+            error.usage = usage
+        self._record_request_usage(plan, usage)
+        accumulator = _LLM_USAGE_ACCUMULATOR.get()
+        if accumulator is not None:
+            accumulator.add(usage)
 
     def _observe_success(
         self,
@@ -2580,24 +2691,116 @@ def _tool_aliases(tools: list[ToolSpec]) -> dict[str, str]:
     return aliases
 
 
-def _json_arguments(value: Any) -> dict[str, Any]:
+def _json_arguments(
+    value: Any,
+    *,
+    finish_reason: str | None = None,
+    usage: LLMUsage | None = None,
+) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     if not isinstance(value, str):
         return {}
+    argument_chars = len(value)
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
+        truncated = _is_output_limit_reason(finish_reason)
+        details = [f"chars={argument_chars}", f"json_error_position={exc.pos}"]
+        if finish_reason:
+            details.insert(0, f"finish_reason={finish_reason}")
         raise LLMProviderError(
-            "model returned malformed tool arguments",
-            code="invalid_tool_arguments",
+            "model returned "
+            + ("truncated" if truncated else "malformed")
+            + " tool arguments ("
+            + ", ".join(details)
+            + ")",
+            retryable=True,
+            code=(
+                "tool_arguments_truncated"
+                if truncated
+                else "invalid_tool_arguments"
+            ),
+            finish_reason=finish_reason,
+            usage=usage,
+            tool_argument_chars=argument_chars,
+            json_error_position=exc.pos,
         ) from exc
     if not isinstance(parsed, dict):
         raise LLMProviderError(
-            "model returned non-object tool arguments",
+            f"model returned non-object tool arguments (chars={argument_chars})",
+            retryable=True,
             code="invalid_tool_arguments",
+            finish_reason=finish_reason,
+            usage=usage,
+            tool_argument_chars=argument_chars,
         )
     return parsed
+
+
+def _is_output_limit_reason(finish_reason: str | None) -> bool:
+    return str(finish_reason or "").strip().lower() in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "incomplete",
+    }
+
+
+def _raise_truncated_tool_turn(
+    finish_reason: str | None,
+    usage: LLMUsage | None,
+) -> None:
+    if not _is_output_limit_reason(finish_reason):
+        return
+    raise LLMProviderError(
+        f"model tool turn reached its output limit (finish_reason={finish_reason})",
+        retryable=True,
+        code="tool_output_truncated",
+        finish_reason=finish_reason,
+        usage=usage,
+    )
+
+
+def _tool_retry_messages(
+    messages: list[dict[str, Any]],
+    error: LLMProviderError,
+    *,
+    attempt: int,
+) -> list[dict[str, Any]]:
+    diagnostic = (
+        f" Previous finish reason: {error.finish_reason}."
+        if error.finish_reason
+        else ""
+    )
+    return list(messages) + [
+        {
+            "role": "system",
+            "content": (
+                "The previous tool call could not be parsed or was truncated. "
+                "Retry with exactly one tool call. Keep its arguments substantially "
+                "smaller: change one file at a time, prefer a focused patch, and do "
+                "not embed multiple complete files in one argument."
+                f" Corrective attempt: {attempt}.{diagnostic}"
+            ),
+        }
+    ]
+
+
+def _effective_model_output_limit(
+    candidate: ModelConfig,
+    *,
+    input_tokens: int,
+    requested_output_tokens: int,
+) -> int:
+    context_remaining = candidate.context_window_tokens - input_tokens
+    if context_remaining <= 0:
+        raise LLMProviderError(
+            "model context window has no room for output tokens",
+            code="context_window_too_small",
+        )
+    model_limit = candidate.max_output_tokens or requested_output_tokens
+    return max(1, min(requested_output_tokens, model_limit, context_remaining))
 
 
 def _usage_from_mapping(value: Any) -> LLMUsage | None:

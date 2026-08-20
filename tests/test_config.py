@@ -28,6 +28,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_max_tool_rounds, 24)
         self.assertEqual(settings.agent_soft_tool_calls, 36)
         self.assertEqual(settings.agent_max_tool_calls, 72)
+        self.assertEqual(settings.agent_plan_max_output_tokens, 4096)
+        self.assertEqual(settings.agent_mutation_max_output_tokens, 16384)
+        self.assertEqual(settings.agent_final_max_output_tokens, 4096)
         self.assertEqual(settings.agent_approval_policy, "on_request")
         self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
@@ -134,6 +137,9 @@ class SettingsTests(unittest.TestCase):
                 "EMBEDDING_PROVIDER": "local",
                 "EMBEDDING_MODEL": "gemini-embedding-001",
                 "LLM_MAX_OUTPUT_TOKENS": "8192",
+                "AGENT_PLAN_MAX_OUTPUT_TOKENS": "3000",
+                "AGENT_MUTATION_MAX_OUTPUT_TOKENS": "12000",
+                "AGENT_FINAL_MAX_OUTPUT_TOKENS": "2500",
                 "LLM_THINKING_LEVEL": "medium",
                 "LLM_MODEL_CATALOG_JSON": (
                     '[{"provider":"fake","model":"fast-fake",'
@@ -239,6 +245,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.log_format, "text")
         self.assertEqual(settings.llm_max_output_tokens, 8192)
+        self.assertEqual(settings.agent_plan_max_output_tokens, 3000)
+        self.assertEqual(settings.agent_mutation_max_output_tokens, 12000)
+        self.assertEqual(settings.agent_final_max_output_tokens, 2500)
         self.assertEqual(settings.llm_thinking_level, "medium")
         self.assertIn("fast-fake", settings.llm_model_catalog_json or "")
         self.assertEqual(settings.llm_model_context_window_tokens, 96000)

@@ -26,6 +26,7 @@ class ModelConfig:
     provider: str
     model: str
     context_window_tokens: int
+    max_output_tokens: int | None = None
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
@@ -39,6 +40,8 @@ class ModelConfig:
             raise ValueError("model provider and model must not be empty")
         if self.context_window_tokens <= 0:
             raise ValueError("model context_window_tokens must be positive")
+        if self.max_output_tokens is not None and self.max_output_tokens <= 0:
+            raise ValueError("model max_output_tokens must be positive")
         if self.input_cost_per_million < 0 or self.output_cost_per_million < 0:
             raise ValueError("model prices must be greater than or equal to 0")
         if not 0.0 <= self.quality_score <= 1.0:
@@ -59,6 +62,11 @@ class ModelConfig:
             provider=str(value.get("provider", "")),
             model=str(value.get("model", "")),
             context_window_tokens=int(value.get("context_window_tokens", 0)),
+            max_output_tokens=(
+                int(value["max_output_tokens"])
+                if value.get("max_output_tokens") is not None
+                else None
+            ),
             capabilities=ModelCapabilities(
                 tool_calling=bool(raw_capabilities.get("tool_calling", False)),
                 structured_output=bool(
@@ -86,6 +94,7 @@ class ModelConfig:
                 "structured_output": self.capabilities.structured_output,
             },
             "context_window_tokens": self.context_window_tokens,
+            "max_output_tokens": self.max_output_tokens,
             "input_cost_per_million": self.input_cost_per_million,
             "output_cost_per_million": self.output_cost_per_million,
             "quality_score": self.quality_score,

@@ -31,6 +31,7 @@ from ai_agent_platform.model_registry import (
     ModelSelection,
     PostgresModelRegistryRepository,
     ProviderConnection,
+    RegisteredModel,
 )
 
 
@@ -54,6 +55,7 @@ def _registered_payload(provider: str = "openai") -> dict:
         "model": "test-model",
         "display_name": "Test Model",
         "context_window_tokens": 128_000,
+        "max_output_tokens": 16_384,
         "tool_calling": True,
         "structured_output": True,
         "input_cost_per_million": 0.25,
@@ -409,6 +411,7 @@ class ModelRegistryApiTests(unittest.TestCase):
                 model="gpt-5-mini",
                 display_name="GPT-5 Mini",
                 context_window_tokens=400_000,
+                max_output_tokens=128_000,
                 tool_calling=True,
                 structured_output=True,
             ),
@@ -443,16 +446,29 @@ class ModelRegistryApiTests(unittest.TestCase):
                     json={
                         "provider": "openai",
                         "model": "gpt-5-mini",
+                        "max_output_tokens": 32_768,
                         "enabled": True,
                         "auto_eligible": True,
+                    },
+                )
+                updated = client.put(
+                    f"/api/v1/model-registry/models/{created.json()['id']}",
+                    json={
+                        "enabled": True,
+                        "auto_eligible": True,
+                        "max_output_tokens": 24_576,
                     },
                 )
 
         self.assertEqual(catalog.status_code, 200)
         self.assertEqual(catalog.json()["models"][0]["model"], "gpt-5-mini")
+        self.assertEqual(catalog.json()["models"][0]["max_output_tokens"], 128_000)
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.json()["display_name"], "GPT-5 Mini")
         self.assertEqual(created.json()["context_window_tokens"], 400_000)
+        self.assertEqual(created.json()["max_output_tokens"], 32_768)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["max_output_tokens"], 24_576)
         discover.assert_called_once_with("openai", "sk-never-return-this")
 
     def test_frontend_registration_and_session_preference_are_persisted(self) -> None:
@@ -550,9 +566,11 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertIn('data-view-panel="models"', frontend)
         self.assertIn('id="discovered-model-select"', frontend)
         self.assertIn('id="manual-model-id-input"', frontend)
+        self.assertIn('id="registered-model-output-limit-input"', frontend)
         self.assertNotIn('id="registered-model-quality-input"', frontend)
         self.assertNotIn('id="registered-model-latency-input"', frontend)
         self.assertIn("available-models", frontend_js)
+        self.assertIn("save-output-limit", frontend_js)
         self.assertIn("if (milliseconds <= 1000)", frontend_js)
         self.assertIn("if (milliseconds <= 3000)", frontend_js)
         self.assertIn("manual-model-mode", frontend_js)
@@ -706,6 +724,60 @@ class ModelRegistryApiTests(unittest.TestCase):
 
 
 class PostgresModelRegistryTests(unittest.TestCase):
+    def test_model_output_limit_round_trips_through_postgres_mapping(self) -> None:
+        now = datetime.now(timezone.utc)
+        model = RegisteredModel(
+            id="mdl_openai",
+            provider="openai",
+            model="gpt-test",
+            display_name="GPT Test",
+            context_window_tokens=128_000,
+            max_output_tokens=32_768,
+            tool_calling=True,
+            structured_output=True,
+            input_cost_per_million=1.0,
+            output_cost_per_million=4.0,
+            quality_score=0.8,
+            configured_latency_ms=500,
+            enabled=True,
+            auto_eligible=True,
+            created_at=now,
+            updated_at=now,
+        )
+        row = (
+            model.id,
+            model.provider,
+            model.model,
+            model.display_name,
+            model.context_window_tokens,
+            model.max_output_tokens,
+            model.tool_calling,
+            model.structured_output,
+            model.input_cost_per_million,
+            model.output_cost_per_million,
+            model.quality_score,
+            model.configured_latency_ms,
+            model.enabled,
+            model.auto_eligible,
+            model.created_at,
+            model.updated_at,
+        )
+        connection = _FakeConnection([row])
+        with patch(
+            "ai_agent_platform.model_registry.repository._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresModelRegistryRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            restored = repository.upsert_model(model)
+
+        self.assertEqual(restored.max_output_tokens, 32_768)
+        insert_sql, insert_params = connection.calls[0]
+        self.assertIn("max_output_tokens", insert_sql)
+        self.assertEqual(insert_params[5], 32_768)
+
     def test_agent_run_selection_snapshot_round_trips_all_routing_fields(self) -> None:
         selected = ModelSelection(
             mode="manual",

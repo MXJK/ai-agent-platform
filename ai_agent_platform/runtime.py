@@ -966,6 +966,11 @@ class ApplicationFactory:
             native_context_keep_messages=(
                 settings.agent_native_context_keep_messages
             ),
+            plan_max_output_tokens=settings.agent_plan_max_output_tokens,
+            mutation_max_output_tokens=(
+                settings.agent_mutation_max_output_tokens
+            ),
+            final_max_output_tokens=settings.agent_final_max_output_tokens,
             graph_recursion_limit=settings.agent_graph_recursion_limit,
             approval_policy=settings.agent_approval_policy,
             max_history_messages=settings.llm_max_context_messages,

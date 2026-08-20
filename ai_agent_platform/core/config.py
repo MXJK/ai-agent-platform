@@ -235,6 +235,9 @@ class Settings:
     agent_max_consecutive_failures: int = 3
     agent_native_context_max_chars: int = 48000
     agent_native_context_keep_messages: int = 10
+    agent_plan_max_output_tokens: int = 4096
+    agent_mutation_max_output_tokens: int = 16384
+    agent_final_max_output_tokens: int = 4096
     agent_graph_recursion_limit: int = 128
     agent_approval_policy: str = "on_request"
     live_workspace_writes_enabled: bool = False
@@ -601,6 +604,18 @@ class Settings:
             (
                 "agent_native_context_keep_messages",
                 self.agent_native_context_keep_messages,
+            ),
+            (
+                "agent_plan_max_output_tokens",
+                self.agent_plan_max_output_tokens,
+            ),
+            (
+                "agent_mutation_max_output_tokens",
+                self.agent_mutation_max_output_tokens,
+            ),
+            (
+                "agent_final_max_output_tokens",
+                self.agent_final_max_output_tokens,
             ),
             ("agent_graph_recursion_limit", self.agent_graph_recursion_limit),
             ("change_set_max_files", self.change_set_max_files),
@@ -1230,6 +1245,21 @@ class Settings:
             agent_native_context_keep_messages=_int_env(
                 "AGENT_NATIVE_CONTEXT_KEEP_MESSAGES",
                 cls.agent_native_context_keep_messages,
+                dotenv,
+            ),
+            agent_plan_max_output_tokens=_int_env(
+                "AGENT_PLAN_MAX_OUTPUT_TOKENS",
+                cls.agent_plan_max_output_tokens,
+                dotenv,
+            ),
+            agent_mutation_max_output_tokens=_int_env(
+                "AGENT_MUTATION_MAX_OUTPUT_TOKENS",
+                cls.agent_mutation_max_output_tokens,
+                dotenv,
+            ),
+            agent_final_max_output_tokens=_int_env(
+                "AGENT_FINAL_MAX_OUTPUT_TOKENS",
+                cls.agent_final_max_output_tokens,
                 dotenv,
             ),
             agent_graph_recursion_limit=_int_env(

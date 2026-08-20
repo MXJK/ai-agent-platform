@@ -13,12 +13,23 @@ from ai_agent_platform.agents.coding_agent import (
     CodingAgentRuntime,
     create_coding_tool_registry,
 )
+from ai_agent_platform.agents.coding.tool_loop_nodes import _native_output_budget
+from ai_agent_platform.agents.coding.runtime_support import error_from_exception
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import (
     LLMClient,
+    LLMProviderError,
     LLMToolDecision,
     LLMUsage,
+    _effective_model_output_limit,
+    _json_arguments,
+    collect_llm_usage,
     _google_tool_contents,
+)
+from ai_agent_platform.integrations.model_router import (
+    ModelCapabilities,
+    ModelConfig,
+    ModelRouter,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
@@ -39,6 +50,187 @@ def _tool_spec(name: str = "repo.read_file") -> ToolSpec:
 
 
 class NativeProviderMappingTests(unittest.TestCase):
+    def test_effective_output_limit_uses_phase_model_and_context_minimum(self) -> None:
+        model = ModelConfig(
+            provider="deepseek",
+            model="deepseek-test",
+            context_window_tokens=10_000,
+            max_output_tokens=8_192,
+        )
+
+        self.assertEqual(
+            _effective_model_output_limit(
+                model,
+                input_tokens=1_000,
+                requested_output_tokens=16_384,
+            ),
+            8_192,
+        )
+        self.assertEqual(
+            _effective_model_output_limit(
+                model,
+                input_tokens=9_500,
+                requested_output_tokens=16_384,
+            ),
+            500,
+        )
+
+    def test_malformed_tool_arguments_expose_safe_retry_diagnostics(self) -> None:
+        value = '{"path":"index.html","content":"unterminated'
+
+        with self.assertRaises(LLMProviderError) as raised:
+            _json_arguments(
+                value,
+                finish_reason="length",
+                usage=LLMUsage(input_tokens=20, output_tokens=4096),
+            )
+
+        error = raised.exception
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.code, "tool_arguments_truncated")
+        self.assertEqual(error.finish_reason, "length")
+        self.assertEqual(error.tool_argument_chars, len(value))
+        self.assertIsInstance(error.json_error_position, int)
+        self.assertNotIn("unterminated", str(error))
+
+        error.llm_usage = SimpleNamespace(
+            input_tokens=44,
+            output_tokens=4108,
+            thoughts_tokens=0,
+        )
+        persisted = error_from_exception(
+            "runtime",
+            error,
+            attempt=1,
+            max_attempts=1,
+        )
+        self.assertEqual(persisted["code"], "tool_arguments_truncated")
+        self.assertEqual(persisted["request_usage"]["output_tokens"], 4096)
+        self.assertEqual(persisted["run_usage"]["output_tokens"], 4108)
+        self.assertEqual(persisted["tool_argument_chars"], len(value))
+        self.assertNotIn("unterminated", str(persisted))
+
+    def test_deepseek_retries_truncated_arguments_and_records_failed_usage(self) -> None:
+        class RecordingLedger:
+            def __init__(self) -> None:
+                self.authorizations: list[dict[str, object]] = []
+                self.records: list[dict[str, object]] = []
+
+            def authorize(self, **kwargs):
+                self.authorizations.append(dict(kwargs))
+                return SimpleNamespace(
+                    provider=kwargs["requested_provider"],
+                    model=kwargs["requested_model"],
+                    max_output_tokens=kwargs["max_output_tokens"],
+                    budget_decision="allowed",
+                    budget_reason=None,
+                )
+
+            def record(self, **kwargs):
+                self.records.append(dict(kwargs))
+
+        ledger = RecordingLedger()
+        router = ModelRouter(
+            [
+                ModelConfig(
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                    context_window_tokens=128_000,
+                    max_output_tokens=8_192,
+                    capabilities=ModelCapabilities(
+                        tool_calling=True,
+                        structured_output=True,
+                    ),
+                )
+            ]
+        )
+        client = LLMClient(
+            Settings(
+                llm_provider="deepseek",
+                llm_model="deepseek-v4-flash",
+                llm_max_retries=1,
+            ),
+            usage_ledger=ledger,
+            model_router=router,
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "deepseek" else None
+            ),
+        )
+        responses = [
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "truncated_1",
+                                    "function": {
+                                        "name": "sandbox_apply_patch",
+                                        "arguments": '{"patch":"*** Begin Patch',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 4096},
+            },
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "recovered_1",
+                                    "function": {
+                                        "name": "sandbox_apply_patch",
+                                        "arguments": '{"patch":"small patch"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 24, "completion_tokens": 12},
+            },
+        ]
+        payloads: list[dict[str, object]] = []
+
+        def fake_post(url, *, headers, payload):
+            del url, headers
+            payloads.append(payload)
+            return responses.pop(0)
+
+        with (
+            patch.object(client, "_post_json", side_effect=fake_post),
+            patch("ai_agent_platform.integrations.llm.time.sleep"),
+            collect_llm_usage() as usage,
+        ):
+            decision = client.decide_tools(
+                [{"role": "user", "content": "create the app"}],
+                [_tool_spec("sandbox.apply_patch")],
+                max_output_tokens=16_384,
+            )
+
+        self.assertEqual(decision.tool_calls[0].call_id, "recovered_1")
+        self.assertEqual(decision.tool_calls[0].arguments, {"patch": "small patch"})
+        self.assertEqual([item["max_tokens"] for item in payloads], [8_192, 8_192])
+        self.assertTrue(
+            any(
+                "exactly one tool call" in str(message.get("content") or "")
+                for message in payloads[1]["messages"]
+            )
+        )
+        self.assertEqual(len(ledger.records), 2)
+        self.assertEqual(usage.input_tokens, 44)
+        self.assertEqual(usage.output_tokens, 4108)
+
     def test_google_converts_foreign_tool_history_to_text_without_signatures(self) -> None:
         contents = _google_tool_contents(
             [
@@ -204,6 +396,7 @@ class NativeProviderMappingTests(unittest.TestCase):
             payloads[0]["tools"][0]["name"],
             "repo_read_file",
         )
+        self.assertFalse(payloads[0]["parallel_tool_calls"])
         result_item = next(
             item
             for item in payloads[1]["input"]
@@ -465,6 +658,50 @@ class ScriptedNativePlanner:
 
     def compose_answer(self, state: CodingAgentState) -> str:
         return "fallback"
+
+
+class SingleToolNativePlanner(ScriptedNativePlanner):
+    single_tool_per_turn = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_suppression = False
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="single_1",
+                        name="demo.lookup",
+                        arguments={"query": "first"},
+                    ),
+                    ToolCall(
+                        call_id="single_2",
+                        name="demo.lookup",
+                        arguments={"query": "second"},
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.observed_suppression = any(
+            message.get("role") == "tool"
+            and message.get("call_id") == "single_2"
+            and message.get("content", {}).get("error_code") == "single_tool_turn"
+            for message in messages
+        )
+        return LLMToolDecision(
+            text="Only one tool was executed in the turn.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
 
 
 class RecoveringArtifactNativePlanner(ScriptedNativePlanner):
@@ -773,6 +1010,63 @@ class RefusalThenMutationPlanner(ScriptedNativePlanner):
 
 
 class NativeToolLoopTests(unittest.TestCase):
+    def test_phase_output_budget_switches_after_change_plan(self) -> None:
+        self.assertEqual(
+            _native_output_budget(
+                {"intent": "change_planning", "tool_results": []},
+                plan_tokens=4096,
+                mutation_tokens=16384,
+            ),
+            4096,
+        )
+        self.assertEqual(
+            _native_output_budget(
+                {
+                    "intent": "change_planning",
+                    "tool_results": [
+                        {"name": "change_planner", "ok": True}
+                    ],
+                },
+                plan_tokens=4096,
+                mutation_tokens=16384,
+            ),
+            16384,
+        )
+
+    def test_single_tool_planner_suppresses_additional_calls_in_same_turn(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lambda query: {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            planner = SingleToolNativePlanner()
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+            ).run(
+                conversation_id="sess_single_tool_turn",
+                user_input="look up one value at a time",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        executed = [
+            item
+            for item in result.tool_results
+            if str(item.get("call_id", "")).startswith("single_")
+        ]
+        self.assertEqual([item["call_id"] for item in executed], ["single_1"])
+        self.assertTrue(planner.observed_suppression)
+
     def test_change_task_cannot_complete_before_successful_sandbox_mutation(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

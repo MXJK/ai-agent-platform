@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from typing import Any
 
 from langgraph.types import interrupt
@@ -47,6 +48,8 @@ class ToolLoopNodes:
         self._max_tool_calls = runtime._max_tool_calls
         self._native_context_max_chars = runtime._native_context_max_chars
         self._native_context_keep_messages = runtime._native_context_keep_messages
+        self._plan_max_output_tokens = runtime._plan_max_output_tokens
+        self._mutation_max_output_tokens = runtime._mutation_max_output_tokens
         self._control_policy = runtime._policies.control
         self._budget_policy = runtime._policies.budget
         self._completion_policy = runtime._policies.completion
@@ -209,7 +212,15 @@ class ToolLoopNodes:
             )
             warnings.append("native tool loop reached its soft execution budget")
 
-        decision = self._planner.decide_tool_calls(native_messages, tool_specs)
+        decide = self._planner.decide_tool_calls
+        decide_kwargs: dict[str, Any] = {}
+        if "max_output_tokens" in inspect.signature(decide).parameters:
+            decide_kwargs["max_output_tokens"] = _native_output_budget(
+                state,
+                plan_tokens=self._plan_max_output_tokens,
+                mutation_tokens=self._mutation_max_output_tokens,
+            )
+        decision = decide(native_messages, tool_specs, **decide_kwargs)
         native_round = state.get("native_tool_round", 0) + 1
         stop_reason = decision.stop_reason
         all_proposed_calls = list(decision.tool_calls)
@@ -217,8 +228,14 @@ class ToolLoopNodes:
             0,
             self._max_tool_calls - state.get("native_tool_call_count", 0),
         )
-        proposed_calls = all_proposed_calls[:remaining_calls]
-        dropped_calls = all_proposed_calls[remaining_calls:]
+        per_turn_limit = (
+            1
+            if bool(getattr(self._planner, "single_tool_per_turn", False))
+            else remaining_calls
+        )
+        accepted_count = min(remaining_calls, per_turn_limit)
+        proposed_calls = all_proposed_calls[:accepted_count]
+        dropped_calls = all_proposed_calls[accepted_count:]
         previous_signatures = set(state.get("native_tool_signatures", []))
         tool_calls: list[ToolCall] = []
         suppressed_calls: list[tuple[ToolCall, str]] = []
@@ -229,7 +246,12 @@ class ToolLoopNodes:
                 continue
             previous_signatures.add(signature)
             tool_calls.append(call)
-        suppressed_calls.extend((call, "hard_tool_call_budget") for call in dropped_calls)
+        dropped_reason = (
+            "single_tool_turn"
+            if remaining_calls > 0 and per_turn_limit == 1
+            else "hard_tool_call_budget"
+        )
+        suppressed_calls.extend((call, dropped_reason) for call in dropped_calls)
         if suppressed_calls:
             warnings.append(
                 f"native tool loop suppressed {len(suppressed_calls)} call(s)"
@@ -770,6 +792,22 @@ def _has_successful_native_mutation(state: CodingAgentState) -> bool:
         result.get("ok") and result.get("name") in SANDBOX_MUTATION_TOOLS
         for result in state.get("tool_results", [])
     )
+
+
+def _native_output_budget(
+    state: CodingAgentState,
+    *,
+    plan_tokens: int,
+    mutation_tokens: int,
+) -> int:
+    if state.get("intent") != "change_planning":
+        return plan_tokens
+    mutation_phase_started = any(
+        result.get("ok")
+        and result.get("name") in ({"change_planner"} | SANDBOX_MUTATION_TOOLS)
+        for result in state.get("tool_results", [])
+    )
+    return mutation_tokens if mutation_phase_started else plan_tokens
 
 
 def _native_messages_chars(messages: list[dict[str, Any]]) -> int:

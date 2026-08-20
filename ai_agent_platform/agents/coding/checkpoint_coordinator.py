@@ -34,7 +34,11 @@ class CheckpointResumeCoordinator:
         config: dict[str, Any],
     ) -> tuple[CodingAgentState, Any]:
         with collect_llm_usage() as usage:
-            state = self._graph.invoke(initial_state, config)
+            try:
+                state = self._graph.invoke(initial_state, config)
+            except Exception as exc:
+                setattr(exc, "llm_usage", usage)
+                raise
         return state, usage
 
     def resume(
@@ -47,18 +51,22 @@ class CheckpointResumeCoordinator:
     ) -> tuple[CodingAgentState, Any, dict[str, Any]]:
         config = self.config(record.thread_id)
         with collect_llm_usage() as usage:
-            state = self._graph.invoke(
-                Command(
-                    resume={
-                        "approved": approved,
-                        "feedback": feedback or "",
-                        "message": feedback or "",
-                        "action": "continue",
-                        "approved_by": approved_by or "",
-                    }
-                ),
-                config,
-            )
+            try:
+                state = self._graph.invoke(
+                    Command(
+                        resume={
+                            "approved": approved,
+                            "feedback": feedback or "",
+                            "message": feedback or "",
+                            "action": "continue",
+                            "approved_by": approved_by or "",
+                        }
+                    ),
+                    config,
+                )
+            except Exception as exc:
+                setattr(exc, "llm_usage", usage)
+                raise
         return state, usage, config
 
     def snapshot_for(self, config: dict[str, Any]):

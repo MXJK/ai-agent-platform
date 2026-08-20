@@ -240,15 +240,17 @@ class PostgresModelRegistryRepository:
                 """
                 INSERT INTO registered_models (
                     id, provider, model, display_name, context_window_tokens,
+                    max_output_tokens,
                     tool_calling, structured_output, input_cost_per_million,
                     output_cost_per_million, quality_score, configured_latency_ms,
                     enabled, auto_eligible, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     provider = EXCLUDED.provider,
                     model = EXCLUDED.model,
                     display_name = EXCLUDED.display_name,
                     context_window_tokens = EXCLUDED.context_window_tokens,
+                    max_output_tokens = EXCLUDED.max_output_tokens,
                     tool_calling = EXCLUDED.tool_calling,
                     structured_output = EXCLUDED.structured_output,
                     input_cost_per_million = EXCLUDED.input_cost_per_million,
@@ -259,6 +261,7 @@ class PostgresModelRegistryRepository:
                     auto_eligible = EXCLUDED.auto_eligible,
                     updated_at = EXCLUDED.updated_at
                 RETURNING id, provider, model, display_name, context_window_tokens,
+                    max_output_tokens,
                     tool_calling, structured_output, input_cost_per_million,
                     output_cost_per_million, quality_score, configured_latency_ms,
                     enabled, auto_eligible, created_at, updated_at
@@ -463,6 +466,7 @@ class PostgresModelRegistryRepository:
 
 
 _MODEL_SELECT = """SELECT id, provider, model, display_name, context_window_tokens,
+    max_output_tokens,
     tool_calling, structured_output, input_cost_per_million,
     output_cost_per_million, quality_score, configured_latency_ms,
     enabled, auto_eligible, created_at, updated_at FROM registered_models"""
@@ -483,18 +487,19 @@ def _model_from_row(row: tuple[Any, ...]) -> RegisteredModel:
     return RegisteredModel(
         id=str(row[0]), provider=str(row[1]), model=str(row[2]),
         display_name=str(row[3]), context_window_tokens=int(row[4]),
-        tool_calling=bool(row[5]), structured_output=bool(row[6]),
-        input_cost_per_million=float(row[7]), output_cost_per_million=float(row[8]),
-        quality_score=float(row[9]), configured_latency_ms=int(row[10]),
-        enabled=bool(row[11]), auto_eligible=bool(row[12]),
-        created_at=row[13], updated_at=row[14]
+        max_output_tokens=int(row[5]), tool_calling=bool(row[6]),
+        structured_output=bool(row[7]), input_cost_per_million=float(row[8]),
+        output_cost_per_million=float(row[9]), quality_score=float(row[10]),
+        configured_latency_ms=int(row[11]), enabled=bool(row[12]),
+        auto_eligible=bool(row[13]), created_at=row[14], updated_at=row[15]
     )
 
 
 def _model_values(model: RegisteredModel) -> tuple[object, ...]:
     return (
         model.id, model.provider, model.model, model.display_name,
-        model.context_window_tokens, model.tool_calling, model.structured_output,
+        model.context_window_tokens, model.max_output_tokens, model.tool_calling,
+        model.structured_output,
         model.input_cost_per_million, model.output_cost_per_million,
         model.quality_score, model.configured_latency_ms, model.enabled,
         model.auto_eligible, model.created_at, model.updated_at,

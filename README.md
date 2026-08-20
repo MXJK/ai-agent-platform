@@ -352,8 +352,8 @@ API 返回。升级后若连接仍是遗留 `env:*` 引用，页面会要求重�
 
 保存 Provider 后，模型管理页会调用该 Provider 的官方模型列表接口，过滤出当前
 API Key 可用的文本生成模型供用户选择，并标记已经注册的条目。注册只需要选择
-Provider/模型以及是否启用、是否参与自动路由；显示名称、上下文、能力和冷启动
-路由画像由 Provider 元数据与后端先验合成。发现接口暂时没有目标模型时仍可手动
+Provider/模型、模型最大输出 token 以及是否启用、是否参与自动路由；显示名称、上下文、
+能力和冷启动路由画像由 Provider 元数据与后端先验合成。发现接口暂时没有目标模型时仍可手动
 填写模型 ID，但不再要求用户填写质量、价格或延迟。
 
 统一输入框会暴露供 Chat、整次代码 Agent 运行（包括恢复执行）和 RAG Ask 使用的
@@ -419,6 +419,7 @@ Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独统
     "model": "your-quality-model",
     "capabilities": {"tool_calling": true, "structured_output": true},
     "context_window_tokens": 200000,
+    "max_output_tokens": 16384,
     "input_cost_per_million": 2.0,
     "output_cost_per_million": 8.0,
     "quality_score": 0.92,
@@ -430,6 +431,7 @@ Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独统
     "model": "your-low-latency-model",
     "capabilities": {"tool_calling": true, "structured_output": true},
     "context_window_tokens": 128000,
+    "max_output_tokens": 16384,
     "input_cost_per_million": 0.4,
     "output_cost_per_million": 1.6,
     "quality_score": 0.76,
@@ -474,6 +476,13 @@ OS keyring；多节点部署需要外部 KMS/Vault，而不是共享该单机文
 `LLM_PROVIDER`、`LLM_MODEL` 和 `LLM_MODEL_CATALOG_JSON` 只负责空注册中心的启动导入与
 兼容，不会形成第二份静态准入策略；持久化注册中心建立后，前端的启用/停用状态立即
 影响运行时目录，无需重启。
+
+模型注册记录分别保存上下文窗口和最大输出 token；后者可在模型管理页调整。普通 Chat
+默认请求 `LLM_MAX_OUTPUT_TOKENS`，代码 Agent 则按规划、变更、最终回答三个阶段分别请求
+`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384` 和
+`AGENT_FINAL_MAX_OUTPUT_TOKENS=4096`。真正发给 Provider 的额度取阶段请求、模型能力上限、
+上下文剩余空间和 Usage Ledger 授权结果的最小值。因此 16K 是变更阶段预算，不是要求每个
+模型都生成 16K，也不会越过注册的模型能力。
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
@@ -561,7 +570,7 @@ setup_workspace
 
 ### 原生工具调用循环
 
-OpenAI、Anthropic 和 Google 适配器会通过各 Provider 原生的 Function/Tool Calling
+OpenAI、DeepSeek、Anthropic 和 Google 适配器会通过各 Provider 原生的 Function/Tool Calling
 API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具计划。Provider
 特有的函数调用会被标准化为 `LLMToolDecision`，其中包含稳定的 tool-call ID；带点号
 的注册名会转换为 Provider 安全别名，并在执行前映射回原名。Fake Provider 保留
@@ -585,6 +594,19 @@ Google Developer API 的工具调用 Token 预检把 system instruction 与工�
 跨 Provider fallback 时，仅 Google 自己返回的原始 provider items 会作为带
 `thought_signature` 的原生 functionCall 历史重放；其他 Provider 的调用与结果转成
 明确文本观察，避免伪造 Gemini 签名或丢失已执行证据。
+
+生产规划器每轮最多接受一个工具调用；OpenAI 请求同时设置
+`parallel_tool_calls=false`，其他 Provider 即使返回多个调用也只执行第一个并为其余调用
+回灌 `single_tool_turn`。变更 Prompt 要求一次只修改一个文件并优先使用小
+`sandbox.apply_patch`，避免把多个完整文件塞进一个 JSON 参数。当前仍使用各 Provider 的
+结构化工具参数协议，没有假装 DeepSeek/Anthropic/Google 已支持 OpenAI 的 freeform
+`apply_patch` custom tool。
+
+如果函数参数 JSON 非法，错误会被标为可恢复；若 Provider 的 finish reason 是
+`length`/`max_tokens`/`MAX_TOKENS`/`max_output_tokens`，则进一步标记为截断。`LLMClient`
+在 `LLM_MAX_RETRIES` 范围内追加“单工具、单文件、小 patch”的纠错提示并重新预检、授权、
+调用。失败尝试的真实 usage 仍写统一账本；Run 错误只保存 finish reason、参数字符数和
+JSON 解析位置，不保存可能含源码的原始参数。
 
 ```text
 原生工具调用
@@ -610,7 +632,9 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 最终总结，因此返回 `partial`/`blocked`，不会把预算耗尽误报为 `completed`。相关配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
-`AGENT_MAX_CONSECUTIVE_FAILURES`。工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS` 时按完整
+`AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、
+`AGENT_MUTATION_MAX_OUTPUT_TOKENS` 和 `AGENT_FINAL_MAX_OUTPUT_TOKENS` 控制。工具会话超过
+`AGENT_NATIVE_CONTEXT_MAX_CHARS` 时按完整
 assistant/tool 组压缩旧观察，避免拆断 call/result 对。图的独立保险由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
@@ -1206,6 +1230,8 @@ RAG_RERANK_DEFAULT_ENABLED=false
   审阅并显式授权应用。
 - `20260813_0021`：为消息添加 `source_run_id` 与每 Run/role 唯一约束，使 Query start 的
   用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束；该迁移同样尚未执行。
+- `20260820_0022`：为每个已注册模型添加 `max_output_tokens` 能力上限；现有 DeepSeek
+  记录回填为 8192、fake 为 4096，其余为 16384。该迁移随代码交付但未在当前数据库执行。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。

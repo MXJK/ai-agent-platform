@@ -13,6 +13,7 @@ class ModelRegistrationProfile:
     model: str
     display_name: str
     context_window_tokens: int
+    max_output_tokens: int
     tool_calling: bool
     structured_output: bool
     input_cost_per_million: float
@@ -25,11 +26,11 @@ class ModelRegistrationProfile:
 
 
 _PROVIDER_PRIORS = {
-    "openai": (128_000, 1.25, 10.0, 0.80, 1_100),
-    "deepseek": (128_000, 0.30, 1.20, 0.76, 1_000),
-    "anthropic": (200_000, 3.0, 15.0, 0.82, 1_300),
-    "google": (1_000_000, 0.50, 3.0, 0.78, 900),
-    "fake": (128_000, 0.0, 0.0, 0.50, 10),
+    "openai": (128_000, 16_384, 1.25, 10.0, 0.80, 1_100),
+    "deepseek": (128_000, 8_192, 0.30, 1.20, 0.76, 1_000),
+    "anthropic": (200_000, 16_384, 3.0, 15.0, 0.82, 1_300),
+    "google": (1_000_000, 16_384, 0.50, 3.0, 0.78, 900),
+    "fake": (128_000, 4_096, 0.0, 0.0, 0.50, 10),
 }
 
 
@@ -38,9 +39,9 @@ def build_registration_profile(
     model: str,
     discovered: DiscoveredModel | None = None,
 ) -> ModelRegistrationProfile:
-    context, input_cost, output_cost, quality, latency = _PROVIDER_PRIORS.get(
+    context, max_output, input_cost, output_cost, quality, latency = _PROVIDER_PRIORS.get(
         provider,
-        (128_000, 1.0, 4.0, 0.70, 1_200),
+        (128_000, 8_192, 1.0, 4.0, 0.70, 1_200),
     )
     value = model.lower()
     quality_tier = "balanced"
@@ -72,6 +73,8 @@ def build_registration_profile(
 
     if discovered is not None and discovered.context_window_tokens:
         context = discovered.context_window_tokens
+    if discovered is not None and discovered.max_output_tokens:
+        max_output = discovered.max_output_tokens
 
     return ModelRegistrationProfile(
         provider=provider,
@@ -82,6 +85,7 @@ def build_registration_profile(
             else _humanize_model_id(model)
         ),
         context_window_tokens=context,
+        max_output_tokens=max_output,
         tool_calling=(
             discovered.tool_calling
             if discovered is not None and discovered.tool_calling is not None

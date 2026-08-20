@@ -149,15 +149,26 @@ class LLMStructuredAgentPlanner:
         enabled = getattr(self._llm_client, "native_tool_calling_enabled", True)
         return callable(decide) and bool(enabled)
 
+    @property
+    def single_tool_per_turn(self) -> bool:
+        return True
+
     def decide_tool_calls(
         self,
         messages: list[dict[str, Any]],
         tool_specs: list[ToolSpec],
+        *,
+        max_output_tokens: int | None = None,
     ) -> LLMToolDecision:
         decide = getattr(self._llm_client, "decide_tools", None)
         if not callable(decide):
             raise RuntimeError("LLM client does not support native tool calling")
-        return decide(messages, tool_specs)
+        kwargs = (
+            {"max_output_tokens": max_output_tokens}
+            if max_output_tokens is not None
+            else {}
+        )
+        return decide(messages, tool_specs, **kwargs)
 
     def finalize_tool_session(
         self,
@@ -165,11 +176,22 @@ class LLMStructuredAgentPlanner:
         *,
         reason: str,
         tool_specs: list[ToolSpec] | None = None,
+        max_output_tokens: int | None = None,
     ) -> LLMToolDecision:
         finalize = getattr(self._llm_client, "finalize_tools", None)
         if not callable(finalize):
             raise RuntimeError("LLM client does not support tool-session finalization")
-        return finalize(messages, reason=reason, tools=tool_specs or [])
+        kwargs = (
+            {"max_output_tokens": max_output_tokens}
+            if max_output_tokens is not None
+            else {}
+        )
+        return finalize(
+            messages,
+            reason=reason,
+            tools=tool_specs or [],
+            **kwargs,
+        )
 
     def plan_repair_tool_calls(
         self,
@@ -411,7 +433,10 @@ def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
         "After observing tool results, either call another useful tool or provide "
         "a grounded final answer. Cite source paths and line ranges. Do not repeat "
         "an identical tool call, and do not claim an action succeeded unless its "
-        "tool result reports success."
+        "tool result reports success. Emit at most one tool call per turn. For "
+        "repository changes, make one focused file change at a time and prefer a "
+        "small sandbox.apply_patch operation over embedding several complete files "
+        "in one sandbox.write_file call. Observe each result before continuing."
     )
     user_payload = {
         "task": state["user_input"],

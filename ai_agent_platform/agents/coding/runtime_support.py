@@ -166,19 +166,45 @@ def error_from_exception(
     attempt: int,
     max_attempts: int,
 ) -> dict[str, Any]:
-    return structured_error(
+    error = structured_error(
         node=node,
-        code=(
-            "workspace_unavailable"
-            if "workspace_unavailable" in str(exc)
-            else "runtime_error"
+        code=str(
+            getattr(exc, "code", None)
+            or (
+                "workspace_unavailable"
+                if "workspace_unavailable" in str(exc)
+                else "runtime_error"
+            )
         ),
         message=str(exc),
-        retryable=False,
+        retryable=bool(getattr(exc, "retryable", False)),
         attempt=attempt,
         max_attempts=max_attempts,
         recovered=False,
     )
+    for name in (
+        "finish_reason",
+        "tool_argument_chars",
+        "json_error_position",
+    ):
+        value = getattr(exc, name, None)
+        if value is not None:
+            error[name] = value
+    usage = getattr(exc, "usage", None)
+    if usage is not None:
+        error["request_usage"] = {
+            "input_tokens": int(getattr(usage, "input_tokens", 0)),
+            "output_tokens": int(getattr(usage, "output_tokens", 0)),
+            "thoughts_tokens": int(getattr(usage, "thoughts_tokens", 0)),
+        }
+    aggregate = getattr(exc, "llm_usage", None)
+    if aggregate is not None:
+        error["run_usage"] = {
+            "input_tokens": int(getattr(aggregate, "input_tokens", 0)),
+            "output_tokens": int(getattr(aggregate, "output_tokens", 0)),
+            "thoughts_tokens": int(getattr(aggregate, "thoughts_tokens", 0)),
+        }
+    return error
 
 
 def append_errors(

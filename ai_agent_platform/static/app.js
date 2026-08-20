@@ -2147,7 +2147,8 @@ function renderDiscoveredModels() {
     selected.capabilities?.tool_calling ? "工具调用" : null,
     selected.capabilities?.structured_output ? "结构化输出" : null,
   ].filter(Boolean).join("、") || "基础文本生成";
-  summary.innerHTML = `<strong>${escapeHtml(selected.display_name)}</strong><span>${Number(selected.context_window_tokens).toLocaleString()} ctx · ${escapeHtml(capabilities)} · ${escapeHtml(modelTierLabel(selected.quality_tier))} · ${escapeHtml(modelTierLabel(selected.cost_tier))}</span><small>Provider 元数据 + 后端路由画像；延迟将在真实请求后自动学习。</small>`;
+  $("registered-model-output-limit-input").value = String(selected.max_output_tokens || 16384);
+  summary.innerHTML = `<strong>${escapeHtml(selected.display_name)}</strong><span>${Number(selected.context_window_tokens).toLocaleString()} ctx · ${Number(selected.max_output_tokens).toLocaleString()} output · ${escapeHtml(capabilities)} · ${escapeHtml(modelTierLabel(selected.quality_tier))} · ${escapeHtml(modelTierLabel(selected.cost_tier))}</span><small>Provider 元数据 + 后端路由画像；延迟将在真实请求后自动学习。</small>`;
 }
 
 async function discoverProviderModels(
@@ -2175,6 +2176,9 @@ function resetRegisteredModelForm() {
   $("manual-model-id-input").value = "";
   $("registered-model-enabled-input").checked = true;
   $("registered-model-auto-input").checked = true;
+  $("registered-model-output-limit-input").value = (
+    $("registered-model-provider-input").value === "deepseek" ? "8192" : "16384"
+  );
 }
 
 async function saveRegisteredModel() {
@@ -2186,9 +2190,19 @@ async function saveRegisteredModel() {
     showToast("请先发现并选择模型，或填写模型 ID", "warning");
     return;
   }
+  const maxOutputTokens = Number($("registered-model-output-limit-input").value);
+  if (
+    !Number.isInteger(maxOutputTokens)
+    || maxOutputTokens < 1
+    || (!manualModel && discovered && maxOutputTokens > discovered.context_window_tokens)
+  ) {
+    showToast("最大输出 token 必须是正整数，且不能超过上下文窗口", "warning");
+    return;
+  }
   const payload = {
     provider,
     model,
+    max_output_tokens: maxOutputTokens,
     enabled: $("registered-model-enabled-input").checked,
     auto_eligible: $("registered-model-auto-input").checked,
   };
@@ -2221,10 +2235,11 @@ async function updateRegisteredModel(modelId, changes) {
       body: JSON.stringify({
         enabled: changes.enabled ?? model.enabled,
         auto_eligible: changes.auto_eligible ?? model.auto_eligible,
+        max_output_tokens: changes.max_output_tokens ?? model.max_output_tokens,
       }),
     });
     await loadModelRegistry();
-    showToast("模型状态已更新");
+    showToast("模型配置已更新");
   } catch (error) {
     showToast(humanizeError(error), "error");
   }
@@ -2262,8 +2277,9 @@ function renderRegisteredModels() {
           <div><strong>${escapeHtml(model.display_name)}</strong><small>${escapeHtml(model.provider)} · ${escapeHtml(model.model)}</small></div>
           <span class="status-pill ${modelStatusClass(model.status)}"><span class="status-dot"></span>${escapeHtml(modelStatusLabel(model.status))}</span>
         </div>
-        <div class="model-stat-row"><span>${escapeHtml(latency)}</span><span>成功 ${telemetry.success_rate == null ? "—" : `${Math.round(telemetry.success_rate * 100)}%`}</span><span>${model.context_window_tokens.toLocaleString()} ctx</span></div>
+        <div class="model-stat-row"><span>${escapeHtml(latency)}</span><span>成功 ${telemetry.success_rate == null ? "—" : `${Math.round(telemetry.success_rate * 100)}%`}</span><span>${model.context_window_tokens.toLocaleString()} ctx</span><span>${model.max_output_tokens.toLocaleString()} output</span></div>
         <p>${escapeHtml(modelTierLabel(routing.quality_tier))} · ${escapeHtml(modelTierLabel(routing.cost_tier))} · ${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
+        <div class="model-output-control"><label>最大输出 token<input type="number" min="1" max="1000000" step="1" value="${model.max_output_tokens}" data-model-output-limit /></label><button class="button ghost" type="button" data-model-action="save-output-limit">保存上限</button></div>
         <div class="button-row"><button class="button ghost" type="button" data-model-action="toggle-enabled">${model.enabled ? "停用" : "启用"}</button><button class="button ghost" type="button" data-model-action="toggle-auto">${model.auto_eligible ? "仅手动" : "加入自动"}</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
       </article>`;
   }).join("");
@@ -6950,6 +6966,15 @@ function bindEvents() {
     if (action === "toggle-auto") {
       const model = registeredModel(card.dataset.modelId);
       if (model) updateRegisteredModel(model.id, { auto_eligible: !model.auto_eligible });
+    }
+    if (action === "save-output-limit") {
+      const model = registeredModel(card.dataset.modelId);
+      const maxOutputTokens = Number(card.querySelector("[data-model-output-limit]")?.value);
+      if (!model || !Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > model.context_window_tokens) {
+        showToast("最大输出 token 必须是正整数，且不能超过上下文窗口", "warning");
+        return;
+      }
+      updateRegisteredModel(model.id, { max_output_tokens: maxOutputTokens });
     }
     if (action === "delete") deleteRegisteredModel(card.dataset.modelId);
   });
