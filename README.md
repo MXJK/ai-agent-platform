@@ -17,7 +17,7 @@ Docker Compose 运行 App、PostgreSQL 和 Qdrant，并以进程内队列保持�
 - [分层运行时配置](#分层运行时配置)
 - [Skill 发现与 slash command](#skill-发现与-slash-command)
 - [主要能力](#主要能力)
-- [Gemini 流式输出](#gemini-流式输出)
+- [Gemini 协议支持](#gemini-协议支持)
 - [模型路由](#模型路由)
 - [模型白名单与 Token 预算](#模型白名单与-token-预算)
 - [代码 Agent 流程](#代码-agent-流程)
@@ -369,21 +369,12 @@ Provider/模型、模型最大输出 token 以及是否启用、是否参与自�
 独立的服务策略。连接测试只由用户触发；正常状态和延迟来自真实请求的被动观测，
 不会通过周期性付费探测获得。
 
-## Gemini 流式输出
+## Gemini 协议支持
 
-如需使用 Gemini，可在 `.env` 选择启动模型，但 API Key 必须在模型管理页录入：
-
-```dotenv
-LLM_PROVIDER=google
-LLM_MODEL=gemini-3.5-flash
-LLM_MAX_OUTPUT_TOKENS=4096
-LLM_THINKING_LEVEL=low
-LLM_TIMEOUT_SECONDS=30
-SSE_HEARTBEAT_SECONDS=10
-```
-
-启动后进入“模型管理”，保存 Google API Key、发现并注册目标模型。Provider API Key
-不会从 `.env` 或进程环境读取。
+如需使用 Gemini，必须在“模型管理”中保存 Google API Key、发现并注册目标模型；
+`.env` 不选择或导入 Google/Gemini 模型。Provider API Key 不会从 `.env` 或进程环境
+读取。`LLM_MAX_OUTPUT_TOKENS`、`LLM_THINKING_LEVEL`、`LLM_TIMEOUT_SECONDS` 和
+`SSE_HEARTBEAT_SECONDS` 只控制通用运行策略，不承担 Provider/Model 注册。
 
 Gemini 3 请求的 `thinking_level` 支持 `minimal`、`low`、`medium` 或 `high`；API 请求
 和既有会话配置仍可覆盖服务端默认值，但个人工作区管理界面不提供这个选项。当
@@ -406,44 +397,13 @@ Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独统
 → 调用 Provider；首个 delta 前失败时可尝试下一个跨 Provider 候选
 ```
 
-持久化注册中心是运行时模型表，更新后无需重启即可影响路由器。
-`LLM_MODEL_CATALOG_JSON` 仍作为启动和兼容数据源：当数据库中没有持久化记录时，
-应用会导入其中的条目，或根据 `LLM_PROVIDER`、`LLM_MODEL` 和
-`LLM_MODEL_CONTEXT_WINDOW_TOKENS` 推导一条保守记录。下面为了可读性进行了换行，
-实际 `.env` 中的 JSON 数组必须保持单行：
-
-```json
-[
-  {
-    "provider": "google",
-    "model": "your-quality-model",
-    "capabilities": {"tool_calling": true, "structured_output": true},
-    "context_window_tokens": 200000,
-    "max_output_tokens": 16384,
-    "input_cost_per_million": 2.0,
-    "output_cost_per_million": 8.0,
-    "quality_score": 0.92,
-    "latency_ms": 900,
-    "enabled": true
-  },
-  {
-    "provider": "openai",
-    "model": "your-low-latency-model",
-    "capabilities": {"tool_calling": true, "structured_output": true},
-    "context_window_tokens": 128000,
-    "max_output_tokens": 16384,
-    "input_cost_per_million": 0.4,
-    "output_cost_per_million": 1.6,
-    "quality_score": 0.76,
-    "latency_ms": 220,
-    "enabled": true
-  }
-]
-```
+持久化注册中心是运行时模型表，更新后无需重启即可影响路由器。PostgreSQL 产品运行时
+不会从 `LLM_PROVIDER`、`LLM_MODEL` 或 `LLM_MODEL_CATALOG_JSON` 导入候选；空注册中心
+保持为空，直到本机 owner 从前端注册 Provider 和模型。静态/default catalog 只保留给
+显式的 `memory` 测试或临时开发运行时。
 
 通过前端发现并注册的模型由后端生成质量/成本等级和数值路由先验；它们不是在线
-质量评测或 Provider 官方实时报价。`LLM_MODEL_CATALOG_JSON` 兼容入口仍允许显式
-提供这些底层数值。延迟只在冷启动时使用后端先验，一旦存在成功请求样本，运行时
+质量评测或 Provider 官方实时报价。延迟只在冷启动时使用后端先验，一旦存在成功请求样本，运行时
 目录和 `latency`/`smart` 排序就自动使用被动观测的总延迟 P50。`quality` 最大化
 后端质量画像，`cost` 最小化估算输入/输出成本；确定性的平局规则保证测试可复现。
 
@@ -473,9 +433,9 @@ OS keyring；多节点部署需要外部 KMS/Vault，而不是共享该单机文
 无需在 `.env` 维护 Provider/Model 白名单。未注册、已停用的模型或已停用的 Provider
 连接仍会在计数和生成请求发出前被拒绝。
 
-`LLM_PROVIDER`、`LLM_MODEL` 和 `LLM_MODEL_CATALOG_JSON` 只负责空注册中心的启动导入与
-兼容，不会形成第二份静态准入策略；持久化注册中心建立后，前端的启用/停用状态立即
-影响运行时目录，无需重启。
+PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
+`LLM_MODEL_CATALOG_JSON` 形成启动候选，也不会维护第二份静态准入策略；前端的
+注册、启用和停用状态立即影响运行时目录，无需重启。
 
 模型注册记录分别保存上下文窗口和最大输出 token；后者可在模型管理页调整。普通 Chat
 默认请求 `LLM_MAX_OUTPUT_TOKENS`，代码 Agent 则按规划、变更、最终回答三个阶段分别请求

@@ -376,23 +376,14 @@ compression, and memory extraction retain their independent service policy.
 Connection tests are user-triggered; normal status and latency come from passive
 observations of real requests rather than periodic paid probes.
 
-## Gemini streaming
+## Gemini protocol support
 
-The startup model may be selected in `.env`, but its API key must be entered through
-Model Management:
-
-```dotenv
-LLM_PROVIDER=google
-LLM_MODEL=gemini-3.5-flash
-LLM_MAX_OUTPUT_TOKENS=4096
-LLM_THINKING_LEVEL=low
-LLM_TIMEOUT_SECONDS=30
-SSE_HEARTBEAT_SECONDS=10
-```
-
-After startup, save the Google API key in Model Management, discover models, and
-register the target model. Provider API keys are not read from `.env` or process
-environment variables.
+To use Gemini, save the Google API key, discover models, and register the target
+model in Model Management. `.env` neither selects nor imports Google/Gemini models,
+and Provider API keys are not read from `.env` or process environment variables.
+`LLM_MAX_OUTPUT_TOKENS`, `LLM_THINKING_LEVEL`, `LLM_TIMEOUT_SECONDS`, and
+`SSE_HEARTBEAT_SECONDS` configure shared runtime policy rather than Provider/model
+registration.
 
 Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
 `thinking_level`. API requests and existing session configuration can still
@@ -418,46 +409,16 @@ session auto policy or manually preferred model
 → provider call; pre-delta failure may try the next cross-provider candidate
 ```
 
-The persistent registry is the runtime model table and updates the router
-without a restart. `LLM_MODEL_CATALOG_JSON` remains a bootstrap/compatibility
-source: without persisted rows the application imports its entries, or derives
-one conservative entry from `LLM_PROVIDER`, `LLM_MODEL`, and
-`LLM_MODEL_CONTEXT_WINDOW_TOKENS`. This abbreviated bootstrap example is
-formatted for readability; `.env` values must keep the JSON array on one line:
-
-```json
-[
-  {
-    "provider": "google",
-    "model": "your-quality-model",
-    "capabilities": {"tool_calling": true, "structured_output": true},
-    "context_window_tokens": 200000,
-    "max_output_tokens": 16384,
-    "input_cost_per_million": 2.0,
-    "output_cost_per_million": 8.0,
-    "quality_score": 0.92,
-    "latency_ms": 900,
-    "enabled": true
-  },
-  {
-    "provider": "openai",
-    "model": "your-low-latency-model",
-    "capabilities": {"tool_calling": true, "structured_output": true},
-    "context_window_tokens": 128000,
-    "max_output_tokens": 16384,
-    "input_cost_per_million": 0.4,
-    "output_cost_per_million": 1.6,
-    "quality_score": 0.76,
-    "latency_ms": 220,
-    "enabled": true
-  }
-]
-```
+The persistent registry is the runtime model table and updates the router without a
+restart. The PostgreSQL product runtime does not import candidates from
+`LLM_PROVIDER`, `LLM_MODEL`, or `LLM_MODEL_CATALOG_JSON`; an empty registry stays
+empty until the local owner registers a Provider and model in the frontend.
+Static/default catalogs remain only for explicit `memory` test or ephemeral local
+runtimes.
 
 Models registered through discovery receive backend-owned numeric routing priors
 and quality/cost tiers; these are not online quality evaluations or live official
-Provider prices. The `LLM_MODEL_CATALOG_JSON` compatibility path can still supply
-explicit low-level values. Latency uses the backend cold-start prior only until a
+Provider prices. Latency uses the backend cold-start prior only until a
 successful request is observed; the runtime catalog and `latency`/`smart` ranking
 then switch automatically to passive total-latency P50. `quality` maximizes the
 backend profile and `cost` minimizes estimated input/output cost. Deterministic
@@ -492,10 +453,10 @@ automatic routing without a static environment allowlist. Unregistered or
 disabled models and disabled provider connections are still rejected before a
 count or generation request leaves the process.
 
-`LLM_PROVIDER`, `LLM_MODEL`, and `LLM_MODEL_CATALOG_JSON` only bootstrap an empty
-registry and preserve compatibility; they do not create a second admission
-policy. After the persistent registry exists, frontend enable/disable changes
-update the runtime catalog immediately without a restart.
+The PostgreSQL product runtime does not read `LLM_PROVIDER`, `LLM_MODEL`, or
+`LLM_MODEL_CATALOG_JSON` to form startup candidates and does not maintain a second
+static admission policy. Frontend registration and enable/disable changes update
+the runtime catalog immediately without a restart.
 
 Each registry row stores the context window and a separate maximum output-token
 capability, editable in Model Management. Normal Chat requests

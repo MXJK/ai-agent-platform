@@ -6,6 +6,10 @@ from unittest.mock import patch
 
 from ai_agent_platform.core import Settings
 from ai_agent_platform.main import create_app
+from ai_agent_platform.model_registry import (
+    InMemoryModelRegistryRepository,
+    InMemorySecretStore,
+)
 from ai_agent_platform.runtime import (
     ApplicationFactory,
     RuntimeContainer,
@@ -114,6 +118,49 @@ class RuntimeBootstrapTests(unittest.TestCase):
             workspace_store="postgres",
             langgraph_checkpointer="postgres",
             rag_vector_store="qdrant",
+        )
+
+    def test_postgres_model_registry_does_not_bootstrap_static_models(self) -> None:
+        factory = ApplicationFactory()
+        settings = self.settings(
+            model_registry_store="postgres",
+            llm_provider="google",
+            llm_model="configured-but-not-registered",
+        )
+        llm_client = factory.create_llm_client(settings)
+
+        with patch(
+            "ai_agent_platform.runtime.PostgresModelRegistryRepository",
+            return_value=InMemoryModelRegistryRepository(),
+        ):
+            registry = factory.create_model_registry(
+                settings,
+                llm_client,
+                secret_store=InMemorySecretStore(),
+            )
+
+        self.assertEqual(registry.list_connections(), [])
+        self.assertEqual(registry.list_models(), [])
+        self.assertEqual(llm_client.model_router.models, ())
+
+    def test_memory_model_registry_keeps_ephemeral_bootstrap_model(self) -> None:
+        factory = ApplicationFactory()
+        settings = self.settings(
+            model_registry_store="memory",
+            llm_provider="fake",
+            llm_model="ephemeral-test-model",
+        )
+        llm_client = factory.create_llm_client(settings)
+
+        registry = factory.create_model_registry(
+            settings,
+            llm_client,
+            secret_store=InMemorySecretStore(),
+        )
+
+        self.assertEqual(
+            [(item["provider"], item["model"]) for item in registry.list_models()],
+            [("fake", "ephemeral-test-model")],
         )
 
     def test_api_and_worker_use_the_same_application_factory_graph(self) -> None:

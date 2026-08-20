@@ -733,10 +733,18 @@ class ApplicationFactory:
             )
         secret_store = secret_store or self.create_secret_store(settings)
         runtime_router = getattr(llm_client, "model_router", None)
+        # PostgreSQL is the product registry: an empty catalog must stay empty
+        # until the local owner registers providers and models through Model
+        # Management. Static/default catalogs remain useful only for the
+        # explicitly ephemeral memory runtime used by tests and local smoke runs.
         initial_models = (
-            runtime_router.models
-            if runtime_router is not None
-            else LLMClient(settings).model_router.models
+            (
+                runtime_router.models
+                if runtime_router is not None
+                else LLMClient(settings).model_router.models
+            )
+            if settings.model_registry_store == "memory"
+            else ()
         )
         registry = ModelRegistryService(
             repository,
