@@ -16,6 +16,7 @@ from ai_agent_platform.project_memory.models import (
     MemoryIndexEvent,
     MemorySettings,
     ProjectMemory,
+    ROLE_RANK,
     WorkspaceMember,
 )
 from ai_agent_platform.repositories.postgres import (
@@ -45,7 +46,11 @@ class InMemoryProjectMemoryRepository:
             key = (workspace_id, user_id)
             existing = self._members.get(key)
             if existing is not None:
-                return existing
+                if ROLE_RANK[existing.role] >= ROLE_RANK[role]:
+                    return existing
+                promoted = replace(existing, role=role, updated_at=_now())
+                self._members[key] = promoted
+                return promoted
             now = _now()
             member = WorkspaceMember(
                 workspace_id=workspace_id,
@@ -385,7 +390,32 @@ class PostgresProjectMemoryRepository:
                 )
                 VALUES (%s, %s, %s, NOW(), NOW())
                 ON CONFLICT (workspace_id, user_id) DO UPDATE SET
-                    updated_at = workspace_members.updated_at
+                    role = CASE
+                        WHEN CASE workspace_members.role
+                            WHEN 'admin' THEN 3
+                            WHEN 'editor' THEN 2
+                            ELSE 1
+                        END < CASE EXCLUDED.role
+                            WHEN 'admin' THEN 3
+                            WHEN 'editor' THEN 2
+                            ELSE 1
+                        END
+                        THEN EXCLUDED.role
+                        ELSE workspace_members.role
+                    END,
+                    updated_at = CASE
+                        WHEN CASE workspace_members.role
+                            WHEN 'admin' THEN 3
+                            WHEN 'editor' THEN 2
+                            ELSE 1
+                        END < CASE EXCLUDED.role
+                            WHEN 'admin' THEN 3
+                            WHEN 'editor' THEN 2
+                            ELSE 1
+                        END
+                        THEN NOW()
+                        ELSE workspace_members.updated_at
+                    END
                 RETURNING workspace_id, user_id, role, created_at, updated_at
                 """,
                 (workspace_id, user_id, role),

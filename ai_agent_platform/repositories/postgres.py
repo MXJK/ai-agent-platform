@@ -1620,6 +1620,17 @@ class PostgresWorkspaceRepository:
             ).fetchall()
         return [_workspace_from_row(row) for row in rows]
 
+    def list_including_removed(self) -> list[WorkspaceRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, root_path, created_at, updated_at, revision, removed_at
+                FROM workspaces
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        return [_workspace_from_row(row) for row in rows]
+
     def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         with self._connect() as conn:
             row = conn.execute(

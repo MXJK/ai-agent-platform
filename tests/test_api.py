@@ -15,6 +15,8 @@ from ai_agent_platform.integrations.llm import (
     _google_usage,
 )
 from ai_agent_platform.main import create_app
+from ai_agent_platform.repositories import InMemoryWorkspaceRepository
+from ai_agent_platform.runtime import ApplicationFactory
 from ai_agent_platform.schemas.chat import ChatStreamRequest
 from ai_agent_platform.usage_ledger import current_model_usage_context
 
@@ -74,6 +76,122 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(fetched.status_code, 200)
             self.assertEqual(fetched.json()["id"], created.json()["id"])
             self.assertEqual(fetched.json()["user_id"], "owner")
+
+    def test_single_user_recovers_legacy_workspace_ownership(self) -> None:
+        class LegacyWorkspaceFactory(ApplicationFactory):
+            def __init__(self, store, workspace_ids):
+                self.store = store
+                self.workspace_ids = workspace_ids
+
+            def create_workspace_store(self, settings):
+                return self.store
+
+            def create_project_memory_service(self, settings, **kwargs):
+                service = super().create_project_memory_service(settings, **kwargs)
+                for workspace_id in self.workspace_ids:
+                    service.ensure_workspace_admin(
+                        workspace_id=workspace_id,
+                        actor_user_id="legacy-user",
+                    )
+                return service
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            active_root = root / "active"
+            restored_root = root / "restored"
+            active_root.mkdir()
+            restored_root.mkdir()
+            store = InMemoryWorkspaceRepository()
+            store.upsert(
+                workspace_id="active",
+                root_path=str(root / "legacy-active-mount"),
+            )
+            store.upsert(
+                workspace_id="removed",
+                root_path=str(root / "legacy-removed-mount"),
+            )
+            store.remove("removed")
+            factory = LegacyWorkspaceFactory(store, ("active", "removed"))
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(str(root.resolve()),),
+                background_task_workers=2,
+                auth_mode="single_user",
+                single_user_id="owner",
+                native_directory_picker_mode="disabled",
+            )
+            app = create_app(settings=settings, application_factory=factory)
+
+            with TestClient(app) as client:
+                listed = client.get("/api/v1/workspaces")
+                updated = client.put(
+                    "/api/v1/workspaces/active",
+                    json={"root_path": str(active_root)},
+                )
+                restored = client.put(
+                    "/api/v1/workspaces/removed",
+                    json={"root_path": str(restored_root)},
+                )
+                memory_service = app.state.project_memory_service
+
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(
+                    [item["id"] for item in listed.json()["workspaces"]],
+                    ["active"],
+                )
+                self.assertEqual(listed.json()["workspaces"][0]["role"], "admin")
+                self.assertEqual(updated.status_code, 200)
+                self.assertEqual(
+                    updated.json()["root_path"],
+                    str(active_root.resolve()),
+                )
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(
+                    restored.json()["root_path"],
+                    str(restored_root.resolve()),
+                )
+                for workspace_id in ("active", "removed"):
+                    self.assertEqual(
+                        memory_service.role_for(
+                            workspace_id=workspace_id,
+                            actor_user_id="owner",
+                        ),
+                        "admin",
+                    )
+                    self.assertEqual(
+                        memory_service.role_for(
+                            workspace_id=workspace_id,
+                            actor_user_id="legacy-user",
+                        ),
+                        "admin",
+                    )
+
+            disabled_store = InMemoryWorkspaceRepository()
+            disabled_store.upsert(
+                workspace_id="active",
+                root_path=str(active_root),
+            )
+            disabled_factory = LegacyWorkspaceFactory(disabled_store, ("active",))
+            disabled_app = create_app(
+                settings=Settings(
+                    llm_provider="fake",
+                    embedding_provider="local",
+                    workspace_allowed_roots=(str(root.resolve()),),
+                    background_task_workers=2,
+                    auth_mode="disabled",
+                ),
+                application_factory=disabled_factory,
+            )
+            try:
+                self.assertIsNone(
+                    disabled_app.state.project_memory_service.role_for(
+                        workspace_id="active",
+                        actor_user_id="owner",
+                    )
+                )
+            finally:
+                disabled_app.state.runtime.close()
 
     def test_chat_rolls_old_turns_into_summary_visible_from_api(self) -> None:
         with TemporaryDirectory() as temp_dir:

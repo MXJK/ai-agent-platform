@@ -562,6 +562,13 @@ class SQLiteWorkspaceRepository:
             ).fetchall()
         return [_workspace_from_row(row) for row in rows]
 
+    def list_including_removed(self) -> list[WorkspaceRecord]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workspaces ORDER BY id"
+            ).fetchall()
+        return [_workspace_from_row(row) for row in rows]
+
     def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         with self.database.transaction(immediate=True) as conn:
             row = conn.execute(

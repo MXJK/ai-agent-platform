@@ -59,6 +59,10 @@ LLM，接入真实 Provider 前只需替换 `.env` 中的模型选择和对应 A
 App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App 容器内执行，当前产品只
 支持用户自己信任的仓库，Workspace 写入默认保持 `patch_only`。
 
+持久化安装从旧本地/可信网关身份切换到 `single_user` 时，启动过程会为固定 owner 补齐
+所有既有工作区（包括软移除记录）的管理员关系，同时保留旧成员和项目数据。旧记录若
+保存的是宿主机绝对路径，仍需在页面中重新关联到容器可见的 `/workspaces/...` 路径。
+
 兼容的 SQLite、Celery、Go gateway、OIDC 和多 Worker 实现仍保留在代码中，供测试与后续
 演进使用，但不属于当前 MVP 的支持部署面。旧 `start-local.sh` 仅转发到同一个 Compose
 入口；可用 `./scripts/start.sh --check` 做静态配置检查。
@@ -776,7 +780,9 @@ curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 
 `single_user` 模式下所有会话和工作区操作都归属固定 owner；请求体、`X-User-ID` 与
 `X-Authenticated-User` 不能切换身份。底层 Workspace RBAC 和 Worker 二次授权实现仍
-保留，但多用户角色协作不是当前 MVP 的支持能力。
+保留，但多用户角色协作不是当前 MVP 的支持能力。启动时固定 owner 会获得所有持久化
+工作区（含软移除记录）的管理员关系；这是单用户兼容接管，不删除既有成员，也不自动
+改写旧根路径。
 
 工作区响应中的 `available` 表示已保存路径当前是否仍可读取。`DELETE` 是软移除：它只
 让工作区退出可选列表，不删除本地文件，也不级联删除历史会话、用量或项目记忆；再次

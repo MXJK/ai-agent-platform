@@ -27,6 +27,9 @@ class WorkspaceStore(Protocol):
     def list(self) -> list[WorkspaceRecord]:
         ...
 
+    def list_including_removed(self) -> list[WorkspaceRecord]:
+        ...
+
     def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         ...
 
@@ -87,6 +90,9 @@ class WorkspaceService:
 
     def list(self) -> list[WorkspaceRecord]:
         return self._store.list()
+
+    def list_including_removed(self) -> list[WorkspaceRecord]:
+        return self._store.list_including_removed()
 
     def remove(self, workspace_id: str) -> WorkspaceRecord:
         workspace = self._store.remove(workspace_id)

@@ -17,6 +17,7 @@ from ai_agent_platform.project_memory.models import (
     MemoryIndexEvent,
     MemorySettings,
     ProjectMemory,
+    ROLE_RANK,
     WorkspaceMember,
 )
 
@@ -31,13 +32,26 @@ class SQLiteProjectMemoryRepository:
                 "SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
                 (workspace_id, user_id),
             ).fetchone()
+            now = _now()
             if row is None:
-                now = _now()
                 conn.execute(
                     "INSERT INTO workspace_members VALUES (?, ?, ?, ?, ?)",
                     (workspace_id, user_id, role, _iso(now), _iso(now)),
                 )
                 return WorkspaceMember(workspace_id, user_id, role, now, now)
+            if ROLE_RANK[str(row["role"])] < ROLE_RANK[role]:
+                conn.execute(
+                    "UPDATE workspace_members SET role = ?, updated_at = ? "
+                    "WHERE workspace_id = ? AND user_id = ?",
+                    (role, _iso(now), workspace_id, user_id),
+                )
+                return WorkspaceMember(
+                    workspace_id,
+                    user_id,
+                    role,
+                    _dt(row["created_at"]),
+                    now,
+                )
         return _member_from_row(row)
 
     def get_member(self, *, workspace_id: str, user_id: str) -> WorkspaceMember | None:

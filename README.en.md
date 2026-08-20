@@ -49,6 +49,12 @@ public-network authentication: do not publish this port on LAN or Internet
 interfaces. Commands execute inside the App container and the MVP supports only
 repositories the owner already trusts; workspace mode stays `patch_only`.
 
+When a persistent installation moves from a legacy local or trusted-gateway
+identity to `single_user`, startup grants the fixed owner administrator membership
+for every existing Workspace, including soft-removed records, without deleting
+legacy members or project data. A legacy host-absolute root must still be relinked
+through the UI to its container-visible `/workspaces/...` path.
+
 SQLite, Celery, Go gateway, OIDC, and multi-worker implementations remain as
 compatibility and test code, not supported deployment paths. `start-local.sh` now
 forwards to the same Compose entrypoint; `./scripts/start.sh --check` performs a
@@ -799,7 +805,10 @@ client-side until a usable workspace is selected.
 In `single_user` mode every session and Workspace operation belongs to the fixed
 owner; request bodies, `X-User-ID`, and `X-Authenticated-User` cannot switch
 identity. Workspace RBAC and Worker reauthorization remain implemented underneath,
-but multi-user collaboration is outside this MVP.
+but multi-user collaboration is outside this MVP. At startup the fixed owner gains
+administrator membership for every persisted Workspace, including soft-removed
+records. This single-user compatibility takeover retains legacy members and does
+not rewrite saved root paths.
 
 The `available` response field reports whether the saved path can currently be
 read. `DELETE` performs a soft removal: it removes the workspace from selection

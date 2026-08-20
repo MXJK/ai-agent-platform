@@ -241,7 +241,7 @@ class PostgresRepositoryTests(unittest.TestCase):
         now = datetime(2026, 7, 23, tzinfo=timezone.utc)
         row = ("workspace_main", "/workspace/code", now, now, 1, None)
         removed_row = ("workspace_main", "/workspace/code", now, now, 1, now)
-        connection = FakeConnection([row, row, [row], removed_row])
+        connection = FakeConnection([row, row, [row], [row, removed_row], removed_row])
         with patch(
             "ai_agent_platform.repositories.postgres._require_psycopg",
             return_value=object(),
@@ -254,15 +254,19 @@ class PostgresRepositoryTests(unittest.TestCase):
             )
             loaded = repository.get("workspace_main")
             listed = repository.list()
+            including_removed = repository.list_including_removed()
             removed = repository.remove("workspace_main")
         self.assertEqual(created.root_path, "/workspace/code")
         self.assertEqual(loaded.id, "workspace_main")
         self.assertEqual([item.id for item in listed], ["workspace_main"])
+        self.assertEqual(len(including_removed), 2)
+        self.assertIsNotNone(including_removed[1].removed_at)
         self.assertEqual(removed.removed_at, now)
         self.assertIn("workspaces", connection.calls[0][0])
         self.assertIn("removed_at IS NULL", connection.calls[1][0])
-        self.assertIn("UPDATE workspaces", connection.calls[3][0])
-        self.assertNotIn("DELETE FROM workspaces", connection.calls[3][0])
+        self.assertNotIn("removed_at IS NULL", connection.calls[3][0])
+        self.assertIn("UPDATE workspaces", connection.calls[4][0])
+        self.assertNotIn("DELETE FROM workspaces", connection.calls[4][0])
 
     def test_document_repository_persists_lexical_and_provenance_metadata(self) -> None:
         connection = FakeConnection([None, None, None])
@@ -620,6 +624,31 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertEqual(loaded.evidence[0].path, "app.py")
         self.assertIn("project_memories", connection.calls[0][0])
         self.assertIn("project_memory_evidence", connection.calls[1][0])
+
+    def test_project_memory_membership_promotes_roles_without_downgrade(self) -> None:
+        now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+        connection = FakeConnection(
+            [("project", "owner", "admin", now, now)]
+        )
+        with patch(
+            "ai_agent_platform.repositories.project_memory._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresProjectMemoryRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            member = repository.ensure_member(
+                workspace_id="project",
+                user_id="owner",
+                role="admin",
+            )
+
+        self.assertEqual(member.role, "admin")
+        sql, params = connection.calls[0]
+        self.assertIn("CASE workspace_members.role", sql)
+        self.assertIn("THEN EXCLUDED.role", sql)
+        self.assertEqual(params, ("project", "owner", "admin"))
 
     def test_project_memory_write_and_outbox_share_one_transaction(self) -> None:
         now = datetime(2026, 7, 30, tzinfo=timezone.utc)

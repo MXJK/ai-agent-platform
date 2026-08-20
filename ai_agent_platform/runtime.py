@@ -320,6 +320,16 @@ class ApplicationFactory:
                 usage_ledger=container.usage_ledger,
                 local_state_database=container.local_state_database,
             )
+            recovered_workspace_count = _recover_single_user_workspace_ownership(
+                settings,
+                workspace_service=container.workspace_service,
+                project_memory_service=container.project_memory_service,
+            )
+            if recovered_workspace_count:
+                logger.info(
+                    "ensured fixed single-user ownership for persisted workspaces",
+                    extra={"workspace_count": recovered_workspace_count},
+                )
             container.project_memory_service.set_index_outbox_submitter(
                 lambda trigger_id: container.task_queue.submit(
                     "memory_index_outbox",
@@ -1001,6 +1011,24 @@ def _uses_local_state(settings: Settings) -> bool:
             settings.project_memory_vector_store,
         )
     )
+
+
+def _recover_single_user_workspace_ownership(
+    settings: Settings,
+    *,
+    workspace_service: WorkspaceService,
+    project_memory_service: ProjectMemoryService,
+) -> int:
+    """Make the fixed local owner authoritative over persisted workspaces."""
+    if settings.auth_mode != "single_user":
+        return 0
+    workspaces = workspace_service.list_including_removed()
+    for workspace in workspaces:
+        project_memory_service.ensure_workspace_admin(
+            workspace_id=workspace.id,
+            actor_user_id=settings.single_user_id.strip(),
+        )
+    return len(workspaces)
 
 
 __all__ = [

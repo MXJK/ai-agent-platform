@@ -339,6 +339,10 @@ class InMemoryWorkspaceRepository:
                 key=lambda record: record.id,
             )
 
+    def list_including_removed(self) -> list[WorkspaceRecord]:
+        with self._lock:
+            return sorted(self._workspaces.values(), key=lambda record: record.id)
+
     def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         with self._lock:
             existing = self._workspaces.get(workspace_id)

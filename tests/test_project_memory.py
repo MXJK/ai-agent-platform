@@ -460,6 +460,22 @@ class ProjectMemoryServiceTests(unittest.TestCase):
                 user_id="viewer",
                 role="viewer",
             )
+            service.ensure_workspace_admin(
+                workspace_id="project",
+                actor_user_id="viewer",
+            )
+            self.assertEqual(
+                service.role_for(
+                    workspace_id="project",
+                    actor_user_id="viewer",
+                ),
+                "admin",
+            )
+            repository.ensure_member(
+                workspace_id="project",
+                user_id="viewer-only",
+                role="viewer",
+            )
             repository.ensure_member(
                 workspace_id="project",
                 user_id="editor",
@@ -468,7 +484,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
             with self.assertRaises(MemoryAccessDeniedError):
                 service.create_manual(
                     workspace_id="project",
-                    actor_user_id="viewer",
+                    actor_user_id="viewer-only",
                     kind="constraint",
                     title="No secrets",
                     content="Credentials must not be persisted.",

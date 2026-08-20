@@ -143,6 +143,17 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
                 raise RuntimeError("force rollback")
         assert SQLiteWorkspaceRepository(database=database).get("rolled-back") is None
 
+        workspaces = SQLiteWorkspaceRepository(database=database)
+        persisted = workspaces.upsert(
+            workspace_id="removed",
+            root_path="/tmp/removed",
+        )
+        workspaces.remove(persisted.id)
+        assert workspaces.list() == []
+        assert [
+            item.id for item in workspaces.list_including_removed()
+        ] == ["removed"]
+
         reopened = _database(root)
         assert reopened.fts5_available == database.fts5_available
 
@@ -192,6 +203,17 @@ def test_sqlite_project_memory_scopes_lexical_and_vector_results() -> None:
     with TemporaryDirectory() as root:
         database = _database(root)
         repository = SQLiteProjectMemoryRepository(database=database)
+        repository.ensure_member(
+            workspace_id="workspace",
+            user_id="owner",
+            role="viewer",
+        )
+        promoted = repository.ensure_member(
+            workspace_id="workspace",
+            user_id="owner",
+            role="admin",
+        )
+        assert promoted.role == "admin"
         active = _project_memory(memory_id="mem_active")
         old_revision = _project_memory(memory_id="mem_old", revision=2)
         candidate = _project_memory(memory_id="mem_candidate", status="candidate")
