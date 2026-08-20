@@ -126,11 +126,13 @@ class GoogleStreamingTests(unittest.TestCase):
             Settings(
                 llm_provider="google",
                 llm_model="gemini-3.5-flash",
-                google_api_key="test-key",
                 llm_max_output_tokens=4096,
                 llm_thinking_level="low",
                 llm_timeout_seconds=7.5,
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "google" else None
+            ),
         )
 
     def test_google_stream_applies_thinking_level_timeout_and_usage(self) -> None:
@@ -239,9 +241,11 @@ class OpenAIStreamingTests(unittest.TestCase):
             Settings(
                 llm_provider="openai",
                 llm_model="gpt-test",
-                openai_api_key="test-key",
                 llm_max_output_tokens=777,
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "openai" else None
+            ),
         )
         with patch.object(
             client,
@@ -267,8 +271,10 @@ class OpenAIStreamingTests(unittest.TestCase):
             Settings(
                 llm_provider="openai",
                 llm_model="gpt-test",
-                openai_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "openai" else None
+            ),
         )
         messages = [
             {"role": "system", "content": "system policy"},

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.rag.errors import RAGConfigurationError
 from ai_agent_platform.integrations.rag.models import (
@@ -30,16 +32,19 @@ def create_rag_service(
     *,
     document_store: DocumentStore | None = None,
     usage_ledger=None,
+    credential_resolver: Callable[[str], str | None] | None = None,
 ) -> RAGService:
     if settings.embedding_provider == "openai":
         embedding_provider: EmbeddingProvider = OpenAIEmbeddingProvider(
             settings,
             usage_ledger=usage_ledger,
+            credential_resolver=credential_resolver,
         )
     elif settings.embedding_provider == "gemini":
         embedding_provider = GeminiEmbeddingProvider(
             settings,
             usage_ledger=usage_ledger,
+            credential_resolver=credential_resolver,
         )
     elif settings.embedding_provider == "local":
         embedding_provider = HashingEmbeddingProvider(

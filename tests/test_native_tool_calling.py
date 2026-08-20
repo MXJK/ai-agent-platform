@@ -81,8 +81,10 @@ class NativeProviderMappingTests(unittest.TestCase):
             Settings(
                 llm_provider="openai",
                 llm_model="test-openai",
-                openai_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "openai" else None
+            ),
         )
         mcp_spec = _tool_spec("mcp.github.search_code")
 
@@ -122,8 +124,10 @@ class NativeProviderMappingTests(unittest.TestCase):
             Settings(
                 llm_provider="openai",
                 llm_model="test-openai",
-                openai_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "openai" else None
+            ),
         )
         responses = [
             {
@@ -213,8 +217,10 @@ class NativeProviderMappingTests(unittest.TestCase):
             Settings(
                 llm_provider="openai",
                 llm_model="test-openai",
-                openai_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "openai" else None
+            ),
         )
         captured: dict[str, object] = {}
 
@@ -272,8 +278,10 @@ class NativeProviderMappingTests(unittest.TestCase):
             Settings(
                 llm_provider="anthropic",
                 llm_model="test-claude",
-                anthropic_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "anthropic" else None
+            ),
         )
         captured: dict[str, object] = {}
 
@@ -354,8 +362,10 @@ class NativeProviderMappingTests(unittest.TestCase):
             Settings(
                 llm_provider="google",
                 llm_model="gemini-test",
-                google_api_key="test-key",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "google" else None
+            ),
         )
 
         with patch("google.genai.Client", return_value=fake_client):

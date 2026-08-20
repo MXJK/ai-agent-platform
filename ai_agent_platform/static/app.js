@@ -2048,6 +2048,8 @@ function renderProviderConnections() {
     const connection = state.modelRegistry.connections.find((item) => item.provider === provider);
     const status = connection?.status || "unavailable";
     const configured = connection?.credential_configured === true;
+    const credentialMessage = connection?.credential_error
+      || (configured ? "凭证已安全保存" : "尚未配置凭证，请重新输入 API Key");
     return `
       <article class="provider-card" data-provider="${provider}">
         <div class="provider-card-heading">
@@ -2062,7 +2064,7 @@ function renderProviderConnections() {
           <button class="button secondary" type="button" data-provider-action="save">${configured ? "更新配置" : "保存配置"}</button>
           <button class="button ghost" type="button" data-provider-action="test" ${connection ? "" : "disabled"}>测试连接</button>
         </div>
-        <p>${configured ? "凭证已配置" : "尚未配置凭证"} · ${connection?.model_count || 0} 个模型</p>
+        <p>${escapeHtml(credentialMessage)} · ${connection?.model_count || 0} 个模型</p>
       </article>`;
   }).join("");
 }

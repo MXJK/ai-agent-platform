@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "CODE-AGENT-DIRECT-SOURCE-DEFAULT"
-next_action: "Use the Code Agent directly and review source edits and ChangeSets in the conversation."
+active_task: "PERSISTENT-PROVIDER-SECRETS"
+next_action: "Review the verified diff, then rebuild the App and re-enter Provider API Keys through Model Management"
 blockers: []
 last_verified_commit: "ccb4f15ac6f1a78a2b39e9720cc70c5c4006c965"
-updated_at: "2026-08-20T20:58:28+08:00"
+updated_at: "2026-08-20T21:45:16+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

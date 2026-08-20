@@ -43,6 +43,7 @@ from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.memory import UserMemoryService
 from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
 from ai_agent_platform.model_registry import (
+    EncryptedFileSecretStore,
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
     KeyringSecretStore,
@@ -319,6 +320,9 @@ class ApplicationFactory:
                 metrics=container.metrics,
                 usage_ledger=container.usage_ledger,
                 local_state_database=container.local_state_database,
+                credential_resolver=(
+                    container.model_registry.credential_for_provider
+                ),
             )
             recovered_workspace_count = _recover_single_user_workspace_ownership(
                 settings,
@@ -376,6 +380,9 @@ class ApplicationFactory:
                 settings,
                 document_store=container.document_store,
                 usage_ledger=container.usage_ledger,
+                credential_resolver=(
+                    container.model_registry.credential_for_provider
+                ),
             )
             container.knowledge_base_service = KnowledgeBaseService(
                 store=container.knowledge_base_store,
@@ -735,12 +742,6 @@ class ApplicationFactory:
             repository,
             secret_store,
             initial_models=initial_models,
-            environment_secret_refs={
-                "openai": "env:OPENAI_API_KEY",
-                "deepseek": "env:DEEPSEEK_API_KEY",
-                "anthropic": "env:ANTHROPIC_API_KEY",
-                "google": "env:GOOGLE_API_KEY",
-            },
         )
         set_model_registry = getattr(llm_client, "set_model_registry", None)
         if callable(set_model_registry):
@@ -760,11 +761,14 @@ class ApplicationFactory:
         return registry
 
     def create_secret_store(self, settings: Settings) -> Any:
-        return (
-            InMemorySecretStore()
-            if settings.model_secret_backend == "memory"
-            else KeyringSecretStore(service_name=settings.app_name)
-        )
+        if settings.model_secret_backend == "memory":
+            return InMemorySecretStore()
+        if settings.model_secret_backend == "encrypted_file":
+            state_path = Path(settings.local_state_path).expanduser()
+            return EncryptedFileSecretStore(
+                state_path.with_name("provider-secrets.enc")
+            )
+        return KeyringSecretStore(service_name=settings.app_name)
 
     def create_game_agent_runtime(self) -> GameAgentRuntime:
         return GameAgentRuntime()
@@ -778,6 +782,7 @@ class ApplicationFactory:
         metrics: MetricsRegistry,
         usage_ledger: UsageLedgerService,
         local_state_database: LocalStateDatabase | None = None,
+        credential_resolver: Callable[[str], str | None] | None = None,
     ) -> ProjectMemoryService:
         return create_project_memory_service(
             settings,
@@ -786,6 +791,7 @@ class ApplicationFactory:
             metrics=metrics,
             usage_ledger=usage_ledger,
             local_state_database=local_state_database,
+            credential_resolver=credential_resolver,
         )
 
     def create_rag_service(
@@ -794,11 +800,13 @@ class ApplicationFactory:
         *,
         document_store: Any,
         usage_ledger: UsageLedgerService,
+        credential_resolver: Callable[[str], str | None] | None = None,
     ) -> RAGService:
         return create_rag_service(
             settings,
             document_store=document_store,
             usage_ledger=usage_ledger,
+            credential_resolver=credential_resolver,
         )
 
     def create_mcp_providers(

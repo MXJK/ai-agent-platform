@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import os
 from pathlib import Path
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -20,12 +23,14 @@ from ai_agent_platform.integrations.tools import ToolSpec
 from ai_agent_platform.main import create_app
 from ai_agent_platform.model_registry import (
     DiscoveredModel,
+    EncryptedFileSecretStore,
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
     ModelDiscoveryError,
     ModelRegistryService,
     ModelSelection,
     PostgresModelRegistryRepository,
+    ProviderConnection,
 )
 
 
@@ -71,6 +76,102 @@ class _RegisteredProviderAdapter:
 
     def decide_tools(self, messages, tools, *, model):
         raise AssertionError("tool selection is not used by this chat test")
+
+
+class ProviderSecretStoreTests(unittest.TestCase):
+    def test_encrypted_file_store_survives_recreation_without_plaintext(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "provider-secrets.enc"
+            secret = "deepseek-persisted-test-secret"
+
+            first_process = EncryptedFileSecretStore(path)
+            first_process.set("model-provider:deepseek", secret)
+            second_process = EncryptedFileSecretStore(path)
+
+            self.assertEqual(
+                second_process.get("model-provider:deepseek"),
+                secret,
+            )
+            self.assertNotIn(secret, path.read_text(encoding="utf-8"))
+            self.assertNotIn(secret.encode(), path.with_name(f"{path.name}.key").read_bytes())
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(
+                stat.S_IMODE(path.with_name(f"{path.name}.key").stat().st_mode),
+                0o600,
+            )
+
+    def test_encrypted_file_store_fails_closed_when_key_is_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "provider-secrets.enc"
+            store = EncryptedFileSecretStore(path)
+            store.set("model-provider:deepseek", "persisted-secret")
+            path.with_name(f"{path.name}.key").unlink()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "encryption key is missing",
+            ):
+                EncryptedFileSecretStore(path)
+
+    def test_registry_credential_survives_secret_store_recreation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "provider-secrets.enc"
+            repository = InMemoryModelRegistryRepository()
+            first_process = ModelRegistryService(
+                repository,
+                EncryptedFileSecretStore(path),
+                initial_models=[_fake_model()],
+            )
+            first_process.upsert_connection(
+                provider="deepseek",
+                display_name="DeepSeek",
+                api_key="deepseek-restart-safe-secret",
+                enabled=True,
+            )
+
+            second_process = ModelRegistryService(
+                repository,
+                EncryptedFileSecretStore(path),
+                initial_models=[_fake_model()],
+            )
+
+            self.assertEqual(
+                second_process.credential_for_provider("deepseek"),
+                "deepseek-restart-safe-secret",
+            )
+
+    def test_provider_registry_never_resolves_legacy_environment_reference(self) -> None:
+        repository = InMemoryModelRegistryRepository()
+        now = datetime.now(timezone.utc)
+        repository.upsert_connection(
+            ProviderConnection(
+                provider="deepseek",
+                display_name="DeepSeek",
+                secret_ref="env:DEEPSEEK_API_KEY",
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        service = ModelRegistryService(
+            repository,
+            InMemorySecretStore(),
+            initial_models=[_fake_model()],
+        )
+
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "must-not-be-resolved"},
+        ):
+            connection = next(
+                item
+                for item in service.list_connections()
+                if item["provider"] == "deepseek"
+            )
+
+            self.assertIsNone(service.credential_for_provider("deepseek"))
+            self.assertFalse(connection["credential_configured"])
+            self.assertIn("re-enter", connection["credential_error"])
 
 
 class ModelRegistryServiceTests(unittest.TestCase):
@@ -670,8 +771,10 @@ class DeepSeekProtocolTests(unittest.TestCase):
                 llm_provider="fake",
                 llm_model="demo-stream-model",
                 embedding_provider="local",
-                deepseek_api_key="deepseek-secret",
-            )
+            ),
+            credential_resolver=lambda provider: (
+                "deepseek-secret" if provider == "deepseek" else None
+            ),
         )
         captured = {}
 

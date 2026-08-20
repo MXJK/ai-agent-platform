@@ -10,6 +10,7 @@ import math
 import re
 from threading import Lock
 from time import perf_counter
+from typing import Callable
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
@@ -709,8 +710,13 @@ class HashingEmbeddingProvider:
 
 
 class OpenAIEmbeddingProvider:
-    def __init__(self, settings: Settings, usage_ledger=None) -> None:
-        self._api_key = settings.openai_api_key
+    def __init__(
+        self,
+        settings: Settings,
+        usage_ledger=None,
+        credential_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self._credential_resolver = credential_resolver
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
         self._usage_ledger = usage_ledger
@@ -721,14 +727,21 @@ class OpenAIEmbeddingProvider:
         *,
         task_type: str = "document",
     ) -> list[list[float]]:
-        if not self._api_key:
-            raise RAGConfigurationError("OPENAI_API_KEY is required for OpenAI embeddings")
+        api_key = (
+            self._credential_resolver("openai")
+            if self._credential_resolver is not None
+            else None
+        )
+        if not api_key:
+            raise RAGConfigurationError(
+                "OpenAI credential is required in model management for embeddings"
+            )
         payload = {
             "model": self._model,
             "input": texts,
         }
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         timeout = httpx.Timeout(self._timeout_seconds)
@@ -766,8 +779,13 @@ class OpenAIEmbeddingProvider:
 
 
 class GeminiEmbeddingProvider:
-    def __init__(self, settings: Settings, usage_ledger=None) -> None:
-        self._api_key = settings.google_api_key
+    def __init__(
+        self,
+        settings: Settings,
+        usage_ledger=None,
+        credential_resolver: Callable[[str], str | None] | None = None,
+    ) -> None:
+        self._credential_resolver = credential_resolver
         self._model = settings.embedding_model
         self._timeout_seconds = settings.llm_timeout_seconds
         self._usage_ledger = usage_ledger
@@ -778,18 +796,33 @@ class GeminiEmbeddingProvider:
         *,
         task_type: str = "document",
     ) -> list[list[float]]:
-        if not self._api_key:
+        api_key = (
+            self._credential_resolver("google")
+            if self._credential_resolver is not None
+            else None
+        )
+        if not api_key:
             raise RAGConfigurationError(
-                "GOOGLE_API_KEY or GEMINI_API_KEY is required for Gemini embeddings"
+                "Google credential is required in model management for Gemini embeddings"
             )
 
         gemini_task_type = _gemini_task_type(task_type)
         return [
-            self._embed_one(text=text, task_type=gemini_task_type)
+            self._embed_one(
+                text=text,
+                task_type=gemini_task_type,
+                api_key=api_key,
+            )
             for text in texts
         ]
 
-    def _embed_one(self, *, text: str, task_type: str) -> list[float]:
+    def _embed_one(
+        self,
+        *,
+        text: str,
+        task_type: str,
+        api_key: str,
+    ) -> list[float]:
         payload = {
             "content": {
                 "parts": [
@@ -802,7 +835,7 @@ class GeminiEmbeddingProvider:
         }
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": self._api_key,
+            "x-goog-api-key": api_key,
         }
         model = self._model
         if not model.startswith("models/"):

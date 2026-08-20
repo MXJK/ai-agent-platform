@@ -90,10 +90,6 @@ class Settings:
     log_format: str = "json"
     llm_provider: str = "fake"
     llm_model: str = "demo-stream-model"
-    openai_api_key: str | None = field(default=None, repr=False)
-    deepseek_api_key: str | None = field(default=None, repr=False)
-    anthropic_api_key: str | None = field(default=None, repr=False)
-    google_api_key: str | None = field(default=None, repr=False)
     database_url: str = field(
         default="postgresql://localhost:5432/ai_agent_platform",
         repr=False,
@@ -344,7 +340,7 @@ class Settings:
         _require_choice(
             "model_secret_backend",
             self.model_secret_backend,
-            {"keyring", "memory"},
+            {"encrypted_file", "keyring", "memory"},
         )
         _require_choice(
             "langgraph_checkpointer",
@@ -846,14 +842,6 @@ class Settings:
             ),
             model_secret_backend=_env(
                 "MODEL_SECRET_BACKEND", cls.model_secret_backend, dotenv
-            ),
-            openai_api_key=_env("OPENAI_API_KEY", None, dotenv),
-            deepseek_api_key=_env("DEEPSEEK_API_KEY", None, dotenv),
-            anthropic_api_key=_env("ANTHROPIC_API_KEY", None, dotenv),
-            google_api_key=_env(
-                "GOOGLE_API_KEY",
-                _env("GEMINI_API_KEY", None, dotenv),
-                dotenv,
             ),
             database_url=_env("DATABASE_URL", cls.database_url, dotenv),
             local_state_path=_env(

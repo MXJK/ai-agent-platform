@@ -50,9 +50,9 @@ PostgreSQL 和 Qdrant 只在私有 Compose 网络可达。`WORKSPACE_HOST_PATH` 
 不会尝试从容器打开 macOS Finder。
 
 默认 `RUNTIME_PROFILE=custom` 组合现有 PostgreSQL Repository、Qdrant Vector Store 和
-`in_process` TaskQueue。项目记忆开启，用户记忆关闭；模型密钥从本机 `.env` 注入并通过
-既有 `env:*` 引用使用，页面临时写入的密钥不承诺跨容器重启持久化。默认模型仍是 Fake
-LLM，接入真实 Provider 前只需替换 `.env` 中的模型选择和对应 API Key。
+`in_process` TaskQueue。项目记忆开启，用户记忆关闭；Provider API Key 只从模型管理页
+录入，Compose 将其加密保存到私有 `app_state` 持久卷，PostgreSQL 只保存不透明引用。
+默认模型仍是 Fake LLM；接入真实 Provider 时在页面保存连接并注册模型即可。
 
 `AUTH_MODE=single_user` 忽略请求体与 Header 中的用户声明，所有请求都归属固定
 `SINGLE_USER_ID=owner`，并允许 owner 管理模型和 MCP。该模式没有公网认证能力；不得把
@@ -180,9 +180,9 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 的不可变 `ToolCatalog`，由共享 `ToolPoolBuilder` 将项目 `enabled_tools`、Agent/模式、模型
 能力、Workspace role、中央 display deny、显式 deny、Sandbox 和 Skill 依赖求交为
 `EffectiveToolPool`，不修改源 `ToolRegistry`。未知工具、大小写冲突、保留 namespace
-冒用、尝试突破进程上限或非法恢复都会 fail closed。环境变量
-继续兼容既有无前缀名称和 `.env`，包括 `GEMINI_API_KEY` 以及
-`SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧回退关系；存储回退只在目标 Store 支持该
+冒用、尝试突破进程上限或非法恢复都会 fail closed。非 Provider 凭据的环境变量
+继续兼容既有无前缀名称和 `.env`，以及 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧
+回退关系；Provider API Key 不再是配置字段，相关环境变量会被忽略。存储回退只在目标 Store 支持该
 后端时生效，因此 local profile 的 SQLite 不会传播给只支持 memory/PostgreSQL 的模型
 注册表或 ChangeSet Store。Session 与 Run Store 还必须选择同一后端，否则配置解析阶段
 直接失败，避免把 Query 原子启动问题拖到运行时装配。新的
@@ -317,8 +317,8 @@ Token 时才作为后备。
 
 PostgreSQL 是可跨重启恢复会话的事实来源。会话记录保存自动生成或手工修改的标题、
 归档状态、最后更新时间、工作区和模型配置；`user_preferences` 保存未来会话的默认值
-和最后活跃会话。API Key、数据库 URL 和允许访问的文件系统根目录始终是服务端配置，
-不会进入会话或偏好记录。
+和最后活跃会话。Provider API Key 位于服务端 Secret Store；数据库 URL 和允许访问的
+文件系统根目录仍是服务端配置，三者都不会进入会话或偏好记录。
 
 `GET /api/v1/sessions` 按最近更新时间返回包含 `message_count` 和
 `last_message_preview` 的列表，支持标题或正文子串搜索、活跃或归档筛选，以及不透明
@@ -345,8 +345,10 @@ Agent 执行都会返回 `409`。
 
 这是一个本地单用户应用，所有工作区共享同一个全局模型注册中心。模型管理页可以
 统一配置 OpenAI、DeepSeek、Anthropic 和 Google，再为每个 Provider 注册多个模型。
-API Key 只能写入：PostgreSQL 仅保存 secret reference，密钥值进入操作系统钥匙串。
-已有环境变量仍可作为启动凭据，并且绝不会由 API 返回。
+API Key 只能写入：PostgreSQL 仅保存 secret reference，密钥值进入选定的 Secret Store。
+原生本机运行使用操作系统钥匙串；官方 Compose 使用私有持久卷中的 Fernet 密文与
+`0600` 随机本机密钥。Provider 环境变量和 `.env` 不再作为启动凭据，密钥绝不会由
+API 返回。升级后若连接仍是遗留 `env:*` 引用，页面会要求重新录入，而不会读取环境变量。
 
 保存 Provider 后，模型管理页会调用该 Provider 的官方模型列表接口，过滤出当前
 API Key 可用的文本生成模型供用户选择，并标记已经注册的条目。注册只需要选择
@@ -369,7 +371,7 @@ Provider/模型以及是否启用、是否参与自动路由；显示名称、�
 
 ## Gemini 流式输出
 
-如需使用 Gemini，请创建本地 `.env`：
+如需使用 Gemini，可在 `.env` 选择启动模型，但 API Key 必须在模型管理页录入：
 
 ```dotenv
 LLM_PROVIDER=google
@@ -378,8 +380,10 @@ LLM_MAX_OUTPUT_TOKENS=4096
 LLM_THINKING_LEVEL=low
 LLM_TIMEOUT_SECONDS=30
 SSE_HEARTBEAT_SECONDS=10
-GOOGLE_API_KEY=your_google_ai_studio_key
 ```
+
+启动后进入“模型管理”，保存 Google API Key、发现并注册目标模型。Provider API Key
+不会从 `.env` 或进程环境读取。
 
 Gemini 3 请求的 `thinking_level` 支持 `minimal`、`low`、`medium` 或 `high`；API 请求
 和既有会话配置仍可覆盖服务端默认值，但个人工作区管理界面不提供这个选项。当
@@ -453,12 +457,12 @@ Provider 健康状态只在当前进程中维护。系统根据有界的近期�
 Provider 回退。已经发出首个文本 delta 后，失败会以 `partial_response=true` 返回，
 不会在其他模型上重放。
 
-当前 Compose 使用 `MODEL_REGISTRY_STORE=postgres` 持久化模型目录。Provider API Key 从
-本机 `.env` 注入，并通过已有 `env:OPENAI_API_KEY` 等引用读取；
-`MODEL_SECRET_BACKEND=memory` 只承接页面在当前 App 生命周期内写入的临时密钥。固定的
-`single_user` owner 可以执行模型连接保存、测试/发现和模型增删改，调用方提交的身份
-Header 不会改变 owner。若要让页面写入的密钥跨重启持久化，需要另外实现适合容器的
-Secret Store；当前 MVP 不把 OS keyring 或明文数据库当作该问题的答案。
+当前 Compose 使用 `MODEL_REGISTRY_STORE=postgres` 持久化模型目录，并以
+`MODEL_SECRET_BACKEND=encrypted_file` 将页面录入的 Provider API Key 加密写入私有
+`app_state` 持久卷。密文文件和随机本机密钥均为 owner-only；数据库、API、日志和浏览器
+存储都不持有明文。固定的 `single_user` owner 可以执行模型连接保存、测试/发现和模型
+增删改，调用方提交的身份 Header 不会改变 owner。`memory` 仅用于测试，原生运行仍可用
+OS keyring；多节点部署需要外部 KMS/Vault，而不是共享该单机文件后端。
 
 ## 动态模型准入与 Token 预算
 

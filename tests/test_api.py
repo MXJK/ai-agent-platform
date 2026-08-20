@@ -1321,7 +1321,6 @@ Inspect the requested code before reporting findings.
                     settings=Settings(
                         llm_provider="google",
                         llm_model="gemini-3.5-flash",
-                        google_api_key="test-key",
                         workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
                     ),
                     llm_client=truncated_llm,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from ai_agent_platform.core import MetricsRegistry, Settings
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.integrations.rag import (
@@ -33,6 +35,7 @@ def create_project_memory_service(
     metrics: MetricsRegistry,
     usage_ledger=None,
     local_state_database: LocalStateDatabase | None = None,
+    credential_resolver: Callable[[str], str | None] | None = None,
 ) -> ProjectMemoryService:
     if settings.project_memory_store == "postgres":
         repository = PostgresProjectMemoryRepository(
@@ -49,11 +52,13 @@ def create_project_memory_service(
         embedding_provider = OpenAIEmbeddingProvider(
             settings,
             usage_ledger=usage_ledger,
+            credential_resolver=credential_resolver,
         )
     elif settings.embedding_provider == "gemini":
         embedding_provider = GeminiEmbeddingProvider(
             settings,
             usage_ledger=usage_ledger,
+            credential_resolver=credential_resolver,
         )
     else:
         embedding_provider = HashingEmbeddingProvider(

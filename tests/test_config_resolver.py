@@ -551,7 +551,6 @@ class ConfigResolverTests(unittest.TestCase):
             "database_url": "postgresql://alice:db-password@db.local/app",
             "redis_url": "redis://:redis-password@cache.local/0",
             "qdrant_url": "https://qdrant.local/collections?token=query-secret",
-            "openai_api_key": "openai-secret-value",
             "qdrant_api_key": "qdrant-secret-value",
             "gateway_trust_secret": "gateway-secret-value",
         }
@@ -571,7 +570,6 @@ class ConfigResolverTests(unittest.TestCase):
             "db-password",
             "redis-password",
             "query-secret",
-            "openai-secret-value",
             "qdrant-secret-value",
             "gateway-secret-value",
         ):
@@ -595,7 +593,7 @@ class ConfigResolverTests(unittest.TestCase):
             ).resolve()
         self.assertNotIn(secret, str(raised.exception))
 
-    def test_legacy_environment_aliases_and_namespaced_variables_work(self) -> None:
+    def test_provider_api_key_environment_variables_are_ignored(self) -> None:
         resolved = ConfigResolver(
             env={
                 "GEMINI_API_KEY": "legacy-google-key",
@@ -606,14 +604,10 @@ class ConfigResolverTests(unittest.TestCase):
             }
         ).resolve()
 
-        self.assertEqual(resolved.google_api_key, "legacy-google-key")
+        self.assertFalse(hasattr(resolved.settings, "google_api_key"))
         self.assertEqual(resolved.model_registry_store, "postgres")
         self.assertEqual(resolved.change_set_store, "postgres")
         self.assertEqual(resolved.llm_model, "namespaced-model")
-        self.assertIn(
-            "legacy fallback",
-            resolved.provenance_for("google_api_key").detail,
-        )
 
         with patch.dict(
             os.environ,
@@ -624,7 +618,7 @@ class ConfigResolverTests(unittest.TestCase):
             clear=True,
         ):
             settings = Settings.from_env()
-        self.assertEqual(settings.google_api_key, "canonical-key")
+        self.assertFalse(hasattr(settings, "google_api_key"))
 
     def test_sqlite_legacy_store_aliases_do_not_target_unsupported_stores(
         self,

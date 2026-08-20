@@ -195,10 +195,6 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "api_prefix",
         "log_level",
         "log_format",
-        "openai_api_key",
-        "deepseek_api_key",
-        "anthropic_api_key",
-        "google_api_key",
         "database_url",
         "runtime_profile",
         "local_state_path",
@@ -299,10 +295,6 @@ _OPTIONAL_TUPLE_FIELDS = frozenset(
 
 _SECRET_FIELDS = frozenset(
     {
-        "openai_api_key",
-        "deepseek_api_key",
-        "anthropic_api_key",
-        "google_api_key",
         "qdrant_api_key",
         "gateway_trust_secret",
     }
@@ -559,16 +551,6 @@ class ConfigResolver:
         # Preserve compatible legacy fallbacks when their canonical name is absent.
         # Store aliases predate the one-field/one-env-name schema, but SQLite is not
         # a valid model-registry or ChangeSet backend and must not leak into them.
-        _apply_legacy_environment_fallback(
-            environment_values,
-            details,
-            combined,
-            self._env,
-            target="google_api_key",
-            canonical="GOOGLE_API_KEY",
-            fallback="GEMINI_API_KEY",
-            current=values["google_api_key"],
-        )
         _apply_legacy_environment_fallback(
             environment_values,
             details,

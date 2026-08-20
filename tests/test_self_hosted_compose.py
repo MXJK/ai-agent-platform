@@ -34,6 +34,7 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["WORKSPACE_STORE"] == "postgres"
     assert environment["LANGGRAPH_CHECKPOINTER"] == "postgres"
     assert environment["MODEL_REGISTRY_STORE"] == "postgres"
+    assert environment["MODEL_SECRET_BACKEND"] == "encrypted_file"
     assert environment["RAG_VECTOR_STORE"] == "qdrant"
     assert environment["PROJECT_MEMORY_STORE"] == "postgres"
     assert environment["PROJECT_MEMORY_VECTOR_STORE"] == "qdrant"
@@ -70,5 +71,19 @@ def test_self_hosted_image_omits_compatibility_only_dependencies() -> None:
     assert "celery" not in requirements.lower()
     assert "chromadb" not in requirements.lower()
     assert "keyring" not in requirements.lower()
+    assert "cryptography" in requirements.lower()
     assert "sentence-transformers" not in requirements.lower()
     assert "pytest" not in requirements.lower()
+
+
+def test_provider_api_keys_are_not_dotenv_configuration() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for name in (
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+    ):
+        assert name not in example

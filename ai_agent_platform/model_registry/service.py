@@ -58,12 +58,10 @@ class ModelRegistryService:
         secret_store: SecretStore,
         *,
         initial_models: Iterable[ModelConfig],
-        environment_secret_refs: dict[str, str] | None = None,
         model_discovery: ModelDiscovery | None = None,
     ) -> None:
         self._repository = repository
         self._secret_store = secret_store
-        self._environment_secret_refs = dict(environment_secret_refs or {})
         self._router: ModelRouter | None = None
         self._catalog_changed: Callable[[tuple[ModelConfig, ...]], None] | None = None
         self._test_connection: Callable[[str, str], dict[str, Any]] | None = None
@@ -119,11 +117,15 @@ class ModelRegistryService:
         now = _now()
         existing = self._repository.get_connection(provider)
         secret_ref = existing.secret_ref if existing else None
+        previous_secret_ref = secret_ref
         if api_key is not None:
             if not api_key.strip():
                 raise ValueError("API key must not be blank")
-            secret_ref = f"keyring:model-provider:{provider}"
-            self._secret_store.set(secret_ref, api_key.strip())
+            secret_ref = f"model-provider:{provider}"
+            normalized_api_key = api_key.strip()
+            self._secret_store.set(secret_ref, normalized_api_key)
+            if self._secret_store.get(secret_ref) != normalized_api_key:
+                raise SecretStoreError("stored API key could not be read back")
         connection = ProviderConnection(
             provider=provider,
             display_name=display_name.strip() or _default_provider_name(provider),
@@ -133,6 +135,13 @@ class ModelRegistryService:
             updated_at=now,
         )
         stored = self._repository.upsert_connection(connection)
+        if (
+            api_key is not None
+            and previous_secret_ref
+            and previous_secret_ref != secret_ref
+            and not previous_secret_ref.startswith("env:")
+        ):
+            self._secret_store.delete(previous_secret_ref)
         self._notify_catalog_changed()
         provider_models = [
             model for model in self._repository.list_models() if model.provider == provider
@@ -145,7 +154,7 @@ class ModelRegistryService:
             raise ModelRegistryNotFoundError(provider)
         self._repository.delete_connection(provider)
         self._discovered_models.pop(provider, None)
-        if connection.secret_ref and connection.secret_ref.startswith("keyring:"):
+        if connection.secret_ref and not connection.secret_ref.startswith("env:"):
             self._secret_store.delete(connection.secret_ref)
         self._notify_catalog_changed()
 
@@ -377,6 +386,8 @@ class ModelRegistryService:
         connection = self._repository.get_connection(provider)
         if connection is None or not connection.enabled or not connection.secret_ref:
             return None
+        if connection.secret_ref.startswith("env:"):
+            return None
         return self._secret_store.get(connection.secret_ref)
 
     def is_model_available(self, provider: str, model: str) -> bool:
@@ -521,7 +532,7 @@ class ModelRegistryService:
                     ProviderConnection(
                         provider=provider,
                         display_name=_default_provider_name(provider),
-                        secret_ref=self._environment_secret_refs.get(provider),
+                        secret_ref=None,
                         enabled=True,
                         created_at=now,
                         updated_at=now,
@@ -711,6 +722,12 @@ class ModelRegistryService:
             return True, None
         if not connection.secret_ref:
             return False, None
+        if connection.secret_ref.startswith("env:"):
+            return (
+                False,
+                "environment-based Provider credentials are disabled; "
+                "re-enter the API key in model management",
+            )
         try:
             return bool(self._secret_store.get(connection.secret_ref)), None
         except SecretStoreError as exc:

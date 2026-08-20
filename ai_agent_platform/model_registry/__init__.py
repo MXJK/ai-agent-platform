@@ -18,7 +18,12 @@ from .repository import (
     ModelRegistryRepository,
     PostgresModelRegistryRepository,
 )
-from .secrets import InMemorySecretStore, KeyringSecretStore, SecretStoreError
+from .secrets import (
+    EncryptedFileSecretStore,
+    InMemorySecretStore,
+    KeyringSecretStore,
+    SecretStoreError,
+)
 from .selection import (
     ModelSelection,
     current_model_selection,
@@ -35,6 +40,7 @@ __all__ = [
     "REAL_PROVIDERS",
     "SUPPORTED_PROVIDERS",
     "InMemoryModelRegistryRepository",
+    "EncryptedFileSecretStore",
     "InMemorySecretStore",
     "KeyringSecretStore",
     "ModelConnectionTestError",

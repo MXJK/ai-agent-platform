@@ -938,7 +938,7 @@ class LLMClient:
     ) -> LLMToolDecision:
         api_key = self._api_key("openai")
         if not api_key:
-            raise LLMProviderError("OPENAI_API_KEY is not configured")
+            raise LLMProviderError("OpenAI credential is not configured in model management")
         reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
         payload: dict[str, Any] = {
             "model": model,
@@ -1012,7 +1012,7 @@ class LLMClient:
     ) -> LLMToolDecision:
         api_key = self._api_key("anthropic")
         if not api_key:
-            raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+            raise LLMProviderError("Anthropic credential is not configured in model management")
         reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
         system = [
             str(message.get("content") or "")
@@ -1086,7 +1086,7 @@ class LLMClient:
     ) -> LLMToolDecision:
         api_key = self._api_key("deepseek")
         if not api_key:
-            raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+            raise LLMProviderError("DeepSeek credential is not configured in model management")
         reverse_aliases = {
             registry_name: alias for alias, registry_name in aliases.items()
         }
@@ -1159,7 +1159,7 @@ class LLMClient:
     ) -> LLMToolDecision:
         api_key = self._api_key("google")
         if not api_key:
-            raise LLMProviderError("GOOGLE_API_KEY is not configured")
+            raise LLMProviderError("Google credential is not configured in model management")
         try:
             from google import genai
             from google.genai import types
@@ -1578,7 +1578,7 @@ class LLMClient:
             return _count_fake_text_tokens(serialized), "fake_lexical_tokenizer"
         if provider == "deepseek":
             if not self._api_key("deepseek"):
-                raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+                raise LLMProviderError("DeepSeek credential is not configured in model management")
             serialized = _join_any_message_text(messages) + json.dumps(
                 [spec.input_schema for spec in tools],
                 ensure_ascii=False,
@@ -1588,7 +1588,7 @@ class LLMClient:
         if provider == "openai":
             api_key = self._api_key("openai")
             if not api_key:
-                raise LLMProviderError("OPENAI_API_KEY is not configured")
+                raise LLMProviderError("OpenAI credential is not configured in model management")
             payload = {
                 "model": model,
                 "input": _openai_tool_input(messages, reverse_aliases),
@@ -1620,7 +1620,7 @@ class LLMClient:
         if provider == "anthropic":
             api_key = self._api_key("anthropic")
             if not api_key:
-                raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+                raise LLMProviderError("Anthropic credential is not configured in model management")
             system = [
                 str(message.get("content") or "")
                 for message in messages
@@ -1662,7 +1662,7 @@ class LLMClient:
         if provider == "google":
             api_key = self._api_key("google")
             if not api_key:
-                raise LLMProviderError("GOOGLE_API_KEY is not configured")
+                raise LLMProviderError("Google credential is not configured in model management")
             try:
                 from google import genai
                 from google.genai import types
@@ -1782,16 +1782,9 @@ class LLMClient:
         )
 
     def _api_key(self, provider: str) -> str | None:
-        if self._credential_resolver is not None:
-            value = self._credential_resolver(provider)
-            if value:
-                return value
-        return {
-            "openai": self._settings.openai_api_key,
-            "deepseek": self._settings.deepseek_api_key,
-            "anthropic": self._settings.anthropic_api_key,
-            "google": self._settings.google_api_key,
-        }.get(provider)
+        if self._credential_resolver is None:
+            return None
+        return self._credential_resolver(provider) or None
 
     def _count_input_tokens(
         self,
@@ -1810,7 +1803,7 @@ class LLMClient:
         if provider == "openai":
             api_key = self._api_key("openai")
             if not api_key:
-                raise LLMProviderError("OPENAI_API_KEY is not configured")
+                raise LLMProviderError("OpenAI credential is not configured in model management")
             body = self._post_json(
                 "https://api.openai.com/v1/responses/input_tokens",
                 headers={
@@ -1828,7 +1821,7 @@ class LLMClient:
             return max(0, count), "openai_responses_input_tokens"
         if provider == "deepseek":
             if not self._api_key("deepseek"):
-                raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+                raise LLMProviderError("DeepSeek credential is not configured in model management")
             return (
                 _estimate_tokens(_join_message_text(messages)),
                 "deepseek_preflight_estimate",
@@ -1836,7 +1829,7 @@ class LLMClient:
         if provider == "anthropic":
             api_key = self._api_key("anthropic")
             if not api_key:
-                raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+                raise LLMProviderError("Anthropic credential is not configured in model management")
             system_messages = [
                 message["content"]
                 for message in messages
@@ -1871,7 +1864,7 @@ class LLMClient:
         if provider == "google":
             api_key = self._api_key("google")
             if not api_key:
-                raise LLMProviderError("GOOGLE_API_KEY is not configured")
+                raise LLMProviderError("Google credential is not configured in model management")
             try:
                 from google import genai
                 from google.genai import types
@@ -2091,7 +2084,7 @@ class LLMClient:
     ) -> Iterable[LLMStreamEvent]:
         api_key = self._api_key("openai")
         if not api_key:
-            raise LLMProviderError("OPENAI_API_KEY is not configured")
+            raise LLMProviderError("OpenAI credential is not configured in model management")
 
         payload = {
             "model": model,
@@ -2119,7 +2112,7 @@ class LLMClient:
     ) -> Iterable[LLMStreamEvent]:
         api_key = self._api_key("anthropic")
         if not api_key:
-            raise LLMProviderError("ANTHROPIC_API_KEY is not configured")
+            raise LLMProviderError("Anthropic credential is not configured in model management")
 
         system_messages = [
             message["content"] for message in messages if message["role"] == "system"
@@ -2159,7 +2152,7 @@ class LLMClient:
     ) -> Iterable[LLMStreamEvent]:
         api_key = self._api_key("deepseek")
         if not api_key:
-            raise LLMProviderError("DEEPSEEK_API_KEY is not configured")
+            raise LLMProviderError("DeepSeek credential is not configured in model management")
         payload: dict[str, object] = {
             "model": model,
             "messages": messages,
@@ -2187,7 +2180,7 @@ class LLMClient:
     ) -> Iterable[LLMStreamEvent]:
         api_key = self._api_key("google")
         if not api_key:
-            raise LLMProviderError("GOOGLE_API_KEY is not configured")
+            raise LLMProviderError("Google credential is not configured in model management")
 
         try:
             from google import genai

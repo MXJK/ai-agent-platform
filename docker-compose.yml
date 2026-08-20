@@ -12,7 +12,7 @@ x-app-environment: &app-environment
   WORKSPACE_STORE: "postgres"
   LANGGRAPH_CHECKPOINTER: "postgres"
   MODEL_REGISTRY_STORE: "postgres"
-  MODEL_SECRET_BACKEND: "memory"
+  MODEL_SECRET_BACKEND: "encrypted_file"
   RAG_VECTOR_STORE: "qdrant"
   PROJECT_MEMORY_STORE: "postgres"
   PROJECT_MEMORY_VECTOR_STORE: "qdrant"

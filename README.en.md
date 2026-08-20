@@ -38,10 +38,10 @@ to open the host Finder from a container.
 
 The official `RUNTIME_PROFILE=custom` combination reuses the existing PostgreSQL
 repositories, Qdrant vector stores, and `in_process` task queue. Project memory is
-enabled and user memory is disabled. Provider keys come from the local `.env` and
-use the existing `env:*` references; keys entered through the UI are not promised
-to survive an App-container restart. The default Fake LLM keeps the stack offline
-until a real provider and its key are selected.
+enabled and user memory is disabled. Provider API keys are entered only in Model
+Management; Compose encrypts them in the private persistent `app_state` volume while
+PostgreSQL stores only opaque references. The default Fake LLM keeps the stack
+offline until a real Provider connection and model are registered in the UI.
 
 `AUTH_MODE=single_user` ignores caller-controlled identities and assigns every
 request to `SINGLE_USER_ID=owner`, who may administer models and MCP. It is not
@@ -152,8 +152,10 @@ project selection, Agent/mode, model capabilities, Workspace role, central displ
 deny, explicit deny, Sandbox capabilities, and Skill requirements into an
 `EffectiveToolPool` without mutating the Registry.
 
-Legacy unprefixed environment names and `.env` remain supported, including
-`GEMINI_API_KEY` and the old `SESSION_REPOSITORY`/`AGENT_RUN_STORE` fallback chains.
+Legacy unprefixed environment names and `.env` remain supported for non-Provider
+configuration, including the old `SESSION_REPOSITORY`/`AGENT_RUN_STORE` fallback
+chains. Provider API keys are no longer configuration fields and matching environment
+variables are ignored.
 Store fallback applies only when the target Store supports that backend, so local
 SQLite is not propagated into the memory/PostgreSQL-only model registry or ChangeSet
 Store. Session and Run Stores must also select the same backend; configuration fails
@@ -307,9 +309,9 @@ The browser workspace also includes:
 PostgreSQL is the source of truth for restart-safe conversations. Session rows
 store a deterministic or manually edited title, archive state, last-update
 time, workspace and model configuration; `user_preferences` stores defaults
-for future sessions and the last active session. API keys, database URLs and
-allowed filesystem roots remain server-side configuration and are never part
-of the session or preference records.
+for future sessions and the last active session. Provider API keys live in the
+server-side Secret Store; database URLs and allowed filesystem roots remain
+server-side configuration. None are part of session or preference records.
 
 `GET /api/v1/sessions` returns recent-first list items with `message_count` and
 `last_message_preview`, supports title/body substring search, active/archived
@@ -342,9 +344,12 @@ identity from the trusted gateway. The health endpoint exposes `session_storage`
 This local single-user application has one global model registry shared by all
 workspaces. The Model Management page can configure OpenAI, DeepSeek,
 Anthropic, and Google once, then register multiple models under each Provider.
-API keys are write-only: PostgreSQL stores only a secret reference and the
-secret value is placed in the operating-system keyring. Existing environment
-variables remain valid bootstrap credentials and are never returned by the API.
+API keys are write-only: PostgreSQL stores only a secret reference and the secret
+value goes to the selected Secret Store. Native runs use the operating-system keyring. Official
+Compose stores Fernet ciphertext plus an owner-only random host key in its private
+persistent volume. Provider environment variables and `.env` are no longer bootstrap
+credentials and keys are never returned by the API. Legacy `env:*` references require
+one UI re-entry after upgrade and are never resolved from the environment.
 
 After a Provider is saved, Model Management calls that Provider's official
 model-list endpoint, filters the text-generation models available to the current
@@ -372,7 +377,8 @@ observations of real requests rather than periodic paid probes.
 
 ## Gemini streaming
 
-Create a local `.env` file to use Gemini:
+The startup model may be selected in `.env`, but its API key must be entered through
+Model Management:
 
 ```dotenv
 LLM_PROVIDER=google
@@ -381,8 +387,11 @@ LLM_MAX_OUTPUT_TOKENS=4096
 LLM_THINKING_LEVEL=low
 LLM_TIMEOUT_SECONDS=30
 SSE_HEARTBEAT_SECONDS=10
-GOOGLE_API_KEY=your_google_ai_studio_key
 ```
+
+After startup, save the Google API key in Model Management, discover models, and
+register the target model. Provider API keys are not read from `.env` or process
+environment variables.
 
 Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
 `thinking_level`. API requests and existing session configuration can still
@@ -463,12 +472,13 @@ can safely fall back across providers. After the first text delta, failures are
 returned with `partial_response=true` and never replayed on another model.
 
 The Compose stack uses `MODEL_REGISTRY_STORE=postgres` for restart-safe model
-catalog state. Provider keys are injected from the host `.env` and read through
-existing references such as `env:OPENAI_API_KEY`; `MODEL_SECRET_BACKEND=memory`
-holds only temporary keys entered during the current App lifetime. The fixed
-`single_user` owner may save/test/discover connections and mutate models, and
-caller identity headers cannot replace that owner. A container-appropriate Secret
-Store is still required before UI-entered keys can be promised across restarts.
+catalog state and `MODEL_SECRET_BACKEND=encrypted_file` for Provider API keys entered
+through the UI. Ciphertext and its random owner-only host key live in the private
+`app_state` volume; PostgreSQL, API responses, logs, and browser storage never contain
+plaintext. The fixed `single_user` owner may save/test/discover connections and mutate
+models, and caller identity headers cannot replace that owner. `memory` is test-only,
+native runs may use the OS keyring, and multi-node deployments require an external
+KMS/Vault instead of this single-node file backend.
 
 ## Dynamic model admission and Token budgets
 
