@@ -48,10 +48,6 @@ class AgentRunRequest(BaseModel):
         max_length=256,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
-    workspace_mode: Optional[str] = Field(
-        default=None,
-        pattern=r"^(patch_only|direct|worktree)$",
-    )
 
     @field_validator("additional_workspace_ids")
     @classmethod
@@ -99,9 +95,6 @@ class ComposerCapabilitiesResponse(BaseModel):
     skill_commands: list[ComposerSkillCommandResponse]
     mcp_tools: list[ComposerToolResponse]
     diagnostics: list[str]
-    allowed_workspace_modes: list[str]
-    default_workspace_mode: str
-    workspace_mode_unavailable_reasons: dict[str, Optional[str]]
 
 
 class AgentRunResumeRequest(BaseModel):

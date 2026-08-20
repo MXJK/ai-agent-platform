@@ -139,7 +139,6 @@ class ExecutionContextFactory:
         skill_name: str | None = None,
         skill_arguments: Sequence[str] = (),
         preferred_tool_name: str | None = None,
-        workspace_mode: str | None = None,
         prepare_execution_workspace: bool = True,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
@@ -162,10 +161,7 @@ class ExecutionContextFactory:
             effective_config=effective_config,
             git_context=git_context,
         )
-        effective_workspace_mode = _select_workspace_mode(
-            workspace_mode,
-            mode_capabilities,
-        )
+        effective_workspace_mode = _select_default_workspace_mode(mode_capabilities)
         if prepare_execution_workspace:
             execution_record = self._execution_workspace_runtime.prepare(
                 run_id=resolved_run_id,
@@ -978,16 +974,13 @@ def _resolve_execution_cwd(
     return str(candidate)
 
 
-def _select_workspace_mode(
-    requested: str | None,
-    capabilities: Mapping[str, object],
-) -> str:
-    mode = str(requested or capabilities["default_mode"])
+def _select_default_workspace_mode(capabilities: Mapping[str, object]) -> str:
+    mode = str(capabilities["default_mode"])
     if mode not in EXECUTION_WORKSPACE_MODES:
-        raise ValueError(f"unsupported workspace_mode: {mode}")
+        raise ValueError(f"unsupported default workspace mode: {mode}")
     allowed = tuple(str(item) for item in capabilities.get("allowed_modes", []))
     if mode not in allowed:
-        raise PermissionError("requested workspace_mode is outside the server allowlist")
+        raise PermissionError("default workspace mode is outside the server allowlist")
     reasons = capabilities.get("unavailable_reasons")
     reason = reasons.get(mode) if isinstance(reasons, Mapping) else None
     if reason:

@@ -47,7 +47,8 @@ until a real provider and its key are selected.
 request to `SINGLE_USER_ID=owner`, who may administer models and MCP. It is not
 public-network authentication: do not publish this port on LAN or Internet
 interfaces. Commands execute inside the App container and the MVP supports only
-repositories the owner already trusts; workspace mode stays `patch_only`.
+repositories the owner already trusts. The code Agent edits the registered source
+root directly by default and no longer asks the user to choose an execution location.
 
 When a persistent installation moves from a legacy local or trusted-gateway
 identity to `single_user`, startup grants the fixed owner administrator membership
@@ -94,7 +95,7 @@ single-node product contract in service-owned environment values:
 | Document and project-memory vectors | Qdrant |
 | Agent, compression, and memory tasks | Bounded queue in the API process |
 | Identity | Fixed `single_user` owner |
-| Workspace | `/workspaces` bind mount and `patch_only` |
+| Workspace | `/workspaces` bind mount and direct source edits |
 | Sandbox | Local execution inside the App container for trusted repositories |
 
 The named `local` and `production` profiles remain compatibility implementations,
@@ -289,9 +290,10 @@ The browser workspace also includes:
 - approval, input, and pause checkpoints rendered inside the matching assistant
   message, with inline approve, reject, feedback, continue, steer, pause, and cancel
   actions; terminal messages include a changed-file ledger, line counts, expandable
-  Diff, validation state, and safe revert actions. `patch_only` explicitly says the
-  real workspace is unchanged; `direct` / `worktree` show where the Run already
-  wrote and require digest confirmation to revert. Reopening a session restores its
+  Diff, validation state, and safe revert actions. Current `direct` Runs show the
+  source location already written and require digest confirmation to revert;
+  historical `patch_only` / `worktree` records retain their original presentation.
+  Reopening a session restores its
   latest Run and ChangeSet so `waiting_approval` or Sandbox-only output is not
   mistaken for a stalled or already-applied change;
 - an auto-growing conversation input with per-session unsent drafts, availability
@@ -547,14 +549,14 @@ Project memory contributes at most six current-revision active records within a
 managed knowledge base is forced to `repo`; it discovers and reads README files,
 project manifests, and entry points instead of filling a live-evidence gap with
 unrelated managed documents. `merge_evidence` preserves all provenance types before
-tool/change planning or answer generation. Before tools are built, a change Run
-freezes a `patch_only`, `direct`, or `worktree` execution root and retains exact
-tool approval, validation, bounded repair, and Diff/test artifacts. Terminal
-capture persists the full patch, pre/post hashes, and execution location as a
-ChangeSet. `patch_only` never changes the source workspace; `direct`/`worktree`
-write during approved tool execution and require live writes, a trusted editor,
-baseline conflict checks, and a mutation journal. The matching conversation
-message shows the ledger, full Diff, actual location, and digest-bound safe revert.
+tool/change planning or answer generation. Before tools are built, the current
+product freezes the registered source root as the server-selected `direct`
+execution root; neither the UI nor `POST /agent/runs` accepts a per-Run location
+choice. Exact tool approval, validation, bounded repair, and Diff/test artifacts
+remain in force. Terminal capture persists the full patch, pre/post hashes, and
+source location as an applied ChangeSet protected by baseline conflict checks, a
+mutation journal, the single-writer guard, and digest-bound safe revert. Historical
+`patch_only` and `worktree` Runs and ChangeSets remain readable.
 
 Running Agent status uses the product run store as its source of truth and adds
 the latest LangGraph checkpoint as a read-only progress overlay. The API can
@@ -875,8 +877,9 @@ the active one.
 Responses expose `context_route`, `selected_knowledge_base_ids`, and
 `context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
 optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
-The removed `repository_id` and `rag_context` Agent fields are not accepted or
-returned.
+The removed `repository_id`, `rag_context`, and per-Run `workspace_mode` Agent
+fields are not accepted. Run status still returns the server-frozen final mode and
+execution root as audit metadata.
 
 A ChangeSet is an audit and recovery boundary after tool approval. It stores the
 untruncated patch, SHA-256, changed paths, pre/post hashes, source/execution roots,
@@ -907,7 +910,8 @@ execution workspace and freezes its source root, mode, execution root, Git HEAD,
 branch, and cleanup policy in RunContext v4. Repository reads, mutations,
 commands, status, and Diff always use that same execution root. The registered
 source root remains the authorization boundary and cannot be replaced by model
-or request parameters. The modes are:
+or request parameters. The current product fixes the mode to `direct`; the
+retained audit modes are:
 
 - `patch_only`: copy regular, non-sensitive files into a disposable per-Run
   directory, export a ChangeSet at terminal state, then delete it;
@@ -925,14 +929,16 @@ durable pre-write mutation journal protect updates. `direct` has a per-Workspace
 single-writer lock, so external edits and concurrent Agent writers fail without
 overwriting content.
 
-The current product supports only `patch_only`: a Run creates a ChangeSet in an
-isolated copy and the owner reviews it before applying. Its defaults are:
+The current product supports only `direct`: after exact tool approval, the code
+Agent edits the registered source root and its terminal ChangeSet records the write
+with conflict-safe revert. The page and Run request expose no execution-location
+choice. The official settings are:
 
 ```dotenv
 CHANGE_SET_STORE=postgres
-LIVE_WORKSPACE_WRITES_ENABLED=false
-AGENT_WORKSPACE_DEFAULT_MODE=patch_only
-AGENT_WORKSPACE_ALLOWED_MODES=patch_only
+LIVE_WORKSPACE_WRITES_ENABLED=true
+AGENT_WORKSPACE_DEFAULT_MODE=direct
+AGENT_WORKSPACE_ALLOWED_MODES=direct
 CHANGE_SET_APPLY_MODE=patch_only  # historical ChangeSet apply compatibility only
 CHANGE_SET_MAX_FILES=100
 CHANGE_SET_MAX_PATCH_CHARS=1000000
@@ -940,19 +946,18 @@ CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
 
-The `direct`/`worktree` implementations, trusted-header identity, and their audit
-paths remain as compatibility code. Compose locks
-`LIVE_WORKSPACE_WRITES_ENABLED=false` and `patch_only`, so those modes are not
-exposed to current product users.
+`patch_only`, `worktree`, and historical apply remain as persistence compatibility
+code. Compose locks the only allowed mode to `direct`, and current product users
+receive neither a selector nor a per-Run override field.
 
 For `direct` and `worktree`, the ChangeSet records a write that already happened:
 it is captured as `applied` and is never applied twice. The conversation shows
 the actual source or worktree path and branch and can call
 `POST /agent/runs/{run_id}/changes/revert`. Revert revalidates the patch digest
 and post-write hashes, preserves newer user content on conflict, and is
-idempotent. `patch_only` explicitly remains unwritten and non-promotable.
-Historical ready ChangeSets retain their original apply contract without a
-database migration.
+idempotent. Historical `patch_only` records explicitly remain unwritten and
+non-promotable. Historical ready ChangeSets retain their original apply contract
+without a database migration.
 
 `SANDBOX_MODE=local` executes inside the App container and is intended only for
 repositories owned and trusted by the user. It runs an executable basename from `SANDBOX_ALLOWED_COMMANDS` with

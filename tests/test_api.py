@@ -732,10 +732,8 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
-        self.assertIn('id="agent-workspace-mode-select"', response.text)
-        self.assertIn('value="direct"', response.text)
-        self.assertIn('value="worktree"', response.text)
-        self.assertIn('value="patch_only"', response.text)
+        self.assertNotIn('id="agent-workspace-mode-select"', response.text)
+        self.assertNotIn("执行位置", response.text)
         self.assertIn('id="slash-command-menu"', response.text)
         self.assertIn('data-memory-tab="project"', response.text)
         self.assertIn('data-memory-tab="profile"', response.text)
@@ -872,7 +870,8 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn("workspace_id", script_response.text)
-        self.assertIn("workspace_mode: workspaceMode", script_response.text)
+        self.assertNotIn("workspace_mode: workspaceMode", script_response.text)
+        self.assertNotIn('$("agent-workspace-mode-select")', script_response.text)
         self.assertIn('data-inline-change-action="${recordedLive && applied ? "revert" : "apply"}"', script_response.text)
         self.assertIn("browseWorkspaceDirectories", script_response.text)
         self.assertIn("/workspace-directories", script_response.text)
@@ -956,19 +955,17 @@ Inspect the requested code before reporting findings.
                     }],
                 )
                 self.assertEqual(capabilities.json()["mcp_tools"], [])
-                self.assertEqual(
-                    capabilities.json()["allowed_workspace_modes"],
-                    ["patch_only"],
+                self.assertNotIn(
+                    "allowed_workspace_modes",
+                    capabilities.json(),
                 )
-                self.assertEqual(
-                    capabilities.json()["default_workspace_mode"],
-                    "patch_only",
+                self.assertNotIn(
+                    "default_workspace_mode",
+                    capabilities.json(),
                 )
-                self.assertIn(
-                    "outside the server allowlist",
-                    capabilities.json()["workspace_mode_unavailable_reasons"][
-                        "direct"
-                    ],
+                self.assertNotIn(
+                    "workspace_mode_unavailable_reasons",
+                    capabilities.json(),
                 )
 
                 started = client.post(
@@ -1004,7 +1001,9 @@ Inspect the requested code before reporting findings.
                     ],
                 )
 
-    def test_trusted_editor_can_select_direct_workspace_mode_via_api(self) -> None:
+    def test_agent_run_uses_server_direct_mode_and_rejects_per_run_override(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace = root / "project"
@@ -1019,11 +1018,7 @@ Inspect the requested code before reporting findings.
                 gateway_trust_secret="test-gateway-secret",
                 live_workspace_writes_enabled=True,
                 agent_workspace_default_mode="direct",
-                agent_workspace_allowed_modes=(
-                    "patch_only",
-                    "direct",
-                    "worktree",
-                ),
+                agent_workspace_allowed_modes=("direct",),
             )
             headers = {
                 "X-Authenticated-User": "editor-1",
@@ -1048,25 +1043,32 @@ Inspect the requested code before reporting findings.
                         "workspace_id": "project",
                     },
                 )
+                rejected_override = client.post(
+                    "/api/v1/agent/runs",
+                    headers=headers,
+                    json={
+                        "conversation_id": session_id,
+                        "workspace_id": "project",
+                        "workspace_mode": "patch_only",
+                        "message": "inspect app.py",
+                    },
+                )
                 started = client.post(
                     "/api/v1/agent/runs",
                     headers=headers,
                     json={
                         "conversation_id": session_id,
                         "workspace_id": "project",
-                        "workspace_mode": "direct",
                         "message": "inspect app.py",
                     },
                 )
 
                 self.assertEqual(capabilities.status_code, 200, capabilities.text)
+                self.assertNotIn("default_workspace_mode", capabilities.json())
                 self.assertEqual(
-                    capabilities.json()["default_workspace_mode"], "direct"
-                )
-                self.assertIsNone(
-                    capabilities.json()["workspace_mode_unavailable_reasons"][
-                        "direct"
-                    ]
+                    rejected_override.status_code,
+                    422,
+                    rejected_override.text,
                 )
                 self.assertEqual(started.status_code, 202, started.text)
                 self.assertEqual(started.json()["workspace_mode"], "direct")

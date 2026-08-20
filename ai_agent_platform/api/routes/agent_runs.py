@@ -91,7 +91,6 @@ def create_agent_runs_router(
                     skill_name=request.skill_name,
                     skill_arguments=tuple(request.skill_arguments),
                     preferred_tool_name=request.preferred_tool_name,
-                    workspace_mode=request.workspace_mode,
                     actor_user_id=(
                         request_user_id(http_request, settings)
                         if settings.auth_mode != "disabled"

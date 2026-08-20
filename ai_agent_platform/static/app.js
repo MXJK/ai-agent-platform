@@ -129,9 +129,6 @@ const state = {
     skill_commands: [],
     mcp_tools: [],
     diagnostics: [],
-    allowed_workspace_modes: ["patch_only"],
-    default_workspace_mode: "patch_only",
-    workspace_mode_unavailable_reasons: {},
   },
   slashCapabilityKey: "",
   slashLoading: false,
@@ -143,8 +140,6 @@ const state = {
   followConversation: true,
   currentView: "chat",
   composerMode: "chat",
-  workspaceMode: "patch_only",
-  workspaceModeLocked: false,
   chatController: null,
   agentPollGeneration: 0,
   changeSetRequestGeneration: 0,
@@ -675,64 +670,9 @@ function invalidateSlashCapabilities() {
     skill_commands: [],
     mcp_tools: [],
     diagnostics: [],
-    allowed_workspace_modes: ["patch_only"],
-    default_workspace_mode: "patch_only",
-    workspace_mode_unavailable_reasons: {},
   };
-  state.workspaceMode = "patch_only";
   state.slashLoading = false;
   state.slashError = "";
-  renderWorkspaceModeControl();
-}
-
-const WORKSPACE_MODE_COPY = {
-  direct: {
-    label: "当前源码",
-    hint: "工具、命令与 Diff 都针对注册源码根；修改会立即可见。",
-  },
-  worktree: {
-    label: "Git Worktree",
-    hint: "在服务创建并保留的干净 Git worktree 中执行，不改动当前检出。",
-  },
-  patch_only: {
-    label: "仅生成补丁",
-    hint: "在临时副本中执行；真实工作区保持不变。",
-  },
-};
-
-function renderWorkspaceModeControl() {
-  const control = $("agent-workspace-mode-control");
-  const select = $("agent-workspace-mode-select");
-  const hint = $("agent-workspace-mode-hint");
-  if (!control || !select || !hint) return;
-  control.hidden = state.composerMode !== "agent";
-  const capabilities = state.slashCapabilities || {};
-  const allowed = new Set(capabilities.allowed_workspace_modes || ["patch_only"]);
-  const reasons = capabilities.workspace_mode_unavailable_reasons || {};
-  const options = [...select.options];
-  options.forEach((option) => {
-    const reason = reasons[option.value];
-    option.disabled = !allowed.has(option.value) || Boolean(reason);
-    option.title = reason || WORKSPACE_MODE_COPY[option.value]?.hint || "";
-  });
-  const selectedOption = options.find((option) => option.value === state.workspaceMode);
-  if (!selectedOption || selectedOption.disabled) {
-    const fallback = capabilities.default_workspace_mode || "patch_only";
-    const fallbackOption = options.find(
-      (option) => option.value === fallback && !option.disabled,
-    ) || options.find((option) => !option.disabled);
-    state.workspaceMode = fallbackOption?.value || "patch_only";
-  }
-  select.value = state.workspaceMode;
-  select.disabled = state.workspaceModeLocked
-    || state.composerMode !== "agent"
-    || Boolean(state.currentSession?.archived_at)
-    || Boolean(state.chatController);
-  const selectedReason = reasons[state.workspaceMode];
-  hint.textContent = selectedReason
-    ? `不可用：${selectedReason}`
-    : WORKSPACE_MODE_COPY[state.workspaceMode]?.hint || "运行开始后将锁定本次选择。";
-  control.title = selectedReason || "运行开始后将锁定本次选择";
 }
 
 function slashQueryContext() {
@@ -901,7 +841,6 @@ async function loadSlashCapabilities() {
     state.slashLoading = true;
     const key = `${conversationId}:${workspace.id}`;
     if (state.slashCapabilityKey === key) {
-      renderWorkspaceModeControl();
       return;
     }
     const params = new URLSearchParams({
@@ -912,7 +851,6 @@ async function loadSlashCapabilities() {
     if (generation !== state.slashRequestGeneration) return;
     state.slashCapabilities = body;
     state.slashCapabilityKey = key;
-    state.workspaceMode = body.default_workspace_mode || "patch_only";
   } catch (error) {
     if (generation && generation !== state.slashRequestGeneration) return;
     state.slashError = `能力加载失败：${humanizeError(error)}`;
@@ -920,7 +858,6 @@ async function loadSlashCapabilities() {
     if (!generation || generation === state.slashRequestGeneration) {
       state.slashLoading = false;
       renderSlashCommandMenu();
-      renderWorkspaceModeControl();
     }
   }
 }
@@ -1260,7 +1197,6 @@ function setActiveWorkspace(workspaceId) {
   ) {
     loadSlashCapabilities().catch((error) => {
       state.slashError = `能力加载失败：${humanizeError(error)}`;
-      renderWorkspaceModeControl();
     });
   }
 }
@@ -1288,11 +1224,9 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("send-chat-btn").innerHTML = isAgent
     ? `交给 Agent ${iconMarkup("arrow-right")}`
     : `发送 ${iconMarkup("arrow-up")}`;
-  renderWorkspaceModeControl();
   if (state.conversationId && isAgent && workspaceIsReady(currentWorkspace())) {
     loadSlashCapabilities().catch((error) => {
       state.slashError = `能力加载失败：${humanizeError(error)}`;
-      renderWorkspaceModeControl();
     });
   }
   updateComposerAvailability();
@@ -1339,7 +1273,6 @@ function updateComposerAvailability() {
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
-  renderWorkspaceModeControl();
   $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace || empty;
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
@@ -3703,12 +3636,9 @@ async function runAgentFromComposer() {
 
   const sendButton = $("send-chat-btn");
   const modeInput = $("composer-mode-input");
-  const submittedWorkspaceMode = $("agent-workspace-mode-select").value;
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
-  state.workspaceModeLocked = true;
-  renderWorkspaceModeControl();
   clearComposerInput();
   let submitted = false;
   let assistantContent = null;
@@ -3719,7 +3649,6 @@ async function runAgentFromComposer() {
     const run = await runAgent({
       message: submission.message,
       focusFiles: [],
-      workspaceMode: submittedWorkspaceMode,
       skillName: submission.skillName,
       skillArguments: submission.skillArguments,
       preferredToolName: submission.preferredToolName,
@@ -3768,7 +3697,6 @@ async function runAgentFromComposer() {
     sendButton.disabled = false;
     sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
-    state.workspaceModeLocked = false;
     updateComposerAvailability();
   }
 }
@@ -4096,7 +4024,6 @@ function parseSseBlock(block) {
 async function runAgent({
   message = "",
   focusFiles = [],
-  workspaceMode = "patch_only",
   skillName = null,
   skillArguments = [],
   preferredToolName = null,
@@ -4125,7 +4052,6 @@ async function runAgent({
       conversation_id: conversationId,
       message: normalizedMessage,
       workspace_id: workspace.id,
-      workspace_mode: workspaceMode,
       ...optionalModelFields(),
       focus_files: focusFiles,
       ...(skillName ? {
@@ -6671,10 +6597,6 @@ function bindEvents() {
   $("stop-chat-btn").addEventListener("click", stopChat);
   $("composer-mode-input").addEventListener("change", (event) => {
     persistComposerMode(event.target.value);
-  });
-  $("agent-workspace-mode-select").addEventListener("change", (event) => {
-    state.workspaceMode = event.target.value;
-    renderWorkspaceModeControl();
   });
   $("auto-model-toggle").addEventListener("change", async (event) => {
     state.modelPreference.mode = event.target.checked ? "auto" : "manual";

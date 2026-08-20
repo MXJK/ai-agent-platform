@@ -145,7 +145,6 @@ class QueryService:
             skill_name=params.skill_name,
             skill_arguments=params.skill_arguments,
             preferred_tool_name=params.preferred_tool_name,
-            workspace_mode=params.workspace_mode,
             entrypoint_type=params.entrypoint,
             entrypoint_metadata=params.metadata_dict(),
         )
@@ -207,7 +206,6 @@ class QueryService:
         skill_name: str | None = None,
         skill_arguments: tuple[str, ...] = (),
         preferred_tool_name: str | None = None,
-        workspace_mode: str | None = None,
     ) -> AgentRunRecord:
         if mode is not None and mode not in {"auto", "manual"}:
             raise ValueError("Query mode must be auto or manual")
@@ -280,7 +278,6 @@ class QueryService:
                 skill_name=skill_name,
                 skill_arguments=skill_arguments,
                 preferred_tool_name=preferred_tool_name,
-                workspace_mode=workspace_mode,
             )
             resolved_actor = context_snapshot.identity.actor_user_id
             workspace_root = context_snapshot.project.workspace_root
@@ -438,17 +435,6 @@ class QueryService:
             model_selection=selection,
         )
         catalog = factory.effective_skills(snapshot)
-        effective_config, _config_json, _config_version = factory._workspace_config(
-            snapshot.project.workspace_root
-        )
-        workspace_modes = factory.workspace_mode_capabilities(
-            workspace_id=workspace_id,
-            actor_user_id=snapshot.identity.actor_user_id,
-            workspace_root=snapshot.project.workspace_root,
-            workspace_role=snapshot.identity.workspace_role,
-            effective_config=effective_config,
-            git_context=snapshot.project.git,
-        )
         tool_access = factory.restore_tool_access(snapshot)
         mcp_specs = sorted(
             (
@@ -495,11 +481,6 @@ class QueryService:
                     [*snapshot.instructions.diagnostics, *skill_diagnostics]
                 )
             ),
-            "allowed_workspace_modes": workspace_modes["allowed_modes"],
-            "default_workspace_mode": workspace_modes["default_mode"],
-            "workspace_mode_unavailable_reasons": workspace_modes[
-                "unavailable_reasons"
-            ],
         }
 
     def execute(

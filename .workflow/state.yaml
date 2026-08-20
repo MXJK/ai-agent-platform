@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "SINGLE-USER-WORKSPACE-OWNERSHIP-RECOVERY"
-next_action: "Refresh the browser and relink legacy unavailable roots to their /workspaces paths."
+status: "active"
+active_task: "CODE-AGENT-DIRECT-SOURCE-DEFAULT"
+next_action: "Remove per-Run workspace mode selection and lock the product to direct source execution."
 blockers: []
 last_verified_commit: "21a02f49433f198c83d56133b7481a0e22a9bad0"
-updated_at: "2026-08-20T15:09:50+08:00"
+updated_at: "2026-08-20T16:00:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

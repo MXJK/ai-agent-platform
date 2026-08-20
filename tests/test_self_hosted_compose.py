@@ -42,7 +42,9 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["NATIVE_DIRECTORY_PICKER_MODE"] == "disabled"
     assert environment["WORKSPACE_ALLOWED_ROOTS"] == "/workspaces"
     assert environment["SANDBOX_MODE"] == "local"
-    assert environment["AGENT_WORKSPACE_ALLOWED_MODES"] == "patch_only"
+    assert environment["LIVE_WORKSPACE_WRITES_ENABLED"] == "true"
+    assert environment["AGENT_WORKSPACE_DEFAULT_MODE"] == "direct"
+    assert environment["AGENT_WORKSPACE_ALLOWED_MODES"] == "direct"
     assert "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces" in app["volumes"]
     assert all("docker.sock" not in volume for volume in app["volumes"])
 

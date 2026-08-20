@@ -57,7 +57,7 @@ LLM，接入真实 Provider 前只需替换 `.env` 中的模型选择和对应 A
 `AUTH_MODE=single_user` 忽略请求体与 Header 中的用户声明，所有请求都归属固定
 `SINGLE_USER_ID=owner`，并允许 owner 管理模型和 MCP。该模式没有公网认证能力；不得把
 App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App 容器内执行，当前产品只
-支持用户自己信任的仓库，Workspace 写入默认保持 `patch_only`。
+支持用户自己信任的仓库；代码 Agent 默认直接修改登记的源码根，不再让用户选择执行位置。
 
 持久化安装从旧本地/可信网关身份切换到 `single_user` 时，启动过程会为固定 owner 补齐
 所有既有工作区（包括软移除记录）的管理员关系，同时保留旧成员和项目数据。旧记录若
@@ -125,7 +125,7 @@ Celery Worker 生命周期适配器仍保留为兼容实现，但当前 Compose 
 | 文档与项目记忆向量 | Qdrant |
 | Agent、压缩和记忆任务 | API 进程内有界队列 |
 | 身份 | 固定 `single_user` owner |
-| Workspace | `/workspaces` bind mount + `patch_only` |
+| Workspace | `/workspaces` bind mount + `direct` 源码修改 |
 | Sandbox | App 容器内本地执行，仅限可信仓库 |
 
 `local` 与 `production` 命名 profile 及其 Adapter 暂时保留为兼容实现，不再是公开启动
@@ -304,8 +304,8 @@ Token 时才作为后备。
   路径仍经过允许根校验；macOS Finder 选择器仅作为非默认本机开发兼容实现保留；
 - Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
   要求，运行中也可就地暂停、取消或发送转向；终态消息内显示修改文件、逐文件增删行、
-  可展开完整 Diff、ChangeSet 校验状态和安全回滚。`patch_only` 会明确标记“尚未写入
-  真实工作区”；`direct` / `worktree` 显示执行时已经写入的位置，回滚需二次确认摘要。
+  可展开完整 Diff、ChangeSet 校验状态和安全回滚。当前产品的 `direct` Run 会显示已经
+  写入的源码位置，回滚需二次确认摘要；历史 `patch_only` / `worktree` 记录仍按原语义显示。
   刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
   `waiting_approval` 误认为卡死，也避免误以为 Sandbox 文件已经进入真实工作区；
 - 对话输入框随内容自动增高，按会话保存未发送草稿；发送可用性会即时反映空输入、
@@ -528,12 +528,12 @@ setup_workspace
 为 3,000 字符。未显式指向知识库的通用“项目介绍”问题强制使用 `repo`，先发现并
 读取 README、项目清单和入口文件，避免无关托管文档填补源码证据真空。
 
-`merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。变更任务在 Run
-开始前冻结 `patch_only`、`direct` 或 `worktree` 执行根，继续使用精确工具审批、验证、
-有界修复以及 Diff/测试产物。终态把完整补丁、写前/写后哈希和执行位置持久化为
-ChangeSet：`patch_only` 不修改源工作区；`direct`/`worktree` 在工具执行时已经写入，
-并要求 trusted editor、真实写入开关、基线冲突检查和 mutation journal。浏览器在对应
-消息呈现文件账本、完整 Diff、实际位置和摘要绑定的安全回滚。
+`merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。当前产品的变更任务
+在 Run 开始前由服务端冻结登记源码根作为 `direct` 执行根；UI 和 `POST /agent/runs` 都
+不接受逐 Run 的执行位置选择。精确工具审批、验证、有界修复以及 Diff/测试产物继续生效。
+终态把完整补丁、写前/写后哈希和源码位置持久化为已应用 ChangeSet，并继续使用基线冲突
+检查、mutation journal、单写者锁和摘要绑定的安全回滚。底层仍可读取历史
+`patch_only` / `worktree` Run 和 ChangeSet。
 
 运行中的 Agent 状态以产品运行存储为事实源，并把最近的 LangGraph checkpoint 作为
 只读进度叠加，因此 API 可以在任务仍执行时暴露已经完成的 Trace 节点，GET 查询本身
@@ -844,8 +844,9 @@ SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接�
 
 响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
 使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和
-`score` 来源字段。已经移除的 `repository_id` 和 `rag_context` Agent 字段不会被接受
-或返回。
+`score` 来源字段。已经移除的 `repository_id`、`rag_context` 和逐 Run
+`workspace_mode` Agent 字段不会被接受；Run 状态仍返回服务端冻结的最终 mode 与
+execution root 作为审计信息。
 
 ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒绝/历史应用/回滚也进入同一
 `PermissionResolver` 的 Workspace role/root 判定，同时保留服务内纵深校验。它保存不可
@@ -872,7 +873,7 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
 每个 Run 在读取项目指令和构建工具池之前就确定一个执行工作区，并把来源根、模式、
 执行根、Git HEAD、分支和清理策略冻结到 RunContext v4。仓库读取、文件写入、命令、
 状态和 Diff 始终使用同一个执行根；登记的来源根只负责授权边界，不能由模型或请求参数
-替换。三种模式是：
+替换。当前产品固定使用 `direct`；底层保留的三种审计模式是：
 
 - `patch_only`：把普通、非敏感文件复制到每 Run 临时目录，终态导出 ChangeSet 后删除；
 - `direct`：直接在登记源码根中读取、写入和执行，修改立即对其他本机进程可见；
@@ -885,14 +886,15 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
 替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施单写者
 锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
 
-当前产品只支持 `patch_only`：Run 在隔离副本产生 ChangeSet，用户审阅后再应用。默认配置
-如下：
+当前产品只支持 `direct`：代码 Agent 经精确工具审批后直接修改登记源码根，终态
+ChangeSet 记录已经发生的写入并提供冲突安全的回滚。页面和 Run 请求都没有执行位置
+选择。官方配置如下：
 
 ```dotenv
 CHANGE_SET_STORE=postgres
-LIVE_WORKSPACE_WRITES_ENABLED=false
-AGENT_WORKSPACE_DEFAULT_MODE=patch_only
-AGENT_WORKSPACE_ALLOWED_MODES=patch_only
+LIVE_WORKSPACE_WRITES_ENABLED=true
+AGENT_WORKSPACE_DEFAULT_MODE=direct
+AGENT_WORKSPACE_ALLOWED_MODES=direct
 CHANGE_SET_APPLY_MODE=patch_only  # 仅供旧 ChangeSet apply 配置兼容
 CHANGE_SET_MAX_FILES=100
 CHANGE_SET_MAX_PATCH_CHARS=1000000
@@ -900,15 +902,14 @@ CHANGE_SET_WORKTREE_PARENT=
 CHANGE_SET_BRANCH_PREFIX=codex/
 ```
 
-`direct`/`worktree`、trusted-header 身份和对应审计实现仍保留为兼容代码，但官方 Compose
-通过环境锁定 `LIVE_WORKSPACE_WRITES_ENABLED=false` 和 `patch_only`，不会向产品用户暴露
-这些模式。
+`patch_only` / `worktree` 与历史 apply 仍保留为持久化兼容代码，但官方 Compose 把唯一
+允许模式锁定为 `direct`，不会向产品用户暴露模式选择器或逐 Run 覆盖字段。
 
 `direct`/`worktree` 的 ChangeSet 是已发生写入的审计记录，捕获时即为 `applied`，不会
 再次应用；对话会明确显示实际源码根或 worktree 路径/分支，并可调用
 `POST /agent/runs/{run_id}/changes/revert`。回滚重新校验补丁摘要和写后文件哈希，冲突时
-保留较新的用户内容，重复回滚幂等。`patch_only` 明确标记尚未写入且不能推广；旧版
-待应用 ChangeSet 仍保留原 apply 语义，不需要数据库迁移。
+保留较新的用户内容，重复回滚幂等。历史 `patch_only` 明确标记尚未写入且不能推广；
+旧版待应用 ChangeSet 仍保留原 apply 语义，不需要数据库迁移。
 
 `SANDBOX_MODE=local` 在 App 容器内部执行，只适用于用户拥有并信任的仓库。它在最小环境中执行
 `SANDBOX_ALLOWED_COMMANDS` 里的可执行文件基本名，使用固定最大超时、有界输出捕获和

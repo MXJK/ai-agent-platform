@@ -142,7 +142,6 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                 workspace_id="main",
                 actor_user_id="alice",
                 model_selection=ModelSelection(),
-                workspace_mode="direct",
                 run_id="run_direct_context",
             )
 
