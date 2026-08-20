@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "CODE-AGENT-DIRECT-SOURCE-DEFAULT"
-next_action: "Remove per-Run workspace mode selection and lock the product to direct source execution."
+next_action: "Use the Code Agent directly and review source edits and ChangeSets in the conversation."
 blockers: []
-last_verified_commit: "21a02f49433f198c83d56133b7481a0e22a9bad0"
-updated_at: "2026-08-20T16:00:00+08:00"
+last_verified_commit: "ccb4f15ac6f1a78a2b39e9720cc70c5c4006c965"
+updated_at: "2026-08-20T20:58:28+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
