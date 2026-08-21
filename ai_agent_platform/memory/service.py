@@ -15,6 +15,7 @@ from ai_agent_platform.memory.models import (
     UserMemory,
     UserMemoryEvidence,
     UserMemorySettings,
+    UserMemoryScene,
     UserProfileSnapshot,
 )
 from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
@@ -111,7 +112,11 @@ class UserMemoryService:
             content=content,
             importance=4 if explicit_global else 3,
             confidence=1.0 if explicit_global else 0.75,
-            status="active" if explicit_global else "candidate",
+            status=(
+                "active"
+                if explicit_global or settings.mode == "auto"
+                else "candidate"
+            ),
             source_kind=source_type,
             source_id=source_id,
         )
@@ -210,11 +215,80 @@ class UserMemoryService:
         current = self._require_repository().get_snapshot(user_id)
         return current or self.rebuild_profile(user_id=user_id)
 
+    def list_scenes(self, *, user_id: str) -> list[UserMemoryScene]:
+        if not self._enabled or self._repository is None:
+            return []
+        if self.get_settings(user_id=user_id).mode == "off":
+            return []
+        return self._repository.list_scenes(user_id=user_id)
+
+    def refresh_project_scene(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str,
+        workspace_title: str,
+        memories: list[object],
+    ) -> UserMemoryScene | None:
+        """Compose L2 from active L1 records, then rebuild the L3 snapshot."""
+        if not self._enabled or self.get_settings(user_id=user_id).mode == "off":
+            return None
+        repository = self._require_repository()
+        active = [item for item in memories if getattr(item, "status", None) == "active"]
+        active.sort(
+            key=lambda item: (
+                -int(getattr(item, "importance", 0)),
+                -getattr(item, "updated_at").timestamp(),
+                str(getattr(item, "id")),
+            )
+        )
+        current = repository.get_scene(user_id=user_id, workspace_id=workspace_id)
+        if not active:
+            repository.delete_scene(user_id=user_id, workspace_id=workspace_id)
+            self.rebuild_profile(user_id=user_id)
+            return None
+        source_ids = [str(getattr(item, "id")) for item in active]
+        lines = [
+            f"- [{getattr(item, 'kind')}] {getattr(item, 'title')}: {getattr(item, 'content')}"
+            for item in active
+        ]
+        content = "\n".join(lines)
+        if (
+            current is not None
+            and current.content == content
+            and current.source_memory_ids == source_ids
+            and current.title == workspace_title
+        ):
+            self.rebuild_profile(user_id=user_id)
+            return current
+        now = _now()
+        scene = UserMemoryScene(
+            id=(
+                current.id
+                if current is not None
+                else "uscene_" + hashlib.sha256(
+                    f"{user_id}:{workspace_id}".encode("utf-8")
+                ).hexdigest()[:16]
+            ),
+            user_id=user_id,
+            workspace_id=workspace_id,
+            title=workspace_title[:160] or workspace_id,
+            content=content,
+            source_memory_ids=source_ids,
+            version=(current.version + 1 if current else 1),
+            created_at=current.created_at if current else now,
+            updated_at=now,
+        )
+        repository.save_scene(scene)
+        self.rebuild_profile(user_id=user_id)
+        return scene
+
     def rebuild_profile(self, *, user_id: str) -> UserProfileSnapshot:
         repository = self._require_repository()
         current = repository.get_snapshot(user_id)
         enabled = self._enabled and self.get_settings(user_id=user_id).mode != "off"
         active = repository.list(user_id=user_id, status="active", limit=200) if enabled else []
+        scenes = repository.list_scenes(user_id=user_id) if enabled else []
         active.sort(
             key=lambda item: (
                 -item.importance,
@@ -222,7 +296,7 @@ class UserMemoryService:
                 item.id,
             )
         )
-        content, source_ids = _render_profile(active, self._max_context_chars)
+        content, source_ids = _render_profile(active, scenes, self._max_context_chars)
         snapshot = UserProfileSnapshot(
             user_id=user_id,
             version=(current.version + 1 if current else 1),
@@ -351,7 +425,11 @@ def _validate(kind: str, title: str, content: str, importance: int) -> tuple[str
     return kind, title, content, importance
 
 
-def _render_profile(memories: list[UserMemory], max_chars: int) -> tuple[str, list[str]]:
+def _render_profile(
+    memories: list[UserMemory],
+    scenes: list[UserMemoryScene],
+    max_chars: int,
+) -> tuple[str, list[str]]:
     labels = {
         "personal_constraint": "Standing constraints",
         "communication_preference": "Communication preferences",
@@ -379,6 +457,24 @@ def _render_profile(memories: list[UserMemory], max_chars: int) -> tuple[str, li
                 lines.append("")
             lines.append(f"## {label}")
             lines.extend(section)
+    scene_lines: list[str] = []
+    for scene in scenes:
+        prefix = "\n".join([*lines, "", "## Project scenes", *scene_lines])
+        heading = f"### {scene.title}\n"
+        available = max_chars - len(prefix) - len(heading) - 1
+        if available <= 0:
+            continue
+        body = scene.content
+        if len(body) > available:
+            body = body[: max(0, available - 1)].rstrip() + "…"
+        line = heading + body
+        scene_lines.append(line)
+        source_ids.append(scene.id)
+    if scene_lines:
+        if lines:
+            lines.append("")
+        lines.append("## Project scenes")
+        lines.extend(scene_lines)
     return "\n".join(lines), source_ids
 
 

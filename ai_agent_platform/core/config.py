@@ -22,9 +22,9 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "project_memory_store": "sqlite",
         "project_memory_vector_store": "sqlite",
         "project_memory_enabled": True,
-        "project_memory_mode": "review",
+        "project_memory_mode": "auto",
         "user_memory_enabled": True,
-        "user_memory_mode": "review",
+        "user_memory_mode": "auto",
         "rag_reranker_provider": "none",
         "task_queue_backend": "in_process",
     },
@@ -386,7 +386,7 @@ class Settings:
         _require_choice(
             "user_memory_mode",
             self.user_memory_mode,
-            {"off", "review"},
+            {"off", "review", "auto"},
         )
         _require_choice(
             "auth_mode",

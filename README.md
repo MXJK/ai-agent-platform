@@ -917,11 +917,11 @@ Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmp
 
 ## 项目记忆
 
-当前记忆架构明确采用 **L0 + L1 + L3**：L0 是会话摘要、最近消息和按需跨会话搜索；
-L1 是当前 Workspace/revision 的可治理项目事实；L3 是当前用户的原子事实和确定性画像
-快照。**没有实现 L2 Scene Block**：任务进度、场景与工作流状态已经由实时源码、
-`.workflow/tasks`、Agent Run、checkpoint 和 ChangeSet 表达，再维护一份场景摘要会产生
-重复事实源和陈旧风险。架构总览见
+当前记忆架构采用 **L0 → L1 → L2 → L3**：L0 保存原始消息并支持按需搜索；L1 是当前
+Workspace/revision 的原子项目事实；L2 按用户和 Workspace 将 active L1 确定性聚合为
+可追溯的项目场景；L3 再把 L2 场景与用户级 active 事实合成为有界画像。任务进度和
+执行状态仍以实时源码、`.workflow/tasks`、Agent Run、checkpoint 和 ChangeSet 为准，L2
+只总结已生效 L1，不充当第二套任务状态。架构总览见
 [`local-layered-memory-overview.drawio`](docs/architecture/local-layered-memory-overview.drawio)
 和对应的 [`PNG`](docs/architecture/local-layered-memory-overview.png)；同目录还提供上下文组装、
 写入治理和持久化三个可编辑细节图。
@@ -943,11 +943,12 @@ L1 是当前 Workspace/revision 的可治理项目事实；L3 是当前用户的
 - `off`：不抽取也不检索；
 - `shadow`：抽取待审候选，但不注入上下文；
 - `review`：只检索活跃记录，通常需要人工确认；
-- `auto`：高置信度且有权威来源的候选可以自动转为活跃状态。
+- `auto`：通过敏感信息检查和候选质量门槛的抽取结果直接转为活跃状态。
 
-用户创建的记录和明确的“记住”请求以 `1.0` 置信度直接生效。其他候选低于 `0.60`
-会被丢弃，`0.60` 至 `0.84` 保持待审；在 `auto` 模式下，权威且不低于 `0.85` 的内容
-可以生效。只有助手推断的内容永远不会自动生效。
+用户创建的记录和明确的“记住”请求以 `1.0` 置信度直接生效。自动抽取结果低于
+`PROJECT_MEMORY_CANDIDATE_THRESHOLD` 会被丢弃；`review` 下保留为 candidate，`auto`
+下直接 active。切换到 `auto` 时，当前 revision 已有 candidate 也会被激活。敏感信息、
+凭据式内容和 Prompt Injection 仍会在任何模式下被拒绝。
 
 规范化内容相同会追加证据；权威冲突会替代旧记录，不确定冲突继续作为候选。带源码
 依据的可变事实会在注入前检查哈希，源码变化后转为 `stale`。长期未确认的记录只会
@@ -991,18 +992,21 @@ PATCH、confirm 和 reject 必须携带当前 `version`。Viewer 可以检索和
 Token 前发送 `memory_context`，并在响应完成后排队抽取任务。Agent 在上下文路由后
 执行 `retrieve_project_memory`，只有运行成功完成后才按 `run_id` 排队抽取。
 
-### L0 对话搜索与 L3 用户画像
+### L0 对话搜索与 L2/L3 画像流水线
 
-L0 不复制第二份聊天日志：SQLite 直接为原始 `messages` 建 FTS5 索引，搜索始终按当前
-用户隔离，并可进一步限定 workspace/session。历史命中不会自动跨会话注入；只有用户
-或 Agent 显式调用 `GET /api/v1/memory/conversations/search` 或只读工具
-`memory.search_conversations` 才会读取。
+L0 不复制第二份聊天日志。SQLite 对原始 `messages` 使用写入/查询对齐的 CJK n-gram
+FTS5 索引，升级到 schema v2 时会重建旧索引；PostgreSQL 使用受转义的 `ILIKE` 子串
+检索。空关键词返回最近消息，因此前端进入 L0 即可看到内容；非空查询、最近消息列表
+都始终按当前用户隔离，并可进一步限定 workspace/session。历史命中不会自动跨会话
+注入。
 
 L3 使用独立的 `UserMemory` 领域，固定为 `profile_fact`、
 `communication_preference`、`tooling_preference`、`workflow_preference`、
 `standing_goal` 和 `personal_constraint`。手工记录和明确的全局“记住/所有项目/以后”
-请求直接 active；其他自动提炼只进入 candidate。系统只从 active 事实按重要性和最近
-确认时间确定性重建最多 1,500 字符的 `UserProfileSnapshot`，不调用 LLM。Chat 与 Agent
+请求直接 active；普通偏好在 `auto` 下也直接 active，在 `review` 下保留为 candidate。
+每次 L1 新增、编辑、状态变化或删除都会异步重建对应的 `UserMemoryScene`（L2），再从
+L2 场景和 active 用户事实确定性重建最多 1,500 字符的 `UserProfileSnapshot`（L3），
+不调用 LLM。Chat 与 Agent
 始终把已确认小画像标记为不可信历史偏好；它不能覆盖当前请求、系统/项目指令、权限或
 实时源码。Agent 的助手结果只可提炼 L1，不能推导 L3。凭据、完整环境变量、权限提升
 要求和 Prompt Injection 会在 L1/L3 写入前被拒绝。
@@ -1011,6 +1015,7 @@ L3 管理接口：
 
 ```text
 GET/PATCH /api/v1/users/me/memory-settings
+GET       /api/v1/users/me/memory-scenes
 GET/POST  /api/v1/users/me/memories
 GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
 POST      /api/v1/users/me/memories/{memory_id}/confirm
@@ -1020,18 +1025,18 @@ POST      /api/v1/users/me/profile/rebuild
 GET       /api/v1/memory/conversations/search
 ```
 
-前端“记忆工作台”采用与后端层级一致的 L1/L3/L0 三页信息架构：项目记忆和个人事实
+前端“记忆工作台”采用与后端层级一致的 L1/L2/L3/L0 信息架构：项目记忆和个人事实
 均使用左侧资产列表、右侧详情治理的双栏布局，显示 active/candidate 统计、状态/类型
 筛选、证据、版本和可用操作；个人画像单独预览模型实际会看到的确定性快照；对话搜索
-展示用户隔离的命中列表与原文详情。页面显式标出“L2 不存储”，并为加载、空结果和失败
-提供独立状态，避免把未确认候选误解为已注入记忆。
+展示用户隔离的最近消息、搜索命中与原文详情；画像页同时展示 L2 场景及其 L1 来源数。
+L1 固定自动提炼，前端不再暴露工作区模式、手动重建索引或刷新控件；进入页面即自动加载。
 
-当前 Docker MVP 默认启用项目记忆，并使用 PostgreSQL 保存事实、证据、任务与 Outbox，
-使用 Qdrant 保存可重建向量；跨项目用户记忆暂时关闭：
+当前 Docker MVP 默认启用完整流水线：PostgreSQL 保存 L0 会话和 L1 事实、证据、任务与
+Outbox，Qdrant 保存可重建 L1 向量，SQLite v2 保存 L2 场景与 L3 用户画像：
 
 ```dotenv
 PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_MODE=auto
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
@@ -1044,15 +1049,14 @@ PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
 PROJECT_MEMORY_RECENCY_WEIGHT=0.20
 PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
 PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
-USER_MEMORY_ENABLED=false
-USER_MEMORY_MODE=off
+USER_MEMORY_ENABLED=true
+USER_MEMORY_MODE=auto
 USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
 
 默认 [`.env.example`](.env.example) 使用官方单实例 Compose 组合。
-[`.env.local-memory.example`](.env.local-memory.example) 与 SQLite Repository 仍保留为兼容
-和聚焦测试实现，不属于当前产品的数据路径，也不提供与 PostgreSQL/Qdrant 之间的数据
-导入。
+[`.env.local-memory.example`](.env.local-memory.example) 提供全部结构化数据均落 SQLite 的
+单进程变体；Compose 则只把用户级 L2/L3 放在挂载到 `app_state` 的 SQLite 中。
 
 会话压缩单独配置：
 
@@ -1214,7 +1218,9 @@ WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_MODE=auto
+USER_MEMORY_ENABLED=true
+USER_MEMORY_MODE=auto
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/workspaces

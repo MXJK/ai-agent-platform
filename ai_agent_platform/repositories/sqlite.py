@@ -32,6 +32,7 @@ from ai_agent_platform.repositories.memory import (
     SessionNotFoundError,
 )
 from ai_agent_platform.repositories.postgres import _agent_result_from_json
+from ai_agent_platform.text_search import fts_index_text, fts_match_query
 
 
 class SQLiteSessionRepository:
@@ -273,7 +274,7 @@ class SQLiteSessionRepository:
         if self.database.fts5_available:
             conn.execute(
                 "INSERT INTO messages_fts(message_id, session_id, content) VALUES (?, ?, ?)",
-                (message.id, session_id, content),
+                (message.id, session_id, fts_index_text(content)),
             )
         title_sql = ""
         params: list[object] = [_iso(now)]
@@ -437,8 +438,6 @@ class SQLiteSessionRepository:
         limit: int = 10,
     ) -> list[ConversationMemoryHit]:
         text = query.strip()
-        if not text:
-            return []
         filters = ["s.user_id = ?"]
         params: list[object] = [user_id]
         if workspace_id is not None:
@@ -447,8 +446,8 @@ class SQLiteSessionRepository:
         if session_id is not None:
             filters.append("m.session_id = ?")
             params.append(session_id)
-        if self.database.fts5_available:
-            match = _fts_query(text)
+        if text and self.database.fts5_available:
+            match = fts_match_query(text)
             if not match:
                 return []
             sql = f"""
@@ -475,8 +474,9 @@ class SQLiteSessionRepository:
                 )
                 for row in rows
             ]
-        filters.append("LOWER(m.content) LIKE ? ESCAPE '\\'")
-        params.append(f"%{_escape_like(text.casefold())}%")
+        if text:
+            filters.append("LOWER(m.content) LIKE ? ESCAPE '\\'")
+            params.append(f"%{_escape_like(text.casefold())}%")
         params.append(max(1, min(limit, 50)))
         with self.database.connect() as conn:
             rows = conn.execute(
@@ -904,11 +904,6 @@ def _derive_title(content: str) -> str:
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-def _fts_query(value: str) -> str:
-    tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", value.casefold())
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens[:24])
 
 
 def _excerpt(content: str, query: str, limit: int = 240) -> str:

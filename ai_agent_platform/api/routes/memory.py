@@ -17,6 +17,8 @@ from ai_agent_platform.schemas.memory import (
     UserMemoryResponse,
     UserMemorySettingsResponse,
     UserMemorySettingsUpdateRequest,
+    UserMemorySceneResponse,
+    UserMemoryScenesResponse,
     UserMemoryUpdateRequest,
     UserMemoryVersionRequest,
     UserProfileSnapshotResponse,
@@ -37,7 +39,7 @@ def create_memory_router(
     )
     def search_conversations(
         request: Request,
-        q: str = Query(min_length=1, max_length=500),
+        q: str = Query(default="", max_length=500),
         workspace_id: str | None = Query(default=None, max_length=128),
         session_id: str | None = Query(default=None, max_length=64),
         limit: int = Query(default=10, ge=1, le=50),
@@ -101,6 +103,19 @@ def create_memory_router(
                         kind=kind,
                         limit=limit,
                         offset=offset,
+                    )
+                ]
+            )
+        )
+
+    @router.get("/users/me/memory-scenes", response_model=UserMemoryScenesResponse)
+    def list_memory_scenes(request: Request) -> UserMemoryScenesResponse:
+        return _handle(
+            lambda: UserMemoryScenesResponse(
+                scenes=[
+                    UserMemorySceneResponse.from_domain(item)
+                    for item in user_memory_service.list_scenes(
+                        user_id=request_user_id(request, settings)
                     )
                 ]
             )

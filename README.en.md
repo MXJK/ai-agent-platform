@@ -987,13 +987,13 @@ tmpfs limits.
 
 ## Project memory
 
-The memory architecture deliberately implements **L0 + L1 + L3**. L0 is the
-rolling conversation summary, recent messages, and explicit cross-session
-search; L1 is governed project knowledge for the current workspace/revision;
-L3 is user-scoped atomic facts plus a deterministic profile snapshot. There is
-**no L2 Scene Block**: live source, `.workflow/tasks`, Agent Runs, checkpoints,
-and ChangeSets already own task/scene state, so another generated scene record
-would duplicate facts and become stale. See the editable
+The memory architecture implements **L0 → L1 → L2 → L3**. L0 stores original
+messages and supports explicit search; L1 is governed project knowledge for the
+current workspace/revision; L2 deterministically composes active L1 records into
+a user/workspace scene; and L3 combines those scenes with active user facts into
+a bounded profile. Live source, `.workflow/tasks`, Agent Runs, checkpoints, and
+ChangeSets remain authoritative for task progress; L2 only summarizes active L1.
+See the editable
 [`architecture overview`](docs/architecture/local-layered-memory-overview.drawio)
 and its [`PNG`](docs/architecture/local-layered-memory-overview.png); the same
 directory also contains editable context-assembly, write-governance, and
@@ -1010,13 +1010,12 @@ Modes are:
 - `off`: no extraction or retrieval;
 - `shadow`: extract review candidates but do not inject them;
 - `review`: retrieve only active records, normally after human confirmation;
-- `auto`: high-confidence authoritative candidates may become active.
+- `auto`: extracted candidates that pass safety and quality gates become active.
 
 User-created records and explicit “remember/记住” requests are active with
-confidence `1.0`. Other candidates below `0.60` are discarded, values from
-`0.60` through `0.84` stay reviewable, and authoritative values at or above
-`0.85` may become active in `auto` mode. Assistant-only inference never becomes
-active automatically. Equal canonical content adds evidence; authoritative
+confidence `1.0`. Extractions below `PROJECT_MEMORY_CANDIDATE_THRESHOLD` are
+discarded; review mode keeps eligible candidates reviewable, while auto mode
+activates them directly and promotes existing candidates when selected. Equal canonical content adds evidence; authoritative
 conflicts supersede the old record, while uncertain conflicts remain
 candidates. Source-backed mutable facts are hash-checked before injection and
 become `stale` after the source changes. Long-unconfirmed records are
@@ -1066,21 +1065,24 @@ Chat emits `memory_context` before answer tokens and enqueues post-response
 extraction. Agent runs execute `retrieve_project_memory` after context routing
 and enqueue extraction by `run_id` only after a completed result.
 
-### L0 conversation search and L3 user profile
+### L0 conversation search and the L2/L3 profile pipeline
 
 L0 indexes the original `messages` table rather than copying another log.
-Search is always user-scoped, can optionally constrain workspace/session, and
-is never injected across conversations automatically. It is available through
+SQLite uses aligned CJK n-grams on writes and queries and rebuilds old FTS data
+during the v2 migration; PostgreSQL uses escaped `ILIKE` substring matching.
+An empty query lists recent messages. Both listing and search are user-scoped,
+can constrain workspace/session, and are never injected automatically. They are available through
 `GET /api/v1/memory/conversations/search` and the read-only
 `memory.search_conversations` tool.
 
 L3 is a separate `UserMemory` domain with `profile_fact`,
 `communication_preference`, `tooling_preference`, `workflow_preference`,
 `standing_goal`, and `personal_constraint`. Manual and explicitly global
-remember requests become active immediately; other automatic extractions are
-review candidates. `UserProfileSnapshot` is rebuilt without an LLM from active
-facts, ordered by importance and confirmation recency, and defaults to 1,500
-characters. Chat and Agent inject it only as untrusted historical preferences;
+remember requests become active immediately; ordinary preferences are active in
+auto mode and candidates in review mode. Every L1 mutation asynchronously
+rebuilds the workspace's `UserMemoryScene` (L2), then `UserProfileSnapshot` (L3)
+is rebuilt without an LLM from L2 scenes and active user facts, within the
+configured character budget. Chat and Agent inject it only as untrusted historical preferences;
 it cannot override the current request, policy, project instructions,
 permissions, or live evidence. Agent answer output can produce L1 evidence but
 never L3 inference. Credentials, complete environment values, privilege
@@ -1088,6 +1090,7 @@ escalation requests, and prompt injection are rejected before L1/L3 storage.
 
 ```text
 GET/PATCH /api/v1/users/me/memory-settings
+GET       /api/v1/users/me/memory-scenes
 GET/POST  /api/v1/users/me/memories
 GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
 POST      /api/v1/users/me/memories/{memory_id}/confirm
@@ -1097,21 +1100,23 @@ POST      /api/v1/users/me/profile/rebuild
 GET       /api/v1/memory/conversations/search
 ```
 
-The Memory Workbench mirrors the backend layers with dedicated L1, L3, and L0
+The Memory Workbench mirrors the backend layers with L1, L2/L3, and L0
 views. Project and user facts use an asset-list/detail-governance split with
 active/candidate counts, status and kind filters, evidence, versions, and
 contextual actions. The profile view previews the exact deterministic snapshot
 visible to the model, while conversation search pairs user-scoped hits with a
-full message detail panel. The UI explicitly marks L2 as not stored and keeps
-loading, empty, and error states distinct so review candidates are not mistaken
-for injected memory.
+full message detail panel and automatically loads recent messages. The profile
+view exposes L2 scenes and their L1 source counts. L1 extraction is fixed to the
+automatic path, so the UI no longer exposes workspace mode, manual reindex, or
+refresh controls; opening the view loads it automatically.
 
-The Docker MVP enables project memory with PostgreSQL facts/evidence/jobs/Outbox
-and rebuildable Qdrant vectors. Cross-project user memory remains disabled:
+The Docker MVP enables the complete pipeline: PostgreSQL stores L0/L1 facts,
+Qdrant stores rebuildable L1 vectors, and a mounted SQLite v2 database stores
+L2 scenes and L3 profiles:
 
 ```dotenv
 PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_MODE=auto
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
 PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
@@ -1124,16 +1129,14 @@ PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
 PROJECT_MEMORY_RECENCY_WEIGHT=0.20
 PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
 PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
-USER_MEMORY_ENABLED=false
-USER_MEMORY_MODE=off
+USER_MEMORY_ENABLED=true
+USER_MEMORY_MODE=auto
 USER_PROFILE_MAX_CONTEXT_CHARS=1500
 ```
 
 The default [`.env.example`](.env.example) describes the official single-node
 Compose combination. [`.env.local-memory.example`](.env.local-memory.example)
-and the SQLite repositories remain focused compatibility/test implementations;
-they are not the current product data path and provide no import into
-PostgreSQL/Qdrant.
+provides a single-process variant where all structured state uses SQLite.
 
 Conversation compression is configured independently:
 
@@ -1353,7 +1356,9 @@ WORKSPACE_STORE=postgres
 LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=review
+PROJECT_MEMORY_MODE=auto
+USER_MEMORY_ENABLED=true
+USER_MEMORY_MODE=auto
 PROJECT_MEMORY_STORE=postgres
 PROJECT_MEMORY_VECTOR_STORE=qdrant
 WORKSPACE_ALLOWED_ROOTS=/workspaces

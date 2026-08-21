@@ -354,6 +354,53 @@ class ApplicationFactory:
                 default_mode=settings.user_memory_mode,
                 max_context_chars=settings.user_profile_max_context_chars,
             )
+
+            def refresh_layered_memory(
+                *, workspace_id: str, actor_user_id: str
+            ) -> None:
+                workspace = container.workspace_service.get(workspace_id)
+                memories = []
+                while True:
+                    page = container.project_memory_service.list_memories(
+                        workspace_id=workspace_id,
+                        actor_user_id=actor_user_id,
+                        status="active",
+                        limit=200,
+                        offset=len(memories),
+                    )
+                    memories.extend(page)
+                    if len(page) < 200:
+                        break
+                container.user_memory_service.refresh_project_scene(
+                    user_id=actor_user_id,
+                    workspace_id=workspace_id,
+                    workspace_title=Path(workspace.root_path).name or workspace.id,
+                    memories=memories,
+                )
+
+            container.project_memory_service.set_layered_memory_submitter(
+                lambda workspace_id, actor_user_id: container.task_queue.submit(
+                    "layered_memory_refresh",
+                    refresh_layered_memory,
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                )
+            )
+            if settings.auth_mode == "single_user":
+                for workspace in container.workspace_service.list():
+                    if settings.project_memory_mode == "auto":
+                        container.project_memory_service.update_settings(
+                            workspace_id=workspace.id,
+                            actor_user_id=settings.single_user_id.strip(),
+                            mode="auto",
+                        )
+                    if container.user_memory_service.enabled:
+                        container.task_queue.submit(
+                            "layered_memory_startup_refresh",
+                            refresh_layered_memory,
+                            workspace_id=workspace.id,
+                            actor_user_id=settings.single_user_id.strip(),
+                        )
             container.permission_resolver = PermissionResolver()
             container.execution_workspace_runtime = ExecutionWorkspaceRuntime(
                 runtime_parent=settings.sandbox_workspace_parent,

@@ -20,6 +20,7 @@ from ai_agent_platform.project_memory.models import (
     ROLE_RANK,
     WorkspaceMember,
 )
+from ai_agent_platform.text_search import fts_index_text, fts_match_query
 
 
 class SQLiteProjectMemoryRepository:
@@ -267,7 +268,7 @@ class SQLiteProjectMemoryRepository:
     ) -> list[tuple[str, float]]:
         now = _iso(_now())
         if self.database.fts5_available:
-            match = _fts_query(query)
+            match = fts_match_query(query)
             if not match:
                 return []
             with self.database.connect() as conn:
@@ -445,7 +446,12 @@ class SQLiteProjectMemoryRepository:
         conn.execute("DELETE FROM project_memories_fts WHERE memory_id = ?", (memory.id,))
         conn.execute(
             "INSERT INTO project_memories_fts(memory_id, title, kind, content) VALUES (?, ?, ?, ?)",
-            (memory.id, memory.title, memory.kind, memory.content),
+            (
+                memory.id,
+                fts_index_text(memory.title),
+                fts_index_text(memory.kind),
+                fts_index_text(memory.content),
+            ),
         )
 
 
@@ -543,10 +549,6 @@ def _dt(value: object | None) -> datetime | None:
 
 def _tokens(value: str) -> set[str]:
     return set(re.findall(r"[a-zA-Z0-9_]+|[\u4e00-\u9fff]", value.casefold()))
-
-
-def _fts_query(value: str) -> str:
-    return " OR ".join(f'"{token}"' for token in sorted(_tokens(value))[:24])
 
 
 __all__ = ["SQLiteProjectMemoryRepository"]

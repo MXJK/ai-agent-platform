@@ -8,6 +8,7 @@ from .models import (
     UserMemory,
     UserMemoryEvidence,
     UserMemorySettings,
+    UserMemoryScene,
     UserProfileSnapshot,
 )
 from .service import (
@@ -25,6 +26,7 @@ __all__ = [
     "UserMemory",
     "UserMemoryEvidence",
     "UserMemorySettings",
+    "UserMemoryScene",
     "UserMemoryConflictError",
     "UserMemoryNotFoundError",
     "UserMemoryService",

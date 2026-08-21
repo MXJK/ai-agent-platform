@@ -5910,6 +5910,7 @@ body.inspector-hidden .inspector {
 
 .memory-layer-node.l0 { color: var(--blue); }
 .memory-layer-node.l1 { color: var(--signal); }
+.memory-layer-node.l2 { color: var(--amber); }
 .memory-layer-node.l3 { color: var(--brand-strong); }
 
 .memory-layer-gap {

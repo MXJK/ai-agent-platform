@@ -95,6 +95,7 @@ class ProjectMemoryService:
         self._recency_half_life_days = recency_half_life_days
         self._metrics = metrics or MetricsRegistry()
         self._index_outbox_submitter: Callable[[str], None] | None = None
+        self._layered_memory_submitter: Callable[[str, str], None] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -105,6 +106,12 @@ class ProjectMemoryService:
     ) -> None:
         """Connect the service to an asynchronous outbox consumer."""
         self._index_outbox_submitter = submitter
+
+    def set_layered_memory_submitter(
+        self, submitter: Callable[[str, str], None] | None
+    ) -> None:
+        """Connect active L1 changes to the L2/L3 composer."""
+        self._layered_memory_submitter = submitter
 
     def resume_index_outbox(self) -> bool:
         """Schedule durable pending index work after a process restart."""
@@ -162,11 +169,29 @@ class ProjectMemoryService:
         self._require_role(workspace_id, actor_user_id, "admin")
         if mode not in MEMORY_MODES:
             raise MemoryValidationError(f"unsupported memory mode: {mode}")
-        return self._repository.update_settings(
+        settings = self._repository.update_settings(
             workspace_id=workspace_id,
             mode=mode,
             updated_by=actor_user_id,
         )
+        if mode == "auto":
+            while True:
+                candidates = self.list_memories(
+                    workspace_id=workspace_id,
+                    actor_user_id=actor_user_id,
+                    status="candidate",
+                    limit=200,
+                )
+                if not candidates:
+                    break
+                for memory in candidates:
+                    self.confirm(
+                        workspace_id=workspace_id,
+                        memory_id=memory.id,
+                        actor_user_id=actor_user_id,
+                        expected_version=memory.version,
+                    )
+        return settings
 
     def create_manual(
         self,
@@ -232,6 +257,7 @@ class ProjectMemoryService:
             high_authority=True,
         )
         self._schedule_index_outbox(f"{stored.id}:{stored.version}")
+        self._schedule_layered_memory(workspace_id, actor_user_id)
         return stored
 
     def get_memory(
@@ -353,6 +379,7 @@ class ProjectMemoryService:
         if stored is None:
             raise MemoryConflictError("memory version changed")
         self._schedule_index_outbox(f"{stored.id}:{stored.version}")
+        self._schedule_layered_memory(workspace_id, actor_user_id)
         return stored
 
     def confirm(
@@ -414,6 +441,7 @@ class ProjectMemoryService:
         if stored is None:
             raise MemoryConflictError("memory version changed")
         self._schedule_index_outbox(f"{stored.id}:{stored.version}")
+        self._schedule_layered_memory(workspace_id, actor_user_id)
         return stored
 
     def _copy_to_current_revision(
@@ -465,6 +493,7 @@ class ProjectMemoryService:
             high_authority=True,
         )
         self._schedule_index_outbox(f"{stored.id}:{stored.version}")
+        self._schedule_layered_memory(current.workspace_id, actor_user_id)
         return stored
 
     def reject(
@@ -504,6 +533,7 @@ class ProjectMemoryService:
         if stored is None:
             raise MemoryConflictError("memory version changed")
         self._schedule_index_outbox(f"{stored.id}:{stored.version}")
+        self._schedule_layered_memory(workspace_id, actor_user_id)
         return stored
 
     def forget(
@@ -528,6 +558,7 @@ class ProjectMemoryService:
         if not deleted:
             raise MemoryNotFoundError(memory_id)
         self._schedule_index_outbox(f"{current.id}:delete:{current.version + 1}")
+        self._schedule_layered_memory(workspace_id, actor_user_id)
 
     def retrieve(
         self,
@@ -755,6 +786,8 @@ class ProjectMemoryService:
             )
             self._repository.update_extraction_job(completed)
             self._schedule_index_outbox(completed.id)
+            if stored:
+                self._schedule_layered_memory(workspace_id, actor_user_id)
             self._metrics.increment("project_memory_extractions_completed_total")
             self._metrics.increment(
                 "project_memory_candidates_total", len(stored)
@@ -921,6 +954,17 @@ class ProjectMemoryService:
                 self._repository.count_pending_index_events(),
             )
 
+    def _schedule_layered_memory(
+        self, workspace_id: str, actor_user_id: str
+    ) -> None:
+        submitter = self._layered_memory_submitter
+        if submitter is None:
+            return
+        try:
+            submitter(workspace_id, actor_user_id)
+        except Exception:
+            self._metrics.increment("layered_memory_enqueue_failed_total")
+
     def _ingest_candidate(
         self,
         *,
@@ -936,28 +980,7 @@ class ProjectMemoryService:
         if candidate.confidence < self._candidate_threshold:
             return None
         _reject_sensitive_or_instructional(candidate.content)
-        high_authority = candidate.authority in {
-            "explicit_user",
-            "user_statement",
-            "verified_agent",
-        }
-        auto_active = (
-            mode == "auto"
-            and high_authority
-            and candidate.confidence >= self._auto_threshold
-        )
-        if candidate.authority == "explicit_user":
-            auto_active = True
-        if (
-            auto_active
-            and candidate.authority == "verified_agent"
-            and candidate.kind == "architecture_fact"
-            and not any(
-                item.get("path") and item.get("content_hash")
-                for item in source_evidence
-            )
-        ):
-            auto_active = False
+        auto_active = mode == "auto" or candidate.authority == "explicit_user"
         status = "active" if auto_active else "candidate"
         now = _now()
         memory = ProjectMemory(

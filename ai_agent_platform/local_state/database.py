@@ -9,8 +9,10 @@ import sqlite3
 from threading import Lock
 from typing import Iterator
 
+from ai_agent_platform.text_search import fts_index_text
 
-SCHEMA_VERSION = 1
+
+SCHEMA_VERSION = 2
 
 
 class LocalStateDatabase:
@@ -44,9 +46,15 @@ class LocalStateDatabase:
                 if current < 1:
                     conn.executescript(_SCHEMA_V1)
                     self._initialize_fts(conn)
-                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                    conn.execute("PRAGMA user_version = 1")
+                    current = 1
                 else:
                     self.fts5_available = _table_exists(conn, "messages_fts")
+                if current < 2:
+                    conn.executescript(_SCHEMA_V2)
+                    if self.fts5_available:
+                        self._rebuild_fts(conn)
+                    conn.execute("PRAGMA user_version = 2")
                 conn.commit()
             if self.path.exists():
                 try:
@@ -64,6 +72,31 @@ class LocalStateDatabase:
             self.fts5_available = False
         else:
             self.fts5_available = True
+
+    def _rebuild_fts(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM messages_fts")
+        conn.executemany(
+            "INSERT INTO messages_fts(message_id, session_id, content) VALUES (?, ?, ?)",
+            [
+                (row[0], row[1], fts_index_text(str(row[2])))
+                for row in conn.execute("SELECT id, session_id, content FROM messages")
+            ],
+        )
+        conn.execute("DELETE FROM project_memories_fts")
+        conn.executemany(
+            "INSERT INTO project_memories_fts(memory_id, title, kind, content) VALUES (?, ?, ?, ?)",
+            [
+                (
+                    row[0],
+                    fts_index_text(str(row[1])),
+                    fts_index_text(str(row[2])),
+                    fts_index_text(str(row[3])),
+                )
+                for row in conn.execute(
+                    "SELECT id, title, kind, content FROM project_memories"
+                )
+            ],
+        )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -411,6 +444,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS project_memories_fts USING fts5(
     content,
     tokenize='unicode61'
 );
+"""
+
+
+_SCHEMA_V2 = r"""
+CREATE TABLE IF NOT EXISTS user_memory_scenes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source_memory_ids_json TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, workspace_id)
+);
+CREATE INDEX IF NOT EXISTS idx_local_user_memory_scenes_scope
+    ON user_memory_scenes(user_id, updated_at DESC, id DESC);
 """
 
 

@@ -73,6 +73,37 @@ def candidate(
 
 
 class ProjectMemoryServiceTests(unittest.TestCase):
+    def test_active_l1_mutations_schedule_l2_l3_refresh(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service, _, _ = self._service(root, extractor=StaticExtractor([]))
+            service._workspace_service.register(  # noqa: SLF001
+                workspace_id="project", root_path=str(workspace)
+            )
+            service.ensure_workspace_admin(workspace_id="project", actor_user_id="alice")
+            refreshes: list[tuple[str, str]] = []
+            service.set_layered_memory_submitter(
+                lambda workspace_id, user_id: refreshes.append((workspace_id, user_id))
+            )
+
+            memory = service.create_manual(
+                workspace_id="project",
+                actor_user_id="alice",
+                kind="decision",
+                title="Storage",
+                content="Use SQLite for local scenes.",
+                importance=4,
+            )
+            service.forget(
+                workspace_id="project",
+                memory_id=memory.id,
+                actor_user_id="alice",
+            )
+
+            self.assertEqual(refreshes, [("project", "alice"), ("project", "alice")])
+
     def test_retrieval_weights_relevance_recency_and_importance_before_top_k(
         self,
     ) -> None:
@@ -595,7 +626,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
             assert job is not None
             self.assertEqual(job.status, "completed")
             self.assertEqual(job.candidate_count, 2)
-            self.assertEqual(job.active_count, 1)
+            self.assertEqual(job.active_count, 2)
             self.assertIsNone(
                 service.extract_and_store(
                     workspace_id="project",
@@ -613,7 +644,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
             )
             self.assertEqual(
                 sorted(item.status for item in memories),
-                ["active", "candidate"],
+                ["active", "active"],
             )
 
             extractor.candidates = [
@@ -674,8 +705,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
                     workspace_id="project",
                     actor_user_id="alice",
                 )
-                if item.status == "candidate"
-                and item.kind == "decision"
+                if item.kind == "decision" and "review it manually" in item.content
             )
             with self.assertRaises(MemoryConflictError):
                 service.confirm(

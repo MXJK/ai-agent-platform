@@ -10,6 +10,7 @@ from ai_agent_platform.memory import (
     UserMemory,
     UserMemoryEvidence,
     UserMemorySettings,
+    UserMemoryScene,
     UserProfileSnapshot,
 )
 
@@ -23,7 +24,7 @@ UserMemoryKind = Literal[
     "personal_constraint",
 ]
 UserMemoryStatus = Literal["candidate", "active", "superseded", "rejected"]
-UserMemoryMode = Literal["off", "review"]
+UserMemoryMode = Literal["off", "review", "auto"]
 
 
 class ConversationMemoryHitResponse(BaseModel):
@@ -137,6 +138,34 @@ class UserMemorySettingsUpdateRequest(BaseModel):
     mode: UserMemoryMode
 
 
+class UserMemorySceneResponse(BaseModel):
+    id: str
+    workspace_id: str
+    title: str
+    content: str
+    source_memory_ids: list[str]
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, value: UserMemoryScene) -> "UserMemorySceneResponse":
+        return cls(
+            id=value.id,
+            workspace_id=value.workspace_id,
+            title=value.title,
+            content=value.content,
+            source_memory_ids=value.source_memory_ids,
+            version=value.version,
+            created_at=value.created_at,
+            updated_at=value.updated_at,
+        )
+
+
+class UserMemoryScenesResponse(BaseModel):
+    scenes: list[UserMemorySceneResponse]
+
+
 class UserProfileSnapshotResponse(BaseModel):
     version: int
     content: str
@@ -161,6 +190,8 @@ __all__ = [
     "UserMemoryResponse",
     "UserMemorySettingsResponse",
     "UserMemorySettingsUpdateRequest",
+    "UserMemorySceneResponse",
+    "UserMemoryScenesResponse",
     "UserMemoryUpdateRequest",
     "UserMemoryVersionRequest",
     "UserProfileSnapshotResponse",

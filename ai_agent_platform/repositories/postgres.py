@@ -33,6 +33,7 @@ from ai_agent_platform.integrations.rag import (
     RetrievedDocument,
 )
 from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.memory import ConversationMemoryHit
 from ai_agent_platform.repositories.memory import (
     SessionArchivedError,
     SessionNotFoundError,
@@ -366,6 +367,54 @@ class PostgresSessionRepository:
                 (session_id,),
             ).fetchall()
         return [_message_from_row(row) for row in rows]
+
+    def search_conversations(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        workspace_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10,
+    ) -> list[ConversationMemoryHit]:
+        text = query.strip()
+        filters = ["s.user_id = %s"]
+        params: list[Any] = [user_id]
+        if workspace_id is not None:
+            filters.append("s.workspace_id = %s")
+            params.append(workspace_id)
+        if session_id is not None:
+            filters.append("m.session_id = %s")
+            params.append(session_id)
+        if text:
+            filters.append("m.content ILIKE %s ESCAPE '\\'")
+            params.append(f"%{_escape_like(text)}%")
+        params.append(max(1, min(limit, 50)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT m.id, m.session_id, s.workspace_id, m.role,
+                       m.content, m.created_at
+                FROM messages m
+                JOIN sessions s ON s.id = m.session_id
+                WHERE {' AND '.join(filters)}
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            ConversationMemoryHit(
+                message_id=str(row[0]),
+                session_id=str(row[1]),
+                workspace_id=str(row[2]) if row[2] is not None else None,
+                role=str(row[3]),
+                excerpt=_conversation_excerpt(str(row[4]), text),
+                created_at=row[5],
+                score=1.0,
+            )
+            for row in rows
+        ]
 
     def get_conversation_summary(
         self, session_id: str
@@ -1786,6 +1835,18 @@ def _derive_session_title(content: str) -> str:
 
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _conversation_excerpt(content: str, query: str, limit: int = 240) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= limit:
+        return compact
+    index = compact.casefold().find(query.casefold()) if query else 0
+    start = max(0, index - limit // 3) if index >= 0 else 0
+    text = compact[start : start + limit]
+    return ("…" if start else "") + text + (
+        "…" if start + limit < len(compact) else ""
+    )
 
 
 def _message_from_row(row: tuple[Any, ...]) -> Message:

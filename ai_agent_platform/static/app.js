@@ -94,6 +94,7 @@ const state = {
   selectedMemoryId: "",
   projectMemoryRequestGeneration: 0,
   userMemories: [],
+  userMemoryScenes: [],
   selectedUserMemoryId: "",
   userMemoryRequestGeneration: 0,
   conversationMemoryHits: [],
@@ -5427,16 +5428,6 @@ function renderMemoryJobs(jobs) {
     .join("");
 }
 
-async function loadMemorySettings() {
-  const workspaceId = requireActiveWorkspace();
-  const body = await fetchJson(
-    `/workspaces/${encodeURIComponent(workspaceId)}/memory-settings`,
-  );
-  $("memory-mode-input").value = body.mode;
-  setMemoryRuntimeStatus(`L1 已连接 · ${body.mode}`);
-  return body;
-}
-
 async function listProjectMemories() {
   if (!workspaceIsReady(currentWorkspace())) {
     state.projectMemories = [];
@@ -5479,28 +5470,12 @@ async function refreshProjectMemory() {
     return;
   }
   try {
-    await Promise.all([loadMemorySettings(), listProjectMemories()]);
+    await listProjectMemories();
+    setMemoryRuntimeStatus("L1 自动提炼已连接");
   } catch (error) {
     $("memory-list").setAttribute("aria-busy", "false");
     $("memory-list").innerHTML = '<div class="memory-empty error"><strong>项目记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
     setMemoryRuntimeStatus("项目记忆加载失败", "error");
-    showToast(humanizeError(error), "error");
-  }
-}
-
-async function saveMemoryMode() {
-  try {
-    const workspaceId = requireActiveWorkspace();
-    const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(workspaceId)}/memory-settings`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ mode: $("memory-mode-input").value }),
-      },
-    );
-    setMemoryRuntimeStatus(`L1 已连接 · ${body.mode}`);
-    showToast("项目记忆模式已更新");
-  } catch (error) {
     showToast(humanizeError(error), "error");
   }
 }
@@ -5594,19 +5569,6 @@ async function forgetProjectMemory() {
   }
 }
 
-async function reindexProjectMemories() {
-  try {
-    const workspaceId = requireActiveWorkspace();
-    const body = await fetchJson(
-      `/workspaces/${encodeURIComponent(workspaceId)}/memories/reindex`,
-      { method: "POST", body: "{}" },
-    );
-    showToast(`已提交 ${body.queued_count || 0} 条索引事件`);
-  } catch (error) {
-    showToast(humanizeError(error), "error");
-  }
-}
-
 function setMemoryTab(tabName, { focus = false } = {}) {
   const allowed = new Set(["project", "profile", "conversations"]);
   const tab = allowed.has(tabName) ? tabName : "project";
@@ -5630,7 +5592,7 @@ function refreshMemoryWorkbench() {
   if (state.activeMemoryTab === "project") {
     return refreshProjectMemory();
   }
-  return Promise.resolve();
+  return searchConversationMemory();
 }
 
 function userMemoryPayload() {
@@ -5731,8 +5693,22 @@ function syncUserMemoryActions() {
 
 function renderUserProfile(profile) {
   $("user-profile-preview").innerHTML = profile.content
-    ? `<div class="memory-profile-meta"><span>画像 v${escapeHtml(profile.version)}</span><span>${escapeHtml(profile.source_memory_ids.length)} 条已确认事实</span><span>${escapeHtml(formatDate(profile.updated_at))}</span></div><div class="markdown-body">${renderMarkdown(profile.content)}</div>`
+    ? `<div class="memory-profile-meta"><span>画像 v${escapeHtml(profile.version)}</span><span>${escapeHtml(profile.source_memory_ids.length)} 个 L1/L2 来源</span><span>${escapeHtml(formatDate(profile.updated_at))}</span></div><div class="markdown-body">${renderMarkdown(profile.content)}</div>`
     : '<div class="memory-empty"><strong>暂无已确认画像</strong><p>确认一条个人事实后，这里会显示模型可见的确定性快照。</p></div>';
+}
+
+function renderUserMemoryScenes(scenes) {
+  state.userMemoryScenes = scenes;
+  $("user-memory-scene-count").textContent = scenes.length;
+  $("user-memory-scenes").innerHTML = scenes.length
+    ? scenes.map((scene) => `
+      <article class="memory-asset-row">
+        <span class="memory-asset-row-head"><strong>${escapeHtml(scene.title)}</strong><span class="memory-status-pill active">L2 · v${escapeHtml(scene.version)}</span></span>
+        <span class="memory-asset-row-body">${escapeHtml(truncate(scene.content, 220))}</span>
+        <span class="memory-asset-row-meta"><span>${escapeHtml(scene.workspace_id)}</span><span>${escapeHtml(scene.source_memory_ids.length)} 条 L1 来源</span><span>${escapeHtml(formatDate(scene.updated_at))}</span></span>
+      </article>
+    `).join("")
+    : '<div class="memory-empty"><strong>暂无项目场景</strong><p>创建或自动提炼一条 L1 后会自动生成。</p></div>';
 }
 
 async function listUserMemories() {
@@ -5757,14 +5733,16 @@ async function listUserMemories() {
 
 async function refreshUserMemory() {
   try {
-    const [settings, profile] = await Promise.all([
+    const [settings, profile, scenes] = await Promise.all([
       fetchJson("/users/me/memory-settings"),
       fetchJson("/users/me/profile"),
+      fetchJson("/users/me/memory-scenes"),
       listUserMemories(),
     ]);
     $("user-memory-mode-input").value = settings.mode;
     setMemoryRuntimeStatus(`L3 已连接 · ${settings.mode}`);
     renderUserProfile(profile);
+    renderUserMemoryScenes(scenes.scenes || []);
   } catch (error) {
     $("user-memory-list").setAttribute("aria-busy", "false");
     $("user-memory-list").innerHTML = '<div class="memory-empty error"><strong>个人记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
@@ -5932,11 +5910,8 @@ function renderConversationMemoryHits(hits, { initial = false } = {}) {
 
 async function searchConversationMemory() {
   const query = $("conversation-memory-query").value.trim();
-  if (!query) {
-    showToast("请输入搜索关键词", "warning");
-    return;
-  }
-  const params = new URLSearchParams({ q: query, limit: "30" });
+  const params = new URLSearchParams({ limit: "30" });
+  if (query) params.set("q", query);
   const sessionId = $("conversation-memory-session").value.trim();
   if (sessionId) params.set("session_id", sessionId);
   if ($("conversation-memory-current-workspace").checked) {
@@ -5955,7 +5930,7 @@ async function searchConversationMemory() {
     $("conversation-memory-results").setAttribute("aria-busy", "false");
     state.selectedConversationMemoryHit = -1;
     renderConversationMemoryHits(body.hits || []);
-    setMemoryRuntimeStatus(`L0 搜索完成 · ${(body.hits || []).length} 条`);
+    setMemoryRuntimeStatus(`L0 ${query ? "搜索完成" : "最近消息"} · ${(body.hits || []).length} 条`);
   } catch (error) {
     if (generation !== state.conversationMemoryRequestGeneration) return;
     $("conversation-memory-results").setAttribute("aria-busy", "false");
@@ -6841,13 +6816,10 @@ function bindEvents() {
       }
     });
   });
-  $("refresh-memory-btn").addEventListener("click", refreshProjectMemory);
   $("new-project-memory-btn").addEventListener("click", () => {
     clearMemorySelection();
     $("memory-title-input").focus();
   });
-  $("save-memory-mode-btn").addEventListener("click", saveMemoryMode);
-  $("reindex-memory-btn").addEventListener("click", reindexProjectMemories);
   $("create-memory-btn").addEventListener("click", createProjectMemory);
   $("update-memory-btn").addEventListener("click", updateProjectMemory);
   $("confirm-memory-btn").addEventListener("click", () =>
@@ -6904,8 +6876,7 @@ function bindEvents() {
     $("conversation-memory-query").value = "";
     $("conversation-memory-session").value = "";
     state.selectedConversationMemoryHit = -1;
-    renderConversationMemoryHits([], { initial: true });
-    setMemoryRuntimeStatus("L0 按需搜索已就绪");
+    searchConversationMemory();
   });
   $("conversation-memory-query").addEventListener("keydown", (event) => {
     if (event.key === "Enter") searchConversationMemory();

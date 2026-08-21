@@ -128,7 +128,7 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
         with database.connect() as connection:
             assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
             assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
 
         with pytest.raises(RuntimeError):
             with database.transaction(immediate=True) as connection:
@@ -197,6 +197,28 @@ def test_l0_search_is_user_scoped_persists_and_falls_back_to_like() -> None:
             ),
         )
         assert result["count"] == 1
+
+
+def test_l0_search_indexes_chinese_and_lists_recent_messages_without_query() -> None:
+    with TemporaryDirectory() as root:
+        sessions = SQLiteSessionRepository(database=_database(root))
+        first = sessions.create_session("user-a")
+        second = sessions.create_session("user-b")
+        sessions.add_message(
+            session_id=first.id,
+            role="user",
+            content="请帮我做一个五子棋游戏",
+        )
+        sessions.add_message(
+            session_id=second.id,
+            role="user",
+            content="五子棋是另一个用户的消息",
+        )
+
+        hits = sessions.search_conversations(user_id="user-a", query="五子棋")
+        assert [item.session_id for item in hits] == [first.id]
+        recent = sessions.search_conversations(user_id="user-a", query="")
+        assert [item.session_id for item in recent] == [first.id]
 
 
 def test_sqlite_project_memory_scopes_lexical_and_vector_results() -> None:
@@ -326,6 +348,42 @@ def test_l3_routing_governance_profile_budget_and_complete_forget() -> None:
         assert service.get_profile(user_id="user-a").content == ""
 
 
+def test_l1_refresh_builds_l2_scene_and_l3_profile() -> None:
+    with TemporaryDirectory() as root:
+        repository = SQLiteUserMemoryRepository(database=_database(root))
+        service = UserMemoryService(
+            repository=repository,
+            enabled=True,
+            default_mode="auto",
+            max_context_chars=200,
+        )
+        scene = service.refresh_project_scene(
+            user_id="user-a",
+            workspace_id="workspace-a",
+            workspace_title="Game project",
+            memories=[_project_memory(content="项目使用 Python 和 SQLite；" * 30)],
+        )
+
+        assert scene is not None
+        assert scene.workspace_id == "workspace-a"
+        assert "Python" in scene.content
+        assert service.list_scenes(user_id="user-a") == [scene]
+        profile = service.get_profile(user_id="user-a")
+        assert "Project scenes" in profile.content
+        assert "Python" in profile.content
+        assert scene.id in profile.source_memory_ids
+        assert len(profile.content) <= 200
+
+        service.refresh_project_scene(
+            user_id="user-a",
+            workspace_id="workspace-a",
+            workspace_title="Game project",
+            memories=[],
+        )
+        assert service.list_scenes(user_id="user-a") == []
+        assert "Python" not in service.get_profile(user_id="user-a").content
+
+
 def test_sqlite_query_start_rolls_back_run_when_message_fails() -> None:
     with TemporaryDirectory() as root:
         database = _database(root)
@@ -380,6 +438,23 @@ def test_local_memory_api_and_state_survive_restart() -> None:
                 "/api/v1/workspaces/project",
                 json={"root_path": str(workspace)},
             ).status_code == 200
+            project_memory = client.post(
+                "/api/v1/workspaces/project/memories",
+                json={
+                    "kind": "architecture_fact",
+                    "title": "本地存储",
+                    "content": "项目使用 SQLite 保存本地状态",
+                    "importance": 4,
+                },
+            )
+            assert project_memory.status_code == 201
+            scenes: list[dict] = []
+            for _ in range(100):
+                scenes = client.get("/api/v1/users/me/memory-scenes").json()["scenes"]
+                if scenes:
+                    break
+            assert scenes and "SQLite" in scenes[0]["content"]
+            assert "SQLite" in client.get("/api/v1/users/me/profile").json()["content"]
             created = client.post(
                 "/api/v1/users/me/memories",
                 json={

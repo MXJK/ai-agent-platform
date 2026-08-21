@@ -12,6 +12,7 @@ from ai_agent_platform.memory.models import (
     UserMemory,
     UserMemoryEvidence,
     UserMemorySettings,
+    UserMemoryScene,
     UserProfileSnapshot,
 )
 
@@ -151,6 +152,47 @@ class SQLiteUserMemoryRepository:
             updated_at=_dt(row["updated_at"]),
         )
 
+    def get_scene(self, *, user_id: str, workspace_id: str) -> UserMemoryScene | None:
+        with self.database.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_memory_scenes WHERE user_id = ? AND workspace_id = ?",
+                (user_id, workspace_id),
+            ).fetchone()
+        return _scene_from_row(row) if row is not None else None
+
+    def list_scenes(self, *, user_id: str) -> list[UserMemoryScene]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_memory_scenes WHERE user_id = ? "
+                "ORDER BY updated_at DESC, id DESC",
+                (user_id,),
+            ).fetchall()
+        return [_scene_from_row(row) for row in rows]
+
+    def save_scene(self, scene: UserMemoryScene) -> UserMemoryScene:
+        with self.database.transaction(immediate=True) as conn:
+            conn.execute(
+                "INSERT INTO user_memory_scenes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, workspace_id) DO UPDATE SET "
+                "id=excluded.id, title=excluded.title, content=excluded.content, "
+                "source_memory_ids_json=excluded.source_memory_ids_json, "
+                "version=excluded.version, updated_at=excluded.updated_at",
+                (
+                    scene.id, scene.user_id, scene.workspace_id, scene.title,
+                    scene.content, json.dumps(scene.source_memory_ids), scene.version,
+                    _iso(scene.created_at), _iso(scene.updated_at),
+                ),
+            )
+        return scene
+
+    def delete_scene(self, *, user_id: str, workspace_id: str) -> bool:
+        with self.database.transaction(immediate=True) as conn:
+            cursor = conn.execute(
+                "DELETE FROM user_memory_scenes WHERE user_id = ? AND workspace_id = ?",
+                (user_id, workspace_id),
+            )
+        return cursor.rowcount > 0
+
     def save_snapshot(self, snapshot: UserProfileSnapshot) -> UserProfileSnapshot:
         with self.database.transaction(immediate=True) as conn:
             conn.execute(
@@ -206,6 +248,17 @@ def _evidence_from_row(row: sqlite3.Row) -> UserMemoryEvidence:
         id=str(row["id"]), memory_id=str(row["memory_id"]),
         source_kind=str(row["source_kind"]), source_id=str(row["source_id"]),
         excerpt=row["excerpt"], created_at=_dt(row["created_at"]),
+    )
+
+
+def _scene_from_row(row: sqlite3.Row) -> UserMemoryScene:
+    return UserMemoryScene(
+        id=str(row["id"]), user_id=str(row["user_id"]),
+        workspace_id=str(row["workspace_id"]), title=str(row["title"]),
+        content=str(row["content"]),
+        source_memory_ids=list(json.loads(str(row["source_memory_ids_json"]))),
+        version=int(row["version"]), created_at=_dt(row["created_at"]),
+        updated_at=_dt(row["updated_at"]),
     )
 
 

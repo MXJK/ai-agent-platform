@@ -17,7 +17,7 @@ USER_MEMORY_KINDS = frozenset(
 USER_MEMORY_STATUSES = frozenset(
     {"candidate", "active", "superseded", "rejected"}
 )
-USER_MEMORY_MODES = frozenset({"off", "review"})
+USER_MEMORY_MODES = frozenset({"off", "review", "auto"})
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,19 @@ class UserMemorySettings:
 
 
 @dataclass(frozen=True)
+class UserMemoryScene:
+    id: str
+    user_id: str
+    workspace_id: str
+    title: str
+    content: str
+    source_memory_ids: list[str]
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class UserProfileSnapshot:
     user_id: str
     version: int
@@ -85,5 +98,6 @@ __all__ = [
     "UserMemory",
     "UserMemoryEvidence",
     "UserMemorySettings",
+    "UserMemoryScene",
     "UserProfileSnapshot",
 ]

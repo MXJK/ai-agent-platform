@@ -724,11 +724,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260818-memory-workbench-2',
+            '/static/styles.css?v=20260821-layered-memory-4',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260818-memory-workbench-2',
+            '/static/app.js?v=20260821-layered-memory-4',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -740,9 +740,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('data-memory-tab="conversations"', response.text)
         self.assertIn('class="memory-layer-rail"', response.text)
         self.assertIn('id="new-project-memory-btn"', response.text)
+        self.assertNotIn('id="memory-mode-input"', response.text)
+        self.assertNotIn('id="save-memory-mode-btn"', response.text)
+        self.assertNotIn('id="reindex-memory-btn"', response.text)
+        self.assertNotIn('id="refresh-memory-btn"', response.text)
+        self.assertNotIn("CURRENT WORKSPACE", response.text)
         self.assertIn('id="new-user-memory-btn"', response.text)
         self.assertIn('id="conversation-memory-detail"', response.text)
-        self.assertIn("L2 不存储", response.text)
+        self.assertIn("L2 PROJECT SCENES", response.text)
         self.assertIn('id="slash-command-options"', response.text)
         self.assertIn('id="jump-to-latest-btn"', response.text)
         self.assertIn('aria-autocomplete="list"', response.text)

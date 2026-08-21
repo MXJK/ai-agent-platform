@@ -38,7 +38,9 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.project_memory_vector_store, "qdrant")
         self.assertEqual(settings.task_queue_backend, "in_process")
         self.assertTrue(settings.project_memory_enabled)
-        self.assertFalse(settings.user_memory_enabled)
+        self.assertTrue(settings.user_memory_enabled)
+        self.assertEqual(settings.project_memory_mode, "auto")
+        self.assertEqual(settings.user_memory_mode, "auto")
         self.assertEqual(settings.auth_mode, "single_user")
         self.assertEqual(settings.single_user_id, "owner")
         self.assertEqual(settings.native_directory_picker_mode, "disabled")
@@ -75,7 +77,7 @@ class ConfigResolverTests(unittest.TestCase):
             "trusted_local_gateway",
         )
 
-    def test_local_memory_profile_is_complete_and_enables_review_mode(self) -> None:
+    def test_local_memory_profile_is_complete_and_enables_auto_pipeline(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.local-memory.example"
 
         resolved = ConfigResolver.from_default_locations(
@@ -91,9 +93,9 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.project_memory_store, "sqlite")
         self.assertEqual(settings.project_memory_vector_store, "sqlite")
         self.assertTrue(settings.project_memory_enabled)
-        self.assertEqual(settings.project_memory_mode, "review")
+        self.assertEqual(settings.project_memory_mode, "auto")
         self.assertTrue(settings.user_memory_enabled)
-        self.assertEqual(settings.user_memory_mode, "review")
+        self.assertEqual(settings.user_memory_mode, "auto")
         self.assertEqual(settings.task_queue_backend, "in_process")
         self.assertEqual(settings.model_registry_store, "memory")
         self.assertEqual(settings.change_set_store, "memory")

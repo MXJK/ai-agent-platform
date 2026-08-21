@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260818-memory-workbench-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260821-layered-memory-4" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -450,32 +450,11 @@
           </div>
 
           <section id="memory-project-panel" role="tabpanel" aria-labelledby="memory-project-tab" data-memory-tab-panel="project">
-            <article class="surface memory-command-bar">
-              <div class="memory-command-copy">
-                <span class="step-kicker">CURRENT WORKSPACE</span>
-                <h2>项目事实与决策</h2>
-                <p>只把稳定、可复用的事实带入当前 revision；候选内容必须先审核。</p>
-              </div>
-              <div class="memory-command-controls">
-                <label class="memory-mode-control" for="memory-mode-input">工作区模式
-                  <select id="memory-mode-input">
-                    <option value="off">off · 关闭</option>
-                    <option value="shadow">shadow · 只提炼</option>
-                    <option value="review">review · 审核后生效</option>
-                    <option value="auto">auto · 高置信度生效</option>
-                  </select>
-                </label>
-                <button id="save-memory-mode-btn" class="button secondary" type="button">保存模式</button>
-                <button id="reindex-memory-btn" class="button ghost" type="button">重建索引</button>
-                <button id="refresh-memory-btn" class="button ghost" type="button">刷新</button>
-              </div>
-            </article>
-
             <div class="memory-layer-rail" aria-label="本地分层记忆边界">
               <div class="memory-layer-node l0"><span>L0</span><strong>对话原文</strong><small>保存消息；跨会话只按需搜索</small></div>
               <div class="memory-layer-node l1"><span>L1</span><strong>项目原子记忆</strong><small><b id="memory-project-active-count">0</b> 已生效 · <b id="memory-project-candidate-count">0</b> 待审核</small></div>
-              <div class="memory-layer-gap"><span>L2 不存储</span><small>任务状态以源码、Run 与 checkpoint 为准</small></div>
-              <div class="memory-layer-node l3"><span>L3</span><strong>个人画像</strong><small>只注入已确认的跨项目偏好</small></div>
+              <div class="memory-layer-node l2"><span>L2</span><strong>项目场景</strong><small>L1 变更后自动聚合，可追溯到原子记忆</small></div>
+              <div class="memory-layer-node l3"><span>L3</span><strong>个人画像</strong><small>由个人事实与 L2 场景自动重建</small></div>
             </div>
 
             <div class="memory-split-layout">
@@ -524,13 +503,18 @@
 
           <section id="memory-profile-panel" role="tabpanel" aria-labelledby="memory-profile-tab" data-memory-tab-panel="profile" hidden>
             <article class="surface memory-command-bar">
-              <div class="memory-command-copy"><span class="step-kicker">PERSONAL MEMORY</span><h2>跨项目偏好与长期事实</h2><p>只有 active 原子事实会进入画像；画像可解释、可重建、可完整遗忘。</p></div>
+              <div class="memory-command-copy"><span class="step-kicker">L2 → L3</span><h2>项目场景与个人画像</h2><p>active L1 自动聚合为 L2 场景，再与个人事实一起生成可解释、可重建的 L3 画像。</p></div>
               <div class="memory-command-controls">
-                <label class="memory-mode-control" for="user-memory-mode-input">个人记忆模式<select id="user-memory-mode-input"><option value="off">off · 关闭</option><option value="review">review · 候选需确认</option></select></label>
+                <label class="memory-mode-control" for="user-memory-mode-input">个人记忆模式<select id="user-memory-mode-input"><option value="off">off · 关闭</option><option value="review">review · 候选需确认</option><option value="auto">auto · 自动生效</option></select></label>
                 <button id="save-user-memory-mode-btn" class="button secondary" type="button">保存模式</button>
                 <button id="rebuild-profile-btn" class="button ghost" type="button">重建画像</button>
                 <button id="refresh-user-memory-btn" class="button ghost" type="button">刷新</button>
               </div>
+            </article>
+
+            <article class="surface memory-profile-snapshot">
+              <div class="memory-pane-heading"><div><span class="step-kicker">L2 PROJECT SCENES</span><h2>自动聚合的项目场景</h2><p>每个 Workspace 一条场景，来源是当前 revision 的 active L1。</p></div><span id="user-memory-scene-count" class="memory-pane-count">0</span></div>
+              <div id="user-memory-scenes" class="memory-asset-list"><div class="memory-empty"><strong>暂无项目场景</strong><p>创建或自动提炼一条 L1 后会自动生成。</p></div></div>
             </article>
 
             <article class="surface memory-profile-snapshot">
@@ -582,7 +566,7 @@
             <div class="memory-conversation-layout">
               <aside class="surface memory-list-pane" aria-labelledby="conversation-memory-list-title">
                 <div class="memory-pane-heading"><div><span class="step-kicker">SEARCH RESULTS</span><h2 id="conversation-memory-list-title">匹配消息</h2></div><span id="conversation-memory-count" class="memory-pane-count">0</span></div>
-                <div id="conversation-memory-results" class="memory-asset-list" aria-live="polite"><div class="memory-empty"><strong>输入关键词开始搜索</strong><p>可选限定当前 Workspace 或指定 Session。</p></div></div>
+                <div id="conversation-memory-results" class="memory-asset-list" aria-live="polite"><div class="memory-empty"><strong>正在加载最近消息</strong><p>也可输入关键词，并限定 Workspace 或 Session。</p></div></div>
               </aside>
               <article id="conversation-memory-detail" class="surface memory-conversation-detail" aria-live="polite">
                 <div class="memory-empty"><strong>选择一条历史消息</strong><p>这里会显示角色、时间、会话范围和匹配正文。</p></div>
@@ -1011,6 +995,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260818-memory-workbench-2" defer></script>
+    <script src="/static/app.js?v=20260821-layered-memory-4" defer></script>
   </body>
 </html>

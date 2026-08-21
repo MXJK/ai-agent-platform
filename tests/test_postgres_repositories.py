@@ -35,6 +35,31 @@ from ai_agent_platform.repositories.project_memory import (
 
 
 class PostgresRepositoryTests(unittest.TestCase):
+    def test_conversation_memory_search_is_user_scoped_and_supports_recent_listing(self) -> None:
+        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        row = ("msg_1", "sess_1", "workspace_1", "user", "请帮我做一个五子棋游戏", now)
+        connection = FakeConnection([[row], [row]])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresSessionRepository(database_url="postgresql://test")
+            repository._connect = lambda: connection
+            hits = repository.search_conversations(
+                user_id="alice", query="五子棋", workspace_id="workspace_1"
+            )
+            recent = repository.search_conversations(user_id="alice", query="")
+
+        self.assertEqual(hits[0].message_id, "msg_1")
+        self.assertEqual(recent[0].session_id, "sess_1")
+        search_sql, search_params = connection.calls[0]
+        self.assertIn("s.user_id = %s", search_sql)
+        self.assertIn("m.content ILIKE %s", search_sql)
+        self.assertEqual(search_params, ("alice", "workspace_1", "%五子棋%", 10))
+        recent_sql, recent_params = connection.calls[1]
+        self.assertNotIn("m.content ILIKE", recent_sql)
+        self.assertEqual(recent_params, ("alice", 10))
+
     def test_change_set_repository_persists_and_cas_updates_status(self) -> None:
         now = datetime(2026, 8, 9, tzinfo=timezone.utc)
         record = ChangeSetRecord(
