@@ -105,6 +105,17 @@ _LLM_USAGE_ACCUMULATOR: ContextVar[LLMUsageAccumulator | None] = ContextVar(
     "llm_usage_accumulator",
     default=None,
 )
+_PROVIDER_ERROR_DETAIL_MAX_CHARS = 400
+_PROVIDER_ERROR_SECRET = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|token|password|secret)\b"
+    r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
+)
+_PROVIDER_ERROR_BEARER = re.compile(
+    r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"
+)
+_PROVIDER_ERROR_KEY = re.compile(
+    r"\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{12,}\b"
+)
 
 
 @contextmanager
@@ -2097,8 +2108,10 @@ class LLMClient:
                     retryable = response.status_code in {408, 409, 429} or (
                         response.status_code >= 500
                     )
+                    detail = _safe_provider_error_detail(response)
                     raise LLMProviderError(
-                        f"llm provider returned HTTP {response.status_code}",
+                        f"llm provider returned HTTP {response.status_code}"
+                        + (f": {detail}" if detail else ""),
                         retryable=retryable,
                         code=_http_error_code(response.status_code),
                     )
@@ -2455,6 +2468,31 @@ def _http_error_code(status_code: int) -> str:
     if status_code == 429:
         return "rate_limit"
     return "llm_http_error"
+
+
+def _safe_provider_error_detail(response: Any) -> str:
+    """Return one bounded, credential-redacted provider error message."""
+
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        detail = error.get("message")
+    elif isinstance(error, str):
+        detail = error
+    else:
+        detail = payload.get("message")
+    if not isinstance(detail, str):
+        return ""
+    safe = " ".join(detail.split())
+    safe = _PROVIDER_ERROR_SECRET.sub(r"\1=[REDACTED]", safe)
+    safe = _PROVIDER_ERROR_BEARER.sub("Bearer [REDACTED]", safe)
+    safe = _PROVIDER_ERROR_KEY.sub("[REDACTED]", safe)
+    return safe[:_PROVIDER_ERROR_DETAIL_MAX_CHARS].strip()
 
 
 def _parse_sse_event(event_name: str, data_lines: list[str], parser):
@@ -3004,6 +3042,14 @@ def _deepseek_tool_messages(
             )
         if tool_calls:
             item["tool_calls"] = tool_calls
+            if role == "assistant":
+                # DeepSeek thinking models validate every assistant tool-call
+                # turn in the replayed history. Runtime-synthesized turns have
+                # no private reasoning to preserve, but must still carry the
+                # field; an empty value is the provider-supported sentinel.
+                item["reasoning_content"] = str(
+                    message.get("reasoning_content") or ""
+                )
         converted.append(item)
     return converted
 

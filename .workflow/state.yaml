@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "FRONTEND-ONLY-MODEL-REGISTRATION"
-next_action: "Review and commit the verified diff; register or remove future Providers only through Model Management"
+active_task: "PRESERVE-SYNTHETIC-TOOL-REASONING"
+next_action: "Review and commit the verified provider tool-history compatibility fix"
 blockers: []
 last_verified_commit: "ccb4f15ac6f1a78a2b39e9720cc70c5c4006c965"
-updated_at: "2026-08-20T23:40:41+08:00"
+updated_at: "2026-08-21T09:02:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -21,10 +21,13 @@ from ai_agent_platform.integrations.llm import (
     LLMProviderError,
     LLMToolDecision,
     LLMUsage,
+    _anthropic_tool_messages,
+    _deepseek_tool_messages,
     _effective_model_output_limit,
-    _json_arguments,
     collect_llm_usage,
     _google_tool_contents,
+    _json_arguments,
+    _openai_tool_input,
 )
 from ai_agent_platform.integrations.model_router import (
     ModelCapabilities,
@@ -47,6 +50,40 @@ def _tool_spec(name: str = "repo.read_file") -> ToolSpec:
         output_schema={"type": "object"},
         provider="local",
     )
+
+
+def _runtime_artifact_messages() -> list[dict[str, object]]:
+    return [
+        {"role": "user", "content": "continue after collecting artifacts"},
+        {
+            "role": "assistant",
+            "content": "Collecting runtime-managed change artifacts.",
+            "tool_calls": [
+                {
+                    "call_id": "runtime_status",
+                    "name": "sandbox.workspace_status",
+                    "arguments": {},
+                },
+                {
+                    "call_id": "runtime_diff",
+                    "name": "sandbox.git_diff",
+                    "arguments": {},
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "call_id": "runtime_status",
+            "name": "sandbox.workspace_status",
+            "content": {"ok": True, "result": {"changed_files": ["index.html"]}},
+        },
+        {
+            "role": "tool",
+            "call_id": "runtime_diff",
+            "name": "sandbox.git_diff",
+            "content": {"ok": True, "result": {"diff": "+<title>Game</title>"}},
+        },
+    ]
 
 
 class NativeProviderMappingTests(unittest.TestCase):
@@ -74,6 +111,106 @@ class NativeProviderMappingTests(unittest.TestCase):
             ),
             500,
         )
+
+    def test_runtime_artifact_tool_history_is_safe_for_every_provider(self) -> None:
+        messages = _runtime_artifact_messages()
+        aliases = {
+            "sandbox.workspace_status": "sandbox_workspace_status",
+            "sandbox.git_diff": "sandbox_git_diff",
+        }
+
+        openai_items = _openai_tool_input(messages, aliases)
+        openai_calls = [
+            item for item in openai_items if item.get("type") == "function_call"
+        ]
+        self.assertEqual(
+            [item["name"] for item in openai_calls],
+            ["sandbox_workspace_status", "sandbox_git_diff"],
+        )
+        self.assertEqual(
+            [
+                item["call_id"]
+                for item in openai_items
+                if item.get("type") == "function_call_output"
+            ],
+            ["runtime_status", "runtime_diff"],
+        )
+
+        anthropic_messages = _anthropic_tool_messages(messages, aliases)
+        anthropic_assistant = anthropic_messages[1]
+        self.assertEqual(anthropic_assistant["role"], "assistant")
+        self.assertEqual(
+            [
+                block["name"]
+                for block in anthropic_assistant["content"]
+                if block["type"] == "tool_use"
+            ],
+            ["sandbox_workspace_status", "sandbox_git_diff"],
+        )
+        self.assertEqual(
+            [block["tool_use_id"] for block in anthropic_messages[2]["content"]],
+            ["runtime_status", "runtime_diff"],
+        )
+
+        deepseek_messages = _deepseek_tool_messages(messages, aliases)
+        deepseek_assistant = deepseek_messages[1]
+        self.assertEqual(deepseek_assistant["reasoning_content"], "")
+        self.assertEqual(
+            [item["function"]["name"] for item in deepseek_assistant["tool_calls"]],
+            ["sandbox_workspace_status", "sandbox_git_diff"],
+        )
+
+        google_contents = _google_tool_contents(messages, types, aliases)
+        google_parts = [part for content in google_contents for part in content.parts]
+        self.assertTrue(
+            any("runtime_status" in (part.text or "") for part in google_parts)
+        )
+        self.assertTrue(all(part.function_call is None for part in google_parts))
+        self.assertTrue(all(part.function_response is None for part in google_parts))
+
+    def test_http_provider_error_keeps_safe_detail_and_redacts_credentials(self) -> None:
+        class FakeResponse:
+            status_code = 400
+
+            @staticmethod
+            def json():
+                return {
+                    "error": {
+                        "message": (
+                            "The `reasoning_content` field is required; "
+                            "api_key=diagnostic-placeholder"
+                        )
+                    }
+                }
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            @staticmethod
+            def post(url, *, headers, json):
+                del url, headers, json
+                return FakeResponse()
+
+        client = LLMClient(Settings())
+        with (
+            patch("ai_agent_platform.integrations.llm.httpx.Client", return_value=FakeClient()),
+            self.assertRaises(LLMProviderError) as raised,
+        ):
+            client._post_json(
+                "https://provider.example/v1/messages",
+                headers={},
+                payload={"messages": []},
+            )
+
+        self.assertIn("HTTP 400", str(raised.exception))
+        self.assertIn("reasoning_content", str(raised.exception))
+        self.assertIn("api_key=[REDACTED]", str(raised.exception))
+        self.assertNotIn("diagnostic-placeholder", str(raised.exception))
+        self.assertEqual(raised.exception.code, "llm_http_error")
 
     def test_malformed_tool_arguments_expose_safe_retry_diagnostics(self) -> None:
         value = '{"path":"index.html","content":"unterminated'
@@ -875,6 +1012,80 @@ class UnifiedChangeNativePlanner(ScriptedNativePlanner):
         )
 
 
+class DeepSeekArtifactHistoryPlanner(UnifiedChangeNativePlanner):
+    def __init__(self, command: str) -> None:
+        super().__init__(command)
+        self.observed_safe_artifact_history = False
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            calls = [
+                ToolCall(
+                    call_id="deepseek_write",
+                    name="sandbox.write_file",
+                    arguments={"path": "app.py", "content": "value = 43\n"},
+                    source="deepseek_native",
+                ),
+                ToolCall(
+                    call_id="deepseek_validate",
+                    name="sandbox.run_command",
+                    arguments={"command": self.command},
+                    source="deepseek_native",
+                ),
+            ]
+            return LLMToolDecision(
+                text="",
+                tool_calls=calls,
+                model="deepseek-v4-flash",
+                provider="deepseek",
+                stop_reason="tool_calls",
+                provider_items=[
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "opaque provider reasoning",
+                        "tool_calls": [
+                            {
+                                "id": call.call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name.replace(".", "_"),
+                                    "arguments": "{}",
+                                },
+                            }
+                            for call in calls
+                        ],
+                    }
+                ],
+            )
+        converted = _deepseek_tool_messages(
+            messages,
+            {
+                "sandbox.workspace_status": "sandbox_workspace_status",
+                "sandbox.git_diff": "sandbox_git_diff",
+            },
+        )
+        artifact_turn = next(
+            message
+            for message in converted
+            if message.get("content")
+            == "Collecting runtime-managed change artifacts."
+        )
+        self.observed_safe_artifact_history = (
+            artifact_turn.get("reasoning_content") == ""
+            and len(artifact_turn.get("tool_calls", [])) == 2
+        )
+        return LLMToolDecision(
+            text="Changed and validated app.py after safe artifact replay.",
+            tool_calls=[],
+            model="deepseek-v4-flash",
+            provider="deepseek",
+            stop_reason="end_turn",
+        )
+
+
 class DiagnosticCommandRecoveryPlanner(ScriptedNativePlanner):
     def __init__(self, command: str) -> None:
         super().__init__()
@@ -1193,6 +1404,38 @@ class NativeToolLoopTests(unittest.TestCase):
         self.assertIn("sandbox.git_diff", planner.observed_order)
         self.assertTrue(result.change_summary.validation_passed)
         self.assertEqual(original_source, "value = 42\n")
+
+    def test_deepseek_replays_runtime_artifacts_with_empty_reasoning_content(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "app.py"
+            source.write_text("value = 42\n", encoding="utf-8")
+            validation = (
+                "compile(open('app.py', encoding='utf-8').read(), "
+                "'app.py', 'exec')"
+            )
+            planner = DeepSeekArtifactHistoryPlanner(
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(validation)}"
+            )
+            runtime = CodingAgentRuntime(planner=planner)
+
+            waiting = runtime.run(
+                conversation_id="sess_deepseek_artifact_replay",
+                user_input="change app.py and validate it",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            result = runtime.resume(run_id=waiting.run_id, approved=True)
+
+        self.assertEqual(waiting.status, "waiting_approval")
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(planner.observed_safe_artifact_history)
+        self.assertEqual(planner.decisions, 2)
+        self.assertEqual(result.change_summary.changed_files, ["app.py"])
+        self.assertTrue(result.change_summary.validation_passed)
 
     def test_tool_result_is_fed_back_before_final_answer(self) -> None:
         with TemporaryDirectory() as temp_dir:

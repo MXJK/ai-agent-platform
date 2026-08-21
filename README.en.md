@@ -594,6 +594,15 @@ On cross-provider fallback, only Google's own original provider items are
 replayed as native function calls with their `thought_signature`; calls and
 results from other providers become explicit text observations, preserving
 evidence without fabricating a Gemini signature.
+Runtime collection of workspace status and diffs synthesizes one assistant
+tool-history turn. DeepSeek thinking mode requires `reasoning_content` on every
+tool turn, so a locally synthesized turn uses an empty string as the
+provider-supported marker for “no private reasoning”; real provider reasoning
+items are still replayed unchanged. OpenAI and Anthropic keep their valid
+synthetic function/tool-use forms, while Google continues to downgrade foreign
+or runtime calls to text rather than fabricating a `thought_signature`.
+Provider JSON error messages are credential-redacted and length-bounded before
+entering Run diagnostics, without retaining the request body.
 
 The production planner accepts at most one tool call per turn. OpenAI also uses
 `parallel_tool_calls=false`; extra calls returned by another provider are not

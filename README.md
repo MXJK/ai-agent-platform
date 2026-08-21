@@ -554,6 +554,12 @@ Google Developer API 的工具调用 Token 预检把 system instruction 与工�
 跨 Provider fallback 时，仅 Google 自己返回的原始 provider items 会作为带
 `thought_signature` 的原生 functionCall 历史重放；其他 Provider 的调用与结果转成
 明确文本观察，避免伪造 Gemini 签名或丢失已执行证据。
+运行时收集 Workspace 状态与 Diff 时会合成一轮 assistant 工具历史：DeepSeek
+思考模式要求每个工具轮次都回传 `reasoning_content`，因此本地合成轮次使用空字符串
+作为无私有推理的 Provider 合法占位；模型真实返回的 reasoning/provider items 仍原样
+重放。OpenAI 和 Anthropic 继续使用各自合法的合成 function/tool-use 历史，Google
+继续降级为文本观察，不伪造 `thought_signature`。Provider JSON 错误的 message 会先做
+凭据脱敏与长度裁剪再进入 Run 错误，便于定位协议问题而不返回请求正文。
 
 生产规划器每轮最多接受一个工具调用；OpenAI 请求同时设置
 `parallel_tool_calls=false`，其他 Provider 即使返回多个调用也只执行第一个并为其余调用
