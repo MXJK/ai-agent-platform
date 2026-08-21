@@ -8,6 +8,11 @@ from ai_agent_platform.integrations.mcp.client import MCPClient, MCPTool
 from ai_agent_platform.integrations.tools import ToolExecutionContext, ToolRegistry
 
 
+# Server-declared schemas own every ordinary argument name, "context"
+# included, so the execution context travels under a reserved name.
+MCP_CONTEXT_PARAMETER = "__tool_context__"
+
+
 class MCPProviderError(Exception):
     def __init__(
         self,
@@ -62,6 +67,8 @@ class MCPToolProvider:
                 provider=f"mcp:{self.server_name}",
                 permission_level=tool.permission_level,
                 requires_approval=tool.requires_approval,
+                accepts_context=True,
+                context_parameter=MCP_CONTEXT_PARAMETER,
                 timeout_seconds=timeout_seconds,
                 max_retries=0,
                 idempotent=tool.idempotent,
@@ -73,9 +80,11 @@ class MCPToolProvider:
             )
 
     def _callable_for(self, tool_name: str):
-        def call_mcp_tool(
-            context: ToolExecutionContext | None = None, **arguments: Any
-        ) -> Any:
+        def call_mcp_tool(**arguments: Any) -> Any:
+            context: ToolExecutionContext | None = arguments.pop(
+                MCP_CONTEXT_PARAMETER,
+                None,
+            )
             call = self._client.call_tool
             supports_call_id = "call_id" in inspect.signature(call).parameters
             result = (

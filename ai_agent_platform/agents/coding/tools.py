@@ -64,6 +64,9 @@ def create_coding_tool_registry(
             "required": ["answer"],
             "additionalProperties": False,
         },
+        # "context" here is a model-supplied string, not the execution context;
+        # the checkpoint runtime answers this call without invoking the tool.
+        accepts_context=False,
     )
     skill_loader = SkillLoaderTool()
     registry.register(

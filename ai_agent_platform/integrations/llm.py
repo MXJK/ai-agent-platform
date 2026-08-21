@@ -56,6 +56,17 @@ class LLMResponse:
 
 
 @dataclass(frozen=True)
+class ContextBudget:
+    """Input-context allowance derived from the model that will serve the turn."""
+
+    window_tokens: int
+    reserved_output_tokens: int
+    input_tokens: int
+    provider: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True)
 class LLMRequestPlan:
     requested_provider: str
     requested_model: str
@@ -307,6 +318,7 @@ class LLMClient:
         min_context_tokens: int = 0,
         alias_tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         (
             provider,
@@ -414,6 +426,7 @@ class LLMClient:
                         tools,
                         aliases,
                         max_output_tokens=request_plan.max_output_tokens,
+                        disable_tool_calls=disable_tool_calls,
                     )
                     self._observe_success(
                         candidate,
@@ -735,8 +748,19 @@ class LLMClient:
         tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
     ) -> LLMToolDecision:
-        """Produce one final, text-only turn over the complete tool transcript."""
-        final_messages = list(messages) + [
+        """Produce one final, text-only turn over the complete tool transcript.
+
+        The transcript still carries provider tool blocks, and providers reject
+        those when the request declares no tools, so the definitions stay in the
+        request and the provider's own tool choice forbids calling them.
+        """
+        final_tools = list(tools or [])
+        transcript = (
+            list(messages)
+            if final_tools
+            else _text_only_tool_transcript(messages)
+        )
+        final_messages = transcript + [
             {
                 "role": "system",
                 "content": (
@@ -748,9 +772,10 @@ class LLMClient:
         ]
         decision = self.decide_tools(
             final_messages,
-            [],
-            alias_tools=tools or [],
+            final_tools,
+            alias_tools=final_tools,
             max_output_tokens=max_output_tokens,
+            disable_tool_calls=True,
         )
         if decision.tool_calls:
             raise LLMProviderError(
@@ -758,6 +783,67 @@ class LLMClient:
                 code="invalid_finalization_tool_call",
             )
         return decision
+
+    def resolve_context_budget(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        routing_policy: RoutingPolicy | None = None,
+        structured_output: bool = False,
+        input_token_ratio: float | None = None,
+    ) -> ContextBudget:
+        """Report how much input context the model about to serve this turn allows.
+
+        Context is assembled before the request is planned, so this resolves the
+        candidate the router would pick without needing the assembled messages.
+        Routing problems degrade to the configured default window: a budget is a
+        cost guardrail, and it must never be the reason a turn cannot start.
+        """
+        ratio = (
+            input_token_ratio
+            if input_token_ratio is not None
+            else self._settings.llm_context_input_token_ratio
+        )
+        reserved_output = self._settings.llm_max_output_tokens
+        window = self._settings.llm_model_context_window_tokens
+        resolved_provider: str | None = None
+        resolved_model: str | None = None
+        try:
+            (
+                provider,
+                model,
+                routing_policy,
+                preferred_provider,
+                preferred_model,
+                fallback_enabled,
+            ) = self._effective_routing(provider, model, routing_policy)
+            candidates, _ = self._route_allowed(
+                RoutingRequirements(
+                    structured_output=structured_output,
+                    min_context_tokens=reserved_output,
+                    expected_output_tokens=reserved_output,
+                ),
+                policy=routing_policy,
+                provider=provider,
+                model=model,
+                preferred_provider=preferred_provider,
+                preferred_model=preferred_model,
+                fallback_enabled=fallback_enabled,
+            )
+            if candidates:
+                window = candidates[0].context_window_tokens
+                resolved_provider = candidates[0].provider
+                resolved_model = candidates[0].model
+        except Exception:  # noqa: BLE001 - budget resolution is best effort
+            pass
+        return ContextBudget(
+            window_tokens=window,
+            reserved_output_tokens=reserved_output,
+            input_tokens=max(0, int(window * ratio) - reserved_output),
+            provider=resolved_provider,
+            model=resolved_model,
+        )
 
     def prepare_chat_request(
         self,
@@ -880,10 +966,17 @@ class LLMClient:
         aliases: dict[str, str],
         *,
         max_output_tokens: int,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         adapter = self._provider_adapters.get(candidate.provider)
         if adapter is not None:
-            return adapter.decide_tools(messages, tools, model=candidate.model)
+            # Adapters have no tool-choice channel, so a text-only turn keeps
+            # offering them nothing to call.
+            return adapter.decide_tools(
+                messages,
+                [] if disable_tool_calls else tools,
+                model=candidate.model,
+            )
         if candidate.provider == "openai":
             return self._decide_openai_tools(
                 messages,
@@ -891,6 +984,7 @@ class LLMClient:
                 aliases,
                 candidate.model,
                 max_output_tokens=max_output_tokens,
+                disable_tool_calls=disable_tool_calls,
             )
         if candidate.provider == "deepseek":
             return self._decide_deepseek_tools(
@@ -899,6 +993,7 @@ class LLMClient:
                 aliases,
                 candidate.model,
                 max_output_tokens=max_output_tokens,
+                disable_tool_calls=disable_tool_calls,
             )
         if candidate.provider == "anthropic":
             return self._decide_anthropic_tools(
@@ -907,6 +1002,7 @@ class LLMClient:
                 aliases,
                 candidate.model,
                 max_output_tokens=max_output_tokens,
+                disable_tool_calls=disable_tool_calls,
             )
         if candidate.provider == "google":
             return self._decide_google_tools(
@@ -915,6 +1011,7 @@ class LLMClient:
                 aliases,
                 candidate.model,
                 max_output_tokens=max_output_tokens,
+                disable_tool_calls=disable_tool_calls,
             )
         if candidate.provider == "fake":
             return self._decide_fake_tools(messages, candidate.model)
@@ -971,6 +1068,7 @@ class LLMClient:
         model: str,
         *,
         max_output_tokens: int,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         api_key = self._api_key("openai")
         if not api_key:
@@ -992,7 +1090,7 @@ class LLMClient:
                 }
                 for spec in tools
                 ],
-                "tool_choice": "auto",
+                "tool_choice": "none" if disable_tool_calls else "auto",
                 "parallel_tool_calls": False,
             })
         body = self._post_json(
@@ -1061,6 +1159,7 @@ class LLMClient:
         model: str,
         *,
         max_output_tokens: int,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         api_key = self._api_key("anthropic")
         if not api_key:
@@ -1086,10 +1185,11 @@ class LLMClient:
                 }
                 for spec in tools
                 ],
-                "tool_choice": {
-                    "type": "auto",
-                    "disable_parallel_tool_use": True,
-                },
+                "tool_choice": (
+                    {"type": "none"}
+                    if disable_tool_calls
+                    else {"type": "auto", "disable_parallel_tool_use": True}
+                ),
             })
         if system:
             payload["system"] = "\n\n".join(system)
@@ -1144,6 +1244,7 @@ class LLMClient:
         model: str,
         *,
         max_output_tokens: int,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         api_key = self._api_key("deepseek")
         if not api_key:
@@ -1170,7 +1271,7 @@ class LLMClient:
                 }
                 for spec in tools
                 ],
-                "tool_choice": "auto",
+                "tool_choice": "none" if disable_tool_calls else "auto",
             })
         body = self._post_json(
             "https://api.deepseek.com/chat/completions",
@@ -1227,6 +1328,7 @@ class LLMClient:
         model: str,
         *,
         max_output_tokens: int,
+        disable_tool_calls: bool = False,
     ) -> LLMToolDecision:
         api_key = self._api_key("google")
         if not api_key:
@@ -1254,6 +1356,12 @@ class LLMClient:
             config_kwargs["tools"] = [
                 types.Tool(function_declarations=declarations)
             ]
+            if disable_tool_calls:
+                config_kwargs["tool_config"] = types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode="NONE",
+                    )
+                )
         system_instruction = _google_system_instruction_any(messages)
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
@@ -2867,6 +2975,54 @@ def _chat_usage_from_mapping(value: Any) -> LLMUsage | None:
         output_tokens=max(0, completion_tokens - reasoning_tokens),
         thoughts_tokens=max(0, reasoning_tokens),
     )
+
+
+def _text_only_tool_transcript(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flatten tool blocks into text for a request that declares no tools.
+
+    Providers reject tool_use/tool_result content when the request carries no
+    tool definitions, so a finalization without definitions keeps the observed
+    evidence as plain text instead.
+    """
+
+    flattened: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role") or "")
+        if role == "tool":
+            flattened.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Tool result {message.get('name') or ''}: "
+                        + json.dumps(
+                            message.get("content"),
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                    ),
+                }
+            )
+            continue
+        calls = [
+            item
+            for item in (message.get("tool_calls") or [])
+            if isinstance(item, dict)
+        ]
+        text = str(message.get("content") or "")
+        if role == "assistant" and calls:
+            names = ", ".join(str(item.get("name") or "") for item in calls)
+            flattened.append(
+                {
+                    "role": "assistant",
+                    "content": (f"{text}\n" if text else "")
+                    + f"[requested tools: {names}]",
+                }
+            )
+            continue
+        flattened.append({"role": role, "content": text})
+    return flattened
 
 
 def _openai_tool_input(

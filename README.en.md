@@ -636,8 +636,11 @@ native tool call
 The default soft budget is 12 rounds/36 calls; it asks the model to converge but
 does not stop execution. Hard limits are 24 rounds/72 calls, 900 seconds, three
 no-progress rounds, and three consecutive failures. A hard stop reserves one
-tool-disabled text finalization, so exhaustion becomes `partial` or `blocked`
-instead of a false `completed`. Configure these with
+text finalization that still declares the same tools and forbids calling them
+through the provider's own tool choice, because replayed tool_use/tool_result
+blocks are rejected by providers when a request declares no tools. Exhaustion
+therefore becomes `partial` or `blocked` instead of a false `completed`.
+Configure these with
 `AGENT_SOFT_TOOL_ROUNDS`, `AGENT_MAX_TOOL_ROUNDS`, `AGENT_SOFT_TOOL_CALLS`,
 `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ELAPSED_SECONDS`,
 `AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Model-output
@@ -656,12 +659,21 @@ boundaries. `AGENT_APPROVAL_POLICY=always|on_request|never` controls approvals;
 `never` blocks approval-requiring calls rather than silently authorizing them.
 
 `ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
-validates both input and output at execution. Tool specs also declare timeout,
-retry, and idempotency behavior. Retries are limited to retryable failures on
-idempotent tools; the same `run_id + call_id` replays a cached result and rejects
-argument changes. MCP tools use the same registry contract: `structuredContent`
-is preferred, text blocks are normalized, and `isError=true` becomes a stable
-tool failure instead of a successful payload.
+validates both input and output at execution. A validation failure reports the
+path, the failed constraint, the schema-side expectation, and the type and size
+of the rejected value, so credentials and file contents never travel back to the
+model inside an error string. Tool specs also declare timeout, retry, and
+idempotency behavior. Retries are limited to retryable failures on idempotent
+tools; the same `run_id + call_id` replays a cached result and rejects argument
+changes. A timeout is not a cancellation: tools run on their own daemon thread,
+a timed-out worker is abandoned, and the result says the call may still be
+running; while an abandoned side-effecting call is still alive, further
+side-effecting calls in that Run return `tool_timeout_in_flight` instead of
+racing it. MCP tools use the same registry contract: `structuredContent` is
+preferred, text blocks are normalized, and `isError=true` becomes a stable tool
+failure instead of a successful payload; the execution context travels under the
+reserved `__tool_context__` parameter, so a server-declared `context` argument is
+forwarded untouched.
 
 ### MCP lifecycle and transports
 

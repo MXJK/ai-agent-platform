@@ -1,6 +1,7 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
+import threading
 import time
 import unittest
 
@@ -294,6 +295,196 @@ class ToolExecutionTests(unittest.TestCase):
             self.assertTrue(first.ok)
             self.assertTrue(second.ok)
             self.assertTrue(first.cached or second.cached)
+
+    def test_timeout_reports_the_abandoned_worker_and_blocks_racing_writes(
+        self,
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        writes: list[str] = []
+
+        def slow_write(path: str) -> dict[str, str]:
+            started.set()
+            release.wait(timeout=5)
+            writes.append(path)
+            return {"written": path}
+
+        registry = ToolRegistry()
+        registry.register(
+            "state.slow_write",
+            slow_write,
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            permission_level="write_safe",
+            timeout_seconds=0.05,
+        )
+        context = ToolExecutionContext(
+            conversation_id="sess_1",
+            workspace_id="workspace_1",
+            workspace_root=".",
+            run_id="run_timeout",
+        )
+
+        try:
+            timed_out = registry.execute(
+                ToolCall(
+                    call_id="call_slow",
+                    name="state.slow_write",
+                    arguments={"path": "a.py"},
+                ),
+                context=context,
+            )
+            self.assertTrue(started.wait(timeout=5))
+            racing = registry.execute(
+                ToolCall(
+                    call_id="call_racing",
+                    name="state.slow_write",
+                    arguments={"path": "b.py"},
+                ),
+                context=context,
+            )
+            other_run = registry.execute(
+                ToolCall(
+                    call_id="call_other_run",
+                    name="state.slow_write",
+                    arguments={"path": "c.py"},
+                ),
+                context=ToolExecutionContext(
+                    conversation_id="sess_1",
+                    workspace_id="workspace_1",
+                    workspace_root=".",
+                    run_id="run_other",
+                ),
+            )
+        finally:
+            release.set()
+
+        self.assertEqual(timed_out.error_code, "tool_timeout")
+        # A Python callable cannot be preempted, so the report must not claim
+        # the abandoned call had no effect.
+        self.assertIn("may still be running", timed_out.error)
+        self.assertIn(
+            "call_slow",
+            [item.call_id for item in registry.abandoned_calls()],
+        )
+        self.assertEqual(racing.error_code, "tool_timeout_in_flight")
+        self.assertIn("call_slow", racing.error)
+        # Another Run shares the process registry but not the workspace, so it
+        # still runs and only reports its own timeout.
+        self.assertEqual(other_run.error_code, "tool_timeout")
+
+        for _ in range(50):
+            if not registry.abandoned_calls():
+                break
+            time.sleep(0.05)
+        self.assertEqual(registry.abandoned_calls(), ())
+        # The blocked call never ran; the abandoned workers still finished.
+        self.assertEqual(sorted(writes), ["a.py", "c.py"])
+
+    def test_validation_errors_never_echo_the_rejected_value(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            "state.credential",
+            lambda api_key: {"ok": True},
+            input_schema={
+                "type": "object",
+                "properties": {"api_key": {"type": "string", "maxLength": 5}},
+                "required": ["api_key"],
+                "additionalProperties": False,
+            },
+        )
+
+        rejected = registry.execute(
+            ToolCall(
+                name="state.credential",
+                arguments={"api_key": "sk-live-not-a-real-key"},
+            )
+        )
+        missing = registry.execute(
+            ToolCall(name="state.credential", arguments={})
+        )
+
+        self.assertEqual(rejected.error_code, "invalid_tool_arguments")
+        self.assertNotIn("sk-live-not-a-real-key", rejected.error)
+        self.assertIn("$.api_key", rejected.error)
+        self.assertIn("maxLength", rejected.error)
+        self.assertIn("string of length 22", rejected.error)
+        self.assertEqual(rejected.arguments_summary, {"api_key": "<redacted>"})
+        # Schema-side names stay readable because they cannot leak a value.
+        self.assertIn("'api_key' is a required property", missing.error)
+
+    def test_output_validation_errors_never_echo_the_rejected_value(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            "state.leaky",
+            lambda: {"token": "ghp-not-a-real-token"},
+            output_schema={
+                "type": "object",
+                "properties": {"token": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+        )
+
+        result = registry.execute(ToolCall(name="state.leaky", arguments={}))
+
+        self.assertEqual(result.error_code, "invalid_tool_output")
+        self.assertNotIn("ghp-not-a-real-token", result.error)
+        self.assertIn("$.token", result.error)
+
+    def test_context_injection_cannot_collide_with_a_declared_argument(
+        self,
+    ) -> None:
+        registry = ToolRegistry()
+
+        with self.assertRaisesRegex(ValueError, "collides"):
+            registry.register(
+                "state.ambiguous",
+                lambda context=None, **arguments: {"ok": True},
+                input_schema={
+                    "type": "object",
+                    "properties": {"context": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            )
+
+        registry.register(
+            "state.reserved_context",
+            lambda **arguments: {
+                "seen": sorted(arguments),
+                "run_id": arguments["__tool_context__"].run_id,
+            },
+            input_schema={
+                "type": "object",
+                "properties": {"context": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object"},
+            accepts_context=True,
+            context_parameter="__tool_context__",
+        )
+
+        result = registry.execute(
+            ToolCall(
+                name="state.reserved_context",
+                arguments={"context": "chapter two"},
+            ),
+            context=ToolExecutionContext(
+                conversation_id="sess_1",
+                workspace_id="workspace_1",
+                workspace_root=".",
+                run_id="run_context",
+            ),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            result.result,
+            {"seen": ["__tool_context__", "context"], "run_id": "run_context"},
+        )
 
 
 if __name__ == "__main__":

@@ -147,6 +147,56 @@ class MCPProviderTests(unittest.TestCase):
         self.assertEqual(result.arguments_summary, {"text": "hello MCP"})
         self.assertEqual(client.calls, [("echo", {"text": "hello MCP"})])
 
+    def test_server_declared_context_argument_reaches_the_server(self) -> None:
+        class ContextArgumentClient(FakeMCPClient):
+            def list_tools(self) -> list[MCPTool]:
+                return [
+                    MCPTool(
+                        name="search",
+                        description="Search with a caller-supplied context.",
+                        input_schema={
+                            "type": "object",
+                            "required": ["query"],
+                            "properties": {
+                                "query": {"type": "string"},
+                                "context": {"type": "string"},
+                            },
+                        },
+                        output_schema={"type": "object"},
+                        permission_level="read_only",
+                    )
+                ]
+
+            def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+                self.calls.append((name, arguments))
+                return {"hits": []}
+
+        client = ContextArgumentClient()
+        registry = create_coding_tool_registry(
+            mcp_providers=[MCPToolProvider(server_name="docs", client=client)]
+        )
+
+        result = registry.execute(
+            ToolCall(
+                name="mcp.docs.search",
+                arguments={"query": "retries", "context": "chapter two"},
+            ),
+            context=ToolExecutionContext(
+                conversation_id="sess_1",
+                workspace_id="workspace_main",
+                workspace_root=".",
+                run_id="run_context",
+            ),
+        )
+
+        self.assertTrue(result.ok, result.error)
+        # The execution context travels under a reserved name, so a server
+        # argument called "context" is forwarded untouched.
+        self.assertEqual(
+            client.calls,
+            [("search", {"query": "retries", "context": "chapter two"})],
+        )
+
     def test_tool_registry_call_id_is_forwarded_to_mcp_client(self) -> None:
         class CallIdClient(FakeMCPClient):
             def __init__(self) -> None:

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from dataclasses import replace
 import hashlib
 import inspect
 import json
-from threading import Lock, RLock
+from threading import Event, Lock, RLock, Thread
 import time
 from time import perf_counter
 from typing import Any, Callable
@@ -34,6 +33,10 @@ SENSITIVE_ARGUMENT_NAMES = {
 }
 DEFAULT_TOOL_MAX_OUTPUT_CHARS = 8000
 DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+DEFAULT_TOOL_CONTEXT_PARAMETER = "context"
+# jsonschema renders the rejected instance inside its own message, so only
+# validators whose message is built from schema-side names may be reused.
+SCHEMA_SAFE_MESSAGE_VALIDATORS = frozenset({"required", "additionalProperties"})
 
 
 class ToolExecutionError(Exception):
@@ -47,6 +50,32 @@ class ToolExecutionError(Exception):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class ToolTimeoutError(ToolExecutionError):
+    """The tool missed its deadline; its worker thread was abandoned.
+
+    A Python callable cannot be preempted, so the abandoned worker keeps
+    running and may still apply side effects after this error is reported.
+    """
+
+    def __init__(self, message: str, *, worker: Thread | None = None) -> None:
+        super().__init__(message, code="tool_timeout", retryable=True)
+        self.worker = worker
+
+
+@dataclass(frozen=True)
+class AbandonedToolCall:
+    """A timed-out call whose worker thread may still be applying changes."""
+
+    run_id: str
+    call_id: str
+    name: str
+    worker: Thread
+
+    @property
+    def running(self) -> bool:
+        return self.worker.is_alive()
 
 
 @dataclass(frozen=True)
@@ -71,6 +100,7 @@ class ToolSpec:
     permission_level: str = "read_only"
     requires_approval: bool = False
     accepts_context: bool = False
+    context_parameter: str = DEFAULT_TOOL_CONTEXT_PARAMETER
     risk_summary: str = "Read-only tool with no expected side effects."
     max_output_chars: int = DEFAULT_TOOL_MAX_OUTPUT_CHARS
     timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -141,6 +171,8 @@ class ToolRegistry:
         self._idempotency_results: dict[tuple[str, str], tuple[str, ToolResult]] = {}
         self._idempotency_guards: dict[tuple[str, str], Lock] = {}
         self._idempotency_lock = Lock()
+        self._abandoned_calls: list[AbandonedToolCall] = []
+        self._abandoned_lock = Lock()
         self._registry_lock = RLock()
         self._permission_resolver = permission_resolver
 
@@ -165,6 +197,7 @@ class ToolRegistry:
         permission_level: str = "read_only",
         requires_approval: bool = False,
         accepts_context: bool | None = None,
+        context_parameter: str = DEFAULT_TOOL_CONTEXT_PARAMETER,
         risk_summary: str | None = None,
         max_output_chars: int = DEFAULT_TOOL_MAX_OUTPUT_CHARS,
         timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -187,6 +220,16 @@ class ToolRegistry:
             if idempotent is None
             else idempotent
         )
+        resolved_accepts_context = (
+            _accepts_context(tool) if accepts_context is None else accepts_context
+        )
+        if resolved_accepts_context and context_parameter in _schema_property_names(
+            resolved_input_schema
+        ):
+            raise ValueError(
+                f"tool {name} declares an argument named {context_parameter!r} that "
+                "collides with the injected execution context parameter"
+            )
         spec = ToolSpec(
             name=name,
             description=description or name,
@@ -195,9 +238,8 @@ class ToolRegistry:
             provider=provider,
             permission_level=permission_level,
             requires_approval=requires_approval,
-            accepts_context=(
-                _accepts_context(tool) if accepts_context is None else accepts_context
-            ),
+            accepts_context=resolved_accepts_context,
+            context_parameter=context_parameter,
             risk_summary=(
                 risk_summary
                 or _default_risk_summary(
@@ -557,6 +599,26 @@ class ToolRegistry:
                 error_code="invalid_tool_arguments",
             )
 
+        blocking = self._blocking_abandoned_call(context, spec)
+        if blocking is not None:
+            return ToolResult(
+                call_id=call_id,
+                name=tool_call.name,
+                ok=False,
+                error=(
+                    f"tool call {blocking.call_id} ({blocking.name}) timed out and is "
+                    "still running; another side-effecting call in this run would "
+                    "race it"
+                ),
+                provider=spec.provider,
+                permission_level=spec.permission_level,
+                requires_approval=spec.requires_approval,
+                duration_ms=int((perf_counter() - started_at) * 1000),
+                risk_summary=spec.risk_summary,
+                arguments_summary=arguments_summary,
+                error_code="tool_timeout_in_flight",
+            )
+
         attempts = 0
         result: Any = None
         execution_context = (
@@ -576,16 +638,23 @@ class ToolRegistry:
                     arguments=tool_call.arguments,
                     context=execution_context,
                     accepts_context=spec.accepts_context,
+                    context_parameter=spec.context_parameter,
                     timeout_seconds=spec.timeout_seconds,
+                    name=tool_call.name,
                 )
                 break
             except Exception as exc:
-                retryable = bool(getattr(exc, "retryable", False))
-                if isinstance(exc, FutureTimeoutError):
-                    retryable = True
+                if isinstance(exc, ToolTimeoutError):
+                    self._record_abandoned_call(
+                        context,
+                        call_id=call_id,
+                        name=tool_call.name,
+                        worker=exc.worker,
+                        idempotent=spec.idempotent,
+                    )
                 should_retry = (
                     spec.idempotent
-                    and retryable
+                    and bool(getattr(exc, "retryable", False))
                     and attempts <= spec.max_retries
                 )
                 if should_retry:
@@ -596,22 +665,14 @@ class ToolRegistry:
                     call_id=call_id,
                     name=tool_call.name,
                     ok=False,
-                    error=(
-                        f"tool execution timed out after {spec.timeout_seconds:g}s"
-                        if isinstance(exc, FutureTimeoutError)
-                        else str(exc)
-                    ),
+                    error=str(exc),
                     provider=spec.provider,
                     permission_level=spec.permission_level,
                     requires_approval=spec.requires_approval,
                     duration_ms=duration_ms,
                     risk_summary=spec.risk_summary,
                     arguments_summary=arguments_summary,
-                    error_code=(
-                        "tool_timeout"
-                        if isinstance(exc, FutureTimeoutError)
-                        else str(getattr(exc, "code", "tool_execution_error"))
-                    ),
+                    error_code=str(getattr(exc, "code", "tool_execution_error")),
                     attempts=attempts,
                 )
                 self._store_result(cache_key, fingerprint, failed)
@@ -700,6 +761,57 @@ class ToolRegistry:
                 cached=True,
             )
         return replace(result, cached=True)
+
+    def abandoned_calls(self) -> tuple[AbandonedToolCall, ...]:
+        """Return timed-out calls whose worker thread is still running."""
+
+        with self._abandoned_lock:
+            self._abandoned_calls = [
+                item for item in self._abandoned_calls if item.running
+            ]
+            return tuple(self._abandoned_calls)
+
+    def _record_abandoned_call(
+        self,
+        context: ToolExecutionContext | None,
+        *,
+        call_id: str,
+        name: str,
+        worker: Thread | None,
+        idempotent: bool,
+    ) -> None:
+        # Only side-effecting calls are tracked: an abandoned read cannot
+        # corrupt the workspace, and tracking it would grow without bound.
+        if idempotent or worker is None or not worker.is_alive():
+            return
+        run_id = str(context.run_id or "") if context is not None else ""
+        if not run_id:
+            return
+        with self._abandoned_lock:
+            self._abandoned_calls = [
+                item for item in self._abandoned_calls if item.running
+            ]
+            self._abandoned_calls.append(
+                AbandonedToolCall(
+                    run_id=run_id,
+                    call_id=call_id,
+                    name=name,
+                    worker=worker,
+                )
+            )
+
+    def _blocking_abandoned_call(
+        self,
+        context: ToolExecutionContext | None,
+        spec: ToolSpec,
+    ) -> AbandonedToolCall | None:
+        if spec.idempotent or context is None or not context.run_id:
+            return None
+        run_id = str(context.run_id)
+        for item in self.abandoned_calls():
+            if item.run_id == run_id:
+                return item
+        return None
 
     def _store_result(
         self,
@@ -876,8 +988,51 @@ def _validate_instance(
         path = "$"
         for item in exc.absolute_path:
             path += f"[{item}]" if isinstance(item, int) else f".{item}"
-        return f"invalid {label} at {path}: {exc.message}"
+        return f"invalid {label} at {path}: {_validation_detail(exc)}"
     return None
+
+
+def _validation_detail(exc: ValidationError) -> str:
+    """Describe a schema failure without echoing the rejected value.
+
+    Tool arguments and outputs carry credentials and file contents, and this
+    text is replayed to the model and persisted with the Run.
+    """
+
+    validator = str(exc.validator or "schema")
+    if validator in SCHEMA_SAFE_MESSAGE_VALIDATORS:
+        return exc.message
+    try:
+        expected = json.dumps(exc.validator_value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        expected = str(exc.validator_value)
+    return (
+        f"failed {validator!r} constraint ({expected}); "
+        f"received {_describe_instance(exc.instance)}"
+    )
+
+
+def _describe_instance(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return f"{type(value).__name__} value"
+    if isinstance(value, str):
+        return f"string of length {len(value)}"
+    if isinstance(value, (list, tuple)):
+        return f"array of {len(value)} item(s)"
+    if isinstance(value, dict):
+        return f"object with {len(value)} key(s)"
+    return type(value).__name__
+
+
+def _schema_property_names(schema: dict[str, Any]) -> frozenset[str]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return frozenset()
+    return frozenset(str(name) for name in properties)
 
 
 def _call_with_timeout(
@@ -887,18 +1042,47 @@ def _call_with_timeout(
     context: ToolExecutionContext | None,
     accepts_context: bool,
     timeout_seconds: float,
+    context_parameter: str = DEFAULT_TOOL_CONTEXT_PARAMETER,
+    name: str = "",
 ) -> Any:
-    def invoke() -> Any:
-        if context is not None and accepts_context:
-            return tool(context=context, **arguments)
-        return tool(**arguments)
+    call_arguments = dict(arguments)
+    if context is not None and accepts_context:
+        if context_parameter in call_arguments:
+            raise ToolExecutionError(
+                f"tool argument {context_parameter!r} collides with the injected "
+                "execution context parameter",
+                code="tool_argument_conflict",
+            )
+        call_arguments[context_parameter] = context
+    completed = Event()
+    outcome: dict[str, Any] = {}
 
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-tool")
-    future = executor.submit(invoke)
-    try:
-        return future.result(timeout=timeout_seconds)
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    def invoke() -> None:
+        try:
+            outcome["value"] = tool(**call_arguments)
+        except BaseException as exc:  # re-raised on the calling thread
+            outcome["error"] = exc
+        finally:
+            completed.set()
+
+    # A daemon thread, not a pooled worker: a wedged tool must never block
+    # interpreter shutdown, and an abandoned worker must never be reused.
+    worker = Thread(
+        target=invoke,
+        name=f"agent-tool-{name or 'call'}",
+        daemon=True,
+    )
+    worker.start()
+    if not completed.wait(timeout_seconds):
+        raise ToolTimeoutError(
+            f"tool execution timed out after {timeout_seconds:g}s; the call may "
+            "still be running and its side effects may still land",
+            worker=worker,
+        )
+    error = outcome.get("error")
+    if error is not None:
+        raise error
+    return outcome.get("value")
 
 
 def _idempotency_key(

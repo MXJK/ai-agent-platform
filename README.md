@@ -603,8 +603,10 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 拆分由稳定轨迹 golden tests 约束，节点名、边、审批、预算、工具顺序和终态语义不变。
 
 默认软预算是 12 轮/36 次工具调用，触发后只提示模型尽快收敛；硬预算是 24 轮/72 次，
-另有 900 秒、连续三轮无进展和连续三次失败保护。硬停止会保留一次禁用工具的文本
-最终总结，因此返回 `partial`/`blocked`，不会把预算耗尽误报为 `completed`。相关配置为
+另有 900 秒、连续三轮无进展和连续三次失败保护。硬停止会保留一次文本最终总结：请求仍
+下发同一批工具定义，并由 Provider 的 tool choice 禁止调用，因为 transcript 中已有的
+tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返回 `partial`/`blocked`，
+不会把预算耗尽误报为 `completed`。相关配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、
@@ -631,10 +633,14 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 `always` 或 `never` 时，项目不能切换到另一种策略造成部分调用重新放行。
 
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
-和输出。工具规格还声明超时、重试和幂等行为。只有幂等工具遇到可重试失败时才会重试；
-相同 `run_id + call_id` 会重放缓存结果，参数变化则会被拒绝。MCP 工具使用同一注册
-契约：优先读取 `structuredContent`，文本块会被标准化，`isError=true` 会变成稳定的
-工具失败，而不是成功载荷。
+和输出。校验失败只回报路径、约束名、schema 侧期望值以及被拒值的类型和长度，凭据或
+文件内容不会经由错误文本回灌模型。工具规格还声明超时、重试和幂等行为。只有幂等工具
+遇到可重试失败时才会重试；相同 `run_id + call_id` 会重放缓存结果，参数变化则会被拒绝。
+超时不等于取消：工具在独立 daemon 线程中执行，超时后线程被放弃，结果如实说明调用可能
+仍在运行；同一 Run 内还有被放弃的写工具时，后续副作用调用返回 `tool_timeout_in_flight`
+而不是与之竞争。MCP 工具使用同一注册契约：优先读取 `structuredContent`，文本块会被
+标准化，`isError=true` 会变成稳定的工具失败，而不是成功载荷；执行上下文使用保留参数名
+`__tool_context__`，因此服务端自带的 `context` 参数原样透传。
 
 ### MCP 生命周期与传输
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import shlex
 import sys
@@ -594,14 +595,160 @@ class NativeProviderMappingTests(unittest.TestCase):
             },
         ]
         with patch.object(client, "_post_json", side_effect=fake_post):
-            decision = client.finalize_tools(messages, reason="hard_tool_round_budget")
+            decision = client.finalize_tools(
+                messages,
+                reason="hard_tool_round_budget",
+                tools=[_tool_spec()],
+            )
 
         self.assertEqual(decision.text, "Grounded final answer.")
-        self.assertNotIn("tools", captured)
-        self.assertNotIn("tool_choice", captured)
+        # Replayed tool blocks are only valid while the request still declares
+        # the tools, so finalization forbids calls through tool_choice instead.
+        self.assertEqual(captured["tools"][0]["name"], "repo_read_file")
+        self.assertEqual(captured["tool_choice"], "none")
         self.assertTrue(
             any(item.get("type") == "function_call_output" for item in captured["input"])
         )
+
+    def test_finalization_without_tool_definitions_flattens_tool_blocks(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="anthropic",
+                llm_model="test-claude",
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "anthropic" else None
+            ),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_post(url, *, headers, payload):
+            del headers
+            if url.endswith("count_tokens"):
+                return {"input_tokens": 24}
+            captured.update(payload)
+            return {
+                "model": "test-claude",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Grounded final answer."}],
+                "usage": {"input_tokens": 24, "output_tokens": 4},
+            }
+
+        messages = [
+            {"role": "user", "content": "read app.py"},
+            {
+                "role": "assistant",
+                "content": "",
+                "provider": "anthropic",
+                "provider_items": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_final",
+                        "name": "repo_read_file",
+                        "input": {"path": "app.py"},
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "call_id": "toolu_final",
+                        "name": "repo.read_file",
+                        "arguments": {"path": "app.py"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "call_id": "toolu_final",
+                "name": "repo.read_file",
+                "content": {"ok": True, "result": {"content": "value=1"}},
+            },
+        ]
+
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            decision = client.finalize_tools(
+                messages,
+                reason="permission_denied",
+                tools=[],
+            )
+
+        self.assertEqual(decision.text, "Grounded final answer.")
+        self.assertNotIn("tools", captured)
+        block_types = [
+            [block.get("type") for block in message["content"]]
+            for message in captured["messages"]
+        ]
+        self.assertEqual(block_types, [["text"], ["text"], ["text"]])
+        self.assertIn("value=1", json.dumps(captured["messages"], ensure_ascii=False))
+
+    def test_anthropic_finalization_keeps_tool_definitions_for_replayed_blocks(
+        self,
+    ) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="anthropic",
+                llm_model="test-claude",
+            ),
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "anthropic" else None
+            ),
+        )
+        captured: dict[str, object] = {}
+        count_payload: dict[str, object] = {}
+
+        def fake_post(url, *, headers, payload):
+            del headers
+            if url.endswith("count_tokens"):
+                count_payload.update(payload)
+                return {"input_tokens": 24}
+            captured.update(payload)
+            return {
+                "model": "test-claude",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Grounded final answer."}],
+                "usage": {"input_tokens": 24, "output_tokens": 4},
+            }
+
+        messages = [
+            {"role": "user", "content": "read app.py"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "toolu_final",
+                        "name": "repo.read_file",
+                        "arguments": {"path": "app.py"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "call_id": "toolu_final",
+                "name": "repo.read_file",
+                "content": {"ok": True, "result": {"content": "value=1"}},
+            },
+        ]
+
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            decision = client.finalize_tools(
+                messages,
+                reason="hard_tool_round_budget",
+                tools=[_tool_spec()],
+            )
+
+        self.assertEqual(decision.text, "Grounded final answer.")
+        self.assertEqual(captured["tools"][0]["name"], "repo_read_file")
+        self.assertEqual(captured["tool_choice"], {"type": "none"})
+        # The token preflight must describe the same request as the real call.
+        self.assertEqual(
+            [item["name"] for item in count_payload["tools"]],
+            ["repo_read_file"],
+        )
+        block_types = [
+            [block.get("type") for block in message["content"]]
+            for message in captured["messages"]
+        ]
+        self.assertEqual(block_types, [["text"], ["tool_use"], ["tool_result"]])
 
     def test_anthropic_maps_tool_use_and_usage(self) -> None:
         client = LLMClient(
