@@ -2652,6 +2652,50 @@ textarea:focus {
   background: var(--red-soft);
 }
 
+.tool-registry-intro,
+.tool-section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.tool-registry-intro h2,
+.tool-section-heading h2 {
+  margin: 5px 0 6px;
+}
+
+.tool-registry-intro p,
+.tool-section-heading p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.tool-section-heading {
+  margin: 34px 2px 4px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+}
+
+.skill-registry-grid {
+  margin-top: 16px;
+}
+
+.skill-editor {
+  min-height: 330px;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+@media (max-width: 760px) {
+  .tool-registry-intro,
+  .tool-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .mcp-topology {
   display: grid;
   grid-template-columns: minmax(300px, 0.85fr) minmax(340px, 1.15fr);

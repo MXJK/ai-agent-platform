@@ -230,6 +230,7 @@ class SkillDiscoveryTests(unittest.TestCase):
                 agent="coding",
                 mode="default",
                 max_chars=120,
+                selected_skill_names=("bounded",),
             )
             self.assertEqual(len(selection.sources), 1)
             self.assertEqual(len(selection.sources[0].text), 120)
@@ -307,6 +308,7 @@ class SkillDiscoveryTests(unittest.TestCase):
                 agent="coding",
                 mode="default",
                 max_chars=1000,
+                selected_skill_names=("danger",),
             )
 
             self.assertEqual(selection.sources, ())

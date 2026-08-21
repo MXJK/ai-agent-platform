@@ -85,6 +85,7 @@ from ai_agent_platform.skills import (
     SkillCatalog,
     SkillDiscovery,
     SkillService,
+    SkillRegistryService,
 )
 from ai_agent_platform.tools import register_memory_tools
 
@@ -147,6 +148,7 @@ class RuntimeContainer:
     tool_registry: ToolRegistry | None = None
     tool_pool_builder: ToolPoolBuilder | None = None
     skill_service: SkillService | None = None
+    skill_registry: SkillRegistryService | None = None
     skill_catalog: SkillCatalog | None = None
     command_registry: CommandRegistry | None = None
     checkpointer: Any = None
@@ -513,6 +515,13 @@ class ApplicationFactory:
             container.skill_service = self.create_skill_service(
                 settings,
                 tool_registry=container.tool_registry,
+            )
+            skill_loader = getattr(container.tool_registry, "skill_loader", None)
+            if skill_loader is not None:
+                skill_loader.bind(container.skill_service)
+            container.skill_registry = self.create_skill_registry(
+                settings,
+                container.skill_service,
             )
             container.skill_catalog = container.skill_service.discover()
             container.command_registry = CommandRegistry(
@@ -934,7 +943,7 @@ class ApplicationFactory:
         package_root = Path(__file__).resolve().parent
         discovery = SkillDiscovery(
             bundled_root=package_root / "bundled_skills",
-            user_root=Path.home() / ".ai-agent-platform" / "skills",
+            user_root=Path(settings.skills_directory_path).expanduser(),
         )
         effective_selection = (
             settings.enabled_skills
@@ -952,6 +961,16 @@ class ApplicationFactory:
             enabled=settings.skills_allowed and settings.skills_enabled,
             enabled_skills=effective_selection,
             available_tools=available_tools,
+        )
+
+    def create_skill_registry(
+        self,
+        settings: Settings,
+        skill_service: SkillService,
+    ) -> SkillRegistryService:
+        return SkillRegistryService(
+            user_root=Path(settings.skills_directory_path).expanduser(),
+            skill_service=skill_service,
         )
 
     def create_langgraph_checkpointer(

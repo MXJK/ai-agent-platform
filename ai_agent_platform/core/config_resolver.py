@@ -235,6 +235,7 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "mcp_allowed",
         "mcp_config_path",
         "skills_allowed",
+        "skills_directory_path",
         "tool_allowlist",
         "skill_allowlist",
         "sandbox_mode",

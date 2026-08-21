@@ -314,10 +314,11 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                     preferred_tool_name="mcp.demo.missing",
                 )
 
-    def test_project_skill_is_frozen_as_untrusted_bounded_context(self) -> None:
+    def test_global_skill_is_frozen_only_for_explicit_invocation(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            skill_file = root / ".agents" / "skills" / "review" / "SKILL.md"
+            global_skills = root / "global-skills"
+            skill_file = global_skills / "review" / "SKILL.md"
             skill_file.parent.mkdir(parents=True)
             skill_file.write_text(
                 """---
@@ -334,7 +335,7 @@ Inspect the requested files before answering.
 """,
                 encoding="utf-8",
             )
-            broken = root / ".agents" / "skills" / "broken" / "SKILL.md"
+            broken = global_skills / "broken" / "SKILL.md"
             broken.parent.mkdir(parents=True)
             broken.write_text("---\nname: broken\n", encoding="utf-8")
             project_config = root / ".ai-agent-platform" / "config.json"
@@ -352,8 +353,9 @@ Inspect the requested files before answering.
                 encoding="utf-8",
             )
             skill_service = SkillService(
-                SkillDiscovery(),
-                enabled=False,
+                SkillDiscovery(user_root=global_skills),
+                enabled=True,
+                enabled_skills=("review",),
             )
             process_config = ConfigResolver(
                 user_config={
@@ -378,14 +380,15 @@ Inspect the requested files before answering.
                 user_message="inspect",
                 workspace_id="main",
                 model_selection=ModelSelection(),
+                skill_name="review",
             )
 
             self.assertEqual(len(snapshot.instructions.sources), 1)
             source = snapshot.instructions.sources[0]
-            self.assertEqual(source.kind, "untrusted_project_skill")
-            self.assertEqual(source.path, "skill://project:review")
-            self.assertIn("cannot override", source.text)
-            self.assertIn("cannot grant tools", source.reason)
+            self.assertEqual(source.kind, "skill_instruction")
+            self.assertEqual(source.path, "skill://user:review")
+            self.assertIn("Declarative Skill", source.text)
+            self.assertIn("do not grant permission", source.reason)
             self.assertEqual(source.priority, 50)
             self.assertEqual(
                 snapshot.tools.enabled_tools,
@@ -521,12 +524,8 @@ Inspect the requested files before answering.
                 [item.text for item in beta_snapshot.instructions.sources[:2]],
                 ["beta agents", "beta config"],
             )
-            alpha_skill = alpha_snapshot.instructions.sources[2]
-            beta_skill = beta_snapshot.instructions.sources[2]
-            self.assertEqual(alpha_skill.path, "skill://project:alpha-review")
-            self.assertEqual(beta_skill.path, "skill://project:beta-review")
-            self.assertIn("alpha skill instructions", alpha_skill.text)
-            self.assertIn("beta skill instructions", beta_skill.text)
+            self.assertEqual(len(alpha_snapshot.instructions.sources), 2)
+            self.assertEqual(len(beta_snapshot.instructions.sources), 2)
             self.assertGreater(
                 alpha_snapshot.instructions.sources[0].priority,
                 alpha_snapshot.instructions.sources[1].priority,

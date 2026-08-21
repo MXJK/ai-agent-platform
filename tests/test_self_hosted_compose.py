@@ -46,7 +46,12 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["LIVE_WORKSPACE_WRITES_ENABLED"] == "true"
     assert environment["AGENT_WORKSPACE_DEFAULT_MODE"] == "direct"
     assert environment["AGENT_WORKSPACE_ALLOWED_MODES"] == "direct"
+    assert environment["MCP_ENABLED"] == "true"
+    assert environment["MCP_CONFIG_PATH"] == "/home/app/.ai-agent-platform/mcp.json"
+    assert environment["SKILLS_ENABLED"] == "true"
+    assert environment["SKILLS_DIRECTORY_PATH"] == "/home/app/.ai-agent-platform/skills"
     assert "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces" in app["volumes"]
+    assert "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform" in app["volumes"]
     assert all("docker.sock" not in volume for volume in app["volumes"])
 
 
@@ -57,6 +62,7 @@ def test_application_image_runs_as_a_non_root_user() -> None:
     assert "--uid 1000" in dockerfile
     assert "requirements.self-hosted.txt" in dockerfile
     assert "import ai_agent_platform.api.entrypoint" in dockerfile
+    assert "nodejs npm" in dockerfile
 
 
 def test_self_hosted_image_omits_compatibility_only_dependencies() -> None:

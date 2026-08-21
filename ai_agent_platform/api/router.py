@@ -10,6 +10,7 @@ from ai_agent_platform.api.routes import (
     create_knowledge_bases_router,
     create_model_registry_router,
     create_mcp_registry_router,
+    create_skill_registry_router,
     create_memory_router,
     create_sessions_router,
     create_workspaces_router,
@@ -32,6 +33,7 @@ from ai_agent_platform.services import (
 )
 from ai_agent_platform.project_memory import ProjectMemoryService
 from ai_agent_platform.memory import UserMemoryService
+from ai_agent_platform.skills import SkillRegistryService
 
 
 def create_api_router(
@@ -49,6 +51,7 @@ def create_api_router(
     model_registry: ModelRegistryService,
     directory_picker: DirectoryPicker,
     mcp_registry: MCPRegistryService,
+    skill_registry: SkillRegistryService,
     mcp_connection_manager: MCPConnectionManager | None = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -73,6 +76,7 @@ def create_api_router(
         create_model_registry_router(model_registry, session_service, settings)
     )
     router.include_router(create_mcp_registry_router(mcp_registry, settings))
+    router.include_router(create_skill_registry_router(skill_registry, settings))
     router.include_router(
         create_chat_router(
             session_service,

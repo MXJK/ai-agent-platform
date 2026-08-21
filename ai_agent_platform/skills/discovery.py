@@ -120,6 +120,7 @@ class SkillDiscovery:
         discovered_count = 0
         loaded_chars = 0
         limit_reported = False
+        disabled_user_names: set[str] = set()
 
         roots = self._source_roots(project_root, diagnostics)
         count_exhausted = False
@@ -132,6 +133,10 @@ class SkillDiscovery:
             )
             diagnostics.extend(root_diagnostics)
             for candidate in candidates:
+                if source is SkillSource.USER and (candidate.parent / ".disabled").is_file():
+                    if _NAME_RE.fullmatch(candidate.parent.name.casefold()):
+                        disabled_user_names.add(candidate.parent.name.casefold())
+                    continue
                 discovered_count += 1
                 display_path = _display_path(candidate, display_base)
                 if discovered_count > self._limits.max_discovered_skills:
@@ -167,7 +172,7 @@ class SkillDiscovery:
                             "total_chars_exceeded",
                             "loading SKILL.md would exceed the total character limit",
                         )
-                    definition = _parse_skill_document(
+                    definition = parse_skill_document(
                         text,
                         raw=raw,
                         source=source,
@@ -214,6 +219,15 @@ class SkillDiscovery:
             if count_exhausted:
                 break
 
+        if disabled_user_names:
+            definitions = [
+                item
+                for item in definitions
+                if not (
+                    item.source is SkillSource.BUNDLED
+                    and item.name in disabled_user_names
+                )
+            ]
         effective, conflict_diagnostics = _resolve_skill_conflicts(definitions)
         diagnostics.extend(conflict_diagnostics)
         command_registry, command_diagnostics = CommandRegistry.from_skills(effective)
@@ -432,14 +446,15 @@ def _read_regular_file(path: Path, *, root: Path, max_bytes: int) -> bytes:
         os.close(descriptor)
 
 
-def _parse_skill_document(
+def parse_skill_document(
     text: str,
     *,
-    raw: bytes,
+    raw: bytes | None = None,
     source: SkillSource,
     path: str,
     max_context_budget_chars: int,
 ) -> SkillDefinition:
+    resolved_raw = text.encode("utf-8") if raw is None else raw
     metadata, instructions = _frontmatter(text)
     unknown_fields = sorted(set(metadata).difference(_SKILL_FIELDS))
     if unknown_fields:
@@ -481,6 +496,11 @@ def _parse_skill_document(
         tool_values=True,
     )
     command = _command(metadata.get("command"), skill_description=description)
+    if command is None:
+        command = SlashCommandMetadata(
+            name=name,
+            description=description,
+        )
     return SkillDefinition(
         name=name,
         description=description,
@@ -492,7 +512,7 @@ def _parse_skill_document(
         command=command,
         source=source,
         path=path,
-        content_hash=hashlib.sha256(raw).hexdigest(),
+        content_hash=hashlib.sha256(resolved_raw).hexdigest(),
         project_context_untrusted=source is SkillSource.PROJECT,
     )
 

@@ -35,11 +35,11 @@ const COMPOSER_BUILTIN_COMMANDS = [
   },
   {
     kind: "builtin",
-    command: "mcp",
-    title: "打开 MCP 管理",
-    description: "查看 Server 连接、状态和已注册工具。",
-    action: "mcp",
-    keywords: ["server", "tool", "工具"],
+    command: "tools",
+    title: "打开工具管理",
+    description: "统一管理全局 Skill 与 MCP Server。",
+    action: "tools",
+    keywords: ["skill", "mcp", "server", "tool", "工具"],
   },
 ];
 let composerDraftSaveTimer = null;
@@ -122,6 +122,13 @@ const state = {
     config_writable: false,
     servers: [],
   },
+  skillRegistry: {
+    root: "~/.ai-agent-platform/skills",
+    writable: false,
+    skills: [],
+    diagnostics: [],
+  },
+  editingSkill: "",
   editingMCPServer: "",
   composerDrafts: {},
   slashCapabilities: {
@@ -919,9 +926,9 @@ async function runBuiltinComposerCommand(item, remaining = "") {
     }
     return;
   }
-  if (item.action === "mcp") {
+  if (["tools", "mcp"].includes(item.action)) {
     clearComposerInput();
-    switchView("mcp");
+    switchView("tools");
   }
 }
 
@@ -1052,7 +1059,9 @@ function bindConversationFollow() {
 }
 
 function switchView(viewName, updateHash = true) {
-  const normalizedView = viewName === "agent" ? "chat" : viewName;
+  const normalizedView = viewName === "agent"
+    ? "chat"
+    : (viewName === "mcp" ? "tools" : viewName);
   const panel = document.querySelector(`[data-view-panel="${normalizedView}"]`);
   if (!panel) {
     return;
@@ -1083,8 +1092,9 @@ function switchView(viewName, updateHash = true) {
   if (normalizedView === "models") {
     loadModelRegistry().catch((error) => showToast(humanizeError(error), "error"));
   }
-  if (normalizedView === "mcp") {
-    loadMCPRegistry().catch((error) => showToast(humanizeError(error), "error"));
+  if (normalizedView === "tools") {
+    Promise.all([loadSkillRegistry(), loadMCPRegistry()])
+      .catch((error) => showToast(humanizeError(error), "error"));
   }
 }
 
@@ -1415,6 +1425,148 @@ async function checkHealth() {
     pill.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span>连接失败</span>';
   } finally {
     renderOverview();
+  }
+}
+
+function skillByName(name) {
+  return state.skillRegistry.skills.find((item) => item.name === name) || null;
+}
+
+function renderSkillRegistry() {
+  const registry = state.skillRegistry;
+  const skills = registry.skills || [];
+  $("skill-registry-root").textContent = registry.root || "~/.ai-agent-platform/skills";
+  $("skill-list-count").textContent = String(skills.length);
+  const note = $("skill-runtime-note");
+  const errors = (registry.diagnostics || []).filter((item) => item.severity === "error");
+  if (!registry.writable) {
+    note.hidden = false;
+    note.className = "mcp-runtime-note error";
+    note.textContent = "全局 Skill 目录不可写，当前只能查看已发现项。";
+  } else if (errors.length) {
+    note.hidden = false;
+    note.className = "mcp-runtime-note";
+    note.textContent = `有 ${errors.length} 个 Skill 未通过校验，请检查路径或 SKILL.md。`;
+  } else {
+    note.hidden = true;
+    note.textContent = "";
+  }
+  $("save-skill-btn").disabled = !registry.writable;
+  const list = $("skill-list");
+  if (!skills.length) {
+    list.innerHTML = '<div class="empty-state">尚未注册 Skill。保存后会立即出现在所有 Workspace。</div>';
+    return;
+  }
+  list.innerHTML = skills.map((skill) => {
+    const command = skill.command?.name || skill.name;
+    const tools = skill.required_tools?.length
+      ? skill.required_tools.map((name) => `<code>${escapeHtml(name)}</code>`).join("")
+      : "<small>不声明额外工具</small>";
+    return `
+      <article class="mcp-server-card ${skill.enabled ? "ready" : "disabled"}" data-skill-name="${escapeHtml(skill.name)}">
+        <div class="mcp-server-heading">
+          <div><strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.description)}</small></div>
+          <span class="status-pill ${skill.enabled ? "ok" : "neutral"}"><span class="status-dot"></span>${skill.enabled ? "已启用" : "已停用"}</span>
+        </div>
+        <div class="mcp-server-meta"><span>/${escapeHtml(command)}</span><span>${escapeHtml(skill.source)}</span><span>${skill.editable ? "全局用户目录" : "系统内置"}</span></div>
+        <div class="mcp-tool-chips">${tools}</div>
+        <div class="mcp-server-actions">
+          ${skill.editable ? `<button class="button ghost" type="button" data-skill-action="edit">编辑</button><button class="button ghost" type="button" data-skill-action="toggle">${skill.enabled ? "停用" : "启用"}</button><button class="text-button danger" type="button" data-skill-action="delete">删除</button>` : '<span class="meta-badge">只读</span>'}
+        </div>
+      </article>`;
+  }).join("");
+}
+
+async function loadSkillRegistry(showRaw = false) {
+  const body = await fetchJson("/skills");
+  state.skillRegistry = body;
+  invalidateSlashCapabilities();
+  renderSkillRegistry();
+  if (showRaw) setRaw(body);
+  return body;
+}
+
+function resetSkillForm() {
+  state.editingSkill = "";
+  $("skill-form").reset();
+  $("skill-name-input").readOnly = false;
+  $("skill-form-title").textContent = "添加 Skill";
+  $("skill-form-hint").textContent = "保存后无需重启，所有 Workspace 立即使用同一份注册表。";
+  $("save-skill-btn").textContent = "保存 Skill";
+  $("skill-enabled-input").checked = true;
+}
+
+function editSkill(name) {
+  const skill = skillByName(name);
+  if (!skill?.editable) return;
+  state.editingSkill = name;
+  $("skill-name-input").value = skill.name;
+  $("skill-name-input").readOnly = true;
+  $("skill-content-input").value = skill.content || "";
+  $("skill-enabled-input").checked = skill.enabled;
+  $("skill-form-title").textContent = `编辑 ${skill.name}`;
+  $("skill-form-hint").textContent = "名称必须与 Frontmatter 的 name 一致。";
+  $("save-skill-btn").textContent = "更新 Skill";
+  $("skill-form").scrollIntoView({ behavior: preferredScrollBehavior(), block: "start" });
+  $("skill-content-input").focus({ preventScroll: true });
+}
+
+async function saveSkill(event) {
+  event.preventDefault();
+  const form = $("skill-form");
+  if (!form.reportValidity()) return;
+  const name = $("skill-name-input").value.trim();
+  const button = $("save-skill-btn");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    await fetchJson(`/skills/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        content: $("skill-content-input").value,
+        enabled: $("skill-enabled-input").checked,
+      }),
+    });
+    await loadSkillRegistry();
+    resetSkillForm();
+    showToast(`${name} 已保存并同步到所有 Workspace`, "success");
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    button.disabled = !state.skillRegistry.writable;
+    button.removeAttribute("aria-busy");
+  }
+}
+
+async function handleSkillAction(button) {
+  const card = button.closest("[data-skill-name]");
+  const name = card?.dataset.skillName;
+  const action = button.dataset.skillAction;
+  const skill = skillByName(name);
+  if (!skill?.editable) return;
+  if (action === "edit") {
+    editSkill(name);
+    return;
+  }
+  if (action === "delete" && !window.confirm(`确认删除全局 Skill“${name}”？`)) return;
+  button.disabled = true;
+  try {
+    if (action === "toggle") {
+      await fetchJson(`/skills/${encodeURIComponent(name)}/enabled`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !skill.enabled }),
+      });
+      showToast(skill.enabled ? `${name} 已停用` : `${name} 已启用`);
+    } else if (action === "delete") {
+      await fetchJson(`/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
+      if (state.editingSkill === name) resetSkillForm();
+      showToast(`${name} 已删除`);
+    }
+    await loadSkillRegistry(true);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -6882,10 +7034,16 @@ function bindEvents() {
     if (event.key === "Enter") searchConversationMemory();
   });
 
-  $("refresh-mcp-registry-btn").addEventListener("click", () => {
-    loadMCPRegistry(true)
-      .then(() => showToast("MCP 连接状态已刷新"))
+  $("refresh-tools-registry-btn").addEventListener("click", () => {
+    Promise.all([loadSkillRegistry(true), loadMCPRegistry()])
+      .then(() => showToast("Skill 与 MCP 状态已刷新"))
       .catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("reset-skill-form-btn").addEventListener("click", resetSkillForm);
+  $("skill-form").addEventListener("submit", saveSkill);
+  $("skill-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-skill-action]");
+    if (button) handleSkillAction(button);
   });
   $("mcp-transport-input").addEventListener("change", (event) => {
     updateMCPTransportFields();
@@ -6982,6 +7140,10 @@ function bindEvents() {
       switchView("chat");
       return;
     }
+    if (view === "mcp") {
+      switchView("tools");
+      return;
+    }
     if (document.querySelector(`[data-view-panel="${view}"]`)) {
       switchView(view, false);
     }
@@ -7033,13 +7195,17 @@ async function init() {
     : {};
   $("user-id-input").value = "demo_user";
   updateMCPTransportFields();
+  resetSkillForm();
   bindEvents();
   bindConversationFollow();
   resizeComposerInput();
-  const requestedView = location.hash.replace("#", "") === "agent"
+  const requestedHashView = location.hash.replace("#", "");
+  const requestedView = requestedHashView === "agent"
     ? "chat"
-    : location.hash.replace("#", "");
-  const storedView = preferences.view === "agent" ? "chat" : preferences.view;
+    : (requestedHashView === "mcp" ? "tools" : requestedHashView);
+  const storedView = preferences.view === "agent"
+    ? "chat"
+    : (preferences.view === "mcp" ? "tools" : preferences.view);
   const preferredView = document.querySelector(`[data-view-panel="${storedView}"]`)
     ? storedView
     : "chat";

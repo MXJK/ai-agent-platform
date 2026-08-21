@@ -51,6 +51,10 @@ class SkillService:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def enabled_skills(self) -> frozenset[str] | None:
+        return self._enabled_skills
+
     def discover(
         self,
         *,
@@ -66,7 +70,9 @@ class SkillService:
                 discovered_count=0,
                 loaded_chars=0,
             )
-        return self._discovery.discover(project_root=workspace_root)
+        # Runtime Skills are user-global. Workspace roots are intentionally not
+        # consulted, so the same catalog is available in every Workspace.
+        return self._discovery.discover(project_root=None)
 
     def build_context(
         self,
@@ -103,8 +109,20 @@ class SkillService:
                 item.strip().casefold() for item in selected_skill_names
             )
         )
+        # Progressive disclosure: metadata is always discoverable, but full Skill
+        # instructions are loaded only for an explicit slash invocation or through
+        # the read-only ``agent.load_skill`` tool.
+        if explicit_selection is None:
+            catalog = self.discover(
+                workspace_root=None,
+                enabled=effective_enabled,
+            )
+            return SkillContextSelection(
+                sources=(),
+                diagnostics=catalog.diagnostics,
+            )
         catalog = self.discover(
-            workspace_root=workspace_root,
+            workspace_root=None,
             enabled=effective_enabled,
         )
         diagnostics = list(catalog.diagnostics)
@@ -213,7 +231,7 @@ class SkillService:
             else frozenset(available_tools)
         )
         catalog = self.discover(
-            workspace_root=workspace_root,
+            workspace_root=None,
             enabled=effective_enabled,
         )
         diagnostics = list(catalog.diagnostics)
@@ -281,7 +299,7 @@ class SkillService:
 
         if not (self._enabled if enabled is None else enabled):
             raise SkillInvocationError("skill_disabled", "Skills are disabled")
-        discovered = self.discover(workspace_root=workspace_root, enabled=True)
+        discovered = self.discover(workspace_root=None, enabled=True)
         candidate = discovered.get_skill(name)
         if candidate is None:
             raise SkillInvocationError(

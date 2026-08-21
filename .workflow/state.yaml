@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "ALIGN-TENCENTDB-LAYERED-MEMORY"
-next_action: "Refresh http://127.0.0.1:8000 and test the automatic L0-to-L3 memory workflow"
+active_task: "GLOBAL-TOOLS-SKILLS-MCP"
+next_action: "Rebuild the Docker image, then migrate legacy .agents/skills into ~/.ai-agent-platform/skills if desired"
 blockers: []
 last_verified_commit: "cabacb8e9b72ee604cb29f5caa5a1b1fbd517e21"
-updated_at: "2026-08-21T10:29:45+08:00"
+updated_at: "2026-08-21T11:32:47+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

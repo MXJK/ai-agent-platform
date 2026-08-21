@@ -72,6 +72,7 @@ def create_app(
         app.state.mcp_providers = runtime.mcp_providers
         app.state.mcp_connection_manager = runtime.mcp_connection_manager
         app.state.mcp_registry = runtime.mcp_registry
+        app.state.skill_registry = runtime.skill_registry
         app.state.tool_registry = runtime.tool_registry
         app.state.agent_run_service = runtime.agent_run_service
         app.state.query_service = runtime.query_service
@@ -102,6 +103,7 @@ def create_app(
                 model_registry=runtime.model_registry,
                 directory_picker=runtime.directory_picker,
                 mcp_registry=runtime.mcp_registry,
+                skill_registry=runtime.skill_registry,
                 mcp_connection_manager=runtime.mcp_connection_manager,
             ),
             prefix=settings.api_prefix,

@@ -197,7 +197,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("effective_denies", diagnostics["permissions"])
 
-    async def test_project_skill_command_submits_query_and_freezes_invocation(self) -> None:
+    async def test_global_skill_command_submits_query_and_freezes_invocation(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -209,7 +209,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
             )
             _write_project_config(
                 root,
-                enabled_skills=("project:review",),
+                enabled_skills=("user:review",),
             )
             runtime = build_runtime(_settings(root), role="cli")
             output = io.StringIO()
@@ -233,10 +233,10 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         invocation = record.context_snapshot.metadata.entrypoint_metadata[
             "skill_invocation"
         ]
-        self.assertEqual(invocation["skill_name"], "project:review")
+        self.assertEqual(invocation["skill_name"], "user:review")
         self.assertEqual(invocation["arguments"], ["app.py"])
         self.assertIn(
-            "untrusted_project_skill",
+            "skill_instruction",
             {item.kind for item in record.context_snapshot.instructions.sources},
         )
         self.assertNotIn(
@@ -248,7 +248,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         for enabled_skills, required_tools, expected_code in (
             ((), (), "skill_disabled"),
             (
-                ("project:review",),
+                ("user:review",),
                 ("missing.tool",),
                 "skill_required_tools_unavailable",
             ),
@@ -263,7 +263,10 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                     required_tools=required_tools,
                 )
                 _write_project_config(root, enabled_skills=enabled_skills)
-                runtime = build_runtime(_settings(root), role="cli")
+                runtime = build_runtime(
+                    _settings(root, enabled_skills=enabled_skills),
+                    role="cli",
+                )
                 output = io.StringIO()
                 try:
                     application = CliApplication(
@@ -438,7 +441,11 @@ class ShellAdapterE2ETests(unittest.TestCase):
         runtime.close.assert_called_once_with()
 
 
-def _settings(root: Path) -> Settings:
+def _settings(
+    root: Path,
+    *,
+    enabled_skills: tuple[str, ...] | None = None,
+) -> Settings:
     return Settings(
         llm_provider="fake",
         model_secret_backend="memory",
@@ -446,6 +453,9 @@ def _settings(root: Path) -> Settings:
         workspace_allowed_roots=(str(root.resolve()),),
         background_task_workers=1,
         conversation_summary_enabled=False,
+        skills_directory_path=str(root / ".global-skills"),
+        skills_enabled=True,
+        enabled_skills=enabled_skills,
     )
 
 
@@ -476,7 +486,7 @@ def _write_project_skill(
     command: str,
     required_tools: tuple[str, ...],
 ) -> None:
-    path = root / ".agents" / "skills" / name / "SKILL.md"
+    path = root / ".global-skills" / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         (

@@ -181,23 +181,11 @@ class ExecutionContextFactory:
         agent_type = "coding"
         run_mode = "default"
         skill_enabled = bool(
-            self._skill_service is not None
-            and (
-                self._skill_service.enabled
-                if effective_config is None
-                else (
-                    effective_config.skills_allowed
-                    and effective_config.skills_enabled
-                )
-            )
+            self._skill_service is not None and self._skill_service.enabled
         )
         enabled_skills = (
-            (
-                effective_config.enabled_skills
-                if effective_config.enabled_skills is not None
-                else effective_config.skill_allowlist
-            )
-            if effective_config is not None
+            self._skill_service.enabled_skills
+            if self._skill_service is not None
             else None
         )
         skill_catalog = (
@@ -435,24 +423,61 @@ class ExecutionContextFactory:
                 workspace_root=execution_root,
                 agent=agent_type,
                 mode=run_mode,
-                enabled=skill_enabled,
-                enabled_skills=enabled_skills,
                 available_tools=tool_selection.enabled_tools or (),
             )
             selected_skill_names = (invoked_skill.qualified_name,)
         skill_diagnostics: tuple[str, ...] = tool_selection.diagnostics
+        if (
+            self._skill_service is not None
+            and selected_skill_names is None
+            and remaining_instruction_chars > 0
+            and "agent.load_skill" in (tool_selection.enabled_tools or ())
+        ):
+            catalog_options: dict[str, object] = {}
+            catalog_options["available_tools"] = tool_selection.enabled_tools or ()
+            implicit_catalog = self._skill_service.effective_catalog(
+                workspace_root=execution_root,
+                agent=agent_type,
+                mode=run_mode,
+                **catalog_options,
+            )
+            if implicit_catalog.skills:
+                catalog_lines = [
+                    "[Global Skill catalog]",
+                    "The following reusable Skills are available in every Workspace. ",
+                    "When exactly one Skill clearly matches the user's request, call ",
+                    "`agent.load_skill` with its qualified name before continuing. ",
+                    "Do not load a Skill merely because of a weak keyword match.",
+                ]
+                catalog_lines.extend(
+                    f"- {skill.qualified_name}: {skill.description}"
+                    for skill in implicit_catalog.skills
+                )
+                catalog_text = "\n".join(catalog_lines)
+                clipped = catalog_text[:remaining_instruction_chars]
+                instruction_snapshots.append(
+                    InstructionSourceSnapshot(
+                        kind="skill_catalog",
+                        path="skill://catalog",
+                        start_line=1,
+                        end_line=clipped.count("\n") + 1,
+                        text=clipped,
+                        reason=(
+                            "global Skill metadata for conservative implicit activation"
+                        ),
+                        content_hash=hashlib.sha256(
+                            catalog_text.encode("utf-8")
+                        ).hexdigest(),
+                        truncated=len(clipped) < len(catalog_text),
+                        priority=40,
+                    )
+                )
+                remaining_instruction_chars = max(
+                    0,
+                    remaining_instruction_chars - len(clipped),
+                )
         if self._skill_service is not None and remaining_instruction_chars > 0:
             skill_options: dict[str, object] = {}
-            if effective_config is not None:
-                skill_options["enabled"] = bool(
-                    effective_config.skills_allowed
-                    and effective_config.skills_enabled
-                )
-                skill_options["enabled_skills"] = (
-                    effective_config.enabled_skills
-                    if effective_config.enabled_skills is not None
-                    else effective_config.skill_allowlist
-                )
             if self._tool_registry is not None:
                 skill_options["available_tools"] = (
                     tool_selection.enabled_tools or ()
@@ -655,20 +680,6 @@ class ExecutionContextFactory:
     def effective_skills(self, snapshot: RunContextSnapshot):
         if self._skill_service is None:
             return None
-        config = snapshot.project.project_config
-        skills_allowed = _config_snapshot_value(
-            config, "process_security", "skills_allowed"
-        )
-        skills_enabled = _config_snapshot_value(
-            config, "project_session", "skills_enabled"
-        )
-        enabled_skills = _config_snapshot_value(
-            config, "project_session", "enabled_skills"
-        )
-        if enabled_skills is None:
-            enabled_skills = _config_snapshot_value(
-                config, "process_security", "skill_allowlist"
-            )
         return self._skill_service.effective_catalog(
             workspace_root=(
                 snapshot.execution_workspace.execution_root
@@ -677,12 +688,6 @@ class ExecutionContextFactory:
             ),
             agent="coding",
             mode="default",
-            enabled=bool(skills_allowed is not False and skills_enabled),
-            enabled_skills=(
-                tuple(str(item) for item in enabled_skills)
-                if isinstance(enabled_skills, list)
-                else None
-            ),
             available_tools=snapshot.tools.enabled_tools or (),
         )
 

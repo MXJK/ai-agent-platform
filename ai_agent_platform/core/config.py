@@ -188,10 +188,15 @@ class Settings:
     celery_worker_max_tasks_per_child: int = 100
     mcp_enabled: bool = False
     mcp_allowed: bool = True
-    mcp_config_path: str | None = None
+    mcp_config_path: str | None = str(
+        Path.home() / ".ai-agent-platform" / "mcp.json"
+    )
     mcp_request_timeout_seconds: float = 10.0
     skills_enabled: bool = False
     skills_allowed: bool = True
+    skills_directory_path: str = str(
+        Path.home() / ".ai-agent-platform" / "skills"
+    )
     tool_allowlist: tuple[str, ...] | None = None
     skill_allowlist: tuple[str, ...] | None = None
     enabled_tools: tuple[str, ...] | None = None
@@ -1144,7 +1149,12 @@ class Settings:
                 dotenv,
             ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
-            mcp_config_path=_env("MCP_CONFIG_PATH", None, dotenv),
+            mcp_config_path=_env("MCP_CONFIG_PATH", cls.mcp_config_path, dotenv),
+            skills_directory_path=_env(
+                "SKILLS_DIRECTORY_PATH",
+                cls.skills_directory_path,
+                dotenv,
+            ),
             mcp_request_timeout_seconds=_float_env(
                 "MCP_REQUEST_TIMEOUT_SECONDS",
                 cls.mcp_request_timeout_seconds,

@@ -163,8 +163,6 @@ root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
   "project_session": {
     "project_instructions": ["先运行受影响的测试。"],
     "enabled_tools": ["file_symbol_locator"],
-    "skills_enabled": true,
-    "enabled_skills": ["review"],
     "mcp_enabled": false
   }
 }
@@ -174,12 +172,13 @@ root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
 Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙箱模式、镜像、命令白名单、
 超时、输出上限、workspace parent 和生命周期都在进程启动时构造执行器，因此全部属于
 `process_security`，项目配置不能产生只在快照中变化、实际执行却不生效的覆盖值。项目层
-仍可收紧审批，并从进程允许的工具/Skill/MCP 集合中选择更小子集，但不能越过
+仍可收紧审批，并从进程允许的工具/MCP 集合中选择更小子集，但不能越过
 `mcp_allowed=false`、`skills_allowed=false` 或进程 allowlist。进程 `tool_allowlist` 只在启动
 时裁剪全局能力上限。每个 Run 再从进程 Registry 建立带 base/local/MCP 来源和 namespace
 的不可变 `ToolCatalog`，由共享 `ToolPoolBuilder` 将项目 `enabled_tools`、Agent/模式、模型
 能力、Workspace role、中央 display deny、显式 deny、Sandbox 和 Skill 依赖求交为
-`EffectiveToolPool`，不修改源 `ToolRegistry`。未知工具、大小写冲突、保留 namespace
+`EffectiveToolPool`，不修改源 `ToolRegistry`。Skill 的启用与选择属于用户全局注册表及
+进程 allowlist，不再由 Workspace 配置分区。未知工具、大小写冲突、保留 namespace
 冒用、尝试突破进程上限或非法恢复都会 fail closed。非 Provider 凭据的环境变量
 继续兼容既有无前缀名称和 `.env`，以及 `SESSION_REPOSITORY`/`AGENT_RUN_STORE` 的旧
 回退关系；Provider API Key 不再是配置字段，相关环境变量会被忽略。存储回退只在目标 Store 支持该
@@ -199,18 +198,17 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 
 ## Skill 发现与 slash command
 
-启用 `skills_enabled` 后，运行时只发现以下目录中的 `SKILL.md`：
+启用 `skills_enabled` 后，运行时只发现以下用户全局目录中的 `SKILL.md`：
 
 - bundled：`ai_agent_platform/bundled_skills/<skill>/SKILL.md`；
-- user：`~/.ai-agent-platform/skills/<skill>/SKILL.md`；
-- project：已鉴权 Workspace 下的 `.agents/skills/<skill>/SKILL.md`。
+- user：`SKILLS_DIRECTORY_PATH`，默认
+  `~/.ai-agent-platform/skills/<skill>/SKILL.md`。
 
-来源优先级固定为 `project > user > bundled`，限定名分别是
-`project:<name>`、`user:<name>` 和 `bundled:<name>`。同一来源的重复名称按相对路径
-字典序选择第一项并产生错误诊断；跨来源覆盖、slash command/alias 冲突也产生稳定
-诊断。最终 Skill 与 command 都按规范化名称排序。项目 Skill 即使覆盖同名用户或
-bundled Skill，仍会标记为 `untrusted_project_skill`，在 Run 入队前以不可信项目
-上下文冻结。
+Workspace 下的 `.agents/skills` 不再参与运行时发现；注册一次后，每个 Workspace 的
+composer、CLI 和 Run 都看到同一份 catalog。来源优先级固定为 `user > bundled`，限定名
+分别是 `user:<name>` 和 `bundled:<name>`。同一来源的重复名称按相对路径字典序选择
+第一项并产生错误诊断；跨来源覆盖、slash command/alias 冲突也产生稳定诊断。最终
+Skill 与 command 都按规范化名称排序。
 
 最小 `SKILL.md` 使用严格、无重复键的 YAML frontmatter：
 
@@ -231,28 +229,39 @@ command:
 Inspect live evidence before giving review findings.
 ```
 
-第一版只接受上述字段。每个文件最多 64 KiB，每次发现最多 64 个候选、最多加载
+`command` 可以省略；此时平台自动用 Skill 的 `name` 和 `description` 注册同名 `/`
+入口。第一版只接受上述字段。每个文件最多 64 KiB，每次发现最多 64 个候选、最多加载
 128 KiB 字符；单个 Skill 的上下文预算上限为 16,000 字符，最终还受 Run 的项目
 指令总预算约束。错误 UTF-8、损坏/重复 YAML、未知字段、超限文件和单个坏 Skill
 只产生诊断，不会终止其余发现。来源根、子目录或 `SKILL.md` 中的 symlink 都不会被
 跟随，真实路径必须留在对应来源根内。
 
+Skill 使用渐进加载：composer 和普通 Run 先只接收名称、描述、路径等元数据；用户通过
+`/` 显式选择时，选中 Skill 的正文在入队前冻结；没有显式选择时，正文不会批量进入
+上下文，模型只有在描述与任务强匹配时才可调用只读 `agent.load_skill` 加载一份正文。
 Skill 是纯声明数据：系统不会执行同目录 Python/Shell，也不会从 Markdown 注册函数。
 `tools` 只是所需工具名称；缺少本次 Run 已筛选工具时 Skill 不进入上下文，即使工具
 存在，调用仍受既有 `ToolUseContext`、Sandbox 和 allow/ask/deny 规则约束。Skill
 不能注册工具、降低审批、扩大 allowlist 或授予权限。Skill 指令的快照优先级低于
-Workspace 指令文件和项目配置指令。REPL 对非内置 slash command 使用当前 Workspace 的
-有效 Skill catalog 解析覆盖、启用列表、Agent/模式和 `required_tools`；成功后提交普通
+Workspace 指令文件和项目配置指令。REPL 对非内置 slash command 使用用户全局
+Skill catalog 解析覆盖、进程启用列表、Agent/模式和 `required_tools`；成功后提交普通
 `QueryParams(skill_name, skill_arguments)`，并在入队前把选中 Skill 指令与 invocation
 元数据冻结。未知、禁用或缺依赖命令返回稳定诊断；注册表只保存元数据，不执行 Skill
 目录代码，也不扩大工具池或绕过 `PermissionResolver`。
 
-浏览器统一输入框也复用这条调用链。输入 `/` 会按内置命令、当前有效 Skill 和当前
+浏览器统一输入框也复用这条调用链。输入 `/` 会按内置命令、全局有效 Skill 和当前
 `EffectiveToolPool` 中的 MCP 工具分组展示并过滤，支持方向键、Enter/Tab、Escape 和
 鼠标选择。选择 Skill 会把限定名与引号感知的参数提交给 Agent；选择 MCP 工具只冻结
 “优先使用此工具”的用户意图，仍由模型原生 tool calling、中央权限解析、审批和 Sandbox
 决定是否调用。`GET /api/v1/agent/composer-capabilities` 按已鉴权会话、Workspace、模型与
 配置生成只读目录，不会把进程中已注册但本次 Run 不可用的能力暴露为可选项。
+
+工作台「工具」（`/#tools`）统一管理 Skill 与 MCP。Skill 管理 API 为
+`GET /api/v1/skills`、`PUT /api/v1/skills/{name}`、
+`PATCH /api/v1/skills/{name}/enabled` 和 `DELETE /api/v1/skills/{name}`；用户 Skill
+支持创建、编辑、启停和删除，bundled Skill 只读。写入使用本机管理能力校验、严格
+Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；停用状态保存在同目录
+`.disabled` 标记中，保存后无需重启。
 
 ## 主要能力
 
@@ -261,7 +270,7 @@ Workspace 指令文件和项目配置指令。REPL 对非内置 slash command �
 - `快速对话`：直接返回模型的 SSE 流式响应；
 - `代码 Agent`：围绕任务探索工作区，并在同一条助手消息内展示进度、审批、文件变更、
   Diff 和 ChangeSet 操作；
-- 键入 `/` 可调用内置 `/chat`、`/agent`、`/new`、`/mcp` 命令，或选择当前会话真正
+- 键入 `/` 可调用内置 `/chat`、`/agent`、`/new`、`/tools` 命令，或选择当前会话真正
   可用的 Skill/MCP 工具；Skill/MCP 选择会自动切换到代码 Agent；
 - 两种模式共享会话历史和持久化滚动摘要。压缩后的历史与数量受控的近期消息可以
   共同参与 Chat、Agent 探索和原生工具选择，同时保留原始消息。
@@ -649,10 +658,10 @@ HTTP Server 必须使用显式 host allowlist；HTTPS 是默认要求，重定�
 MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断。MCP 权限注解始终先
 进入中央 `PermissionResolver`，缺失或高风险提示按外部副作用保守处理，不能直接授权。
 
-启用 MCP 后可直接打开工作台的「MCP 连接」（`/#mcp`）注册、编辑、测试/刷新、启停
+启用 MCP 后可直接打开工作台的「工具」（`/#tools`，旧 `/#mcp` 自动兼容跳转）注册、编辑、测试/刷新、启停
 或删除 Server。前端支持当前 stdio、当前 Streamable HTTP 以及两条显式兼容路径，展示
-独立连接状态、协议版本、重试错误和发现/注册工具数。启用界面写入至少要设置
-`MCP_CONFIG_PATH=/path/to/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
+独立连接状态、协议版本、重试错误和发现/注册工具数。`MCP_CONFIG_PATH` 默认是
+`~/.ai-agent-platform/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
 同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
 否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
 写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。当前
@@ -666,6 +675,10 @@ loopback 端口；关闭认证的直连 loopback 和带本机证明的可信网�
 `POST /api/v1/mcp/servers/{name}/test` 和
 `DELETE /api/v1/mcp/servers/{name}`。这些变更只影响目标 Server；停用或删除会关闭其连接
 并原子移除对应的动态工具，不会重建其他 Server 的生命周期。
+
+自托管 Compose 默认同时启用 Skill 与 MCP，把宿主机 `~/.ai-agent-platform` 挂载到
+容器同名目录，并在镜像内安装 `nodejs`/`npm`/`npx`，因此工具页保存的注册表可跨重建
+保留，常见的 Node stdio MCP Server 也具备启动运行时。
 
 最小配置示例：
 

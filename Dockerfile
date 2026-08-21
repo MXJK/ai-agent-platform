@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git libgomp1 \
+    && apt-get install --yes --no-install-recommends git libgomp1 nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

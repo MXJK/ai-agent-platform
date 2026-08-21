@@ -12,6 +12,7 @@ from ai_agent_platform.integrations.permissions import PermissionResolver
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.integrations.execution_workspace import ExecutionWorkspaceRuntime
 from ai_agent_platform.tools import register_repository_tools, register_sandbox_tools
+from ai_agent_platform.skills import SkillLoaderTool
 
 
 def create_coding_tool_registry(
@@ -64,6 +65,49 @@ def create_coding_tool_registry(
             "additionalProperties": False,
         },
     )
+    skill_loader = SkillLoaderTool()
+    registry.register(
+        "agent.load_skill",
+        skill_loader,
+        description=(
+            "Load one globally registered Skill after its name and description "
+            "clearly match the user's task. Load at most one unless the user "
+            "explicitly requests multiple Skills."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 80}
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "instructions": {"type": "string"},
+                "content_hash": {"type": "string"},
+                "required_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "notice": {"type": "string"},
+            },
+            "required": [
+                "name",
+                "description",
+                "instructions",
+                "content_hash",
+                "required_tools",
+                "notice",
+            ],
+            "additionalProperties": False,
+        },
+        max_output_chars=20_000,
+    )
+    setattr(registry, "skill_loader", skill_loader)
     registry.register(
         "file_symbol_locator",
         file_symbol_locator_tool,

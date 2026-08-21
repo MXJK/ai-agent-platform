@@ -33,6 +33,10 @@ x-app-environment: &app-environment
   CHANGE_SET_WORKTREE_PARENT: "/var/lib/ai-agent-platform/worktrees"
   SANDBOX_MODE: "local"
   SANDBOX_WORKSPACE_PARENT: "/var/lib/ai-agent-platform/sandboxes"
+  MCP_ENABLED: "true"
+  MCP_CONFIG_PATH: "/home/app/.ai-agent-platform/mcp.json"
+  SKILLS_ENABLED: "true"
+  SKILLS_DIRECTORY_PATH: "/home/app/.ai-agent-platform/skills"
 
 services:
   postgres:
@@ -86,6 +90,7 @@ services:
       - "127.0.0.1:${SELF_HOSTED_PORT:-8000}:8000"
     volumes:
       - "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces"
+      - "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform"
       - app_state:/var/lib/ai-agent-platform
     depends_on:
       migrate:

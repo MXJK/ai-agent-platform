@@ -508,7 +508,8 @@ class MCPLifecycleTests(unittest.TestCase):
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn(secret_value, persisted)
             self.assertNotIn("frontend_demo", persisted)
-            self.assertIn('data-view-panel="mcp"', frontend)
+            self.assertIn('data-view-panel="tools"', frontend)
+            self.assertIn('id="skill-form"', frontend)
             self.assertIn('id="mcp-server-form"', frontend)
             self.assertIn("/mcp/servers/${encodeURIComponent(name)}", frontend_js)
             self.assertIn("remove_env_secrets", frontend_js)
@@ -637,6 +638,7 @@ class MCPLifecycleTests(unittest.TestCase):
             llm_provider="fake",
             embedding_provider="local",
             model_secret_backend="memory",
+            mcp_config_path=None,
         )
         with TestClient(
             create_app(settings=settings),

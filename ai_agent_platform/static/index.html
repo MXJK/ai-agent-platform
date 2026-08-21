@@ -97,9 +97,9 @@
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
             <span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="mcp">
+          <button class="nav-item" type="button" data-view="tools">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-network"></use></svg></span>
-            <span><strong>MCP 连接</strong><small>Server、工具与凭据</small></span>
+            <span><strong>工具</strong><small>Skill 与 MCP 管理</small></span>
           </button>
           <button class="nav-item" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
@@ -643,15 +643,56 @@
           </div>
         </section>
 
-        <section id="mcp-view" class="view-panel" data-view-panel="mcp" aria-labelledby="mcp-title" hidden>
+        <section id="tools-view" class="view-panel" data-view-panel="tools" aria-labelledby="tools-title" hidden>
           <header class="view-header compact">
             <div>
-              <p class="eyebrow">Model Context Protocol</p>
-              <h1 id="mcp-title">MCP 连接</h1>
-              <p>注册外部工具 Server，先验证连接状态，再把发现的工具交给 Agent。</p>
+              <p class="eyebrow">Capability Registry</p>
+              <h1 id="tools-title">工具</h1>
+              <p>统一管理全局 Skill 与 MCP Server；可用项会出现在任意 Workspace 的 <code>/</code> 菜单。</p>
             </div>
-            <button id="refresh-mcp-registry-btn" class="button secondary" type="button">刷新连接</button>
+            <button id="refresh-tools-registry-btn" class="button secondary" type="button">刷新全部</button>
           </header>
+
+          <div id="skill-runtime-note" class="mcp-runtime-note" role="status" aria-live="polite" hidden></div>
+
+          <article class="surface tool-registry-intro">
+            <div>
+              <span class="step-kicker">Global Skills</span>
+              <h2>全局 Skill</h2>
+              <p>目录 <code id="skill-registry-root">~/.ai-agent-platform/skills</code> 对所有 Workspace 生效。显式 <code>/</code> 选择会直接加载；隐式匹配按需读取正文。</p>
+            </div>
+            <span id="skill-list-count" class="meta-badge">0</span>
+          </article>
+
+          <div class="content-grid mcp-registry-grid skill-registry-grid">
+            <article class="surface mcp-registration-surface">
+              <div class="surface-heading">
+                <div><span class="step-kicker">01 · 注册</span><h2 id="skill-form-title">添加 Skill</h2><p>使用兼容的 <code>SKILL.md</code> Frontmatter 与 Markdown 正文。</p></div>
+                <button id="reset-skill-form-btn" class="text-button" type="button">清空</button>
+              </div>
+              <form id="skill-form" autocomplete="off">
+                <label for="skill-name-input">Skill 名称
+                  <input id="skill-name-input" required maxlength="64" pattern="[a-z0-9][a-z0-9-]{0,63}" placeholder="例如 code-review" spellcheck="false" />
+                </label>
+                <label for="skill-content-input">SKILL.md
+                  <textarea id="skill-content-input" class="skill-editor" required rows="16" spellcheck="false" placeholder="---&#10;name: code-review&#10;description: Review code changes with focused findings.&#10;agents: [coding]&#10;modes: [default]&#10;command:&#10;  name: code-review&#10;---&#10;&#10;Review the requested changes…"></textarea>
+                </label>
+                <label class="check-field"><input id="skill-enabled-input" type="checkbox" checked /> 启用并显示在 <code>/</code> 菜单</label>
+                <div class="surface-actions">
+                  <p id="skill-form-hint">保存后无需重启，所有 Workspace 立即使用同一份注册表。</p>
+                  <button id="save-skill-btn" class="button primary" type="submit">保存 Skill</button>
+                </div>
+              </form>
+            </article>
+            <article class="surface">
+              <div class="surface-heading"><div><span class="step-kicker">02 · 可用项</span><h2>已注册 Skill</h2><p>系统 Skill 只读，用户 Skill 可编辑和停用。</p></div></div>
+              <div id="skill-list" class="mcp-server-list"><div class="empty-state">尚未注册 Skill。</div></div>
+            </article>
+          </div>
+
+          <div class="tool-section-heading">
+            <div><span class="step-kicker">MCP Servers</span><h2>MCP 连接</h2><p>注册外部 Server，验证连接状态，再把发现的工具交给 Agent。</p></div>
+          </div>
 
           <div id="mcp-runtime-note" class="mcp-runtime-note" role="status" aria-live="polite" hidden></div>
 

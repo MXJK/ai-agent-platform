@@ -807,7 +807,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("已在执行时写入", script_response.text)
         self.assertIn("本次运行只修改临时副本", script_response.text)
         self.assertIn("Agent 写入的变更已安全回滚", script_response.text)
-        self.assertIn('viewName === "agent" ? "chat"', script_response.text)
+        self.assertIn('viewName === "agent"', script_response.text)
+        self.assertIn('viewName === "mcp" ? "tools"', script_response.text)
+        self.assertIn('data-view-panel="tools"', response.text)
+        self.assertIn('id="skill-form"', response.text)
         self.assertNotIn("代码 Agent 页面", script_response.text)
         self.assertIn("已提交补充信息", script_response.text)
         self.assertIn("已继续运行", script_response.text)
@@ -899,7 +902,9 @@ class ApiTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace = root / "project"
-            skill = workspace / ".agents" / "skills" / "review" / "SKILL.md"
+            workspace.mkdir()
+            skill_root = root / "global-skills"
+            skill = skill_root / "review" / "SKILL.md"
             skill.parent.mkdir(parents=True)
             skill.write_text(
                 """---
@@ -926,6 +931,7 @@ Inspect the requested code before reporting findings.
                     workspace_allowed_roots=(str(root.resolve()),),
                     background_task_workers=1,
                     skills_enabled=True,
+                    skills_directory_path=str(skill_root),
                 )
             )
             with TestClient(app) as client:
@@ -955,8 +961,8 @@ Inspect the requested code before reporting findings.
                         "usage": "[path]",
                         "aliases": ["rv"],
                         "skill_name": "review",
-                        "skill_qualified_name": "project:review",
-                        "source": "project",
+                        "skill_qualified_name": "user:review",
+                        "source": "user",
                     }],
                 )
                 self.assertEqual(capabilities.json()["mcp_tools"], [])
@@ -979,7 +985,7 @@ Inspect the requested code before reporting findings.
                         "conversation_id": session_id,
                         "workspace_id": "project",
                         "message": "/review src/app.py",
-                        "skill_name": "project:review",
+                        "skill_name": "user:review",
                         "skill_arguments": ["src/app.py"],
                     },
                 )
@@ -994,12 +1000,12 @@ Inspect the requested code before reporting findings.
                         "skill_invocation"
                     ],
                     {
-                        "skill_name": "project:review",
+                        "skill_name": "user:review",
                         "arguments": ["src/app.py"],
                     },
                 )
                 self.assertIn(
-                    "skill://project:review",
+                    "skill://user:review",
                     [
                         item.path
                         for item in record.context_snapshot.instructions.sources
