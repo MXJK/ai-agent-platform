@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "CONTEXT-BUDGET-COMPACTION"
-next_action: "Rebuild the Docker image; LLM_MAX_CONTEXT_MESSAGES_CEILING=48 accepted and the branch is merged into main"
+active_task: "TOOL-RESULT-BUDGET"
+next_action: "Review and merge codex/tool-result-budget with human confirmation, then start CONTEXT-BUDGET-PRIMITIVES"
 blockers: []
 last_verified_commit: "4ff03bf7"
-updated_at: "2026-08-22T09:56:51+08:00"
+updated_at: "2026-08-22T11:40:32+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

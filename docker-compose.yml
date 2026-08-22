@@ -29,6 +29,7 @@ x-app-environment: &app-environment
   LIVE_WORKSPACE_WRITES_ENABLED: "true"
   AGENT_WORKSPACE_DEFAULT_MODE: "direct"
   AGENT_WORKSPACE_ALLOWED_MODES: "direct"
+  AGENT_TOOL_RESULT_MAX_TOKENS: "${AGENT_TOOL_RESULT_MAX_TOKENS:-2000}"
   CHANGE_SET_APPLY_MODE: "patch_only"
   CHANGE_SET_WORKTREE_PARENT: "/var/lib/ai-agent-platform/worktrees"
   SANDBOX_MODE: "local"

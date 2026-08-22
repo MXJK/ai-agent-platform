@@ -15,8 +15,13 @@ from ai_agent_platform.agents.coding_agent import (
     create_coding_tool_registry,
 )
 from ai_agent_platform.agents.coding.tool_loop_nodes import _native_output_budget
+from ai_agent_platform.agents.coding.tool_loop_nodes import (
+    _native_tool_result_message,
+    _serialize_tool_result,
+)
 from ai_agent_platform.agents.coding.runtime_support import error_from_exception
 from ai_agent_platform.core import Settings
+from ai_agent_platform.core.metrics import MetricsRegistry
 from ai_agent_platform.integrations.llm import (
     LLMClient,
     LLMProviderError,
@@ -35,7 +40,9 @@ from ai_agent_platform.integrations.model_router import (
     ModelConfig,
     ModelRouter,
 )
+from ai_agent_platform.integrations.mcp import MCPTool, MCPToolProvider
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 def _tool_spec(name: str = "repo.read_file") -> ToolSpec:
@@ -88,6 +95,69 @@ def _runtime_artifact_messages() -> list[dict[str, object]]:
 
 
 class NativeProviderMappingTests(unittest.TestCase):
+    def test_bounded_tool_result_serializes_for_every_provider(self) -> None:
+        tool_message, artifact = _native_tool_result_message(
+            {
+                "call_id": "large_call_1",
+                "name": "demo.large",
+                "ok": True,
+                "result": {"payload": "x" * 6000},
+            },
+            max_tokens=128,
+        )
+        self.assertIsNotNone(artifact)
+        placeholder = tool_message["content"]
+        self.assertTrue(placeholder["truncated"])
+        self.assertTrue(placeholder["head"])
+        self.assertTrue(placeholder["tail"])
+        self.assertLessEqual(
+            estimate_text_tokens(_serialize_tool_result(placeholder)),
+            128,
+        )
+        messages = [
+            {"role": "user", "content": "run the large tool"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "large_call_1",
+                        "name": "demo.large",
+                        "arguments": {},
+                    }
+                ],
+            },
+            tool_message,
+        ]
+        aliases = {"demo.large": "demo_large"}
+
+        openai_output = next(
+            item
+            for item in _openai_tool_input(messages, aliases)
+            if item.get("type") == "function_call_output"
+        )
+        self.assertEqual(openai_output["call_id"], "large_call_1")
+        self.assertEqual(json.loads(openai_output["output"]), placeholder)
+
+        anthropic_result = _anthropic_tool_messages(messages, aliases)[-1][
+            "content"
+        ][0]
+        self.assertEqual(anthropic_result["tool_use_id"], "large_call_1")
+        self.assertEqual(json.loads(anthropic_result["content"]), placeholder)
+
+        deepseek_result = _deepseek_tool_messages(messages, aliases)[-1]
+        self.assertEqual(deepseek_result["tool_call_id"], "large_call_1")
+        self.assertEqual(json.loads(deepseek_result["content"]), placeholder)
+
+        google_contents = _google_tool_contents(messages, types, aliases)
+        google_text = "\n".join(
+            part.text or ""
+            for content in google_contents
+            for part in content.parts
+        )
+        self.assertIn("large_call_1", google_text)
+        self.assertIn(placeholder["artifact_id"], google_text)
+
     def test_effective_output_limit_uses_phase_model_and_context_minimum(self) -> None:
         model = ModelConfig(
             provider="deepseek",
@@ -944,6 +1014,44 @@ class ScriptedNativePlanner:
         return "fallback"
 
 
+class OversizedToolResultPlanner(ScriptedNativePlanner):
+    def __init__(self, tool_name: str) -> None:
+        super().__init__()
+        self.tool_name = tool_name
+        self.observed_message: dict[str, object] | None = None
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="oversized_call_1",
+                        name=self.tool_name,
+                        arguments={},
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.observed_message = next(
+            message
+            for message in reversed(messages)
+            if message.get("role") == "tool"
+            and message.get("call_id") == "oversized_call_1"
+        )
+        return LLMToolDecision(
+            text="Observed the bounded result.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class SingleToolNativePlanner(ScriptedNativePlanner):
     single_tool_per_turn = True
 
@@ -1368,6 +1476,115 @@ class RefusalThenMutationPlanner(ScriptedNativePlanner):
 
 
 class NativeToolLoopTests(unittest.TestCase):
+    def _assert_oversized_result_uses_harness_budget(
+        self,
+        *,
+        registry,
+        tool_name: str,
+    ) -> None:
+        planner = OversizedToolResultPlanner(tool_name)
+        metrics = MetricsRegistry()
+        with TemporaryDirectory() as temp_dir:
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+                tool_result_max_tokens=128,
+                metrics=metrics,
+            ).run(
+                conversation_id=f"sess_budget_{tool_name}",
+                user_input="run an oversized tool",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertIsNotNone(planner.observed_message)
+        message = planner.observed_message or {}
+        self.assertEqual(message.get("call_id"), "oversized_call_1")
+        placeholder = message.get("content")
+        self.assertIsInstance(placeholder, dict)
+        placeholder = placeholder if isinstance(placeholder, dict) else {}
+        self.assertTrue(placeholder.get("truncated"))
+        self.assertGreater(placeholder.get("truncated_from_tokens", 0), 128)
+        self.assertTrue(placeholder.get("head"))
+        self.assertTrue(placeholder.get("tail"))
+        self.assertLessEqual(
+            estimate_text_tokens(_serialize_tool_result(placeholder)),
+            128,
+        )
+
+        full_result = next(
+            item
+            for item in result.tool_results
+            if item.get("call_id") == "oversized_call_1"
+        )
+        artifact = next(
+            item
+            for item in result.artifacts
+            if item.get("id") == placeholder.get("artifact_id")
+        )
+        self.assertEqual(artifact["type"], "tool_result")
+        self.assertEqual(artifact["call_id"], "oversized_call_1")
+        self.assertEqual(artifact["content"], full_result)
+        self.assertEqual(
+            metrics.snapshot()["counters"][
+                "agent_tool_results_truncated_total"
+            ],
+            1,
+        )
+
+    def test_builtin_tool_result_is_bounded_and_externalized(self) -> None:
+        registry = create_coding_tool_registry()
+        registry.register(
+            "demo.large",
+            lambda: {"payload": "built-in-" + ("x" * 6000)},
+            input_schema={"type": "object", "additionalProperties": False},
+            output_schema={"type": "object"},
+        )
+
+        self._assert_oversized_result_uses_harness_budget(
+            registry=registry,
+            tool_name="demo.large",
+        )
+
+    def test_mcp_tool_result_uses_the_same_budget_and_artifact_path(self) -> None:
+        class LargeMCPClient:
+            def list_tools(self):
+                return [
+                    MCPTool(
+                        name="large",
+                        description="Return a large MCP payload.",
+                        input_schema={
+                            "type": "object",
+                            "additionalProperties": False,
+                        },
+                        output_schema={"type": "object"},
+                        permission_level="read_only",
+                        requires_approval=False,
+                    )
+                ]
+
+            @staticmethod
+            def call_tool(name, arguments):
+                del name, arguments
+                return {
+                    "structuredContent": {
+                        "payload": "mcp-" + ("y" * 6000)
+                    }
+                }
+
+        registry = create_coding_tool_registry(
+            mcp_providers=[
+                MCPToolProvider(server_name="budget", client=LargeMCPClient())
+            ]
+        )
+
+        self._assert_oversized_result_uses_harness_budget(
+            registry=registry,
+            tool_name="mcp.budget.large",
+        )
+
     def test_phase_output_budget_switches_after_change_plan(self) -> None:
         self.assertEqual(
             _native_output_budget(
