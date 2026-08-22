@@ -589,6 +589,7 @@ JSON 解析位置，不保存可能含源码的原始参数。
 → PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
 → ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
+→ Harness 对内置/MCP 结果统一执行 Token 上限，超限原文写入 Run Artifact
 → Provider 原生工具结果消息
 → 模型观察后继续调用工具或作答
 ```
@@ -611,6 +612,11 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、
 `AGENT_MUTATION_MAX_OUTPUT_TOKENS` 和 `AGENT_FINAL_MAX_OUTPUT_TOKENS` 控制。工具会话超过
+`AGENT_TOOL_RESULT_MAX_TOKENS`（默认 2000，最小 64）的单次结果会在进入模型转录前，无条件替换为
+包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
+`tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
+并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
+工具会话超过
 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
 `AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按完整
 assistant/tool 组压缩旧观察，避免拆断 call/result 对。被折叠的转录交给与会话压缩
@@ -1114,6 +1120,7 @@ LLM_MAX_CONTEXT_MESSAGES=12
 LLM_MAX_CONTEXT_MESSAGES_CEILING=48
 LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
 AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+AGENT_TOOL_RESULT_MAX_TOKENS=2000
 ```
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算

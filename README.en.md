@@ -629,6 +629,7 @@ native tool call
 → PermissionResolver resolves allow/ask/deny from ToolUseContext
 → ToolRegistry validation and execution
 → result/error linked by call ID
+→ harness token cap shared by built-in and MCP results; full overflow becomes a Run artifact
 → provider-native tool result message
 → model observes and either calls another tool or answers
 ```
@@ -646,6 +647,12 @@ Configure these with
 `AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Model-output
 phase limits use `AGENT_PLAN_MAX_OUTPUT_TOKENS`,
 `AGENT_MUTATION_MAX_OUTPUT_TOKENS`, and `AGENT_FINAL_MAX_OUTPUT_TOKENS`.
+Before any result enters the model transcript, `AGENT_TOOL_RESULT_MAX_TOKENS`
+(default `2000`, minimum `64`) applies unconditionally to built-in and MCP tools alike. An
+oversized result becomes a head/tail placeholder with its original token
+estimate and `artifact_id`; the exact result remains available as a
+`tool_result` Run artifact. Existing per-tool character caps remain a second
+line of defense, and `agent_tool_results_truncated_total` counts these events.
 Older complete assistant/tool groups are compacted above
 `AGENT_NATIVE_CONTEXT_MAX_CHARS`, and
 `AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.

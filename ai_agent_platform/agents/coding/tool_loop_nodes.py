@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 from typing import Any
 
@@ -16,6 +17,7 @@ from ai_agent_platform.agents.coding.change_loop import (
 )
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
 from ai_agent_platform.agents.coding.policies import native_assistant_message
+from ai_agent_platform.agents.coding.run_recorder import build_tool_result_artifact
 from ai_agent_platform.agents.coding.tool_access import (
     permission_approval_item as _permission_approval_item,
 )
@@ -54,6 +56,8 @@ class ToolLoopNodes:
         self._llm_client = runtime._llm_client
         self._plan_max_output_tokens = runtime._plan_max_output_tokens
         self._mutation_max_output_tokens = runtime._mutation_max_output_tokens
+        self._tool_result_max_tokens = runtime._tool_result_max_tokens
+        self._metrics = runtime._metrics
         self._control_policy = runtime._policies.control
         self._budget_policy = runtime._policies.budget
         self._completion_policy = runtime._policies.completion
@@ -593,8 +597,9 @@ class ToolLoopNodes:
                     )
                 else:
                     results.extend(self._change_loop.execute_tool_calls(state, [call]))
+            result_messages, result_artifacts = self._budget_tool_results(results)
             native_messages = list(state.get("native_tool_messages", []))
-            native_messages.extend(_native_tool_result_message(result) for result in results)
+            native_messages.extend(result_messages)
             successful_mutation = any(
                 result.get("ok")
                 and result.get("name") in SANDBOX_MUTATION_TOOLS
@@ -630,6 +635,10 @@ class ToolLoopNodes:
             no_progress = 0 if successful_new_result else no_progress + 1
             return {
                 "tool_results": list(state.get("tool_results", [])) + results,
+                "artifacts": _merge_artifacts(
+                    state.get("artifacts", []),
+                    result_artifacts,
+                ),
                 "native_tool_messages": native_messages,
                 "native_pending_tool_calls": [],
                 "analysis_tool_calls": [],
@@ -715,8 +724,13 @@ class ToolLoopNodes:
                 ],
             }
         )
-        native_messages.extend(
-            _native_tool_result_message(result) for result in artifact_results
+        result_messages, result_artifacts = self._budget_tool_results(
+            artifact_results
+        )
+        native_messages.extend(result_messages)
+        update["artifacts"] = _merge_artifacts(
+            state.get("artifacts", []),
+            list(update.get("artifacts", [])) + result_artifacts,
         )
         update.update(
             {
@@ -727,6 +741,23 @@ class ToolLoopNodes:
             }
         )
         return update
+
+    def _budget_tool_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        messages: list[dict[str, Any]] = []
+        artifacts: list[dict[str, Any]] = []
+        for result in results:
+            message, artifact = _native_tool_result_message(
+                result,
+                max_tokens=self._tool_result_max_tokens,
+            )
+            messages.append(message)
+            if artifact is not None:
+                artifacts.append(artifact)
+                self._metrics.increment("agent_tool_results_truncated_total")
+        return messages, artifacts
 
     def _compose_answer(self, state: CodingAgentState) -> CodingAgentState:
         return self._completion_policy.compose_answer(state)
@@ -786,14 +817,99 @@ def _synthetic_tool_message(
     }
 
 
-def _native_tool_result_message(result: dict[str, Any]) -> dict[str, Any]:
+def _native_tool_result_message(
+    result: dict[str, Any],
+    *,
+    max_tokens: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    serialized = _serialize_tool_result(result)
+    original_tokens = estimate_text_tokens(serialized)
+    content: dict[str, Any] = result
+    artifact: dict[str, Any] | None = None
+    if original_tokens > max_tokens:
+        artifact_id = "tool_result_" + hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest()[:20]
+        content = _tool_result_placeholder(
+            serialized,
+            artifact_id=artifact_id,
+            original_tokens=original_tokens,
+            max_tokens=max_tokens,
+        )
+        artifact = build_tool_result_artifact(
+            result,
+            artifact_id=artifact_id,
+            estimated_tokens=original_tokens,
+        )
     return {
         "role": "tool",
         "call_id": result.get("call_id"),
         "name": result.get("name"),
-        "content": result,
+        "content": content,
         "is_error": not bool(result.get("ok")),
+    }, artifact
+
+
+def _serialize_tool_result(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _tool_result_placeholder(
+    serialized: str,
+    *,
+    artifact_id: str,
+    original_tokens: int,
+    max_tokens: int,
+) -> dict[str, Any]:
+    def candidate(keep_chars: int) -> dict[str, Any]:
+        head_chars = (keep_chars + 1) // 2
+        tail_chars = keep_chars // 2
+        return {
+            "truncated": True,
+            "truncated_from_tokens": original_tokens,
+            "artifact_id": artifact_id,
+            "head": serialized[:head_chars],
+            "tail": serialized[-tail_chars:] if tail_chars else "",
+        }
+
+    low = 0
+    high = len(serialized)
+    best = candidate(0)
+    while low <= high:
+        keep_chars = (low + high) // 2
+        current = candidate(keep_chars)
+        if estimate_text_tokens(_serialize_tool_result(current)) <= max_tokens:
+            best = current
+            low = keep_chars + 1
+        else:
+            high = keep_chars - 1
+    return best
+
+
+def _merge_artifacts(
+    existing: list[dict[str, Any]],
+    additions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(existing)
+    known_ids = {
+        str(item.get("id"))
+        for item in merged
+        if item.get("id") is not None
     }
+    for artifact in additions:
+        artifact_id = artifact.get("id")
+        if artifact_id is not None and str(artifact_id) in known_ids:
+            continue
+        merged.append(artifact)
+        if artifact_id is not None:
+            known_ids.add(str(artifact_id))
+    return merged
 
 
 def _native_artifacts_needed(state: CodingAgentState) -> bool:

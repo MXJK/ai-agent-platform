@@ -552,6 +552,7 @@ class ApplicationFactory:
                     execution_workspace_runtime=(
                         container.execution_workspace_runtime
                     ),
+                    metrics=container.metrics,
                 )
             else:
                 container.coding_agent_runtime = coding_agent_runtime
@@ -1025,6 +1026,7 @@ class ApplicationFactory:
         change_set_service: ChangeSetService,
         tool_pool_builder: ToolPoolBuilder,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> CodingAgentRuntime:
         return CodingAgentRuntime(
             tool_registry=tool_registry,
@@ -1060,6 +1062,7 @@ class ApplicationFactory:
                 settings.agent_mutation_max_output_tokens
             ),
             final_max_output_tokens=settings.agent_final_max_output_tokens,
+            tool_result_max_tokens=settings.agent_tool_result_max_tokens,
             graph_recursion_limit=settings.agent_graph_recursion_limit,
             approval_policy=settings.agent_approval_policy,
             max_history_messages=settings.llm_max_context_messages,
@@ -1069,6 +1072,7 @@ class ApplicationFactory:
             change_set_service=change_set_service,
             tool_pool_builder=tool_pool_builder,
             execution_workspace_runtime=execution_workspace_runtime,
+            metrics=metrics,
         )
 
 

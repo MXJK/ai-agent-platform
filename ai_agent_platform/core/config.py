@@ -247,6 +247,7 @@ class Settings:
     agent_plan_max_output_tokens: int = 4096
     agent_mutation_max_output_tokens: int = 16384
     agent_final_max_output_tokens: int = 4096
+    agent_tool_result_max_tokens: int = 2000
     agent_graph_recursion_limit: int = 128
     agent_approval_policy: str = "on_request"
     live_workspace_writes_enabled: bool = False
@@ -630,11 +631,14 @@ class Settings:
                 "agent_final_max_output_tokens",
                 self.agent_final_max_output_tokens,
             ),
+            ("agent_tool_result_max_tokens", self.agent_tool_result_max_tokens),
             ("agent_graph_recursion_limit", self.agent_graph_recursion_limit),
             ("change_set_max_files", self.change_set_max_files),
             ("change_set_max_patch_chars", self.change_set_max_patch_chars),
         ):
             _require_positive(name, value)
+        if self.agent_tool_result_max_tokens < 64:
+            raise ValueError("agent_tool_result_max_tokens must be at least 64")
         if self.agent_soft_tool_rounds > self.agent_max_tool_rounds:
             raise ValueError(
                 "agent_soft_tool_rounds must not exceed agent_max_tool_rounds"
@@ -1314,6 +1318,11 @@ class Settings:
             agent_final_max_output_tokens=_int_env(
                 "AGENT_FINAL_MAX_OUTPUT_TOKENS",
                 cls.agent_final_max_output_tokens,
+                dotenv,
+            ),
+            agent_tool_result_max_tokens=_int_env(
+                "AGENT_TOOL_RESULT_MAX_TOKENS",
+                cls.agent_tool_result_max_tokens,
                 dotenv,
             ),
             agent_graph_recursion_limit=_int_env(

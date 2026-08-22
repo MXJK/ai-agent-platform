@@ -44,6 +44,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.agents.coding.tool_loop_nodes import ToolLoopNodes
+from ai_agent_platform.core.metrics import MetricsRegistry
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.domain import (
     Message,
@@ -133,6 +134,7 @@ class CodingAgentRuntime:
         plan_max_output_tokens: int = 4096,
         mutation_max_output_tokens: int = 16384,
         final_max_output_tokens: int = 4096,
+        tool_result_max_tokens: int = 2000,
         graph_recursion_limit: int = 128,
         approval_policy: str = "on_request",
         max_history_messages: int = 12,
@@ -144,6 +146,7 @@ class CodingAgentRuntime:
         execution_workspace_runtime: Any = None,
         llm_client: Any = None,
         context_compressor: Any = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -169,6 +172,10 @@ class CodingAgentRuntime:
         self._plan_max_output_tokens = plan_max_output_tokens
         self._mutation_max_output_tokens = mutation_max_output_tokens
         self._final_max_output_tokens = final_max_output_tokens
+        if tool_result_max_tokens < 64:
+            raise ValueError("tool_result_max_tokens must be at least 64")
+        self._tool_result_max_tokens = tool_result_max_tokens
+        self._metrics = metrics or MetricsRegistry()
         self._graph_recursion_limit = graph_recursion_limit
         if approval_policy not in {"always", "on_request", "never"}:
             raise ValueError("unsupported approval_policy")
