@@ -99,6 +99,7 @@ verified on its own.
 - Documentation impact: none. This task deliberately changes no API, configuration,
   architecture boundary visible to operators, data flow, or model-observed context;
   editing README or the interview handbook would only restate existing behavior.
-- Work is isolated on stacked branch `codex/context-budget-primitives`, based on
-  `codex/tool-result-budget`. The user authorized commit, push and merge on
-  2026-08-22; no deployment, release or migration is part of this task.
+- The verified implementation is commit `7834249f`; workflow verification is commit
+  `8f07107e`. The user authorized commit, push and merge on 2026-08-22, and the branch
+  was merged into remote `main` through merge commit `01aab227`. No deployment,
+  release or migration was performed.
