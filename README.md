@@ -82,7 +82,9 @@ App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App �
 .venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
 ```
 
-REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
+REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/compact [instruction]`、
+`/resume` 和 `/exit`。`/compact` 会为下一次 Query 冻结强制压缩标记；使用原生工具调用的
+Provider 会在第一次模型请求前执行一次有序压缩，并把可选 instruction 保留在当前请求中。
 普通输入在同一个 session 中逐轮创建 Query；运行期间按 `Ctrl+C` 会向当前 Run 发送
 `cancel`，不会把信号处理安装进 SDK、Service 或领域模型。`/resume [run_id]
 [approve|deny] [message]` 对 `waiting_approval` 使用 resume，对 `waiting_input`/`paused`
@@ -616,12 +618,23 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
-工具会话超过
-`AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
-`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按完整
-assistant/tool 组压缩旧观察，避免拆断 call/result 对。被折叠的转录交给与会话压缩
-同一个压缩器做语义摘要，保留已读文件、已执行命令、已应用修改和失败原因；模型不可用
-时回退到确定性的规则式摘要。图的独立保险由
+工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
+`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按固定成本顺序收缩：先把较旧
+工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
+结果；仍超限才按完整 assistant/tool 组折叠旧观察；折叠后重新计量，必要时用共享预算原语
+成组丢弃并截断正文。所有阶段保留 call/result ID 配对和消息结构。折叠摘要继续使用会话
+压缩器，模型不可用时回退到确定性摘要。
+
+折叠最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次。压缩后仍无法收敛，或已没有
+可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束，并直接说明停止阶段，
+不再重复消耗模型调用。Provider 返回“上下文长度超限”时统一映射为 `context_overflow`：
+Harness 只允许一次强制压缩和一次重试，第二次同类错误立即阻断。每个 native 压缩阶段都
+产生 `AgentEvent(type="context")`，其 output 含 `stage`（`tool_result_eviction`、`fold`、
+`drop_truncate` 或 `overflow_retry_failed`）、压缩计数、预算、当前估算和 `fits`；对应指标为
+`agent_native_context_tool_results_evicted_total`、`agent_native_context_compactions_total`、
+`agent_native_context_groups_dropped_total`、`agent_native_context_groups_truncated_total`、
+`agent_native_context_overflow_retries_total` 与
+`agent_native_context_compaction_exhausted_total`。图的独立保险仍由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
@@ -1119,8 +1132,11 @@ CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW=true
 LLM_MAX_CONTEXT_MESSAGES=12
 LLM_MAX_CONTEXT_MESSAGES_CEILING=48
 LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
+AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
 AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
+AGENT_TOOL_RESULT_KEEP_RECENT=6
+AGENT_NATIVE_MAX_COMPACTIONS=3
 ```
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算

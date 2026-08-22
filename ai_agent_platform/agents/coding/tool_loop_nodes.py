@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 import json
 import hashlib
 import inspect
@@ -29,6 +31,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
 )
+from ai_agent_platform.integrations.llm import LLMProviderError
 from ai_agent_platform.integrations.tools import ToolCall
 from ai_agent_platform.token_counting import estimate_text_tokens
 
@@ -52,6 +55,8 @@ class ToolLoopNodes:
         self._native_context_max_chars = runtime._native_context_max_chars
         self._native_context_keep_messages = runtime._native_context_keep_messages
         self._native_context_token_ratio = runtime._native_context_token_ratio
+        self._tool_result_keep_recent = runtime._tool_result_keep_recent
+        self._native_max_compactions = runtime._native_max_compactions
         self._context_compressor = runtime._context_compressor
         self._llm_client = runtime._llm_client
         self._plan_max_output_tokens = runtime._plan_max_output_tokens
@@ -148,14 +153,6 @@ class ToolLoopNodes:
         native_messages = list(state.get("native_tool_messages", []))
         if not native_messages:
             native_messages = native_tool_messages(state)
-        native_messages, compactions, context_chars = _compact_native_messages(
-            native_messages,
-            max_chars=self._native_context_max_chars,
-            max_tokens=self._native_context_budget_tokens(),
-            keep_messages=self._native_context_keep_messages,
-            previous_compactions=state.get("native_context_compactions", 0),
-            compressor=self._context_compressor,
-        )
         native_messages = self._control_policy.consume_steering(state, native_messages)
         control_action = self._control_policy.consume_action(state)
         if control_action == "pause":
@@ -181,9 +178,40 @@ class ToolLoopNodes:
                 answer="Agent run cancelled by the user at a safe tool boundary.",
                 status="cancelled",
                 reason="user_cancelled",
+                compactions=state.get("native_context_compactions", 0),
+                context_chars=_native_messages_chars(native_messages),
+            )
+
+        max_tokens = self._native_context_budget_tokens()
+        reduction = _reduce_native_messages(
+            native_messages,
+            max_chars=self._native_context_max_chars,
+            max_tokens=max_tokens,
+            keep_messages=self._native_context_keep_messages,
+            tool_result_keep_recent=self._tool_result_keep_recent,
+            previous_compactions=state.get("native_context_compactions", 0),
+            max_compactions=self._native_max_compactions,
+            compressor=self._context_compressor,
+            force=bool(state.get("native_context_force_compaction")),
+        )
+        self._record_context_reduction(reduction)
+        native_messages = reduction.messages
+        compactions = reduction.compactions
+        context_chars = reduction.context_chars
+        context_stages = list(reduction.stages)
+        if reduction.exhausted:
+            warnings.append(
+                "native transcript could not be reduced to the context budget"
+            )
+            terminal = self._context_compaction_terminal(
+                state,
+                native_messages=native_messages,
                 compactions=compactions,
                 context_chars=context_chars,
+                context_stages=context_stages,
             )
+            terminal["context_warnings"] = warnings
+            return terminal
 
         if _native_artifacts_needed(state):
             return self._native_empty_plan(
@@ -193,6 +221,7 @@ class ToolLoopNodes:
                 compactions=compactions,
                 context_chars=context_chars,
                 summary="先汇总当前 Sandbox 状态、Diff 与验证产物，再继续推理。",
+                context_stages=context_stages,
             )
 
         budget_reason, budget_status = self._budget_policy.stop(state)
@@ -214,6 +243,7 @@ class ToolLoopNodes:
                 reason=budget_reason,
                 compactions=compactions,
                 context_chars=_native_messages_chars(native_messages),
+                context_stages=context_stages,
             )
             terminal["errors"] = _append_errors(state, final_errors)
             terminal["context_warnings"] = warnings
@@ -242,7 +272,73 @@ class ToolLoopNodes:
                 plan_tokens=self._plan_max_output_tokens,
                 mutation_tokens=self._mutation_max_output_tokens,
             )
-        decision = decide(native_messages, tool_specs, **decide_kwargs)
+        try:
+            decision = decide(native_messages, tool_specs, **decide_kwargs)
+        except LLMProviderError as exc:
+            if exc.code != "context_overflow":
+                raise
+            self._metrics.increment("agent_native_context_overflow_retries_total")
+            recovery = _reduce_native_messages(
+                native_messages,
+                max_chars=self._native_context_max_chars,
+                max_tokens=max_tokens,
+                keep_messages=self._native_context_keep_messages,
+                tool_result_keep_recent=self._tool_result_keep_recent,
+                previous_compactions=compactions,
+                max_compactions=self._native_max_compactions,
+                compressor=self._context_compressor,
+                force=True,
+            )
+            self._record_context_reduction(recovery)
+            native_messages = recovery.messages
+            compactions = recovery.compactions
+            context_chars = recovery.context_chars
+            context_stages.extend(recovery.stages)
+            if recovery.exhausted or not recovery.changed:
+                warnings.append(
+                    "provider reported context overflow and forced compaction "
+                    "could not make progress"
+                )
+                terminal = self._context_compaction_terminal(
+                    state,
+                    native_messages=native_messages,
+                    compactions=compactions,
+                    context_chars=context_chars,
+                    context_stages=context_stages,
+                )
+                terminal["context_warnings"] = warnings
+                return terminal
+            try:
+                decision = decide(native_messages, tool_specs, **decide_kwargs)
+            except LLMProviderError as retry_exc:
+                if retry_exc.code != "context_overflow":
+                    raise
+                self._metrics.increment(
+                    "agent_native_context_overflow_retry_failed_total"
+                )
+                self._metrics.increment(
+                    "agent_native_context_compaction_exhausted_total"
+                )
+                failed_stage = _context_stage(
+                    "overflow_retry_failed",
+                    native_messages,
+                    max_chars=self._native_context_max_chars,
+                    max_tokens=max_tokens,
+                    forced=True,
+                )
+                context_stages.append(failed_stage)
+                warnings.append(
+                    "provider rejected the single context-overflow recovery retry"
+                )
+                terminal = self._context_compaction_terminal(
+                    state,
+                    native_messages=native_messages,
+                    compactions=compactions,
+                    context_chars=context_chars,
+                    context_stages=context_stages,
+                )
+                terminal["context_warnings"] = warnings
+                return terminal
         native_round = state.get("native_tool_round", 0) + 1
         stop_reason = decision.stop_reason
         all_proposed_calls = list(decision.tool_calls)
@@ -395,6 +491,8 @@ class ToolLoopNodes:
             "native_unfulfilled_change_rounds": unfulfilled_change_rounds,
             "native_context_compactions": compactions,
             "native_context_chars": _native_messages_chars(native_messages),
+            "native_context_reduction_stages": context_stages,
+            "native_context_force_compaction": False,
             "terminal_status": terminal_status,
             "terminal_reason": terminal_reason,
             "context_warnings": warnings,
@@ -415,9 +513,61 @@ class ToolLoopNodes:
                     "hard_round_limit": self._max_tool_rounds,
                     "hard_call_limit": self._max_tool_calls,
                     "context_compactions": compactions,
+                    "context_reduction_stages": context_stages,
                 },
             ),
         }
+
+    def _record_context_reduction(
+        self,
+        reduction: "NativeContextReduction",
+    ) -> None:
+        metric_fields = {
+            "evicted": "agent_native_context_tool_results_evicted_total",
+            "compacted": "agent_native_context_compactions_total",
+            "dropped": "agent_native_context_groups_dropped_total",
+            "truncated": "agent_native_context_groups_truncated_total",
+        }
+        for stage in reduction.stages:
+            for field, metric in metric_fields.items():
+                amount = int(stage.get(field, 0))
+                if amount > 0:
+                    self._metrics.increment(metric, amount)
+        if reduction.exhausted:
+            self._metrics.increment(
+                "agent_native_context_compaction_exhausted_total"
+            )
+
+    def _context_compaction_terminal(
+        self,
+        state: CodingAgentState,
+        *,
+        native_messages: list[dict[str, Any]],
+        compactions: int,
+        context_chars: int,
+        context_stages: Sequence[dict[str, Any]],
+    ) -> CodingAgentState:
+        last_stage = (
+            str(context_stages[-1].get("stage") or "unknown")
+            if context_stages
+            else "preflight"
+        )
+        return self._native_terminal_plan(
+            state,
+            native_messages=native_messages,
+            answer=(
+                "Agent stopped before the next model request because the native "
+                "tool transcript still exceeded the context budget after ordered "
+                "tool-result eviction, folding, and drop/truncate recovery. "
+                f"It stopped at stage {last_stage} with {compactions}/"
+                f"{self._native_max_compactions} allowed folds used."
+            ),
+            status="blocked",
+            reason="context_compaction_exhausted",
+            compactions=compactions,
+            context_chars=context_chars,
+            context_stages=context_stages,
+        )
 
     def _native_empty_plan(
         self,
@@ -428,6 +578,7 @@ class ToolLoopNodes:
         compactions: int,
         context_chars: int,
         summary: str,
+        context_stages: Sequence[dict[str, Any]] = (),
     ) -> CodingAgentState:
         return {
             "native_pending_tool_calls": [],
@@ -443,11 +594,17 @@ class ToolLoopNodes:
             "native_tool_stop_reason": stop_reason,
             "native_context_compactions": compactions,
             "native_context_chars": context_chars,
+            "native_context_reduction_stages": list(context_stages),
+            "native_context_force_compaction": False,
             "trace": _append_trace(
                 state,
                 node="plan_tools",
                 summary=summary,
-                output={"native": True, "stop_reason": stop_reason},
+                output={
+                    "native": True,
+                    "stop_reason": stop_reason,
+                    "context_reduction_stages": list(context_stages),
+                },
             ),
         }
 
@@ -461,6 +618,7 @@ class ToolLoopNodes:
         reason: str,
         compactions: int,
         context_chars: int,
+        context_stages: Sequence[dict[str, Any]] = (),
     ) -> CodingAgentState:
         update = self._native_empty_plan(
             state,
@@ -469,6 +627,7 @@ class ToolLoopNodes:
             compactions=compactions,
             context_chars=context_chars,
             summary="停止工具执行并生成保留的文本最终回答。",
+            context_stages=context_stages,
         )
         update.update(
             {
@@ -949,7 +1108,492 @@ _TRANSCRIPT_SUMMARY_MAX_CHARS = 6000
 
 
 def _native_messages_chars(messages: list[dict[str, Any]]) -> int:
-    return len(json.dumps(messages, ensure_ascii=False, default=str))
+    return len(_serialize_native_messages(messages))
+
+
+def _native_messages_tokens(messages: Sequence[dict[str, Any]]) -> int:
+    return estimate_text_tokens(_serialize_native_messages(messages))
+
+
+def _serialize_native_messages(messages: Sequence[dict[str, Any]]) -> str:
+    return json.dumps(messages, ensure_ascii=False, default=str)
+
+
+def _native_context_over_budget(
+    messages: Sequence[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_tokens: int,
+) -> bool:
+    serialized = _serialize_native_messages(messages)
+    return len(serialized) > max_chars or (
+        max_tokens > 0 and estimate_text_tokens(serialized) > max_tokens
+    )
+
+
+@dataclass(frozen=True)
+class NativeContextReduction:
+    messages: list[dict[str, Any]]
+    compactions: int
+    context_chars: int
+    estimated_tokens: int
+    stages: tuple[dict[str, Any], ...] = ()
+    exhausted: bool = False
+    changed: bool = False
+
+
+@dataclass(frozen=True)
+class _NativeMessageGroup:
+    messages: tuple[dict[str, Any], ...]
+    protected: bool = False
+
+
+@dataclass(frozen=True)
+class _NativeContextBudgetPolicy:
+    def cost(self, item: _NativeMessageGroup) -> int:
+        return _native_messages_tokens(item.messages)
+
+    def truncate(
+        self,
+        item: _NativeMessageGroup,
+        *,
+        overflow_tokens: int,
+        minimum_tokens: int,
+    ) -> _NativeMessageGroup:
+        from ai_agent_platform.services.context_budget import fit_text_to_tokens
+
+        remaining = overflow_tokens
+        messages = list(item.messages)
+        changed = False
+        for index, message in enumerate(messages):
+            if remaining <= 0:
+                break
+            content = message.get("content")
+            serialized = content if isinstance(content, str) else None
+            if (
+                message.get("role") == "tool"
+                and isinstance(content, dict)
+                and content.get("truncated") is True
+                and isinstance(content.get("preview"), str)
+            ):
+                serialized = content["preview"]
+            if serialized is None:
+                serialized = json.dumps(content, ensure_ascii=False, default=str)
+            content_tokens = estimate_text_tokens(serialized)
+            summary_prefix = ""
+            summary_body = serialized
+            if (
+                message.get("role") == "system"
+                and serialized.startswith("Earlier native tool transcript summary")
+            ):
+                summary_prefix, separator, summary_body = serialized.partition("\n")
+                summary_prefix += separator
+            metadata = {
+                key: content[key]
+                for key in (
+                    "artifact_id",
+                    "ok",
+                    "error",
+                    "error_code",
+                    "evicted",
+                )
+                if isinstance(content, dict) and content.get(key) is not None
+            }
+
+            def replace_content(fitted: str) -> dict[str, Any]:
+                if message.get("role") == "tool" and isinstance(content, dict):
+                    return {
+                        **message,
+                        "content": {
+                            "truncated": True,
+                            **metadata,
+                            "preview": fitted,
+                        },
+                    }
+                return {**message, "content": fitted}
+
+            before = self.cost(
+                _NativeMessageGroup(
+                    messages=tuple(messages),
+                    protected=item.protected,
+                )
+            )
+            target = max(minimum_tokens, before - remaining)
+            best: dict[str, Any] | None = None
+            low = 0
+            high = content_tokens
+            while low <= high:
+                allowed = (low + high) // 2
+                if summary_prefix:
+                    prefix_tokens = estimate_text_tokens(summary_prefix)
+                    fitted = summary_prefix + fit_text_to_tokens(
+                        summary_body,
+                        max(0, allowed - prefix_tokens),
+                        estimate_tokens=estimate_text_tokens,
+                    )
+                else:
+                    fitted = fit_text_to_tokens(
+                        serialized,
+                        allowed,
+                        estimate_tokens=estimate_text_tokens,
+                    )
+                candidate = replace_content(fitted)
+                candidate_messages = list(messages)
+                candidate_messages[index] = candidate
+                candidate_cost = self.cost(
+                    _NativeMessageGroup(
+                        messages=tuple(candidate_messages),
+                        protected=item.protected,
+                    )
+                )
+                if candidate_cost <= target:
+                    best = candidate
+                    low = allowed + 1
+                else:
+                    high = allowed - 1
+            if best is None:
+                continue
+            if best == message:
+                continue
+            messages[index] = best
+            after = self.cost(
+                _NativeMessageGroup(
+                    messages=tuple(messages),
+                    protected=item.protected,
+                )
+            )
+            remaining -= max(0, before - after)
+            changed = True
+        if not changed:
+            return item
+        return _NativeMessageGroup(
+            messages=tuple(messages),
+            protected=item.protected,
+        )
+
+    def is_protected(
+        self,
+        item: _NativeMessageGroup,
+        *,
+        index: int,
+        items: Sequence[_NativeMessageGroup],
+    ) -> bool:
+        del index, items
+        return item.protected
+
+
+def _reduce_native_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    keep_messages: int,
+    tool_result_keep_recent: int,
+    previous_compactions: int,
+    max_compactions: int,
+    max_tokens: int = 0,
+    compressor: Any = None,
+    force: bool = False,
+) -> NativeContextReduction:
+    """Spend the cheapest native transcript reduction stage first."""
+
+    current = list(messages)
+    stages: list[dict[str, Any]] = []
+    changed = False
+    over_budget = _native_context_over_budget(
+        current,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+    )
+    forced_despite_fit = force and not over_budget
+    if not over_budget and not force:
+        return _native_reduction_result(
+            current,
+            compactions=previous_compactions,
+        )
+
+    current, evicted = _evict_old_tool_results(
+        current,
+        keep_recent=tool_result_keep_recent,
+    )
+    changed = changed or evicted > 0
+    stages.append(
+        _context_stage(
+            "tool_result_eviction",
+            current,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            forced=force,
+            evicted=evicted,
+        )
+    )
+    over_budget = _native_context_over_budget(
+        current,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+    )
+    if evicted and (not over_budget or forced_despite_fit):
+        return _native_reduction_result(
+            current,
+            compactions=previous_compactions,
+            stages=stages,
+            changed=True,
+        )
+
+    compactions = previous_compactions
+    folded = False
+    if compactions < max_compactions:
+        folded_messages, folded_compactions, _ = _fold_native_messages(
+            current,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            keep_messages=keep_messages,
+            previous_compactions=compactions,
+            compressor=compressor,
+            force=forced_despite_fit,
+        )
+        folded = folded_compactions > compactions
+        current = folded_messages
+        compactions = folded_compactions
+        changed = changed or folded
+    stages.append(
+        _context_stage(
+            "fold",
+            current,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            forced=force,
+            compacted=1 if folded else 0,
+            limit_reached=previous_compactions >= max_compactions,
+        )
+    )
+    over_budget = _native_context_over_budget(
+        current,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+    )
+    if folded and (not over_budget or forced_despite_fit):
+        return _native_reduction_result(
+            current,
+            compactions=compactions,
+            stages=stages,
+            changed=True,
+        )
+
+    current, dropped, truncated = _drop_and_truncate_native_groups(
+        current,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+        force=forced_despite_fit,
+    )
+    changed = changed or dropped > 0 or truncated > 0
+    stages.append(
+        _context_stage(
+            "drop_truncate",
+            current,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            forced=force,
+            dropped=dropped,
+            truncated=truncated,
+        )
+    )
+    exhausted = _native_context_over_budget(
+        current,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+    ) or (force and not changed)
+    return _native_reduction_result(
+        current,
+        compactions=compactions,
+        stages=stages,
+        exhausted=exhausted,
+        changed=changed,
+    )
+
+
+def _native_reduction_result(
+    messages: list[dict[str, Any]],
+    *,
+    compactions: int,
+    stages: Sequence[dict[str, Any]] = (),
+    exhausted: bool = False,
+    changed: bool = False,
+) -> NativeContextReduction:
+    return NativeContextReduction(
+        messages=messages,
+        compactions=compactions,
+        context_chars=_native_messages_chars(messages),
+        estimated_tokens=_native_messages_tokens(messages),
+        stages=tuple(stages),
+        exhausted=exhausted,
+        changed=changed,
+    )
+
+
+def _context_stage(
+    stage: str,
+    messages: Sequence[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_tokens: int,
+    forced: bool = False,
+    evicted: int = 0,
+    compacted: int = 0,
+    dropped: int = 0,
+    truncated: int = 0,
+    limit_reached: bool = False,
+) -> dict[str, Any]:
+    context_chars = _native_messages_chars(list(messages))
+    estimated_tokens = _native_messages_tokens(messages)
+    return {
+        "stage": stage,
+        "evicted": evicted,
+        "compacted": compacted,
+        "dropped": dropped,
+        "truncated": truncated,
+        "context_chars": context_chars,
+        "estimated_tokens": estimated_tokens,
+        "budget_chars": max_chars,
+        "budget_tokens": max_tokens,
+        "fits": context_chars <= max_chars
+        and (max_tokens <= 0 or estimated_tokens <= max_tokens),
+        "forced": forced,
+        "limit_reached": limit_reached,
+    }
+
+
+def _evict_old_tool_results(
+    messages: list[dict[str, Any]],
+    *,
+    keep_recent: int,
+) -> tuple[list[dict[str, Any]], int]:
+    complete_tool_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "tool"
+        and not (
+            isinstance(message.get("content"), dict)
+            and message["content"].get("evicted") is True
+        )
+    ]
+    evict_indexes = set(complete_tool_indexes[:-keep_recent])
+    if not evict_indexes:
+        return messages, 0
+    evicted: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if index not in evict_indexes:
+            evicted.append(message)
+            continue
+        content = message.get("content")
+        content_dict = content if isinstance(content, dict) else {}
+        marker: dict[str, Any] = {
+            "evicted": True,
+            "message": "[older tool result body evicted to fit context]",
+        }
+        for key in ("ok", "error", "error_code", "artifact_id"):
+            if content_dict.get(key) is not None:
+                marker[key] = content_dict[key]
+        evicted.append({**message, "content": marker})
+    return evicted, len(evict_indexes)
+
+
+def _drop_and_truncate_native_groups(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_tokens: int,
+    force: bool,
+) -> tuple[list[dict[str, Any]], int, int]:
+    from ai_agent_platform.services.context_budget import fit_context_to_budget
+
+    groups = _native_message_groups(messages)
+    policy = _NativeContextBudgetPolicy()
+    dropped = 0
+    truncated = 0
+    for _attempt in range(4):
+        flattened = _flatten_native_groups(groups)
+        if not force and not _native_context_over_budget(
+            flattened,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+        ):
+            break
+        budget = _native_group_budget_tokens(
+            flattened,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            force=force,
+        )
+        reduction = fit_context_to_budget(
+            groups,
+            budget,
+            policy=policy,
+        )
+        if reduction.items == groups:
+            break
+        groups = reduction.items
+        dropped += reduction.dropped
+        truncated += reduction.truncated
+        force = False
+    return _flatten_native_groups(groups), dropped, truncated
+
+
+def _native_group_budget_tokens(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_tokens: int,
+    force: bool,
+) -> int:
+    context_chars = _native_messages_chars(messages)
+    context_tokens = _native_messages_tokens(messages)
+    candidates = [max_tokens] if max_tokens > 0 else []
+    if context_chars > max_chars:
+        candidates.append(
+            max(1, (context_tokens * max_chars) // max(1, context_chars))
+        )
+    if force:
+        candidates.append(max(1, (context_tokens * 3) // 4))
+    return min(candidates) if candidates else context_tokens
+
+
+def _native_message_groups(
+    messages: list[dict[str, Any]],
+) -> list[_NativeMessageGroup]:
+    raw: list[list[dict[str, Any]]] = []
+    for index, message in enumerate(messages):
+        if index < 2:
+            raw.append([message])
+        elif (
+            message.get("role") == "tool"
+            and raw
+            and raw[-1][0].get("role") == "assistant"
+        ):
+            raw[-1].append(message)
+        else:
+            raw.append([message])
+    groups: list[_NativeMessageGroup] = []
+    for index, group in enumerate(raw):
+        summary = any(
+            message.get("role") == "system"
+            and str(message.get("content") or "").startswith(
+                "Earlier native tool transcript summary"
+            )
+            for message in group
+        )
+        groups.append(
+            _NativeMessageGroup(
+                messages=tuple(group),
+                protected=index < 2 or index == len(raw) - 1 or summary,
+            )
+        )
+    return groups
+
+
+def _flatten_native_groups(
+    groups: Sequence[_NativeMessageGroup],
+) -> list[dict[str, Any]]:
+    return [message for group in groups for message in group.messages]
 
 
 def _compact_native_messages(
@@ -960,14 +1604,47 @@ def _compact_native_messages(
     previous_compactions: int,
     max_tokens: int = 0,
     compressor: Any = None,
+    tool_result_keep_recent: int = 6,
+    max_compactions: int = 3,
+    force: bool = False,
 ) -> tuple[list[dict[str, Any]], int, int]:
-    """Fold the older transcript into one summary once the budget is exceeded.
+    """Compatibility wrapper over the ordered native reduction ladder."""
+
+    reduction = _reduce_native_messages(
+        messages,
+        max_chars=max_chars,
+        max_tokens=max_tokens,
+        keep_messages=keep_messages,
+        tool_result_keep_recent=tool_result_keep_recent,
+        previous_compactions=previous_compactions,
+        max_compactions=max_compactions,
+        compressor=compressor,
+        force=force,
+    )
+    return (
+        reduction.messages,
+        reduction.compactions,
+        reduction.context_chars,
+    )
+
+
+def _fold_native_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    keep_messages: int,
+    previous_compactions: int,
+    max_tokens: int = 0,
+    compressor: Any = None,
+    force: bool = False,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Apply the legacy lossy fold to complete assistant/tool groups.
 
     ``max_tokens`` comes from the model actually serving the run, so a small
     context window compacts earlier than the static character ceiling would.
     """
     current_chars = _native_messages_chars(messages)
-    over_budget = current_chars > max_chars or (
+    over_budget = force or current_chars > max_chars or (
         max_tokens > 0
         and estimate_text_tokens(
             json.dumps(messages, ensure_ascii=False, default=str)

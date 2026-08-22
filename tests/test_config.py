@@ -32,6 +32,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_mutation_max_output_tokens, 16384)
         self.assertEqual(settings.agent_final_max_output_tokens, 4096)
         self.assertEqual(settings.agent_tool_result_max_tokens, 2000)
+        self.assertEqual(settings.agent_tool_result_keep_recent, 6)
+        self.assertEqual(settings.agent_native_max_compactions, 3)
         self.assertEqual(settings.agent_approval_policy, "on_request")
         self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
@@ -142,6 +144,8 @@ class SettingsTests(unittest.TestCase):
                 "AGENT_MUTATION_MAX_OUTPUT_TOKENS": "12000",
                 "AGENT_FINAL_MAX_OUTPUT_TOKENS": "2500",
                 "AGENT_TOOL_RESULT_MAX_TOKENS": "1500",
+                "AGENT_TOOL_RESULT_KEEP_RECENT": "4",
+                "AGENT_NATIVE_MAX_COMPACTIONS": "2",
                 "LLM_THINKING_LEVEL": "medium",
                 "LLM_MODEL_CATALOG_JSON": (
                     '[{"provider":"fake","model":"fast-fake",'
@@ -251,6 +255,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_mutation_max_output_tokens, 12000)
         self.assertEqual(settings.agent_final_max_output_tokens, 2500)
         self.assertEqual(settings.agent_tool_result_max_tokens, 1500)
+        self.assertEqual(settings.agent_tool_result_keep_recent, 4)
+        self.assertEqual(settings.agent_native_max_compactions, 2)
         self.assertEqual(settings.llm_thinking_level, "medium")
         self.assertIn("fast-fake", settings.llm_model_catalog_json or "")
         self.assertEqual(settings.llm_model_context_window_tokens, 96000)
@@ -480,6 +486,10 @@ class SettingsTests(unittest.TestCase):
             Settings(agent_soft_tool_calls=73, agent_max_tool_calls=72)
         with self.assertRaisesRegex(ValueError, "agent_tool_result_max_tokens"):
             Settings(agent_tool_result_max_tokens=63)
+        with self.assertRaisesRegex(ValueError, "agent_tool_result_keep_recent"):
+            Settings(agent_tool_result_keep_recent=0)
+        with self.assertRaisesRegex(ValueError, "agent_native_max_compactions"):
+            Settings(agent_native_max_compactions=0)
         with self.assertRaisesRegex(ValueError, "agent_approval_policy"):
             Settings(agent_approval_policy="unsafe")
 

@@ -59,6 +59,7 @@ class ScriptedFakeProvider:
     def __init__(self, scripts: list[_StreamScript] | None = None) -> None:
         self.scripts = deque(scripts or [])
         self.stream_calls: list[str] = []
+        self.tool_calls: list[str] = []
         self.tool_error: LLMProviderError | None = None
 
     def stream_chat(self, messages, *, model, thinking_level):
@@ -70,6 +71,7 @@ class ScriptedFakeProvider:
             raise script.error_after
 
     def decide_tools(self, messages, tools, *, model):
+        self.tool_calls.append(model)
         if self.tool_error is not None:
             raise self.tool_error
         return LLMToolDecision(
@@ -320,6 +322,24 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         )
         self.assertEqual(len(ledger.records), 1)
         self.assertEqual(ledger.records[0]["provider"], "backup_fake")
+
+    def test_tool_context_overflow_returns_to_harness_without_provider_fallback(
+        self,
+    ) -> None:
+        primary = ScriptedFakeProvider()
+        primary.tool_error = LLMProviderError(
+            "maximum context length exceeded",
+            retryable=True,
+            code="context_overflow",
+        )
+        backup = ScriptedFakeProvider()
+
+        with self.assertRaises(LLMProviderError) as raised:
+            self.client(primary, backup).decide_tools(_messages(), [])
+
+        self.assertEqual(raised.exception.code, "context_overflow")
+        self.assertEqual(primary.tool_calls, ["primary-model"])
+        self.assertEqual(backup.tool_calls, [])
 
     def test_partial_failure_records_usage_once_without_backup_replay(self) -> None:
         primary = ScriptedFakeProvider(

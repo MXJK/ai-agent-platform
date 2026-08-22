@@ -74,7 +74,10 @@ The installed entrypoints are thin adapters over `RuntimeContainer` and
 
 Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
 keeps one conversation across turns and provides `/skills`, `/tools`, `/mcp`,
-`/permissions`, `/resume`, and `/exit`. `Ctrl+C` during a Run requests cancellation
+`/permissions`, `/compact [instruction]`, `/resume`, and `/exit`. `/compact` freezes
+a forced-compaction flag onto the next Query; native-tool providers run one ordered
+reduction before their first model request and retain the optional instruction in
+that request. `Ctrl+C` during a Run requests cancellation
 of that Run; signal handling exists only in the process-owning CLI, never in the SDK
 or Query Kernel.
 
@@ -653,9 +656,32 @@ oversized result becomes a head/tail placeholder with its original token
 estimate and `artifact_id`; the exact result remains available as a
 `tool_result` Run artifact. Existing per-tool character caps remain a second
 line of defense, and `agent_tool_results_truncated_total` counts these events.
-Older complete assistant/tool groups are compacted above
-`AGENT_NATIVE_CONTEXT_MAX_CHARS`, and
+Above `AGENT_NATIVE_CONTEXT_MAX_CHARS` or the model-derived native token budget,
+the harness reduces the transcript in a fixed order. It first replaces older tool
+result bodies with one-line markers while keeping the newest
+`AGENT_TOOL_RESULT_KEEP_RECENT` results complete (default `6`). If still over
+budget, it folds complete assistant/tool groups, re-measures the fold, and then
+drops whole groups and truncates bodies through the shared budget primitives.
+Call/result IDs and provider-critical message structure remain paired throughout.
+
+Folding is capped by `AGENT_NATIVE_MAX_COMPACTIONS` (default `3`). A transcript
+that still cannot converge terminates as
+`blocked/context_compaction_exhausted` instead of spending another model call.
+Provider context-length failures are normalized to `context_overflow` and receive
+exactly one forced reduction plus one retry. Native reduction emits canonical SSE
+`context` events whose output contains a `stage` field, counts, budgets, the current
+estimate, and `fits`; the same stages have `agent_native_context_*` counters.
 `AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.
+
+The related environment settings are:
+
+```dotenv
+AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
+AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+AGENT_TOOL_RESULT_MAX_TOKENS=2000
+AGENT_TOOL_RESULT_KEEP_RECENT=6
+AGENT_NATIVE_MAX_COMPACTIONS=3
+```
 
 Every successful or failed result is returned under its call ID. Completed
 `(run_id, call_id)` executions can be replayed from the memory or PostgreSQL

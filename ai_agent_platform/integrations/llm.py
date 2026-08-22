@@ -462,6 +462,8 @@ class LLMClient:
                         error=str(exc),
                     )
                     candidate_error = exc
+                    if exc.code == "context_overflow":
+                        break
                     if (
                         not exc.retryable
                         or attempt >= self._settings.llm_max_retries
@@ -483,6 +485,9 @@ class LLMClient:
                 retryable=candidate_error.retryable,
                 after_stream_start=False,
             )
+            if candidate_error.code == "context_overflow":
+                candidate_error.route_trace = trace.to_dict()
+                raise candidate_error
             if request_plan.budget_decision == "downgraded":
                 break
         assert last_error is not None
@@ -2221,7 +2226,10 @@ class LLMClient:
                         f"llm provider returned HTTP {response.status_code}"
                         + (f": {detail}" if detail else ""),
                         retryable=retryable,
-                        code=_http_error_code(response.status_code),
+                        code=_http_error_code(
+                            response.status_code,
+                            detail=detail,
+                        ),
                     )
                 body = response.json()
         except httpx.TimeoutException as exc:
@@ -2531,10 +2539,18 @@ class LLMClient:
                         retryable = response.status_code in {408, 409, 429} or (
                             response.status_code >= 500
                         )
+                        read = getattr(response, "read", None)
+                        if callable(read):
+                            read()
+                        detail = _safe_provider_error_detail(response)
                         raise LLMProviderError(
-                            f"llm provider returned HTTP {response.status_code}",
+                            f"llm provider returned HTTP {response.status_code}"
+                            + (f": {detail}" if detail else ""),
                             retryable=retryable,
-                            code=_http_error_code(response.status_code),
+                            code=_http_error_code(
+                                response.status_code,
+                                detail=detail,
+                            ),
                         )
 
                     event_name = ""
@@ -2568,7 +2584,9 @@ class LLMClient:
             ) from exc
 
 
-def _http_error_code(status_code: int) -> str:
+def _http_error_code(status_code: int, *, detail: str = "") -> str:
+    if status_code in {400, 413, 422} and _is_context_overflow_detail(detail):
+        return "context_overflow"
     if status_code in {401, 403}:
         return "llm_auth_error"
     if status_code == 402:
@@ -2576,6 +2594,24 @@ def _http_error_code(status_code: int) -> str:
     if status_code == 429:
         return "rate_limit"
     return "llm_http_error"
+
+
+def _is_context_overflow_detail(detail: str) -> bool:
+    normalized = " ".join(detail.casefold().split())
+    if not normalized:
+        return False
+    return any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"context[_ -]?length[_ -]?exceeded",
+            r"maximum context length",
+            r"context window.{0,40}(?:exceed|limit|maximum)",
+            r"prompt is too long",
+            r"too many (?:input )?tokens",
+            r"input token count.{0,40}(?:exceed|limit|maximum)",
+            r"(?:input|prompt|request).{0,40}exceeds.{0,40}token limit",
+        )
+    )
 
 
 def _safe_provider_error_detail(response: Any) -> str:
@@ -2590,11 +2626,18 @@ def _safe_provider_error_detail(response: Any) -> str:
     error = payload.get("error")
     if isinstance(error, dict):
         detail = error.get("message")
+        error_code = error.get("code") or error.get("type")
     elif isinstance(error, str):
         detail = error
+        error_code = None
     else:
         detail = payload.get("message")
+        error_code = payload.get("code")
     if not isinstance(detail, str):
+        detail = ""
+    if isinstance(error_code, str) and error_code not in detail:
+        detail = f"{error_code}: {detail}".strip()
+    if not detail:
         return ""
     safe = " ".join(detail.split())
     safe = _PROVIDER_ERROR_SECRET.sub(r"\1=[REDACTED]", safe)
