@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "CONTEXT-BUDGET-PRIMITIVES"
-next_action: "Review and commit codex/context-budget-primitives, then merge it after codex/tool-result-budget with human confirmation before starting LAYERED-TRANSCRIPT-COMPACTION"
+next_action: "Push and merge codex/context-budget-primitives after codex/tool-result-budget, then start LAYERED-TRANSCRIPT-COMPACTION"
 blockers: []
-last_verified_commit: "e754b2ba43d194ee40ff8e995de22a5cc2658f2e"
-updated_at: "2026-08-22T11:55:36+08:00"
+last_verified_commit: "7834249f94e7ca9c3f67f6ee8c98ce49bfb0b847"
+updated_at: "2026-08-22T11:59:45+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
