@@ -104,6 +104,19 @@ class ConversationContextUsage:
     max_context_messages: int
     includes_summary: bool
     estimation_method: str
+    budget_tokens: int = 0
+    dropped_messages: int = 0
+    truncated_messages: int = 0
+    synchronous_compactions: int = 0
+    summary_realigned: bool = False
+
+
+@dataclass(frozen=True)
+class ContextAssembly:
+    """Assembled request context plus what enforcing the budget cost."""
+
+    messages: list[dict[str, str]]
+    usage: ConversationContextUsage
 
 
 @dataclass(frozen=True)

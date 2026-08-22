@@ -111,6 +111,8 @@ class Settings:
     llm_max_retries: int = 2
     llm_max_input_chars: int = 8000
     llm_max_context_messages: int = 12
+    llm_max_context_messages_ceiling: int = 48
+    llm_context_input_token_ratio: float = 0.6
     llm_max_output_tokens: int = 4096
     llm_thinking_level: str = "low"
     llm_model_catalog_json: str | None = None
@@ -131,8 +133,9 @@ class Settings:
     conversation_summary_enabled: bool = True
     conversation_summary_trigger_messages: int = 12
     conversation_summary_keep_recent_messages: int = 6
-    conversation_summary_max_chars: int = 2000
+    conversation_summary_max_chars: int = 4000
     conversation_summary_max_source_chars: int = 12000
+    conversation_summary_sync_on_overflow: bool = True
     sse_heartbeat_seconds: float = 10.0
     rag_vector_store: str = "memory"
     chroma_persist_directory: str = ".chroma"
@@ -240,6 +243,7 @@ class Settings:
     agent_max_consecutive_failures: int = 3
     agent_native_context_max_chars: int = 48000
     agent_native_context_keep_messages: int = 10
+    agent_native_context_token_ratio: float = 0.5
     agent_plan_max_output_tokens: int = 4096
     agent_mutation_max_output_tokens: int = 16384
     agent_final_max_output_tokens: int = 4096
@@ -489,6 +493,10 @@ class Settings:
             ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
+            (
+                "llm_max_context_messages_ceiling",
+                self.llm_max_context_messages_ceiling,
+            ),
             ("llm_max_output_tokens", self.llm_max_output_tokens),
             (
                 "llm_model_context_window_tokens",
@@ -660,6 +668,22 @@ class Settings:
             raise ValueError(
                 "conversation_summary_keep_recent_messages must be smaller than "
                 "conversation_summary_trigger_messages"
+            )
+        if (
+            self.llm_max_context_messages_ceiling
+            < self.llm_max_context_messages
+        ):
+            raise ValueError(
+                "llm_max_context_messages_ceiling must not be smaller than "
+                "llm_max_context_messages"
+            )
+        if not 0.0 < self.llm_context_input_token_ratio <= 1.0:
+            raise ValueError(
+                "llm_context_input_token_ratio must be between 0 and 1"
+            )
+        if not 0.0 < self.agent_native_context_token_ratio <= 1.0:
+            raise ValueError(
+                "agent_native_context_token_ratio must be between 0 and 1"
             )
         if not 0.0 <= self.rag_lexical_weight <= 1.0:
             raise ValueError("rag_lexical_weight must be between 0 and 1")
@@ -898,6 +922,16 @@ class Settings:
             llm_max_context_messages=_int_env(
                 "LLM_MAX_CONTEXT_MESSAGES", cls.llm_max_context_messages, dotenv
             ),
+            llm_max_context_messages_ceiling=_int_env(
+                "LLM_MAX_CONTEXT_MESSAGES_CEILING",
+                cls.llm_max_context_messages_ceiling,
+                dotenv,
+            ),
+            llm_context_input_token_ratio=_float_env(
+                "LLM_CONTEXT_INPUT_TOKEN_RATIO",
+                cls.llm_context_input_token_ratio,
+                dotenv,
+            ),
             llm_max_output_tokens=_int_env(
                 "LLM_MAX_OUTPUT_TOKENS", cls.llm_max_output_tokens, dotenv
             ),
@@ -952,6 +986,11 @@ class Settings:
             conversation_summary_max_source_chars=_int_env(
                 "CONVERSATION_SUMMARY_MAX_SOURCE_CHARS",
                 cls.conversation_summary_max_source_chars,
+                dotenv,
+            ),
+            conversation_summary_sync_on_overflow=_bool_env(
+                "CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW",
+                cls.conversation_summary_sync_on_overflow,
                 dotenv,
             ),
             sse_heartbeat_seconds=_float_env(
@@ -1255,6 +1294,11 @@ class Settings:
             agent_native_context_keep_messages=_int_env(
                 "AGENT_NATIVE_CONTEXT_KEEP_MESSAGES",
                 cls.agent_native_context_keep_messages,
+                dotenv,
+            ),
+            agent_native_context_token_ratio=_float_env(
+                "AGENT_NATIVE_CONTEXT_TOKEN_RATIO",
+                cls.agent_native_context_token_ratio,
                 dotenv,
             ),
             agent_plan_max_output_tokens=_int_env(

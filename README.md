@@ -611,8 +611,11 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、
 `AGENT_MUTATION_MAX_OUTPUT_TOKENS` 和 `AGENT_FINAL_MAX_OUTPUT_TOKENS` 控制。工具会话超过
-`AGENT_NATIVE_CONTEXT_MAX_CHARS` 时按完整
-assistant/tool 组压缩旧观察，避免拆断 call/result 对。图的独立保险由
+`AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
+`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按完整
+assistant/tool 组压缩旧观察，避免拆断 call/result 对。被折叠的转录交给与会话压缩
+同一个压缩器做语义摘要，保留已读文件、已执行命令、已应用修改和失败原因；模型不可用
+时回退到确定性的规则式摘要。图的独立保险由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
@@ -751,7 +754,23 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 会话历史分两层：旧轮次进入增量压缩的滚动摘要，最新消息保持未压缩。成功完成 Chat
 或 Agent 响应后才会触发压缩；原始消息会被保留，类似凭据的值会被脱敏，同时保存
 乐观锁版本和最后已摘要消息。摘要有长度限制、允许有损，并作为不可信历史上下文注入；
-当前请求和实时证据始终优先。
+当前请求和实时证据始终优先。摘要按 `FACTS`/`PREFERENCES`/`DECISIONS`/`OPEN` 分区
+重写，`PREFERENCES` 只增不删，避免反复递归压缩逐轮丢失用户偏好。
+
+滚动摘要的边界按最后已摘要消息 ID 对齐，消息被删除后不会错位；ID 不存在时才退回
+消息计数，并计入 `conversation_summary_realigned_total`。
+
+上下文装配同时受消息条数和 Token 预算约束。Token 预算来自本次将要服务的模型的
+上下文窗口（`LLM_CONTEXT_INPUT_TOKEN_RATIO` 乘以窗口再扣除输出预留），因此小窗口
+模型会更早收敛，大窗口模型可以在 `LLM_MAX_CONTEXT_MESSAGES` 与
+`LLM_MAX_CONTEXT_MESSAGES_CEILING` 之间自动放宽历史条数。超预算按代价从低到高恢复：
+先同步触发一次会话压缩，再丢弃最旧轮次，最后才对消息正文做保留首尾的截断，而不是
+把请求直接抛给 Provider 触发 `context_window_too_small`。装配结果通过 Chat SSE 的
+`context` 事件和 `/sessions/{id}/token-usage` 的 `context` 字段暴露：估算 Token、
+预算、是否含摘要、丢弃与截断条数、同步压缩次数。
+
+Prompt 前缀按稳定性排序：用户画像等长期稳定内容在最前，滚动摘要与历史其次，
+每轮随查询变化的项目记忆紧贴当前用户消息，使 Provider 的前缀缓存可以命中。
 
 项目记忆是独立的工作区长期子系统，不等同于会话历史或 LangGraph checkpoint，也
 不会自动吸收知识库文档。记忆只作为历史线索；系统/项目指令、当前请求和实时源码
@@ -1083,9 +1102,22 @@ USER_PROFILE_MAX_CONTEXT_CHARS=1500
 CONVERSATION_SUMMARY_ENABLED=true
 CONVERSATION_SUMMARY_TRIGGER_MESSAGES=12
 CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES=6
-CONVERSATION_SUMMARY_MAX_CHARS=2000
+CONVERSATION_SUMMARY_MAX_CHARS=4000
 CONVERSATION_SUMMARY_MAX_SOURCE_CHARS=12000
+CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW=true
 ```
+
+上下文预算单独配置：
+
+```dotenv
+LLM_MAX_CONTEXT_MESSAGES=12
+LLM_MAX_CONTEXT_MESSAGES_CEILING=48
+LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
+AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+```
+
+`LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算
+允许时的上界；两者相等即固定为原有的定长窗口。
 
 ## 独立知识库
 

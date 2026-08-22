@@ -308,6 +308,7 @@ function humanizeAgentNode(value) {
     plan_exploration: "规划仓库探索",
     execute_exploration: "执行仓库探索",
     assess_context: "评估上下文",
+    assemble_context: "装配上下文预算",
     merge_evidence: "合并证据",
     plan_tools: "规划工具调用",
     review_tool_plan: "等待工具审批",
@@ -2928,6 +2929,15 @@ function renderSessionSummary(
               usage.context?.includes_summary ? " · 包含滚动摘要" : ""
             } · 不含下一条用户输入、系统提示和工作区检索内容</small>
             <small>${
+              usage.context?.budget_tokens
+                ? `模型上下文预算 <strong>${escapeHtml(formatTokenCount(usage.context.budget_tokens))}</strong> tokens`
+                : "未解析到模型上下文预算"
+            }${
+              usage.context?.dropped_messages || usage.context?.truncated_messages
+                ? ` · 上一次装配丢弃 ${escapeHtml(usage.context.dropped_messages || 0)} 条、截断 ${escapeHtml(usage.context.truncated_messages || 0)} 条`
+                : ""
+            }</small>
+            <small>${
               latestPromptRecord
                 ? `最近最终 Prompt <strong>${escapeHtml(formatTokenCount(latestPromptRecord.input_tokens))}</strong> tokens · ${escapeHtml(formatInputCountMethod(latestPromptRecord.input_count_method))}`
                 : "尚无已发送的最终 Prompt"
@@ -3970,6 +3980,34 @@ async function streamChat() {
               ? `已回退并选择 ${data.provider} / ${data.model}（${failures} 次前置失败）。`
               : `已选择 ${data.provider} / ${data.model}。`,
             output: data.route_trace || {},
+          });
+          renderExecutionProcess(assistantContent, {
+            trace: chatTrace,
+            status: "running",
+            elapsedMs: performance.now() - startedAt,
+          });
+        } else if (eventName === "context") {
+          const pressure = [];
+          if (data.synchronous_compactions) {
+            pressure.push(`同步压缩 ${data.synchronous_compactions} 次`);
+          }
+          if (data.dropped_messages) {
+            pressure.push(`丢弃最旧 ${data.dropped_messages} 条`);
+          }
+          if (data.truncated_messages) {
+            pressure.push(`截断 ${data.truncated_messages} 条`);
+          }
+          chatTrace.push({
+            step: chatTrace.length + 1,
+            node: "assemble_context",
+            summary: `上下文 ≈ ${formatTokenCount(data.estimated_tokens || 0)} / ${
+              data.budget_tokens
+                ? formatTokenCount(data.budget_tokens)
+                : "未设预算"
+            } tokens${data.includes_summary ? " · 含滚动摘要" : ""}${
+              pressure.length ? ` · ${pressure.join("、")}` : ""
+            }。`,
+            output: data,
           });
           renderExecutionProcess(assistantContent, {
             trace: chatTrace,

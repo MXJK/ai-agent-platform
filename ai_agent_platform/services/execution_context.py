@@ -86,6 +86,8 @@ class ExecutionContextFactory:
         model_registry: Any = None,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
         user_memory_service: Any = None,
+        llm_client: Any = None,
+        max_context_messages_ceiling: int = 0,
     ) -> None:
         if entrypoint_type not in {"api", "worker", "cli", "sdk", "agent_loop"}:
             raise ValueError(f"unsupported Run entrypoint type: {entrypoint_type}")
@@ -95,7 +97,9 @@ class ExecutionContextFactory:
         self._auth_mode = auth_mode
         self._entrypoint_type = entrypoint_type
         self._max_context_messages = max_context_messages
+        self._max_context_messages_ceiling = max_context_messages_ceiling
         self._max_instruction_chars = max_instruction_chars
+        self._llm_client = llm_client
         self._skill_service = skill_service
         self._process_config = process_config
         self._tool_registry = tool_registry or ToolRegistry()
@@ -243,6 +247,12 @@ class ExecutionContextFactory:
                 raw_history = build_agent_context(
                     session_id=conversation_id,
                     max_context_messages=context_message_limit,
+                    max_context_tokens=self._context_budget_tokens(
+                        model_selection
+                    ),
+                    max_context_messages_ceiling=(
+                        self._max_context_messages_ceiling
+                    ),
                     record_injection=False,
                 )
             except TypeError:
@@ -575,6 +585,27 @@ class ExecutionContextFactory:
             execution_workspace=ExecutionWorkspaceContext(
                 **execution_record.to_dict(),
             ),
+        )
+
+    def _context_budget_tokens(self, model_selection: Any = None) -> int:
+        """Resolve the model-derived input budget, or 0 when unavailable."""
+        resolve = getattr(self._llm_client, "resolve_context_budget", None)
+        if not callable(resolve):
+            return 0
+        manual = getattr(model_selection, "mode", None) == "manual"
+        return int(
+            resolve(
+                provider=(
+                    getattr(model_selection, "preferred_provider", None)
+                    if manual
+                    else None
+                ),
+                model=(
+                    getattr(model_selection, "preferred_model", None)
+                    if manual
+                    else None
+                ),
+            ).input_tokens
         )
 
     def _workspace_config(

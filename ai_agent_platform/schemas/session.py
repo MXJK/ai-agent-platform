@@ -190,6 +190,11 @@ class ContextTokenUsageResponse(BaseModel):
     max_context_messages: int
     includes_summary: bool
     estimation_method: str
+    budget_tokens: int = 0
+    dropped_messages: int = 0
+    truncated_messages: int = 0
+    synchronous_compactions: int = 0
+    summary_realigned: bool = False
 
     @classmethod
     def from_domain(

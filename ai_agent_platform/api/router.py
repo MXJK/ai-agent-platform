@@ -70,6 +70,7 @@ def create_api_router(
             workspace_service=workspace_service,
             memory_service=project_memory_service,
             model_registry=model_registry,
+            llm_client=llm_client,
         )
     )
     router.include_router(

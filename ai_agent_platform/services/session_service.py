@@ -3,13 +3,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
 
 from ai_agent_platform.agents.game_agent import GameAgentRuntime
 from ai_agent_platform.core import MetricsRegistry, TaskQueue, TaskQueueError
 from ai_agent_platform.domain import (
+    ContextAssembly,
     ConversationContextUsage,
     ConversationSummary,
     Message,
@@ -28,12 +29,28 @@ from ai_agent_platform.usage_ledger import (
     model_usage_scope,
 )
 from ai_agent_platform.token_counting import (
+    CONVERSATION_TOKEN_OVERHEAD,
     TOKEN_ESTIMATION_METHOD,
     estimate_message_tokens,
+    estimate_text_tokens,
 )
 
 
 _UNSET = object()
+
+_MIN_TRUNCATED_MESSAGE_TOKENS = 32
+_TRUNCATION_MARKER = "\n...[truncated to fit the context budget]...\n"
+
+
+@dataclass
+class _ContextState:
+    """Mutable bookkeeping for one context assembly."""
+
+    includes_summary: bool = False
+    dropped_messages: int = 0
+    truncated_messages: int = 0
+    synchronous_compactions: int = 0
+    summary_realigned: bool = False
 
 
 class SessionService:
@@ -49,6 +66,7 @@ class SessionService:
         summary_keep_recent_messages: int = 6,
         summary_max_chars: int = 2000,
         summary_max_source_chars: int = 12000,
+        summary_sync_on_overflow: bool = True,
         metrics: MetricsRegistry | None = None,
         usage_ledger: UsageLedgerService | None = None,
         default_provider: str | None = None,
@@ -65,6 +83,7 @@ class SessionService:
         self._summary_keep_recent_messages = summary_keep_recent_messages
         self._summary_max_chars = summary_max_chars
         self._summary_max_source_chars = summary_max_source_chars
+        self._summary_sync_on_overflow = summary_sync_on_overflow
         self._metrics = metrics or MetricsRegistry()
         self._usage_ledger = usage_ledger
         self._default_provider = default_provider
@@ -326,44 +345,218 @@ class SessionService:
         session_id: str,
         user_message: str,
         max_context_messages: int,
+        max_context_tokens: int = 0,
+        max_context_messages_ceiling: int = 0,
     ) -> list[dict[str, str]]:
-        context = self.build_agent_context(
+        return self.assemble_chat_context(
+            session_id=session_id,
+            user_message=user_message,
+            max_context_messages=max_context_messages,
+            max_context_tokens=max_context_tokens,
+            max_context_messages_ceiling=max_context_messages_ceiling,
+        ).messages
+
+    def assemble_chat_context(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        max_context_messages: int,
+        max_context_tokens: int = 0,
+        max_context_messages_ceiling: int = 0,
+        record_injection: bool = True,
+        reserved_tokens: int = 0,
+    ) -> ContextAssembly:
+        """Assemble history plus the live user turn under one token budget.
+
+        ``reserved_tokens`` covers blocks the caller injects after assembly,
+        such as the user profile and retrieved memories, so the budget still
+        holds once they are added.
+        """
+        assembly = self.assemble_agent_context(
             session_id=session_id,
             max_context_messages=max_context_messages,
+            max_context_tokens=max_context_tokens,
+            max_context_messages_ceiling=max_context_messages_ceiling,
+            record_injection=record_injection,
+            reserved_tokens=reserved_tokens
+            + estimate_message_tokens(
+                [{"role": "user", "content": user_message}]
+            ),
         )
-        context.append({"role": "user", "content": user_message})
-        return context
+        messages = assembly.messages + [
+            {"role": "user", "content": user_message}
+        ]
+        return ContextAssembly(
+            messages=messages,
+            usage=replace(
+                assembly.usage,
+                estimated_tokens=estimate_message_tokens(messages),
+                message_count=len(messages),
+            ),
+        )
 
     def build_agent_context(
         self,
         *,
         session_id: str,
         max_context_messages: int,
+        max_context_tokens: int = 0,
+        max_context_messages_ceiling: int = 0,
         record_injection: bool = True,
+    ) -> list[dict[str, str]]:
+        return self.assemble_agent_context(
+            session_id=session_id,
+            max_context_messages=max_context_messages,
+            max_context_tokens=max_context_tokens,
+            max_context_messages_ceiling=max_context_messages_ceiling,
+            record_injection=record_injection,
+        ).messages
+
+    def assemble_agent_context(
+        self,
+        *,
+        session_id: str,
+        max_context_messages: int,
+        max_context_tokens: int = 0,
+        max_context_messages_ceiling: int = 0,
+        record_injection: bool = True,
+        reserved_tokens: int = 0,
+        allow_sync_compaction: bool = True,
+    ) -> ContextAssembly:
+        """Select history under both a message cap and a hard token budget.
+
+        The message cap bounds cost on small turns; the token budget is the
+        real gate, so a single oversized message is trimmed here instead of
+        failing later against the provider's context window. Overflow recovery
+        is ordered by how much it costs the conversation: compact first, then
+        drop the oldest turns, and only then truncate message bodies.
+        """
+        budget = max(0, max_context_tokens - max(0, reserved_tokens))
+        window = max_context_messages
+        if budget and max_context_messages_ceiling > max_context_messages:
+            window = max_context_messages_ceiling
+        state = _ContextState()
+        context = self._select_context_messages(
+            session_id=session_id,
+            window=window,
+            state=state,
+        )
+        if budget and estimate_message_tokens(context) > budget:
+            self._metrics.increment("conversation_context_overflow_total")
+            if allow_sync_compaction and self._can_compress_now(session_id):
+                self.compress_conversation(session_id=session_id)
+                state.synchronous_compactions += 1
+                self._metrics.increment(
+                    "conversation_context_sync_compactions_total"
+                )
+                context = self._select_context_messages(
+                    session_id=session_id,
+                    window=window,
+                    state=state,
+                )
+            context = self._fit_context_to_budget(context, budget, state)
+        if state.includes_summary and record_injection:
+            self._metrics.increment("conversation_summaries_injected_total")
+        return ContextAssembly(
+            messages=context,
+            usage=ConversationContextUsage(
+                estimated_tokens=estimate_message_tokens(context),
+                message_count=len(context),
+                max_context_messages=window,
+                includes_summary=state.includes_summary,
+                estimation_method=TOKEN_ESTIMATION_METHOD,
+                budget_tokens=budget,
+                dropped_messages=state.dropped_messages,
+                truncated_messages=state.truncated_messages,
+                synchronous_compactions=state.synchronous_compactions,
+                summary_realigned=state.summary_realigned,
+            ),
+        )
+
+    def _select_context_messages(
+        self,
+        *,
+        session_id: str,
+        window: int,
+        state: "_ContextState",
     ) -> list[dict[str, str]]:
         messages = self._repository.list_messages(session_id=session_id)
         summary = self.get_conversation_summary(session_id)
         if summary is None:
-            recent_messages = (
-                messages[-max_context_messages:] if max_context_messages else []
-            )
-            return _message_context(recent_messages)
+            state.includes_summary = False
+            return _message_context(messages[-window:] if window else [])
 
-        unsummarized_start = min(summary.summarized_message_count, len(messages))
+        unsummarized_start, realigned = _unsummarized_start(messages, summary)
+        if realigned and not state.summary_realigned:
+            state.summary_realigned = True
+            self._metrics.increment("conversation_summary_realigned_total")
         unsummarized = messages[unsummarized_start:]
-        recent_limit = max(0, max_context_messages - 1)
-        recent_messages = (
-            unsummarized[-recent_limit:] if recent_limit else []
+        recent_limit = max(0, window - 1)
+        recent_messages = unsummarized[-recent_limit:] if recent_limit else []
+        state.includes_summary = True
+        return [
+            {"role": "system", "content": _summary_context(summary)}
+        ] + _message_context(recent_messages)
+
+    def _can_compress_now(self, session_id: str) -> bool:
+        if not (self.summary_enabled and self._summary_sync_on_overflow):
+            return False
+        messages = self._repository.list_messages(session_id=session_id)
+        summary = self.get_conversation_summary(session_id)
+        summarized = 0
+        if summary is not None:
+            summarized, _ = _unsummarized_start(messages, summary)
+        elif len(messages) < self._summary_trigger_messages:
+            return False
+        compressible = max(
+            0, len(messages) - self._summary_keep_recent_messages
         )
-        context = [
-            {
-                "role": "system",
-                "content": _summary_context(summary),
-            }
-        ]
-        context.extend(_message_context(recent_messages))
-        if record_injection:
-            self._metrics.increment("conversation_summaries_injected_total")
+        return compressible > summarized
+
+    def _fit_context_to_budget(
+        self,
+        context: list[dict[str, str]],
+        budget: int,
+        state: "_ContextState",
+    ) -> list[dict[str, str]]:
+        """Drop the oldest turns, then truncate bodies, until the budget holds.
+
+        Truncation runs oldest-first, which reaches the summary before the live
+        turn on purpose: the summary is already lossy, while the message the
+        user just sent has to arrive intact.
+        """
+        floor = 2 if state.includes_summary else 1
+        oldest = 1 if state.includes_summary else 0
+        costs = [_message_cost(item) for item in context]
+        total = sum(costs) + CONVERSATION_TOKEN_OVERHEAD
+        while total > budget and len(context) > floor:
+            context.pop(oldest)
+            total -= costs.pop(oldest)
+            state.dropped_messages += 1
+            self._metrics.increment(
+                "conversation_context_messages_dropped_total"
+            )
+        for index, message in enumerate(context):
+            overflow = total - budget
+            if overflow <= 0:
+                break
+            content = message.get("content", "")
+            allowed = max(
+                _MIN_TRUNCATED_MESSAGE_TOKENS,
+                estimate_text_tokens(content) - overflow,
+            )
+            fitted = _fit_text_to_tokens(content, allowed)
+            if fitted == content:
+                continue
+            context[index] = {**message, "content": fitted}
+            fitted_cost = _message_cost(context[index])
+            total -= costs[index] - fitted_cost
+            costs[index] = fitted_cost
+            state.truncated_messages += 1
+            self._metrics.increment(
+                "conversation_context_messages_truncated_total"
+            )
         return context
 
     def get_conversation_summary(
@@ -412,9 +605,11 @@ class SessionService:
         if current is None and len(messages) < self._summary_trigger_messages:
             return None
 
-        summarized_count = (
-            current.summarized_message_count if current is not None else 0
-        )
+        summarized_count = 0
+        if current is not None:
+            summarized_count, realigned = _unsummarized_start(messages, current)
+            if realigned:
+                self._metrics.increment("conversation_summary_realigned_total")
         compressible_count = max(
             0,
             len(messages) - self._summary_keep_recent_messages,
@@ -595,25 +790,19 @@ class SessionService:
         *,
         session_id: str,
         max_context_messages: int,
+        max_context_tokens: int = 0,
+        max_context_messages_ceiling: int = 0,
     ) -> ConversationContextUsage:
-        context = self.build_agent_context(
+        # Reporting must stay side-effect free: previewing the next turn never
+        # spends a model call on compaction.
+        return self.assemble_agent_context(
             session_id=session_id,
             max_context_messages=max_context_messages,
+            max_context_tokens=max_context_tokens,
+            max_context_messages_ceiling=max_context_messages_ceiling,
             record_injection=False,
-        )
-        return ConversationContextUsage(
-            estimated_tokens=estimate_message_tokens(context),
-            message_count=len(context),
-            max_context_messages=max_context_messages,
-            includes_summary=bool(
-                context
-                and context[0].get("role") == "system"
-                and context[0].get("content", "").startswith(
-                    "Earlier conversation summary"
-                )
-            ),
-            estimation_method=TOKEN_ESTIMATION_METHOD,
-        )
+            allow_sync_compaction=False,
+        ).usage
 
     def get_session_summary(self, session_id: str) -> SessionSummary:
         messages = self._repository.list_messages(session_id=session_id)
@@ -650,6 +839,54 @@ def _message_context(messages: list[Message]) -> list[dict[str, str]]:
         for message in messages
         if message.role in {"system", "user", "assistant"}
     ]
+
+
+def _message_cost(message: dict[str, str]) -> int:
+    """Estimate one message's share of the conversation token total."""
+    return estimate_message_tokens([message]) - CONVERSATION_TOKEN_OVERHEAD
+
+
+def _unsummarized_start(
+    messages: list[Message],
+    summary: ConversationSummary,
+) -> tuple[int, bool]:
+    """Locate the first unsummarized message by identity, not by offset.
+
+    ``summarized_message_count`` is only correct while the message list is
+    append-only, so the stored boundary id wins whenever it is still present.
+    """
+    if summary.through_message_id:
+        for index, message in enumerate(messages):
+            if message.id == summary.through_message_id:
+                return index + 1, index + 1 != summary.summarized_message_count
+    return min(summary.summarized_message_count, len(messages)), False
+
+
+def _fit_text_to_tokens(text: str, max_tokens: int) -> str:
+    """Keep the head and tail of ``text`` within an estimated token budget."""
+    if max_tokens <= 0:
+        return ""
+    if estimate_text_tokens(text) <= max_tokens:
+        return text
+    low, high = 0, len(text)
+    best = _TRUNCATION_MARKER.strip()
+    while low <= high:
+        keep = (low + high) // 2
+        candidate = _head_tail(text, keep)
+        if estimate_text_tokens(candidate) <= max_tokens:
+            best = candidate
+            low = keep + 1
+        else:
+            high = keep - 1
+    return best
+
+
+def _head_tail(text: str, keep: int) -> str:
+    if keep <= 0:
+        return _TRUNCATION_MARKER.strip()
+    head = (keep * 2) // 3
+    tail = keep - head
+    return text[:head] + _TRUNCATION_MARKER + (text[-tail:] if tail else "")
 
 
 def _summary_context(summary: ConversationSummary) -> str:

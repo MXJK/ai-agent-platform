@@ -24,9 +24,11 @@ from ai_agent_platform.integrations import (
     LLMRequestPlan,
     LLMStreamEvent,
 )
+from ai_agent_platform.domain import ConversationContextUsage
 from ai_agent_platform.repositories import SessionArchivedError, SessionNotFoundError
 from ai_agent_platform.schemas import ChatStreamRequest
 from ai_agent_platform.services import SessionService
+from ai_agent_platform.token_counting import estimate_message_tokens
 from ai_agent_platform.project_memory import (
     MemoryAccessDeniedError,
     ProjectMemoryService,
@@ -134,30 +136,53 @@ def create_chat_router(
                         actor_user_id=actor_user_id,
                         query=request.message,
                     )
-                prepared_messages = session_service.build_chat_context(
-                    session_id=request.conversation_id,
-                    user_message=request.message,
-                    max_context_messages=settings.llm_max_context_messages,
+                memory_context = (
+                    _memory_system_context(retrieved_memories)
+                    if retrieved_memories
+                    else None
                 )
                 user_profile_context = (
                     user_memory_service.context_for_user(user_id=actor_user_id)
                     if user_memory_service is not None
                     else None
                 )
+                context_budget_tokens = _context_budget_tokens(
+                    llm_client,
+                    provider=request.provider,
+                    model=request.model,
+                    routing_policy=request.routing_policy,
+                    structured_output=request.requires_structured_output,
+                )
+                context_assembly = session_service.assemble_chat_context(
+                    session_id=request.conversation_id,
+                    user_message=request.message,
+                    max_context_messages=settings.llm_max_context_messages,
+                    max_context_tokens=context_budget_tokens,
+                    max_context_messages_ceiling=(
+                        settings.llm_max_context_messages_ceiling
+                    ),
+                    reserved_tokens=estimate_message_tokens(
+                        [
+                            {"role": "system", "content": value}
+                            for value in (user_profile_context, memory_context)
+                            if value
+                        ]
+                    ),
+                )
+                prepared_messages = context_assembly.messages
+                context_usage = context_assembly.usage
+                # The prefix stays byte-stable across turns so provider prompt
+                # caches can hit: the per-user profile leads, and per-query
+                # memories sit next to the turn that retrieved them.
                 if user_profile_context:
                     prepared_messages.insert(
                         0,
                         {"role": "system", "content": user_profile_context},
                     )
-                if retrieved_memories:
+                if memory_context:
                     prepared_messages.insert(
-                        0,
-                        {
-                            "role": "system",
-                            "content": _memory_system_context(
-                                retrieved_memories
-                            ),
-                        },
+                        max(0, len(prepared_messages) - 1),
+                        {"role": "system", "content": memory_context},
                     )
                 request_plan = llm_client.prepare_chat_request(
                     prepared_messages,
@@ -202,6 +227,7 @@ def create_chat_router(
                 actor_user_id=actor_user_id,
                 retrieved_memories=retrieved_memories,
                 prepared_messages=prepared_messages,
+                context_usage=context_usage,
                 request_plan=request_plan,
             ),
             media_type="text/event-stream",
@@ -213,6 +239,14 @@ def create_chat_router(
         )
 
     return router
+
+
+def _context_budget_tokens(llm_client: LLMClient, **kwargs: object) -> int:
+    """Resolve the model-derived input budget, or 0 when unavailable."""
+    resolve = getattr(llm_client, "resolve_context_budget", None)
+    if not callable(resolve):
+        return 0
+    return int(resolve(**kwargs).input_tokens)
 
 
 def chat_stream_events(
@@ -229,6 +263,7 @@ def chat_stream_events(
     actor_user_id: str = "demo_user",
     retrieved_memories: list[RetrievedMemory] | None = None,
     prepared_messages: list[dict[str, str]] | None = None,
+    context_usage: ConversationContextUsage | None = None,
     request_plan: LLMRequestPlan | None = None,
 ):
     started_at = perf_counter()
@@ -321,6 +356,26 @@ def chat_stream_events(
             "routing_pending": True,
         },
     )
+    if context_usage is not None:
+        if context_usage.dropped_messages or context_usage.truncated_messages:
+            metrics.increment("chat_context_pressure_total")
+        yield sse(
+            "context",
+            {
+                "estimated_tokens": context_usage.estimated_tokens,
+                "budget_tokens": context_usage.budget_tokens,
+                "message_count": context_usage.message_count,
+                "max_context_messages": context_usage.max_context_messages,
+                "includes_summary": context_usage.includes_summary,
+                "dropped_messages": context_usage.dropped_messages,
+                "truncated_messages": context_usage.truncated_messages,
+                "synchronous_compactions": (
+                    context_usage.synchronous_compactions
+                ),
+                "summary_realigned": context_usage.summary_realigned,
+                "estimation_method": context_usage.estimation_method,
+            },
+        )
     retrieved_memories = retrieved_memories or []
     if retrieved_memories:
         yield sse(
@@ -347,6 +402,10 @@ def chat_stream_events(
             session_id=request.conversation_id,
             user_message=request.message,
             max_context_messages=settings.llm_max_context_messages,
+            max_context_tokens=_context_budget_tokens(llm_client),
+            max_context_messages_ceiling=(
+                settings.llm_max_context_messages_ceiling
+            ),
         )
         session_service.add_message(
             session_id=request.conversation_id,

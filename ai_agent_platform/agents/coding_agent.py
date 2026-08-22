@@ -129,6 +129,7 @@ class CodingAgentRuntime:
         max_consecutive_failures: int = 3,
         native_context_max_chars: int = 48000,
         native_context_keep_messages: int = 10,
+        native_context_token_ratio: float = 0.5,
         plan_max_output_tokens: int = 4096,
         mutation_max_output_tokens: int = 16384,
         final_max_output_tokens: int = 4096,
@@ -141,6 +142,8 @@ class CodingAgentRuntime:
         change_set_service: Any = None,
         tool_pool_builder: ToolPoolBuilder | None = None,
         execution_workspace_runtime: Any = None,
+        llm_client: Any = None,
+        context_compressor: Any = None,
     ) -> None:
         self._tools = tool_registry or create_coding_tool_registry()
         self._checkpointer = checkpointer or InMemorySaver()
@@ -160,6 +163,9 @@ class CodingAgentRuntime:
         self._max_consecutive_failures = max_consecutive_failures
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
+        self._native_context_token_ratio = native_context_token_ratio
+        self._llm_client = llm_client
+        self._context_compressor = context_compressor
         self._plan_max_output_tokens = plan_max_output_tokens
         self._mutation_max_output_tokens = mutation_max_output_tokens
         self._final_max_output_tokens = final_max_output_tokens

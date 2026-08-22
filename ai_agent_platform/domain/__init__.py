@@ -1,6 +1,7 @@
 from .models import (
     AgentDecision,
     ChangeSetRecord,
+    ContextAssembly,
     ConversationContextUsage,
     ConversationSummary,
     KnowledgeBaseRecord,
@@ -48,6 +49,7 @@ __all__ = [
     "SUPPORTED_RUN_CONTEXT_SCHEMA_VERSIONS",
     "AdditionalDirectoryContext",
     "ChangeSetRecord",
+    "ContextAssembly",
     "ConversationMessageSnapshot",
     "ConversationSummarySnapshot",
     "ConversationContextUsage",

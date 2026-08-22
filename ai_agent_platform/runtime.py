@@ -583,6 +583,9 @@ class ApplicationFactory:
                 summary_max_source_chars=(
                     settings.conversation_summary_max_source_chars
                 ),
+                summary_sync_on_overflow=(
+                    settings.conversation_summary_sync_on_overflow
+                ),
                 metrics=container.metrics,
                 usage_ledger=container.usage_ledger,
                 default_provider=settings.llm_provider,
@@ -596,6 +599,10 @@ class ApplicationFactory:
                 auth_mode=settings.auth_mode,
                 entrypoint_type=role,
                 max_context_messages=settings.llm_max_context_messages,
+                max_context_messages_ceiling=(
+                    settings.llm_max_context_messages_ceiling
+                ),
+                llm_client=container.llm_client,
                 max_instruction_chars=settings.agent_max_instruction_chars,
                 config_snapshot=(
                     resolved_config or ResolvedConfig.from_settings(settings)
@@ -1039,6 +1046,14 @@ class ApplicationFactory:
             native_context_max_chars=settings.agent_native_context_max_chars,
             native_context_keep_messages=(
                 settings.agent_native_context_keep_messages
+            ),
+            native_context_token_ratio=(
+                settings.agent_native_context_token_ratio
+            ),
+            llm_client=llm_client,
+            context_compressor=create_conversation_compressor(
+                llm_provider=settings.llm_provider,
+                llm_client=llm_client,
             ),
             plan_max_output_tokens=settings.agent_plan_max_output_tokens,
             mutation_max_output_tokens=(

@@ -4,6 +4,7 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.model_registry import ModelRegistryService
 from ai_agent_platform.project_memory import (
     MemoryAccessDeniedError,
@@ -39,12 +40,21 @@ from ai_agent_platform.services import (
 )
 
 
+def _context_budget_tokens(llm_client: LLMClient | None) -> int:
+    """Resolve the model-derived input budget, or 0 when unavailable."""
+    resolve = getattr(llm_client, "resolve_context_budget", None)
+    if not callable(resolve):
+        return 0
+    return int(resolve().input_tokens)
+
+
 def create_sessions_router(
     session_service: SessionService,
     settings: Settings | None = None,
     workspace_service: WorkspaceService | None = None,
     memory_service: ProjectMemoryService | None = None,
     model_registry: ModelRegistryService | None = None,
+    llm_client: LLMClient | None = None,
 ) -> APIRouter:
     router = APIRouter()
     settings = settings or Settings()
@@ -259,6 +269,10 @@ def create_sessions_router(
         context = session_service.get_context_token_usage(
             session_id=session_id,
             max_context_messages=settings.llm_max_context_messages,
+            max_context_tokens=_context_budget_tokens(llm_client),
+            max_context_messages_ceiling=(
+                settings.llm_max_context_messages_ceiling
+            ),
         )
         return TokenUsagesResponse(
             session_id=session_id,
