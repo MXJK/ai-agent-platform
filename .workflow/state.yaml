@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "TOOL-CALL-EXECUTION-HARDENING"
-next_action: "Triage the remaining tool-calling review findings listed in the task Result"
+active_task: "CONTEXT-BUDGET-COMPACTION"
+next_action: "Decide whether LLM_MAX_CONTEXT_MESSAGES_CEILING=48 is the wanted per-turn cost profile, then merge codex/context-budget-compaction"
 blockers: []
-last_verified_commit: "491d5edb"
-updated_at: "2026-08-21T17:14:27+08:00"
+last_verified_commit: "30fbbcc4"
+updated_at: "2026-08-21T18:05:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
