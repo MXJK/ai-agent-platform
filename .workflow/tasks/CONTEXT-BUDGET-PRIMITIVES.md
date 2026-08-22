@@ -37,17 +37,17 @@ verified on its own.
 
 ## Acceptance criteria
 
-- [x] Characterization tests are written and passing **before** the move, locking the
+- [ ] Characterization tests are written and passing **before** the move, locking the
       current chat-layer reduction behavior, following the pattern in
       `tests/test_agent_loop_characterization.py`.
-- [x] No observable behavior change: `tests/test_context_budget.py` and
+- [ ] No observable behavior change: `tests/test_context_budget.py` and
       `tests/test_context_pipeline.py` pass unmodified.
-- [x] `context_budget.py` imports no repository, no LLM client and no metrics registry.
-- [x] The Protocol supports the native message shape (`call_id`, `tool_calls`,
+- [ ] `context_budget.py` imports no repository, no LLM client and no metrics registry.
+- [ ] The Protocol supports the native message shape (`call_id`, `tool_calls`,
       `is_error`) without normalizing it to `{role, content}`.
-- [x] `.venv/bin/python -m pytest -q` passes.
-- [x] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
-- [x] Documentation impact assessed. If behavior is genuinely unchanged, record that
+- [ ] `.venv/bin/python -m pytest -q` passes.
+- [ ] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
+- [ ] Documentation impact assessed. If behavior is genuinely unchanged, record that
       conclusion and the reason in Result instead of making cosmetic doc edits.
 
 ## Decisions
@@ -62,44 +62,7 @@ verified on its own.
   `{role, content}` normalization would destroy, and a broken pair is a provider 400.
 - Scope stays at extraction. Mixing a refactor with a behavior change would remove the
   one property that makes this step cheap to verify.
-- `ContextBudgetPolicy` owns item cost, truncation and drop protection. The generic
-  fitter copies the input sequence and never projects a native tool message onto a
-  chat-only schema, so provider-critical metadata survives by construction.
-- `SessionService` remains the owner of summary persistence and metrics. It maps the
-  shared `ContextReduction` counters back to the existing
-  `ConversationContextUsage` fields and counter names.
 
 ## Verification
 
-- Before extraction:
-  `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m pytest -q tests/test_context_budget_characterization.py`
-  - PASS: `1 passed in 0.56s` against the original private implementation.
-- Focused after extraction:
-  `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m pytest -q tests/test_context_budget_primitives.py tests/test_context_budget_characterization.py tests/test_context_budget.py tests/test_context_pipeline.py`
-  - PASS: `21 passed, 4 subtests passed in 0.65s`.
-  - `tests/test_context_budget.py` and `tests/test_context_pipeline.py` were not edited.
-- Required full suite:
-  `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m pytest -q`
-  - PASS: `492 passed, 56 subtests passed in 18.90s`.
-- Required bytecode verification:
-  `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m compileall ai_agent_platform tests evals`
-  - PASS.
-
 ## Result
-
-- Added `services/context_budget.py` with a generic `ContextBudgetPolicy`, frozen
-  `ContextReduction` counter bookkeeping, drop-then-truncate fitting, and the extracted
-  head/tail text primitives. The module imports only the Python standard library.
-- Adapted chat context assembly to the shared result while preserving its exact drop
-  order, truncation output, protected summary/latest-message rules, usage fields and
-  metrics.
-- Added a pre-move golden characterization and focused primitive tests. The native
-  shape test keeps `tool_calls`, `call_id` and `is_error` intact and proves the input
-  transcript is not mutated.
-- Documentation impact: none. This task deliberately changes no API, configuration,
-  architecture boundary visible to operators, data flow, or model-observed context;
-  editing README or the interview handbook would only restate existing behavior.
-- The verified implementation is commit `7834249f`; workflow verification is commit
-  `8f07107e`. The user authorized commit, push and merge on 2026-08-22, and the branch
-  was merged into remote `main` through merge commit `01aab227`. No deployment,
-  release or migration was performed.
