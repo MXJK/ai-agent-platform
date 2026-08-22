@@ -724,11 +724,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260821-layered-memory-4',
+            '/static/styles.css?v=20260822-conversation-workbench-1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260821-layered-memory-4',
+            '/static/app.js?v=20260822-conversation-workbench-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -758,7 +758,9 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('id="composer-provider-input"', response.text)
         self.assertIn('id="thinking-level-input"', response.text)
         self.assertNotIn('id="workspace-draft-id-input"', response.text)
-        self.assertNotIn('id="workspace-context-strip"', response.text)
+        self.assertIn('id="composer-scope-strip"', response.text)
+        self.assertIn('id="composer-workspace-btn"', response.text)
+        self.assertIn('id="composer-context-budget"', response.text)
         self.assertNotIn('id="composer-workspace-select"', response.text)
         self.assertNotIn('id="workspace-catalog-list"', response.text)
         self.assertIn('id="workspace-manager-list"', response.text)
@@ -776,6 +778,12 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('class="recent-sessions"', response.text)
         self.assertIn('id="session-search-input"', response.text)
         self.assertIn('id="archived-session-notice"', response.text)
+        self.assertIn('id="active-session-header"', response.text)
+        self.assertIn('id="rename-current-session-btn"', response.text)
+        self.assertIn('id="mobile-more-btn"', response.text)
+        self.assertIn('id="mobile-more-menu"', response.text)
+        self.assertIn('id="composer-config" class="composer-config"', response.text)
+        self.assertNotIn('class="conversation" aria-live=', response.text)
         self.assertIn('class="welcome-signal"', response.text)
         self.assertIn("<b>VERIFY</b>", response.text)
         self.assertIn('id="knowledge-base-list"', response.text)
@@ -845,6 +853,13 @@ class ApiTests(unittest.TestCase):
         self.assertIn("preferred_tool_name", script_response.text)
         self.assertIn("saveComposerDraft", script_response.text)
         self.assertIn("conversationIsNearBottom", script_response.text)
+        self.assertIn("setChatWorkbenchActive", script_response.text)
+        self.assertIn("setMobileMoreOpen", script_response.text)
+        self.assertIn("syncInspectorPresentation", script_response.text)
+        self.assertIn("failureRecoveryMarkup", script_response.text)
+        self.assertIn('data-message-action="copy"', script_response.text)
+        self.assertIn('data-response-action="retry"', script_response.text)
+        self.assertIn("output.scrollTo", script_response.text)
         self.assertIn("event.isComposing", script_response.text)
         self.assertIn(".inspector-recent", stylesheet_response.text)
         self.assertIn("height: clamp(148px, 32vh, 260px)", stylesheet_response.text)
@@ -865,6 +880,13 @@ class ApiTests(unittest.TestCase):
         self.assertIn("--signal: #62d6c2", stylesheet_response.text)
         self.assertIn("@keyframes signal-arrive", stylesheet_response.text)
         self.assertIn("--z-overlay: 80", stylesheet_response.text)
+        self.assertIn(".chat-workbench.has-conversation", stylesheet_response.text)
+        self.assertIn(".composer-scope-strip", stylesheet_response.text)
+        self.assertIn(".response-error-card", stylesheet_response.text)
+        self.assertIn(".inspector-backdrop:not([hidden])", stylesheet_response.text)
+        self.assertIn("body.mobile-more-open", stylesheet_response.text)
+        self.assertIn(".primary-nav > .mobile-overflow-nav", stylesheet_response.text)
+        self.assertIn("repeat(5, minmax(0, 1fr))", stylesheet_response.text)
         self.assertIn("loadSessionTokenUsage", script_response.text)
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)

@@ -1014,8 +1014,8 @@ function composerSubmission(value) {
 }
 
 function conversationIsNearBottom() {
-  const remaining = document.documentElement.scrollHeight
-    - (window.scrollY + window.innerHeight);
+  const output = $("chat-output");
+  const remaining = output.scrollHeight - (output.scrollTop + output.clientHeight);
   return remaining < 180;
 }
 
@@ -1028,8 +1028,9 @@ function updateJumpToLatestButton() {
 
 function scrollConversationToLatest({ behavior = preferredScrollBehavior() } = {}) {
   state.followConversation = true;
-  window.scrollTo({
-    top: document.documentElement.scrollHeight,
+  const output = $("chat-output");
+  output.scrollTo({
+    top: output.scrollHeight,
     behavior,
   });
   window.setTimeout(updateJumpToLatestButton, behavior === "smooth" ? 240 : 0);
@@ -1050,13 +1051,33 @@ function bindConversationFollow() {
   const output = $("chat-output");
   const observer = new MutationObserver(scheduleConversationFollow);
   observer.observe(output, { childList: true, subtree: true, characterData: true });
-  window.addEventListener("scroll", () => {
+  output.addEventListener("scroll", () => {
     state.followConversation = conversationIsNearBottom();
     updateJumpToLatestButton();
   }, { passive: true });
   $("jump-to-latest-btn").addEventListener("click", () =>
     scrollConversationToLatest({ behavior: preferredScrollBehavior() }),
   );
+}
+
+function setMobileMoreOpen(open) {
+  const menu = $("mobile-more-menu");
+  const backdrop = $("mobile-nav-backdrop");
+  menu.hidden = !open;
+  backdrop.hidden = !open;
+  $("mobile-more-btn").setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("mobile-more-open", open);
+}
+
+function updateMobileMoreState() {
+  const overflowActive = ["memory", "models", "tools"].includes(state.currentView);
+  const button = $("mobile-more-btn");
+  button.classList.toggle("active", overflowActive);
+  if (overflowActive) {
+    button.setAttribute("aria-current", "page");
+  } else {
+    button.removeAttribute("aria-current");
+  }
 }
 
 function switchView(viewName, updateHash = true) {
@@ -1068,6 +1089,7 @@ function switchView(viewName, updateHash = true) {
     return;
   }
   state.currentView = normalizedView;
+  setMobileMoreOpen(false);
   document.querySelectorAll("[data-view-panel]").forEach((item) => {
     const active = item.dataset.viewPanel === normalizedView;
     item.classList.toggle("active", active);
@@ -1085,6 +1107,7 @@ function switchView(viewName, updateHash = true) {
   if (updateHash) {
     history.replaceState(null, "", `#${normalizedView}`);
   }
+  updateMobileMoreState();
   saveUiPreferences();
   $("main-workspace").focus({ preventScroll: true });
   if (normalizedView === "memory") {
@@ -1099,6 +1122,12 @@ function switchView(viewName, updateHash = true) {
   }
 }
 
+function syncInspectorPresentation(visible) {
+  const drawer = window.innerWidth <= 1120;
+  $("inspector-backdrop").hidden = !visible || !drawer;
+  document.body.classList.toggle("inspector-drawer-open", visible && drawer);
+}
+
 function setInspectorVisible(visible) {
   const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
@@ -1110,6 +1139,7 @@ function setInspectorVisible(visible) {
   panel.setAttribute("aria-hidden", String(!visible));
   panel.inert = !visible;
   panel.hidden = !visible;
+  syncInspectorPresentation(visible);
   saveUiPreferences();
 }
 
@@ -1153,6 +1183,56 @@ function closeWorkspacePicker() {
   state.workspaceRelinkId = null;
 }
 
+function setChatWorkbenchActive(active) {
+  const workbench = $("chat-view");
+  workbench.classList.toggle("has-conversation", active);
+  workbench.setAttribute("aria-labelledby", active ? "active-session-title" : "chat-title");
+  $("chat-welcome-header").hidden = active;
+  $("active-session-header").hidden = !active;
+  if (active) {
+    updateContextSummary();
+  }
+}
+
+function updateComposerScopeSummary() {
+  const workspace = currentWorkspace();
+  const ready = workspaceIsReady(workspace);
+  const workspaceLabel = workspace ? workspaceName(workspace) : "未选择工作区";
+  const workspaceRole = workspace
+    ? `${workspaceRoleLabel(workspace.role)}${ready ? "" : " · 不可用"}`
+    : "选择";
+  const statusDot = $("composer-workspace-status-dot");
+  statusDot.className = `workspace-status-dot ${
+    workspace ? (ready ? "is-ready" : "is-unavailable") : "is-missing"
+  }`;
+  $("composer-workspace-label").textContent = workspaceLabel;
+  $("composer-workspace-role").textContent = workspaceRole;
+  $("composer-workspace-btn").title = workspace?.root_path
+    ? `${workspace.root_path} · ${workspaceRole}`
+    : "选择 Agent 可以操作的工作区";
+
+  const modelLabel = currentModelSelectionLabel();
+  $("composer-model-label").textContent = modelLabel;
+  $("composer-model-btn").title = `当前模型：${modelLabel}`;
+
+  const usage = state.conversationId
+    ? state.sessionTokenUsage[state.conversationId]
+    : null;
+  const estimated = Number(usage?.context?.estimated_tokens || 0);
+  const budget = Number(usage?.context?.budget_tokens || 0);
+  const ratio = budget ? Math.min(1, estimated / budget) : 0;
+  const contextNode = $("composer-context-budget");
+  contextNode.classList.toggle("warning", ratio >= 0.72 && ratio < 0.9);
+  contextNode.classList.toggle("error", ratio >= 0.9);
+  $("composer-context-label").textContent = estimated
+    ? `≈ ${formatTokenCount(estimated)}${budget ? ` / ${formatTokenCount(budget)}` : ""} tokens`
+    : "等待首轮请求";
+  $("composer-context-meter-fill").style.width = `${Math.round(ratio * 100)}%`;
+  contextNode.title = budget
+    ? `当前上下文估算 ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} tokens`
+    : "发起请求后显示当前会话的上下文估算";
+}
+
 function updateContextSummary() {
   const workspace = currentWorkspace();
   const workspaceLabel = workspace ? workspaceName(workspace) : "未选择";
@@ -1164,6 +1244,11 @@ function updateContextSummary() {
   $("header-session-id").textContent = state.currentSession?.title
     || state.conversationId
     || "尚未创建";
+  $("active-session-title").textContent = state.currentSession?.title
+    || state.conversationId
+    || "当前会话";
+  $("rename-current-session-btn").disabled = !state.currentSession?.id;
+  updateComposerScopeSummary();
 }
 
 function currentWorkspace() {
@@ -2455,6 +2540,7 @@ async function ensureSession() {
 }
 
 function resetChatView() {
+  setChatWorkbenchActive(false);
   $("chat-output").innerHTML = `
     <div class="welcome-state">
       <div class="welcome-signal" aria-hidden="true">
@@ -2655,6 +2741,9 @@ async function loadSessionTokenUsage(sessionIds = state.sessions.map((item) => i
   );
   for (const [sessionId, usage] of entries) {
     state.sessionTokenUsage[sessionId] = usage;
+  }
+  if (sessionIds.includes(state.conversationId)) {
+    updateComposerScopeSummary();
   }
   return entries;
 }
@@ -2875,6 +2964,7 @@ async function loadSessionSummary() {
       fetchJson(`/sessions/${encodeURIComponent(conversationId)}/token-usage`),
     ]);
     state.sessionTokenUsage[conversationId] = usage;
+    updateComposerScopeSummary();
     renderSessionSummary(summary, usage);
     renderSessions();
     setRaw({ summary, usage });
@@ -3028,6 +3118,7 @@ function renderChatHistory(messages) {
   }
   const output = $("chat-output");
   state.followConversation = true;
+  setChatWorkbenchActive(true);
   output.innerHTML = "";
   for (const message of chatMessages) {
     appendChatMessage(message.role, message.content, message.created_at);
@@ -3070,8 +3161,10 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
   if (welcome) {
     output.innerHTML = "";
   }
+  setChatWorkbenchActive(true);
   const item = document.createElement("article");
   item.className = `chat-message ${role}`;
+  item.dataset.messageContent = content;
   const roleLabel = role === "user" ? "你" : "AI 助手";
   const avatar = role === "user" ? "你" : "A";
   item.innerHTML = `
@@ -3079,6 +3172,16 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
     <div class="chat-bubble">
       <div class="message-label"><strong>${roleLabel}</strong><span>${escapeHtml(createdAt ? formatDate(createdAt) : "刚刚")}</span></div>
       <div class="message-content rich-output">${content ? renderMarkdown(content) : '<span class="typing-indicator" aria-label="正在生成"><span></span><span></span><span></span></span>'}</div>
+      <div class="message-actions" aria-label="消息操作">
+        <button class="message-action" type="button" data-message-action="copy" aria-label="复制这条消息" title="复制">
+          ${iconMarkup("copy")}
+        </button>
+        ${role === "user" ? `
+          <button class="message-action" type="button" data-message-action="edit" aria-label="编辑并重新使用这条消息" title="编辑并重新使用">
+            ${iconMarkup("edit")}
+          </button>
+        ` : ""}
+      </div>
     </div>
   `;
   if (runId) {
@@ -3090,6 +3193,104 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
   }
   scheduleConversationFollow();
   return item.querySelector(".message-content");
+}
+
+function failureTitle(detail, code = "") {
+  const normalized = `${code} ${detail}`.toLowerCase();
+  if (normalized.includes("timed out") || normalized.includes("timeout")) {
+    return "模型响应超时";
+  }
+  if (code === "max_output_tokens") {
+    return "回答达到输出额度上限";
+  }
+  return "本次运行未完成";
+}
+
+function failureGuidance(detail, code = "") {
+  const normalized = `${code} ${detail}`.toLowerCase();
+  if (normalized.includes("timed out") || normalized.includes("timeout")) {
+    return "可以直接重试，或选择延迟更低的模型后再次运行。";
+  }
+  if (code === "max_output_tokens") {
+    return "已保留生成的部分内容。可以提高模型输出额度，或缩小本次任务范围。";
+  }
+  return "保留当前会话上下文后重试；需要诊断时打开运行详情查看失败阶段。";
+}
+
+function failureRecoveryMarkup(detail, { code = "", requestId = "" } = {}) {
+  return `
+    <section class="response-error-card" role="alert">
+      <h3>${escapeHtml(failureTitle(detail, code))}</h3>
+      <p class="response-error-detail">${escapeHtml(detail)}</p>
+      <small>${escapeHtml(failureGuidance(detail, code))}${requestId ? ` · Request ID：${escapeHtml(requestId)}` : ""}</small>
+      <div class="response-error-actions">
+        <button class="button primary" type="button" data-response-action="retry">
+          ${iconMarkup("refresh")}重试
+        </button>
+        <button class="button secondary" type="button" data-response-action="choose-model">更换模型</button>
+        <button class="button ghost" type="button" data-response-action="show-details">查看运行详情</button>
+      </div>
+    </section>
+  `;
+}
+
+function previousUserPrompt(message) {
+  let current = message?.previousElementSibling;
+  while (current) {
+    if (current.classList.contains("user")) {
+      return current.dataset.messageContent || "";
+    }
+    current = current.previousElementSibling;
+  }
+  return "";
+}
+
+async function handleConversationAction(target) {
+  const message = target.closest(".chat-message");
+  if (!message) return;
+  const messageAction = target.closest("[data-message-action]")?.dataset.messageAction;
+  const responseAction = target.closest("[data-response-action]")?.dataset.responseAction;
+  if (messageAction === "copy") {
+    const failureDetail = message.querySelector(".response-error-detail")?.innerText;
+    const text = failureDetail || message.querySelector(".message-content")?.innerText || "";
+    try {
+      await navigator.clipboard.writeText(text.trim());
+      showToast("消息已复制");
+    } catch {
+      showToast("无法访问剪贴板，请手动选择文本复制", "warning");
+    }
+    return;
+  }
+  if (messageAction === "edit") {
+    setComposerValue(message.dataset.messageContent || "", { focus: true });
+    scrollConversationToLatest({ behavior: preferredScrollBehavior() });
+    return;
+  }
+  if (responseAction === "show-details") {
+    setInspectorVisible(true);
+    $("close-inspector-btn").focus();
+    return;
+  }
+  if (responseAction === "choose-model") {
+    $("composer-config").open = true;
+    scrollConversationToLatest({ behavior: preferredScrollBehavior() });
+    window.setTimeout(() => {
+      const targetControl = $("auto-model-toggle").checked
+        ? $("auto-model-toggle")
+        : ($("model-picker-trigger").hidden ? $("session-model-select") : $("model-picker-trigger"));
+      targetControl.focus();
+    }, 0);
+    return;
+  }
+  if (responseAction === "retry") {
+    const prompt = previousUserPrompt(message);
+    if (!prompt) {
+      showToast("没有找到可重试的上一条请求", "warning");
+      return;
+    }
+    setComposerValue(prompt);
+    await submitComposerMessage();
+  }
 }
 
 function agentRunId(body) {
@@ -3728,7 +3929,11 @@ function renderAgentChatResponse(
   } else if (!holdAnswer && ["paused", "waiting_input"].includes(actualStatus)) {
     contentNode.innerHTML = "<p>Agent 已在安全边界暂停，请在下方补充信息或继续。</p>";
   } else if (!holdAnswer && actualStatus === "failed") {
-    contentNode.innerHTML = `<p>${escapeHtml(body.error || "Agent 运行失败，请查看运行详情。")}</p>`;
+    const detail = body.error || "Agent 运行失败，请查看运行详情。";
+    contentNode.innerHTML = failureRecoveryMarkup(detail, {
+      code: body.error_code || "agent_run_failed",
+      requestId: body.request_id || "",
+    });
   } else {
     const currentNode = trace.at(-1)?.node || body?.latest_node;
     contentNode.innerHTML = `<p class="response-placeholder">${escapeHtml(
@@ -4092,9 +4297,12 @@ async function streamChat() {
         const detail = error.code === "max_output_tokens"
           ? "回答达到输出额度上限，已保留生成的部分内容。可提高额度或降低 Gemini 思考等级后重试。"
           : humanizeError(error);
+        const recovery = failureRecoveryMarkup(detail, {
+          code: error.code || "llm_provider_error",
+        });
         assistantContent.innerHTML = error.preservePartial
-          ? `${renderMarkdown(answer)}<p><em>${escapeHtml(detail)}</em></p>`
-          : `<p>${escapeHtml(detail)}</p>`;
+          ? `${renderMarkdown(answer)}${recovery}`
+          : recovery;
       }
       setChatStatus(
         error.code === "max_output_tokens" ? "输出已截断" : "生成失败",
@@ -6625,8 +6833,29 @@ function bindEvents() {
     setComposerValue(prompt.dataset.prompt, { focus: true });
   });
 
+  $("chat-output").addEventListener("click", (event) => {
+    if (event.target.closest("[data-message-action], [data-response-action]")) {
+      handleConversationAction(event.target)
+        .catch((error) => showToast(humanizeError(error), "error"));
+    }
+  });
+
+  $("mobile-more-btn").addEventListener("click", () => {
+    setMobileMoreOpen($("mobile-more-menu").hidden);
+  });
+  $("mobile-nav-backdrop").addEventListener("click", () => setMobileMoreOpen(false));
+  $("mobile-more-settings-btn").addEventListener("click", () => {
+    setMobileMoreOpen(false);
+    openSettings();
+  });
+
   $("open-settings-btn").addEventListener("click", openSettings);
   $("sidebar-settings-btn").addEventListener("click", openSettings);
+  $("composer-workspace-btn").addEventListener("click", openSettings);
+  $("composer-model-btn").addEventListener("click", () => {
+    $("composer-config").open = true;
+    window.setTimeout(() => $("composer-config").querySelector("summary").focus(), 0);
+  });
   $("close-settings-btn").addEventListener("click", closeSettings);
   $("settings-dialog").addEventListener("click", (event) => {
     if (event.target === $("settings-dialog")) {
@@ -6691,7 +6920,29 @@ function bindEvents() {
   $("toggle-inspector-btn").addEventListener("click", () => {
     setInspectorVisible(document.body.classList.contains("inspector-hidden"));
   });
+  $("active-session-inspector-btn").addEventListener("click", () => {
+    setInspectorVisible(true);
+    $("close-inspector-btn").focus();
+  });
   $("close-inspector-btn").addEventListener("click", () => setInspectorVisible(false));
+  $("inspector-backdrop").addEventListener("click", () => {
+    setInspectorVisible(false);
+    $("toggle-inspector-btn").focus();
+  });
+  window.addEventListener("resize", () => {
+    syncInspectorPresentation(!$("inspector-panel").hidden);
+    if (window.innerWidth > 900) setMobileMoreOpen(false);
+  }, { passive: true });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("inspector-panel").hidden && window.innerWidth <= 1120) {
+      setInspectorVisible(false);
+      $("toggle-inspector-btn").focus();
+    }
+    if (event.key === "Escape" && !$("mobile-more-menu").hidden) {
+      setMobileMoreOpen(false);
+      $("mobile-more-btn").focus();
+    }
+  });
   $("trace-tab").addEventListener("click", () => selectInspectorTab("trace"));
   $("raw-tab").addEventListener("click", () => selectInspectorTab("raw"));
 
@@ -6702,6 +6953,11 @@ function bindEvents() {
   };
   $("create-session-btn").addEventListener("click", createNewSession);
   $("sessions-create-btn").addEventListener("click", createNewSession);
+  $("rename-current-session-btn").addEventListener("click", () => {
+    if (!state.currentSession?.id) return;
+    handleSessionAction(state.currentSession.id, "rename")
+      .catch((error) => showToast(humanizeError(error), "error"));
+  });
   $("view-all-sessions-btn").addEventListener("click", () => {
     switchView("sessions");
     listSessions(false).catch((error) => showToast(humanizeError(error), "error"));
