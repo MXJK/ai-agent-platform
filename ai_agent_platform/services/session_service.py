@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Sequence
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -23,6 +24,11 @@ from ai_agent_platform.domain import (
 from ai_agent_platform.services.conversation_compression import (
     ConversationCompressor,
 )
+from ai_agent_platform.services.context_budget import (
+    ContextReduction,
+    fit_context_to_budget,
+    fit_text_to_tokens,
+)
 from ai_agent_platform.usage_ledger import (
     TokenBudgetStatus,
     UsageLedgerService,
@@ -38,19 +44,56 @@ from ai_agent_platform.token_counting import (
 
 _UNSET = object()
 
-_MIN_TRUNCATED_MESSAGE_TOKENS = 32
-_TRUNCATION_MARKER = "\n...[truncated to fit the context budget]...\n"
-
 
 @dataclass
 class _ContextState:
     """Mutable bookkeeping for one context assembly."""
 
     includes_summary: bool = False
-    dropped_messages: int = 0
-    truncated_messages: int = 0
-    synchronous_compactions: int = 0
     summary_realigned: bool = False
+
+
+@dataclass(frozen=True)
+class _ChatContextBudgetPolicy:
+    """Preserve chat message shape while applying shared budget primitives."""
+
+    includes_summary: bool
+
+    def cost(self, item: dict[str, str]) -> int:
+        return _message_cost(item)
+
+    def truncate(
+        self,
+        item: dict[str, str],
+        *,
+        overflow_tokens: int,
+        minimum_tokens: int,
+    ) -> dict[str, str]:
+        content = item.get("content", "")
+        allowed = max(
+            minimum_tokens,
+            estimate_text_tokens(content) - overflow_tokens,
+        )
+        fitted = fit_text_to_tokens(
+            content,
+            allowed,
+            estimate_tokens=estimate_text_tokens,
+        )
+        if fitted == content:
+            return item
+        return {**item, "content": fitted}
+
+    def is_protected(
+        self,
+        item: dict[str, str],
+        *,
+        index: int,
+        items: Sequence[dict[str, str]],
+    ) -> bool:
+        del item
+        return index == len(items) - 1 or (
+            self.includes_summary and index == 0
+        )
 
 
 class SessionService:
@@ -442,11 +485,15 @@ class SessionService:
             window=window,
             state=state,
         )
+        reduction = ContextReduction(items=context)
         if budget and estimate_message_tokens(context) > budget:
             self._metrics.increment("conversation_context_overflow_total")
             if allow_sync_compaction and self._can_compress_now(session_id):
                 self.compress_conversation(session_id=session_id)
-                state.synchronous_compactions += 1
+                reduction = replace(
+                    reduction,
+                    compacted=reduction.compacted + 1,
+                )
                 self._metrics.increment(
                     "conversation_context_sync_compactions_total"
                 )
@@ -455,7 +502,28 @@ class SessionService:
                     window=window,
                     state=state,
                 )
-            context = self._fit_context_to_budget(context, budget, state)
+            fitted = fit_context_to_budget(
+                context,
+                budget,
+                policy=_ChatContextBudgetPolicy(state.includes_summary),
+                overhead_tokens=CONVERSATION_TOKEN_OVERHEAD,
+            )
+            reduction = replace(
+                fitted,
+                compacted=reduction.compacted,
+                evicted=reduction.evicted,
+            )
+            context = reduction.items
+            if reduction.dropped:
+                self._metrics.increment(
+                    "conversation_context_messages_dropped_total",
+                    reduction.dropped,
+                )
+            if reduction.truncated:
+                self._metrics.increment(
+                    "conversation_context_messages_truncated_total",
+                    reduction.truncated,
+                )
         if state.includes_summary and record_injection:
             self._metrics.increment("conversation_summaries_injected_total")
         return ContextAssembly(
@@ -467,9 +535,9 @@ class SessionService:
                 includes_summary=state.includes_summary,
                 estimation_method=TOKEN_ESTIMATION_METHOD,
                 budget_tokens=budget,
-                dropped_messages=state.dropped_messages,
-                truncated_messages=state.truncated_messages,
-                synchronous_compactions=state.synchronous_compactions,
+                dropped_messages=reduction.dropped,
+                truncated_messages=reduction.truncated,
+                synchronous_compactions=reduction.compacted,
                 summary_realigned=state.summary_realigned,
             ),
         )
@@ -513,51 +581,6 @@ class SessionService:
             0, len(messages) - self._summary_keep_recent_messages
         )
         return compressible > summarized
-
-    def _fit_context_to_budget(
-        self,
-        context: list[dict[str, str]],
-        budget: int,
-        state: "_ContextState",
-    ) -> list[dict[str, str]]:
-        """Drop the oldest turns, then truncate bodies, until the budget holds.
-
-        Truncation runs oldest-first, which reaches the summary before the live
-        turn on purpose: the summary is already lossy, while the message the
-        user just sent has to arrive intact.
-        """
-        floor = 2 if state.includes_summary else 1
-        oldest = 1 if state.includes_summary else 0
-        costs = [_message_cost(item) for item in context]
-        total = sum(costs) + CONVERSATION_TOKEN_OVERHEAD
-        while total > budget and len(context) > floor:
-            context.pop(oldest)
-            total -= costs.pop(oldest)
-            state.dropped_messages += 1
-            self._metrics.increment(
-                "conversation_context_messages_dropped_total"
-            )
-        for index, message in enumerate(context):
-            overflow = total - budget
-            if overflow <= 0:
-                break
-            content = message.get("content", "")
-            allowed = max(
-                _MIN_TRUNCATED_MESSAGE_TOKENS,
-                estimate_text_tokens(content) - overflow,
-            )
-            fitted = _fit_text_to_tokens(content, allowed)
-            if fitted == content:
-                continue
-            context[index] = {**message, "content": fitted}
-            fitted_cost = _message_cost(context[index])
-            total -= costs[index] - fitted_cost
-            costs[index] = fitted_cost
-            state.truncated_messages += 1
-            self._metrics.increment(
-                "conversation_context_messages_truncated_total"
-            )
-        return context
 
     def get_conversation_summary(
         self, session_id: str
@@ -860,33 +883,6 @@ def _unsummarized_start(
             if message.id == summary.through_message_id:
                 return index + 1, index + 1 != summary.summarized_message_count
     return min(summary.summarized_message_count, len(messages)), False
-
-
-def _fit_text_to_tokens(text: str, max_tokens: int) -> str:
-    """Keep the head and tail of ``text`` within an estimated token budget."""
-    if max_tokens <= 0:
-        return ""
-    if estimate_text_tokens(text) <= max_tokens:
-        return text
-    low, high = 0, len(text)
-    best = _TRUNCATION_MARKER.strip()
-    while low <= high:
-        keep = (low + high) // 2
-        candidate = _head_tail(text, keep)
-        if estimate_text_tokens(candidate) <= max_tokens:
-            best = candidate
-            low = keep + 1
-        else:
-            high = keep - 1
-    return best
-
-
-def _head_tail(text: str, keep: int) -> str:
-    if keep <= 0:
-        return _TRUNCATION_MARKER.strip()
-    head = (keep * 2) // 3
-    tail = keep - head
-    return text[:head] + _TRUNCATION_MARKER + (text[-tail:] if tail else "")
 
 
 def _summary_context(summary: ConversationSummary) -> str:
