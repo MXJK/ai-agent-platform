@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "CONTEXT-BUDGET-COMPACTION"
-next_action: "Decide whether LLM_MAX_CONTEXT_MESSAGES_CEILING=48 is the wanted per-turn cost profile, then merge codex/context-budget-compaction"
+next_action: "Rebuild the Docker image; LLM_MAX_CONTEXT_MESSAGES_CEILING=48 accepted and the branch is merged into main"
 blockers: []
-last_verified_commit: "30fbbcc4"
-updated_at: "2026-08-21T18:05:00+08:00"
+last_verified_commit: "4ff03bf7"
+updated_at: "2026-08-22T09:56:51+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
