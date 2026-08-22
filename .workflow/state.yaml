@@ -1,8 +1,10 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "LAYERED-TRANSCRIPT-COMPACTION"
-next_action: "Review and merge codex/layered-transcript-compaction after human approval"
-blockers: []
-last_verified_commit: "0a94d54bbaa03f129148df9560526a744a37ac9a"
-updated_at: "2026-08-22T15:22:37+08:00"
+status: "active"
+active_task: "UNIFIED-CONTEXT-BUDGET"
+next_action: "Merge the stack (tool-result-budget -> context-budget-primitives -> layered-transcript-compaction -> unified-context-budget) into main after human review; afterwards update the gitignored INTERVIEW_NOTES handbook and run INTERVIEW_NOTES/validate.py from the root checkout"
+blockers:
+  - "INTERVIEW_NOTES/ is gitignored and absent from the worktree, so handbook synchronization and validate.py must run in the root checkout after merge"
+  - "The root checkout still has an untracked .workflow/tasks/UNIFIED-CONTEXT-BUDGET.md; remove it before merging or the merge refuses to overwrite it"
+last_verified_commit: "5441311dc02a5c46263ab1eba7b20c4be7a39a08"
+updated_at: "2026-08-22T16:42:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
