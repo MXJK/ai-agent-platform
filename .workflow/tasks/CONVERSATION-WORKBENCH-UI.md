@@ -63,6 +63,10 @@ recovery actions visible across desktop and mobile layouts.
   — 1 passed, 34 deselected.
 - Root interpreter: `python -m pytest -q` — 485 passed and 56 subtests passed.
 - Root interpreter: `python -m compileall ai_agent_platform tests evals` — passed.
+- Latest `origin/main` integration commit `8b10cab5`:
+  - `python -m pytest -q` — 492 passed and 56 subtests passed.
+  - `python -m compileall ai_agent_platform tests evals` — passed.
+  - `node --check ai_agent_platform/static/app.js` and `git diff --check` — passed.
 - Browser QA against the isolated fake-provider server:
   - 1280×720: empty and active desktop states do not overlap; active messages scroll
     independently from the document.
@@ -83,3 +87,5 @@ Updated `README.md` for the new user-visible behavior. The repository at this re
 not contain the `INTERVIEW_NOTES` handbook named by project guidance, so there was no
 handbook file to synchronize. Implementation verification was completed before integration;
 the authorized commit and merge are recorded by Git history and the final workflow state.
+The merge commit `8b10cab5` integrates the workbench on top of the latest context-budget
+changes from `origin/main` and is covered by the merged verification above.
