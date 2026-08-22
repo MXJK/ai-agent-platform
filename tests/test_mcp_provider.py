@@ -370,7 +370,7 @@ class MCPProviderTests(unittest.TestCase):
                 session_id = create_response.json()["id"]
                 client.put(
                     "/api/v1/workspaces/workspace_main",
-                    json={"root_path": "."},
+                    json={"root_path": temp_dir},
                 )
                 run_response = client.post(
                     "/api/v1/agent/runs",
@@ -436,7 +436,7 @@ class MCPProviderTests(unittest.TestCase):
                 session_id = create_response.json()["id"]
                 client.put(
                     "/api/v1/workspaces/workspace_main",
-                    json={"root_path": "."},
+                    json={"root_path": temp_dir},
                 )
                 run_response = client.post(
                     "/api/v1/agent/runs",
@@ -628,6 +628,7 @@ def _create_app_with_fake_mcp(temp_dir: str, *, server_name: str):
             mcp_enabled=True,
             mcp_config_path=str(config_path),
             mcp_request_timeout_seconds=2.0,
+            workspace_allowed_roots=(str(root.resolve()),),
         )
     )
 

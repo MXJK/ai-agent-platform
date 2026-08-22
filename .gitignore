@@ -20,3 +20,6 @@ rag_test_documents/
 harness讲义.pdf
 .agents/skills/
 mcp.json
+
+# Local dev overrides (uvicorn reload + source bind mount)
+docker-compose.override.yml
