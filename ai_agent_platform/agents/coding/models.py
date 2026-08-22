@@ -57,6 +57,7 @@ class CodingAgentState(TypedDict, total=False):
     rag_context_sources: list["ContextSource"]
     memory_context_sources: list["ContextSource"]
     context_warnings: list[str]
+    context_shares: dict[str, int]
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
     exploration_round: int
@@ -88,6 +89,8 @@ class CodingAgentState(TypedDict, total=False):
     native_consecutive_failures: int
     native_context_compactions: int
     native_context_chars: int
+    native_context_reduction_stages: list[dict[str, Any]]
+    native_context_force_compaction: bool
     native_artifacts_collected: bool
     terminal_status: str
     terminal_reason: str

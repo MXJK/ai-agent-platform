@@ -24,6 +24,7 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_VALIDATION_TOOLS,
 )
 from ai_agent_platform.agents.coding.text import snippet
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 MAX_AGENT_HISTORY_MESSAGES = 6
 MAX_AGENT_HISTORY_CHARS = 1800
@@ -299,15 +300,46 @@ def build_workspace_query(state: CodingAgentState) -> str:
     return "\n".join(parts)
 
 
+def _history_chars_for_tokens(
+    history: list[dict[str, Any]],
+    max_tokens: int,
+) -> int:
+    """Convert a token share into a character bound for this history.
+
+    Selection downstream is character-driven, and the estimator counts ASCII at
+    four characters per token but CJK at one, so a fixed conversion would be
+    wrong for either script. Measuring this conversation's own density keeps the
+    bound honest for both without a second selection pass.
+    """
+
+    text = "".join(str(message.get("content") or "") for message in history)
+    tokens = estimate_text_tokens(text)
+    if tokens <= 0:
+        return max_tokens
+    return max(1, (len(text) * max_tokens) // tokens)
+
+
 def recent_conversation_context(
     state: CodingAgentState,
     *,
     max_messages: int = MAX_AGENT_HISTORY_MESSAGES,
     max_chars: int = MAX_AGENT_HISTORY_CHARS,
+    max_tokens: int = 0,
 ) -> str:
-    """Return a bounded, newest-first-selected conversation excerpt."""
+    """Return a bounded, newest-first-selected conversation excerpt.
+
+    ``max_tokens`` is the history share of the run's single input allowance.
+    When it is set it replaces the static character ceiling, so the excerpt
+    scales with the model actually serving the turn instead of discarding the
+    token-budgeted history the chat layer just assembled. Zero keeps the static
+    bound, which is what retrieval-query callers and unconfigured runs use.
+    """
 
     history = state.get("history", [])
+    if max_tokens > 0:
+        max_chars = _history_chars_for_tokens(history, max_tokens)
+        # The share, not a fixed message count, decides how much history fits.
+        max_messages = max(max_messages, len(history))
     summary_message = next(
         (
             message

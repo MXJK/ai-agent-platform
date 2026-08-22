@@ -136,6 +136,7 @@ def events_for_record(
         )
     for item in record.trace:
         step = int(item.get("step", len(candidates)))
+        output = dict(item.get("output") or {})
         candidates.append(
             (
                 f"trace:{step}",
@@ -145,10 +146,32 @@ def events_for_record(
                     status="running",
                     node=str(item.get("node") or "") or None,
                     summary=str(item.get("summary") or ""),
-                    output=dict(item.get("output") or {}),
+                    output=output,
                 ),
             )
         )
+        stages = output.get("context_reduction_stages")
+        if isinstance(stages, list):
+            for stage_index, stage in enumerate(stages):
+                if not isinstance(stage, dict):
+                    continue
+                stage_name = str(stage.get("stage") or "unknown")
+                candidates.append(
+                    (
+                        f"trace:{step}:context:{stage_index}",
+                        AgentRunEvent(
+                            sequence=0,
+                            type="context",
+                            status="running",
+                            node="context_compaction",
+                            summary=(
+                                "Native context reduction stage completed: "
+                                f"{stage_name}."
+                            ),
+                            output=dict(stage),
+                        ),
+                    )
+                )
     terminal = QueryLifecycle.status_event(record.status)
     if terminal is not None:
         event_type, summary = terminal

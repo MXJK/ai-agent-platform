@@ -244,6 +244,42 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
             record.context_snapshot.tools.enabled_tools,
         )
 
+    async def test_compact_command_forces_one_native_reduction_with_instruction(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+            runtime = build_runtime(_settings(root), role="cli")
+            errors = io.StringIO()
+            try:
+                application = CliApplication(
+                    runtime,
+                    workspace_root=root,
+                    workspace_id="workspace",
+                    input_stream=io.StringIO(
+                        "/compact preserve deployment decisions\n/exit\n"
+                    ),
+                    output_stream=io.StringIO(),
+                    error_stream=errors,
+                )
+                self.assertEqual(await application.run_repl(), 0)
+                record = runtime.coding_agent_runtime.get_run(
+                    application.last_run_id
+                )
+            finally:
+                runtime.close()
+
+        self.assertIn("/compact", errors.getvalue())
+        self.assertTrue(
+            record.context_snapshot.metadata.entrypoint_metadata[
+                "force_context_compaction"
+            ]
+        )
+        self.assertIn(
+            "preserve deployment decisions",
+            record.context_snapshot.session.user_message,
+        )
+        self.assertEqual(record.status, "completed")
+
     async def test_disabled_and_missing_tool_skill_commands_are_rejected_stably(self) -> None:
         for enabled_skills, required_tools, expected_code in (
             ((), (), "skill_disabled"),

@@ -130,7 +130,10 @@ class CodingAgentRuntime:
         max_consecutive_failures: int = 3,
         native_context_max_chars: int = 48000,
         native_context_keep_messages: int = 10,
-        native_context_token_ratio: float = 0.5,
+        context_evidence_ratio: float = 0.25,
+        context_history_ratio: float = 0.15,
+        tool_result_keep_recent: int = 6,
+        native_max_compactions: int = 3,
         plan_max_output_tokens: int = 4096,
         mutation_max_output_tokens: int = 16384,
         final_max_output_tokens: int = 4096,
@@ -166,7 +169,14 @@ class CodingAgentRuntime:
         self._max_consecutive_failures = max_consecutive_failures
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
-        self._native_context_token_ratio = native_context_token_ratio
+        self._context_evidence_ratio = context_evidence_ratio
+        self._context_history_ratio = context_history_ratio
+        if tool_result_keep_recent <= 0:
+            raise ValueError("tool_result_keep_recent must be greater than 0")
+        if native_max_compactions <= 0:
+            raise ValueError("native_max_compactions must be greater than 0")
+        self._tool_result_keep_recent = tool_result_keep_recent
+        self._native_max_compactions = native_max_compactions
         self._llm_client = llm_client
         self._context_compressor = context_compressor
         self._plan_max_output_tokens = plan_max_output_tokens
@@ -358,6 +368,13 @@ class CodingAgentRuntime:
             "native_consecutive_failures": 0,
             "native_context_compactions": 0,
             "native_context_chars": 0,
+            "native_context_reduction_stages": [],
+            "native_context_force_compaction": bool(
+                run_context is not None
+                and run_context.metadata.entrypoint_metadata.get(
+                    "force_context_compaction"
+                )
+            ),
             "native_artifacts_collected": False,
             "terminal_status": "",
             "terminal_reason": "",

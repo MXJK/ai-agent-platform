@@ -113,6 +113,8 @@ class Settings:
     llm_max_context_messages: int = 12
     llm_max_context_messages_ceiling: int = 48
     llm_context_input_token_ratio: float = 0.6
+    llm_context_evidence_ratio: float = 0.25
+    llm_context_history_ratio: float = 0.15
     llm_max_output_tokens: int = 4096
     llm_thinking_level: str = "low"
     llm_model_catalog_json: str | None = None
@@ -243,7 +245,8 @@ class Settings:
     agent_max_consecutive_failures: int = 3
     agent_native_context_max_chars: int = 48000
     agent_native_context_keep_messages: int = 10
-    agent_native_context_token_ratio: float = 0.5
+    agent_tool_result_keep_recent: int = 6
+    agent_native_max_compactions: int = 3
     agent_plan_max_output_tokens: int = 4096
     agent_mutation_max_output_tokens: int = 16384
     agent_final_max_output_tokens: int = 4096
@@ -620,6 +623,14 @@ class Settings:
                 self.agent_native_context_keep_messages,
             ),
             (
+                "agent_tool_result_keep_recent",
+                self.agent_tool_result_keep_recent,
+            ),
+            (
+                "agent_native_max_compactions",
+                self.agent_native_max_compactions,
+            ),
+            (
                 "agent_plan_max_output_tokens",
                 self.agent_plan_max_output_tokens,
             ),
@@ -685,9 +696,18 @@ class Settings:
             raise ValueError(
                 "llm_context_input_token_ratio must be between 0 and 1"
             )
-        if not 0.0 < self.agent_native_context_token_ratio <= 1.0:
+        if not 0.0 <= self.llm_context_evidence_ratio < 1.0:
             raise ValueError(
-                "agent_native_context_token_ratio must be between 0 and 1"
+                "llm_context_evidence_ratio must be between 0 and 1"
+            )
+        if not 0.0 <= self.llm_context_history_ratio < 1.0:
+            raise ValueError(
+                "llm_context_history_ratio must be between 0 and 1"
+            )
+        if self.llm_context_evidence_ratio + self.llm_context_history_ratio >= 1.0:
+            raise ValueError(
+                "llm_context_evidence_ratio and llm_context_history_ratio must "
+                "leave room for the tool transcript"
             )
         if not 0.0 <= self.rag_lexical_weight <= 1.0:
             raise ValueError("rag_lexical_weight must be between 0 and 1")
@@ -934,6 +954,16 @@ class Settings:
             llm_context_input_token_ratio=_float_env(
                 "LLM_CONTEXT_INPUT_TOKEN_RATIO",
                 cls.llm_context_input_token_ratio,
+                dotenv,
+            ),
+            llm_context_evidence_ratio=_float_env(
+                "LLM_CONTEXT_EVIDENCE_RATIO",
+                cls.llm_context_evidence_ratio,
+                dotenv,
+            ),
+            llm_context_history_ratio=_float_env(
+                "LLM_CONTEXT_HISTORY_RATIO",
+                cls.llm_context_history_ratio,
                 dotenv,
             ),
             llm_max_output_tokens=_int_env(
@@ -1300,9 +1330,14 @@ class Settings:
                 cls.agent_native_context_keep_messages,
                 dotenv,
             ),
-            agent_native_context_token_ratio=_float_env(
-                "AGENT_NATIVE_CONTEXT_TOKEN_RATIO",
-                cls.agent_native_context_token_ratio,
+            agent_tool_result_keep_recent=_int_env(
+                "AGENT_TOOL_RESULT_KEEP_RECENT",
+                cls.agent_tool_result_keep_recent,
+                dotenv,
+            ),
+            agent_native_max_compactions=_int_env(
+                "AGENT_NATIVE_MAX_COMPACTIONS",
+                cls.agent_native_max_compactions,
                 dotenv,
             ),
             agent_plan_max_output_tokens=_int_env(

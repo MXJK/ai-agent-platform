@@ -82,7 +82,9 @@ App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App �
 .venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
 ```
 
-REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
+REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/compact [instruction]`、
+`/resume` 和 `/exit`。`/compact` 会为下一次 Query 冻结强制压缩标记；使用原生工具调用的
+Provider 会在第一次模型请求前执行一次有序压缩，并把可选 instruction 保留在当前请求中。
 普通输入在同一个 session 中逐轮创建 Query；运行期间按 `Ctrl+C` 会向当前 Run 发送
 `cancel`，不会把信号处理安装进 SDK、Service 或领域模型。`/resume [run_id]
 [approve|deny] [message]` 对 `waiting_approval` 使用 resume，对 `waiting_input`/`paused`
@@ -620,12 +622,23 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
-工具会话超过
-`AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
-`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按完整
-assistant/tool 组压缩旧观察，避免拆断 call/result 对。被折叠的转录交给与会话压缩
-同一个压缩器做语义摘要，保留已读文件、已执行命令、已应用修改和失败原因；模型不可用
-时回退到确定性的规则式摘要。图的独立保险由
+工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过分给它的 transcript 份额
+（见下方“统一上下文预算”，再扣除工具 Schema 的实测开销）时，按固定成本顺序收缩：先把较旧
+工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
+结果；仍超限才按完整 assistant/tool 组折叠旧观察；折叠后重新计量，必要时用共享预算原语
+成组丢弃并截断正文。所有阶段保留 call/result ID 配对和消息结构。折叠摘要继续使用会话
+压缩器，模型不可用时回退到确定性摘要。
+
+折叠最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次。压缩后仍无法收敛，或已没有
+可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束，并直接说明停止阶段，
+不再重复消耗模型调用。Provider 返回“上下文长度超限”时统一映射为 `context_overflow`：
+Harness 只允许一次强制压缩和一次重试，第二次同类错误立即阻断。每个 native 压缩阶段都
+产生 `AgentEvent(type="context")`，其 output 含 `stage`（`tool_result_eviction`、`fold`、
+`drop_truncate` 或 `overflow_retry_failed`）、压缩计数、预算、当前估算和 `fits`；对应指标为
+`agent_native_context_tool_results_evicted_total`、`agent_native_context_compactions_total`、
+`agent_native_context_groups_dropped_total`、`agent_native_context_groups_truncated_total`、
+`agent_native_context_overflow_retries_total` 与
+`agent_native_context_compaction_exhausted_total`。图的独立保险仍由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
@@ -778,6 +791,25 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 把请求直接抛给 Provider 触发 `context_window_too_small`。装配结果通过 Chat SSE 的
 `context` 事件和 `/sessions/{id}/token-usage` 的 `context` 字段暴露：估算 Token、
 预算、是否含摘要、丢弃与截断条数、同步压缩次数。
+
+#### 统一上下文预算
+
+Agent Run 的输入额度只在一处解析并切分：`setup_workspace` 节点用即将服务本轮的模型
+窗口算出额度，再按 `LLM_CONTEXT_EVIDENCE_RATIO`（默认 0.25）和
+`LLM_CONTEXT_HISTORY_RATIO`（默认 0.15）分成 evidence 与 history 份额，剩余全部归
+native 工具转录。份额写入 Run 状态与 `setup_workspace` trace，后续各层只读取自己的份额，
+不再各自从窗口推导比例。
+
+份额在**组装 seed 时**生效，而不是事后压缩：evidence 先整条丢弃排名最低的来源，装不下
+的最后一条再截其 `text` 字段；会话摘录按 history 份额换算字符上界，取代原先固定的
+1800 字符。因此 seed 的 JSON 载荷始终合法——它是单个 `json.dumps` 结果，事后对整串做
+首尾截断会让模型收到非法 JSON，现在 seed 在收缩阶梯中被标记为不可截断。Provider 报
+`context_overflow` 时，恢复路径改为按减半份额**重建** seed，而不是切它。
+
+用户本轮发出的请求本身不参与裁剪。若固定开销（工具 Schema）已经吃满窗口，Run 以
+`blocked/context_budget_too_small` 结束并给出可操作的配置提示，而不是空转。
+`AGENT_NATIVE_CONTEXT_MAX_CHARS`、`MAX_AGENT_HISTORY_CHARS` 等静态常量降级为拿不到
+模型信息时的兜底。
 
 Prompt 前缀按稳定性排序：用户画像等长期稳定内容在最前，滚动摘要与历史其次，
 每轮随查询变化的项目记忆紧贴当前用户消息，使 Provider 的前缀缓存可以命中。
@@ -1123,12 +1155,20 @@ CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW=true
 LLM_MAX_CONTEXT_MESSAGES=12
 LLM_MAX_CONTEXT_MESSAGES_CEILING=48
 LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
-AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+LLM_CONTEXT_EVIDENCE_RATIO=0.25
+LLM_CONTEXT_HISTORY_RATIO=0.15
+AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
+AGENT_TOOL_RESULT_KEEP_RECENT=6
+AGENT_NATIVE_MAX_COMPACTIONS=3
 ```
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算
 允许时的上界；两者相等即固定为原有的定长窗口。
+
+`LLM_CONTEXT_INPUT_TOKEN_RATIO` 是唯一的窗口比例，`LLM_CONTEXT_EVIDENCE_RATIO` 与
+`LLM_CONTEXT_HISTORY_RATIO` 把它切分给 evidence 和会话历史，两者之和必须小于 1，否则
+启动时报错。把两者调小即把更多额度留给工具转录。
 
 ## 独立知识库
 

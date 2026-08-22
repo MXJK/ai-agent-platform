@@ -13,6 +13,70 @@ MIN_TRUNCATED_ITEM_TOKENS = 32
 TRUNCATION_MARKER = "\n...[truncated to fit the context budget]...\n"
 
 
+@dataclass(frozen=True)
+class ContextShares:
+    """One resolved input allowance divided into named shares.
+
+    Every share is a token count, so a layer sizes its own contribution against
+    the model actually serving the turn instead of against a static character
+    constant of its own.
+    """
+
+    total_tokens: int
+    fixed_overhead_tokens: int
+    evidence_tokens: int
+    history_tokens: int
+    transcript_tokens: int
+
+    @property
+    def fits(self) -> bool:
+        """Return whether the fixed overhead leaves room to run at all."""
+
+        return self.transcript_tokens > 0
+
+
+def divide_context_budget(
+    input_tokens: int,
+    *,
+    fixed_overhead_tokens: int = 0,
+    evidence_ratio: float,
+    history_ratio: float,
+) -> ContextShares:
+    """Divide one input allowance into evidence, history and transcript shares.
+
+    The fixed overhead — system prompt and tool schemas — is subtracted first
+    because it is not negotiable: it is present on every request whatever the
+    conversation looks like. What remains is split by ratio, and the transcript
+    receives the remainder rather than a ratio of its own, so the shares always
+    add back up to the allowance.
+
+    A non-positive transcript share means the overhead alone does not leave room
+    to run; callers surface that as a configuration error instead of looping.
+    """
+
+    if not 0.0 <= evidence_ratio < 1.0:
+        raise ValueError("evidence_ratio must be within [0, 1)")
+    if not 0.0 <= history_ratio < 1.0:
+        raise ValueError("history_ratio must be within [0, 1)")
+    if evidence_ratio + history_ratio >= 1.0:
+        raise ValueError(
+            "evidence_ratio and history_ratio must leave room for the transcript"
+        )
+
+    total = max(0, int(input_tokens))
+    overhead = min(total, max(0, int(fixed_overhead_tokens)))
+    divisible = total - overhead
+    evidence = int(divisible * evidence_ratio)
+    history = int(divisible * history_ratio)
+    return ContextShares(
+        total_tokens=total,
+        fixed_overhead_tokens=overhead,
+        evidence_tokens=evidence,
+        history_tokens=history,
+        transcript_tokens=divisible - evidence - history,
+    )
+
+
 class ContextBudgetPolicy(Protocol[ContextItem]):
     """Adapt a caller-owned context item without changing its native shape."""
 
