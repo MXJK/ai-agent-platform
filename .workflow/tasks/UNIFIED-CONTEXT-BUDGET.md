@@ -109,10 +109,10 @@ not inherit `.venv`:
   `tests/test_context_budget_characterization.py` and
   `tests/test_native_compaction_characterization.py` pass **unmodified**, so the chat
   layer and the step-2/step-3 primitives are unchanged.
-- `INTERVIEW_NOTES/` is gitignored and therefore absent from the worktree.
-  `INTERVIEW_NOTES/validate.py` and the handbook Parts could not be run or updated
-  here; they must be done in the root checkout after this branch merges. This is the
-  one acceptance item not closed in this task.
+- `INTERVIEW_NOTES/` is gitignored by design: the handbook is a local-only artifact and
+  never travels on a branch. It is therefore absent from the worktree, and
+  `INTERVIEW_NOTES/validate.py` plus the affected Parts are run and updated in the root
+  checkout after merge, as every task in this repository does.
 
 ### New coverage
 
@@ -187,4 +187,8 @@ progress outside it.
 ### Not done
 
 - The two reduction pipelines are still separate, as the Decisions section requires.
-- Documentation synchronization for the gitignored interview handbook, per Verification.
+- The interview handbook is updated in the root checkout after merge, since it is
+  gitignored by design and cannot travel on this branch. Part 02 (the context budget
+  section now has one window ratio instead of two), Part 04 (seed assembly and the
+  reduction ladder) and any `facts.json` evidence path naming
+  `agent_native_context_token_ratio` need to follow.
