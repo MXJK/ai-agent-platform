@@ -10,6 +10,11 @@ from .change_sets import (
     InMemoryChangeSetRepository,
     PostgresChangeSetRepository,
 )
+from .evals import (
+    EvalRepository,
+    InMemoryEvalRepository,
+    PostgresEvalRepository,
+)
 from .postgres import (
     PostgresAgentRunRepository,
     PostgresDependencyError,
@@ -39,12 +44,15 @@ from .query import (
 __all__ = [
     "InMemorySessionRepository",
     "ChangeSetRepository",
+    "EvalRepository",
     "InMemoryChangeSetRepository",
+    "InMemoryEvalRepository",
     "InMemoryKnowledgeBaseRepository",
     "InMemoryWorkspaceRepository",
     "InMemoryProjectMemoryRepository",
     "PostgresAgentRunRepository",
     "PostgresChangeSetRepository",
+    "PostgresEvalRepository",
     "PostgresDependencyError",
     "PostgresDocumentRepository",
     "PostgresKnowledgeBaseRepository",

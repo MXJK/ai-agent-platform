@@ -408,6 +408,10 @@ class ToolLoopNodes:
                     "approval_required_tools": [
                         item["name"] for item in approval_tools
                     ],
+                    "suppressed_tools": [
+                        {"name": call.name, "reason": reason}
+                        for call, reason in suppressed_calls
+                    ],
                     "native": uses_native,
                     "round": native_round,
                     "stop_reason": stop_reason,

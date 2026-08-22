@@ -39,6 +39,11 @@ from ai_agent_platform.integrations import (
     create_mcp_providers_from_config_file,
     create_rag_service,
 )
+from ai_agent_platform.evaluation import (
+    FaultInjectingToolRegistry,
+    ToolFaultController,
+)
+from ai_agent_platform.evaluation.service import EvalService
 from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.memory import UserMemoryService
 from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
@@ -54,11 +59,13 @@ from ai_agent_platform.project_memory.factory import create_project_memory_servi
 from ai_agent_platform.project_memory.service import ProjectMemoryService
 from ai_agent_platform.repositories import (
     InMemoryChangeSetRepository,
+    InMemoryEvalRepository,
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
     InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
     PostgresChangeSetRepository,
+    PostgresEvalRepository,
     PostgresDocumentRepository,
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
@@ -128,6 +135,8 @@ class RuntimeContainer:
     agent_run_store: Any = None
     change_set_store: Any = None
     document_store: Any = None
+    eval_store: Any = None
+    tool_fault_controller: Any = field(default=None, repr=False)
     knowledge_base_store: Any = None
     workspace_store: Any = None
     usage_ledger: UsageLedgerService | None = None
@@ -159,6 +168,7 @@ class RuntimeContainer:
     query_uow: Any = None
     query_service: QueryService | None = None
     agent_run_service: AgentRunService | None = None
+    eval_service: Any = None
     startup_timeline: list[StartupCheckpoint] = field(default_factory=list)
     close_errors: list[RuntimeCloseError] = field(default_factory=list)
     _cleanup_callbacks: list[tuple[str, Callable[[], Any]]] = field(
@@ -275,6 +285,7 @@ class ApplicationFactory:
             )
             container.change_set_store = self.create_change_set_store(settings)
             container.document_store = self.create_document_store(settings)
+            container.eval_store = self.create_eval_store(settings)
             container.knowledge_base_store = self.create_knowledge_base_store(
                 settings
             )
@@ -490,6 +501,14 @@ class ApplicationFactory:
                 settings,
                 **tool_factory_kwargs,
             )
+            if settings.eval_fault_injection_enabled:
+                # Evaluation affordance, off by default: the failure-recovery
+                # metric needs a genuinely failed ToolResult on the real path.
+                container.tool_fault_controller = ToolFaultController()
+                container.tool_registry = FaultInjectingToolRegistry(
+                    container.tool_registry,
+                    container.tool_fault_controller,
+                )
             attach_permission_resolver = getattr(
                 container.tool_registry,
                 "attach_permission_resolver",
@@ -655,6 +674,16 @@ class ApplicationFactory:
                 "agent_run_service",
                 container.agent_run_service.close,
             )
+            container.eval_service = self.create_eval_service(
+                settings,
+                repository=container.eval_store,
+                query_service=container.query_service,
+                session_service=container.session_service,
+                workspace_service=container.workspace_service,
+                memory_service=container.project_memory_service,
+                model_registry=container.model_registry,
+                fault_controller=container.tool_fault_controller,
+            )
             container.checkpoint("agent_ready")
             return container
         except BaseException:
@@ -739,6 +768,41 @@ class ApplicationFactory:
         if settings.change_set_store == "postgres":
             return PostgresChangeSetRepository(database_url=settings.database_url)
         raise ValueError(f"unsupported change set store: {settings.change_set_store}")
+
+    def create_eval_service(
+        self,
+        settings: Settings,
+        *,
+        repository: Any,
+        query_service: Any,
+        session_service: Any,
+        workspace_service: Any,
+        memory_service: Any = None,
+        model_registry: Any = None,
+        fault_controller: Any = None,
+    ) -> Any:
+        return EvalService(
+            repository=repository,
+            query_service=query_service,
+            session_service=session_service,
+            workspace_service=workspace_service,
+            memory_service=memory_service,
+            model_registry=model_registry,
+            workspace_root=_eval_workspace_root(settings),
+            actor_user_id=(
+                settings.single_user_id.strip()
+                if settings.auth_mode == "single_user"
+                else ""
+            ),
+            fault_controller=fault_controller,
+        )
+
+    def create_eval_store(self, settings: Settings) -> Any:
+        if settings.eval_store == "memory":
+            return InMemoryEvalRepository()
+        if settings.eval_store == "postgres":
+            return PostgresEvalRepository(database_url=settings.database_url)
+        raise ValueError(f"unsupported eval store: {settings.eval_store}")
 
     def create_document_store(self, settings: Settings) -> Any:
         if settings.document_store == "memory":
@@ -1074,6 +1138,22 @@ class ApplicationFactory:
             execution_workspace_runtime=execution_workspace_runtime,
             metrics=metrics,
         )
+
+
+def _eval_workspace_root(settings: Settings) -> str:
+    """Where eval fixture workspaces are written.
+
+    It has to sit inside an allowed workspace root, otherwise the run would be
+    rejected by the same policy that protects a user's real directories. Evals
+    get no exemption from that policy.
+    """
+
+    configured = settings.eval_workspace_root.strip()
+    if configured:
+        return configured
+    roots = settings.workspace_allowed_roots
+    base = Path(roots[0]) if roots else Path.home()
+    return str(base / ".agent-evals")
 
 
 def build_runtime(

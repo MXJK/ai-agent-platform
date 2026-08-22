@@ -6,6 +6,7 @@ from ai_agent_platform.api.routes import (
     create_agent_runs_router,
     create_change_sets_router,
     create_chat_router,
+    create_evals_router,
     create_health_router,
     create_knowledge_bases_router,
     create_model_registry_router,
@@ -53,6 +54,7 @@ def create_api_router(
     mcp_registry: MCPRegistryService,
     skill_registry: SkillRegistryService,
     mcp_connection_manager: MCPConnectionManager | None = None,
+    eval_service: object | None = None,
 ) -> APIRouter:
     router = APIRouter()
     router.include_router(
@@ -91,6 +93,7 @@ def create_api_router(
         )
     )
     router.include_router(create_agent_runs_router(query_service, settings))
+    router.include_router(create_evals_router(eval_service))
     router.include_router(create_change_sets_router(change_set_service, settings))
     router.include_router(
         create_workspaces_router(

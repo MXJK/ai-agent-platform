@@ -105,6 +105,7 @@ def create_app(
                 mcp_registry=runtime.mcp_registry,
                 skill_registry=runtime.skill_registry,
                 mcp_connection_manager=runtime.mcp_connection_manager,
+                eval_service=runtime.eval_service,
             ),
             prefix=settings.api_prefix,
         )

@@ -1096,6 +1096,33 @@ class SingleToolNativePlanner(ScriptedNativePlanner):
         )
 
 
+class RepeatedCallNativePlanner(ScriptedNativePlanner):
+    def decide_tool_calls(self, messages, tool_specs):
+        del messages, tool_specs
+        self.decisions += 1
+        if self.decisions <= 2:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id=f"repeat_{self.decisions}",
+                        name="demo.lookup",
+                        arguments={"query": "same"},
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        return LLMToolDecision(
+            text="The repeated lookup added nothing.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class RecoveringArtifactNativePlanner(ScriptedNativePlanner):
     def __init__(self) -> None:
         super().__init__()
@@ -1641,6 +1668,50 @@ class NativeToolLoopTests(unittest.TestCase):
         ]
         self.assertEqual([item["call_id"] for item in executed], ["single_1"])
         self.assertTrue(planner.observed_suppression)
+
+    def test_plan_tools_trace_records_suppressed_calls_for_trajectory_evals(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lambda query: {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=RepeatedCallNativePlanner(),
+            ).run(
+                conversation_id="sess_repeated_call",
+                user_input="look up the same value twice",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        executed = [
+            item
+            for item in result.tool_results
+            if str(item.get("call_id", "")).startswith("repeat_")
+        ]
+        suppressed = [
+            entry
+            for step in result.trace
+            for entry in step["output"].get("suppressed_tools", [])
+        ]
+
+        self.assertEqual([item["call_id"] for item in executed], ["repeat_1"])
+        self.assertEqual(
+            suppressed,
+            [{"name": "demo.lookup", "reason": "repeated_tool_call"}],
+        )
 
     def test_change_task_cannot_complete_before_successful_sandbox_mutation(self) -> None:
         with TemporaryDirectory() as temp_dir:

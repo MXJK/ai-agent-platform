@@ -15,6 +15,7 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "agent_run_store": "sqlite",
         "change_set_store": "memory",
         "document_store": "memory",
+        "eval_store": "memory",
         "workspace_store": "sqlite",
         "langgraph_checkpointer": "memory",
         "model_registry_store": "memory",
@@ -33,6 +34,7 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "agent_run_store": "postgres",
         "change_set_store": "postgres",
         "document_store": "postgres",
+        "eval_store": "postgres",
         "workspace_store": "postgres",
         "langgraph_checkpointer": "postgres",
         "model_registry_store": "postgres",
@@ -57,6 +59,7 @@ _RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
             "agent_run_store",
             "change_set_store",
             "document_store",
+            "eval_store",
             "workspace_store",
             "langgraph_checkpointer",
             "model_registry_store",
@@ -102,6 +105,9 @@ class Settings:
     agent_run_store: str = "memory"
     change_set_store: str = "memory"
     document_store: str = "memory"
+    eval_store: str = "memory"
+    eval_fault_injection_enabled: bool = False
+    eval_workspace_root: str = ""
     workspace_store: str = "memory"
     workspace_allowed_roots: tuple[str, ...] = field(
         default_factory=lambda: (str(Path.home().resolve()),)
@@ -489,6 +495,7 @@ class Settings:
             )
         if not self.local_state_path.strip():
             raise ValueError("local_state_path must not be empty")
+        _require_choice("eval_store", self.eval_store, {"memory", "postgres"})
         for name, value in (
             ("llm_timeout_seconds", self.llm_timeout_seconds),
             ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
@@ -899,6 +906,15 @@ class Settings:
                 "SESSION_REPOSITORY", cls.session_repository, dotenv
             ),
             agent_run_store=_env("AGENT_RUN_STORE", cls.agent_run_store, dotenv),
+            eval_store=_env("EVAL_STORE", cls.eval_store, dotenv),
+            eval_fault_injection_enabled=_bool_env(
+                "EVAL_FAULT_INJECTION_ENABLED",
+                cls.eval_fault_injection_enabled,
+                dotenv,
+            ),
+            eval_workspace_root=_env(
+                "EVAL_WORKSPACE_ROOT", cls.eval_workspace_root, dotenv
+            ),
             change_set_store=_env(
                 "CHANGE_SET_STORE",
                 _env("AGENT_RUN_STORE", cls.change_set_store, dotenv),

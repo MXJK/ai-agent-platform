@@ -1,8 +1,15 @@
 # Agent 评测体系设计
 
-> **状态：设计方案，尚未实现。** 本文档描述的 L1–L3 分层、指标和实验矩阵都还没有落地代码；
-> 引用的现有能力（L0）已标注源码位置。按 `INTERVIEW_NOTES/00` 的事实状态约定，本文内容
-> 在实现并验证之前只能以"规划"表述，不得使用完成时态。
+> **状态：阶段一已实现，L2–L3 仍是设计方案。**
+> 已落地：L1 轨迹约束、四项过程指标、引用真实性验证，见
+> `evals/run_trajectory_evals.py`、`evals/trajectory.py`、`evals/citations.py`、
+> `evals/trajectory_cases.json`，实测基线记录在 `evals/README.md`。
+> 已落地：L1 还能在 app 内对着**已注册的真实模型**跑，结果入库并在前端"评测"页
+> 展示成功率、五项指标、越界与相对基线的回归预警、历史与单例详情，见
+> `ai_agent_platform/evaluation/`、`api/routes/evals.py`。
+> 未落地：L2 结果质量、L3 稳定性与成本、A/B 实验矩阵、自建 25 条数据集、
+> LLM judge、SWE-bench 子集。按 `INTERVIEW_NOTES/00` 的事实状态约定，未落地部分
+> 只能以"规划"表述，不得使用完成时态。
 
 ## 为什么需要这份设计
 
@@ -23,7 +30,7 @@ Agent 评测不是一件事。混在一起评就什么都说不清，因此拆�
 | 层 | 评什么 | 模型 | 频率 | 成本 | 现状 |
 | --- | --- | --- | --- | --- | --- |
 | L0 管道回归 | 系统没坏 | fake | 每次提交 | 0 | 已有 |
-| L1 轨迹质量 | 过程对不对 | fake/廉价 | 每次提交 | 极低 | 缺 |
+| L1 轨迹质量 | 过程对不对 | fake/真实 | 每次提交 / 手动 | 极低 / 有 | 已实现 |
 | L2 结果质量 | 答案对不对 | 真实 | 手动/每周 | 有 | 缺 |
 | L3 稳定性与成本 | 稳不稳、多少钱 | 真实 | 手动/每周 | 有 | 缺 |
 
@@ -50,9 +57,15 @@ L0 保持现状，不要改动。增量全部在 L1–L3。
 **优先级最高，因为免费。** fake 或廉价模型就能跑，可以进 CI 每次提交执行，而且它测的
 正是"你的系统"——工具抑制、预算裁剪、重试策略全是本项目的代码，不是模型能力。
 
-### 改造点：从"全等匹配"改成"约束式"
+### 改造点：从"全等匹配"改成"约束式"（已实现，落点与原方案不同）
 
-现在 `tests/golden/agent_loop_trajectories.json` 存的是节点序列，按全等比对。
+原方案打算把 `tests/golden/agent_loop_trajectories.json` 从全等比对改成约束式。
+
+**实现时的修正**：约束层落在**新的 L1 套件**（`evals/trajectory_cases.json`），
+金丝轨迹保持全等断言不变。理由是"全等太脆"这个论证在那里不成立——
+`tests/test_agent_loop_characterization.py` 用手写确定性 planner 驱动图，
+节点序列由本项目代码而不是模型决定，而它正是 `AGENTS.md` 与 `CLAUDE.md` 要求的
+重构安全网。真正会随启发式演进而漂移的是规则 planner 的真实轨迹，约束式属于那里。
 
 **问题**：全等太脆。模型稍微变一下就红，最后必然会去改期望值迁就它，评测随即失效。
 
@@ -63,7 +76,7 @@ L0 保持现状，不要改动。增量全部在 L1–L3。
 - `order_constraints` —— 偏序约束，如"读必须在写之前"
 - `max_steps` —— 步数上限
 
-保留现有节点序列快照作为参考轨迹，但降级为诊断信息，不作为通过条件。
+L1 套件报告里观察到的节点序列以 `trace (diagnostic)` 打印，不作为通过条件。
 
 ### 四个自动采集的指标
 
@@ -98,7 +111,9 @@ L1 存在的意义就是把第二种揪出来。
 
 **这条路能覆盖的 case 一律不要用 judge。**
 
-### 优先级 2：引用真实性验证（本项目最独特的指标，建议重点做）
+### 优先级 2：引用真实性验证（本项目最独特的指标，已在阶段一实现）
+
+实现落在 `evals/citations.py`，由 L1 套件的 `verify_citations` case 调用。它不依赖真实模型，所以提前到了阶段一，而不是等 L2。
 
 `result.context_sources` 携带 `path` / `start_line` / `end_line` / `text`，可以纯程序化
 验证三件事：
@@ -203,22 +218,23 @@ AgentBench / SWE-bench / τ-bench 本质是**模型 benchmark，不是系统 ben
 
 ## 落地顺序
 
-| 阶段 | 内容 | 预估 | API 成本 |
-| --- | --- | --- | --- |
-| 一 | 轨迹约束改造 + 四个轨迹指标 + 引用真实性验证，进 CI | 1–2 天 | 0 |
-| 二 | 自建 25 条数据集（dev/test 分离，负样本 20%）+ 接真实模型跑通 L2 程序化判定 | 2–3 天 | 低 |
-| 三 | A/B 矩阵 + pass^k + 成本延迟采集 + baseline diff 报告 | 2–3 天 | 中 |
-| 四（可选） | LLM judge（含人工校准）+ SWE-bench 子集 | 3–4 天 | 中高 |
+| 阶段 | 内容 | 预估 | API 成本 | 状态 |
+| --- | --- | --- | --- | --- |
+| 一 | 轨迹约束改造 + 四个轨迹指标 + 引用真实性验证，进 CI | 1–2 天 | 0 | 已实现 |
+| 二 | 自建 25 条数据集（dev/test 分离，负样本 20%）+ 接真实模型跑通 L2 程序化判定 | 2–3 天 | 低 | 规划 |
+| 三 | A/B 矩阵 + pass^k + 成本延迟采集 + baseline diff 报告 | 2–3 天 | 中 | 规划 |
+| 四（可选） | LLM judge（含人工校准）+ SWE-bench 子集 | 3–4 天 | 中高 | 规划 |
 
 ---
 
 ## 必须避的坑
 
-1. **别拿 fake LLM 的通过率当质量证据** —— 现有 `evals/README.md` 标注得很诚实，保持
+1. **别拿 fake LLM 的通过率当质量证据** —— `evals/README.md` 标注得很诚实，保持
 2. **别用被测模型当 judge** —— 系统性偏高
 3. **别用 pass@1 当稳定性证据** —— 它恰好掩盖 Agent 最大的问题
 4. **别让 test 集参与调 prompt** —— 会不知不觉过拟合到评测集，最常见也最致命
-5. **别把全等轨迹匹配当质量门禁** —— 脆，最终会倒逼你修改期望值来迁就模型
+5. **别把全等轨迹匹配当质量门禁** —— 脆，最终会倒逼你修改期望值来迁就模型。
+   例外是确定性 planner 驱动的 characterization 测试：那里没有模型可迁就，全等断言正是它的价值
 
 ---
 
@@ -226,8 +242,13 @@ AgentBench / SWE-bench / τ-bench 本质是**模型 benchmark，不是系统 ben
 
 | 主题 | 位置 |
 | --- | --- |
-| 现有 eval runner | `evals/run_evals.py`（`_run_agent_case`、`_run_search_case`） |
-| 现有 case 数据 | `evals/agent_cases.json`、`evals/memory_cases.json` |
+| L0 eval runner | `evals/run_evals.py`（`_run_agent_case`、`_run_search_case`） |
+| L0 case 数据 | `evals/agent_cases.json`、`evals/memory_cases.json` |
+| L1 轨迹 runner | `evals/run_trajectory_evals.py` |
+| L1 约束与指标 | `ai_agent_platform/evaluation/trajectory.py`、`evaluation/trajectory_cases.json` |
+| L1 引用验证 | `ai_agent_platform/evaluation/citations.py` |
+| L1 应用内服务与 API | `ai_agent_platform/evaluation/service.py`、`api/routes/evals.py` |
+| L1 前端评测页 | `ai_agent_platform/static/app.js`（`loadEvalDashboard`） |
 | 轨迹快照 | `tests/golden/agent_loop_trajectories.json` |
 | 工具循环与抑制标记 | `agents/coding/tool_loop_nodes.py` |
 | 探索预算上限 | `agents/coding/context_nodes.py` |

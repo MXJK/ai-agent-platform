@@ -202,6 +202,9 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "agent_run_store",
         "change_set_store",
         "document_store",
+        "eval_store",
+        "eval_fault_injection_enabled",
+        "eval_workspace_root",
         "workspace_store",
         "workspace_allowed_roots",
         "langgraph_checkpointer",
@@ -572,6 +575,17 @@ class ConfigResolver:
             canonical="CHANGE_SET_STORE",
             fallback="AGENT_RUN_STORE",
             current=values["change_set_store"],
+            allowed_values=frozenset({"memory", "postgres"}),
+        )
+        _apply_legacy_environment_fallback(
+            environment_values,
+            details,
+            combined,
+            self._env,
+            target="eval_store",
+            canonical="EVAL_STORE",
+            fallback="CHANGE_SET_STORE",
+            current=values["eval_store"],
             allowed_values=frozenset({"memory", "postgres"}),
         )
         _apply_legacy_workspace_mode_fallback(

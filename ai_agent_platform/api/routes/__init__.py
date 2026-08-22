@@ -3,6 +3,7 @@
 from ai_agent_platform.api.routes.agent_runs import create_agent_runs_router
 from ai_agent_platform.api.routes.change_sets import create_change_sets_router
 from ai_agent_platform.api.routes.chat import create_chat_router
+from ai_agent_platform.api.routes.evals import create_evals_router
 from ai_agent_platform.api.routes.health import create_health_router
 from ai_agent_platform.api.routes.knowledge_bases import create_knowledge_bases_router
 from ai_agent_platform.api.routes.model_registry import create_model_registry_router
@@ -19,6 +20,7 @@ __all__ = [
     "create_agent_runs_router",
     "create_change_sets_router",
     "create_chat_router",
+    "create_evals_router",
     "create_health_router",
     "create_knowledge_bases_router",
     "create_model_registry_router",

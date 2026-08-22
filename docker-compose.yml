@@ -8,6 +8,8 @@ x-app-environment: &app-environment
   SESSION_REPOSITORY: "postgres"
   AGENT_RUN_STORE: "postgres"
   CHANGE_SET_STORE: "postgres"
+  EVAL_STORE: "postgres"
+  EVAL_FAULT_INJECTION_ENABLED: "true"
   DOCUMENT_STORE: "postgres"
   WORKSPACE_STORE: "postgres"
   LANGGRAPH_CHECKPOINTER: "postgres"

@@ -22,6 +22,7 @@
       <symbol id="icon-knowledge" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3" /><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" /></symbol>
       <symbol id="icon-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6M4 4v4.6h4.6M12 8v5l3 2" /></symbol>
       <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4 12 2.2-6H21" /></symbol>
+      <symbol id="icon-gauge" viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0" /><path d="M12 18 16 10" /><path d="M4 18h16" /></symbol>
       <symbol id="icon-model" viewBox="0 0 24 24"><path d="M12 3 4.5 7.2 12 11.5l7.5-4.3L12 3Z" /><path d="m4.5 12 7.5 4.3 7.5-4.3M4.5 16.8 12 21l7.5-4.2" /></symbol>
       <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="6" rx="2" /><rect x="3" y="15" width="6" height="6" rx="2" /><rect x="15" y="15" width="6" height="6" rx="2" /><path d="M12 9v3M6 15v-3h12v3" /></symbol>
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
@@ -109,6 +110,10 @@
           <button class="nav-item mobile-primary" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>会话记录</strong><small>历史消息与摘要</small></span>
+          </button>
+          <button class="nav-item" type="button" data-view="evals">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-gauge"></use></svg></span>
+            <span><strong>评测</strong><small>轨迹约束、指标与预警</small></span>
           </button>
           <button class="nav-item mobile-primary" type="button" data-view="activity">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-activity"></use></svg></span>
@@ -930,6 +935,58 @@
               </details>
             </article>
           </div>
+        </section>
+
+        <section id="evals-view" class="view-panel" data-view-panel="evals" aria-labelledby="evals-title" hidden>
+          <header class="view-header compact">
+            <div>
+              <p class="eyebrow">Trajectory Evaluation</p>
+              <h1 id="evals-title">评测</h1>
+              <p>按约束判定 Agent 的执行过程，并程序化校验引用真实性。fake 免费，真实模型按 Token 计费。</p>
+            </div>
+            <div class="eval-launcher">
+              <label class="eval-provider-field" for="eval-provider-select">Provider
+                <select id="eval-provider-select">
+                  <option value="fake">fake（离线，零成本）</option>
+                </select>
+              </label>
+              <button id="run-eval-btn" class="button primary" type="button">运行评测</button>
+              <button id="refresh-eval-btn" class="button secondary" type="button">刷新</button>
+            </div>
+          </header>
+
+          <div id="eval-progress" class="eval-progress" hidden>
+            <div class="eval-progress-bar"><span id="eval-progress-fill"></span></div>
+            <p id="eval-progress-label">正在运行…</p>
+          </div>
+
+          <article class="surface eval-alert-surface">
+            <div class="surface-heading">
+              <div><h2>预警</h2><p>失败用例与硬性不变量始终报警；性能指标只与该 Provider 自己的基线比较。</p></div>
+              <span id="eval-alert-count" class="meta-badge">0</span>
+            </div>
+            <div id="eval-alert-list" class="eval-alert-list"><div class="empty-state">尚未运行评测</div></div>
+          </article>
+
+          <div id="eval-metric-grid" class="metrics-grid eval-metric-grid">
+            <div class="empty-state">尚未运行评测</div>
+          </div>
+
+          <article class="surface">
+            <div class="surface-heading">
+              <div><h2>用例结果</h2><p>约束不通过时显示破了哪一条；参考轨迹只作诊断。</p></div>
+              <span id="eval-case-summary" class="meta-badge">0/0</span>
+            </div>
+            <div id="eval-case-list" class="eval-case-list"><div class="empty-state">尚未运行评测</div></div>
+          </article>
+
+          <article class="surface">
+            <div class="surface-heading">
+              <div><h2>历史</h2><p>点击任意一次查看详情；可把某次结果固化为该 Provider 的基线。</p></div>
+              <button id="pin-eval-baseline-btn" class="text-button" type="button" disabled>设为基线</button>
+            </div>
+            <div id="eval-history-list" class="eval-history-list"><div class="empty-state">暂无历史</div></div>
+          </article>
         </section>
 
         <section id="activity-view" class="view-panel" data-view-panel="activity" aria-labelledby="activity-title" hidden>
