@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260821-layered-memory-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260822-conversation-workbench-1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -32,6 +32,11 @@
       <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6A2.5 2.5 0 0 1 20.5 9.5v7A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5Z" /></symbol>
       <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1" /></symbol>
       <symbol id="icon-close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17" /></symbol>
+      <symbol id="icon-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></symbol>
+      <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5" /><path d="M18.2 12a7 7 0 0 0-12-4.9L4 9M5.8 12a7 7 0 0 0 12 4.9L20 15" /></symbol>
+      <symbol id="icon-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></symbol>
+      <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.7 2.8 8 7 10 4.2-2 7-5.3 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-5" /></symbol>
     </svg>
     <a class="skip-link" href="#main-workspace">跳到主要内容</a>
 
@@ -54,9 +59,9 @@
           <span class="status-dot" aria-hidden="true"></span>
           <span>连接中</span>
         </div>
-        <button id="create-session-btn" class="button secondary desktop-action" type="button">
+        <button id="create-session-btn" class="button secondary create-session-action" type="button" aria-label="新建会话">
           <svg class="app-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
-          新建会话
+          <span class="create-session-label">新建会话</span>
         </button>
         <button id="open-settings-btn" class="icon-button" type="button" aria-label="打开设置" title="设置">
           <svg class="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>
@@ -81,35 +86,48 @@
     <div class="app-shell">
       <aside class="sidebar" id="primary-sidebar">
         <nav class="primary-nav" aria-label="主要功能">
-          <button class="nav-item active" type="button" data-view="chat" aria-current="page">
+          <button class="nav-item mobile-primary active" type="button" data-view="chat" aria-current="page">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-message"></use></svg></span>
             <span><strong>对话工作台</strong><small>Chat 与 Agent 统一入口</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="rag">
+          <button class="nav-item mobile-primary" type="button" data-view="rag">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-knowledge"></use></svg></span>
             <span><strong>知识库</strong><small>检索与问答</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="memory">
+          <button class="nav-item mobile-overflow-nav" type="button" data-view="memory">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="models">
+          <button class="nav-item mobile-overflow-nav" type="button" data-view="models">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
             <span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="tools">
+          <button class="nav-item mobile-overflow-nav" type="button" data-view="tools">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-network"></use></svg></span>
             <span><strong>工具</strong><small>Skill 与 MCP 管理</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="sessions">
+          <button class="nav-item mobile-primary" type="button" data-view="sessions">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>会话记录</strong><small>历史消息与摘要</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="activity">
+          <button class="nav-item mobile-primary" type="button" data-view="activity">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-activity"></use></svg></span>
             <span><strong>运行中心</strong><small>指标、请求与诊断</small></span>
           </button>
+          <button id="mobile-more-btn" class="nav-item mobile-more-nav" type="button" aria-expanded="false" aria-controls="mobile-more-menu">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-more"></use></svg></span>
+            <span><strong>更多</strong><small>更多工作台</small></span>
+          </button>
         </nav>
+
+        <button id="mobile-nav-backdrop" class="mobile-nav-backdrop" type="button" aria-label="关闭更多导航" hidden></button>
+        <div id="mobile-more-menu" class="mobile-more-menu" role="dialog" aria-label="更多工作台" hidden>
+          <div class="mobile-more-heading"><strong>更多工作台</strong><span>选择一个工作区</span></div>
+          <button type="button" data-view="memory"><svg class="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span></button>
+          <button type="button" data-view="models"><svg class="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg><span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span></button>
+          <button type="button" data-view="tools"><svg class="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span><strong>工具</strong><small>Skill 与 MCP 管理</small></span></button>
+          <button id="mobile-more-settings-btn" type="button"><svg class="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg><span><strong>工作区设置</strong><small>选择 Agent 操作的文件夹</small></span></button>
+        </div>
 
         <div class="sidebar-context">
           <div class="context-card-heading">
@@ -125,19 +143,38 @@
       </aside>
 
       <main id="main-workspace" class="workspace" tabindex="-1">
-        <section id="chat-view" class="view-panel active" data-view-panel="chat" aria-labelledby="chat-title">
-          <header class="view-header">
+        <section id="chat-view" class="view-panel chat-workbench active" data-view-panel="chat" aria-labelledby="chat-title">
+          <header id="chat-welcome-header" class="view-header chat-welcome-header">
             <div>
               <p class="eyebrow">Agent Command Deck</p>
               <h1 id="chat-title">把任务交给 Agent，<br />每一步仍由你掌控。</h1>
               <p>从问题、计划到执行与验证，全部保留在同一个可追溯会话中。</p>
             </div>
-            <span id="chat-meta" class="status-pill neutral" role="status" aria-live="polite">
-              <span class="status-dot" aria-hidden="true"></span><span>等待输入</span>
-            </span>
           </header>
 
-          <div id="chat-output" class="conversation" aria-live="polite" aria-label="对话内容">
+          <header id="active-session-header" class="active-session-header" hidden>
+            <div class="active-session-heading">
+              <span class="active-session-mark" aria-hidden="true"><i></i></span>
+              <div>
+                <p>Active conversation</p>
+                <h1 id="active-session-title">当前会话</h1>
+              </div>
+            </div>
+            <div class="active-session-actions">
+              <span id="chat-meta" class="status-pill neutral" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span><span>等待输入</span>
+              </span>
+              <button id="rename-current-session-btn" class="icon-button small" type="button" aria-label="重命名当前会话" title="重命名当前会话">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-edit"></use></svg>
+              </button>
+              <button id="active-session-inspector-btn" class="button secondary compact-action" type="button">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
+                运行详情
+              </button>
+            </div>
+          </header>
+
+          <div id="chat-output" class="conversation" aria-label="对话内容" tabindex="0">
             <div class="welcome-state">
               <div class="welcome-signal" aria-hidden="true">
                 <span class="active"><i></i><b>ASK</b></span>
@@ -173,6 +210,23 @@
               <span>这是已归档会话，只能查看历史消息。</span>
               <button id="restore-current-session-btn" class="text-button" type="button">恢复并继续</button>
             </div>
+            <div id="composer-scope-strip" class="composer-scope-strip" aria-label="当前执行上下文">
+              <button id="composer-workspace-btn" class="scope-chip workspace-scope" type="button">
+                <span id="composer-workspace-status-dot" class="workspace-status-dot is-missing" aria-hidden="true"></span>
+                <span class="scope-chip-copy"><small>Workspace</small><strong id="composer-workspace-label">未选择工作区</strong></span>
+                <em id="composer-workspace-role">选择</em>
+              </button>
+              <button id="composer-model-btn" class="scope-chip model-scope" type="button">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg>
+                <span class="scope-chip-copy"><small>Model</small><strong id="composer-model-label">默认配置</strong></span>
+                <em>配置</em>
+              </button>
+              <div id="composer-context-budget" class="scope-chip context-scope" role="status" aria-live="polite">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                <span class="scope-chip-copy"><small>Context</small><strong id="composer-context-label">等待首轮请求</strong></span>
+                <span class="context-meter" aria-hidden="true"><i id="composer-context-meter-fill"></i></span>
+              </div>
+            </div>
             <div class="composer">
               <div
                 id="slash-command-menu"
@@ -197,11 +251,17 @@
                       <option value="agent">代码 Agent</option>
                     </select>
                   </label>
-                  <label class="composer-mode-control model-auto-control" for="auto-model-toggle">
-                    <input id="auto-model-toggle" type="checkbox" checked />
-                    <span>Agent 自动选模</span>
-                  </label>
-                  <div class="composer-mode-control model-choice-control">
+                  <details id="composer-config" class="composer-config">
+                    <summary>
+                      <svg class="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>
+                      运行配置
+                    </summary>
+                    <div class="composer-config-panel">
+                      <label class="composer-mode-control model-auto-control" for="auto-model-toggle">
+                        <input id="auto-model-toggle" type="checkbox" checked />
+                        <span>Agent 自动选模</span>
+                      </label>
+                      <div class="composer-mode-control model-choice-control">
                     <span id="session-model-label">路由策略</span>
                     <select id="session-model-select" aria-label="会话模型或自动路由策略">
                       <option value="smart">智能 · 按任务难度</option>
@@ -229,11 +289,13 @@
                       </div>
                       <div id="model-picker-options" class="model-picker-options"></div>
                     </div>
-                  </div>
-                  <label id="model-fallback-control" class="composer-mode-control model-auto-control" for="model-fallback-toggle" hidden>
-                    <input id="model-fallback-toggle" type="checkbox" checked />
-                    <span>不可用时 fallback</span>
-                  </label>
+                      </div>
+                      <label id="model-fallback-control" class="composer-mode-control model-auto-control" for="model-fallback-toggle" hidden>
+                        <input id="model-fallback-toggle" type="checkbox" checked />
+                        <span>不可用时 fallback</span>
+                      </label>
+                    </div>
+                  </details>
                 </div>
                 <span id="composer-mode-description">流式回答，不执行代码工具。</span>
               </div>
@@ -910,6 +972,7 @@
         </section>
       </main>
 
+      <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭会话与运行详情" hidden></button>
       <aside id="inspector-panel" class="inspector" aria-label="会话与运行详情">
         <header class="inspector-header">
           <div><p class="eyebrow">Workspace Rail</p><h2>会话与运行</h2></div>
@@ -1036,6 +1099,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260821-layered-memory-4" defer></script>
+    <script src="/static/app.js?v=20260822-conversation-workbench-1" defer></script>
   </body>
 </html>
