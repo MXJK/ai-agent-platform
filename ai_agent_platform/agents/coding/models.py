@@ -57,6 +57,7 @@ class CodingAgentState(TypedDict, total=False):
     rag_context_sources: list["ContextSource"]
     memory_context_sources: list["ContextSource"]
     context_warnings: list[str]
+    context_shares: dict[str, int]
     project_instructions: list["ContextSource"]
     context_sources: list["ContextSource"]
     exploration_round: int

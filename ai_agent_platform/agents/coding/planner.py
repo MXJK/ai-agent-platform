@@ -28,6 +28,7 @@ from ai_agent_platform.integrations.tools import (
     summarize_tool_arguments,
 )
 from ai_agent_platform.integrations.llm import LLMToolDecision
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 class RuleBasedAgentPlanner:
@@ -401,6 +402,7 @@ def select_knowledge_bases(
 
 
 def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
+    shares = state.get("context_shares") or {}
     sources = [
         {
             "kind": source.kind,
@@ -416,6 +418,9 @@ def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
             + list(state.get("context_sources", []))
         )
     ]
+    evidence_tokens = int(shares.get("evidence_tokens", 0))
+    if evidence_tokens > 0:
+        sources = _fit_evidence_to_share(sources, evidence_tokens)
     system = (
         "You are a repository-aware coding agent. Use the supplied native tools "
         "when additional evidence or an action is required. Treat tool outputs as "
@@ -443,7 +448,10 @@ def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
         "intent": state.get("intent"),
         "workspace_id": state["workspace_id"],
         "focus_files": state.get("focus_files", []),
-        "conversation_context": recent_conversation_context(state),
+        "conversation_context": recent_conversation_context(
+            state,
+            max_tokens=int(shares.get("history_tokens", 0)),
+        ),
         "evidence": sources,
         "context_warnings": state.get("context_warnings", []),
     }
@@ -454,6 +462,60 @@ def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
             "content": json.dumps(user_payload, ensure_ascii=False),
         },
     ]
+
+
+def _fit_evidence_to_share(
+    sources: list[dict[str, Any]],
+    evidence_tokens: int,
+) -> list[dict[str, Any]]:
+    """Fit evidence to its share by dropping whole sources, then trimming text.
+
+    Sources arrive ranked, so the lowest-ranked ones are dropped first and only
+    the last surviving source has its ``text`` trimmed. Trimming a field of the
+    payload keeps the seed valid JSON, which truncating the serialized message
+    afterwards would not: the seed is one ``json.dumps`` blob, and a head/tail
+    cut through it reaches the model as malformed JSON.
+    """
+
+    from ai_agent_platform.services.context_budget import fit_text_to_tokens
+
+    fitted = list(sources)
+    while fitted and _evidence_tokens(fitted) > evidence_tokens:
+        if len(fitted) == 1:
+            break
+        fitted.pop()
+    if not fitted or _evidence_tokens(fitted) <= evidence_tokens:
+        return fitted
+    text = str(fitted[-1].get("text") or "")
+    # Search on the serialized total, not on the text alone: JSON quoting and
+    # escaping mean trimming N tokens of text does not remove N tokens from the
+    # payload, and the share has to hold for what is actually sent.
+    best = {**fitted[-1], "text": "", "truncated": True}
+    low, high = 0, estimate_text_tokens(text)
+    while low <= high:
+        allowed = (low + high) // 2
+        candidate = {
+            **fitted[-1],
+            "text": fit_text_to_tokens(
+                text,
+                allowed,
+                estimate_tokens=estimate_text_tokens,
+            ),
+            "truncated": True,
+        }
+        if _evidence_tokens(fitted[:-1] + [candidate]) <= evidence_tokens:
+            best = candidate
+            low = allowed + 1
+        else:
+            high = allowed - 1
+    fitted[-1] = best
+    return fitted
+
+
+def _evidence_tokens(sources: list[dict[str, Any]]) -> int:
+    return estimate_text_tokens(
+        json.dumps(sources, ensure_ascii=False, default=str)
+    )
 
 
 def repair_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:

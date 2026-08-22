@@ -54,7 +54,6 @@ class ToolLoopNodes:
         self._max_tool_calls = runtime._max_tool_calls
         self._native_context_max_chars = runtime._native_context_max_chars
         self._native_context_keep_messages = runtime._native_context_keep_messages
-        self._native_context_token_ratio = runtime._native_context_token_ratio
         self._tool_result_keep_recent = runtime._tool_result_keep_recent
         self._native_max_compactions = runtime._native_max_compactions
         self._context_compressor = runtime._context_compressor
@@ -70,17 +69,27 @@ class ToolLoopNodes:
         self._tool_use_context = runtime._tool_use_context
         self._visible_tool_specs = runtime._visible_tool_specs
 
-    def _native_context_budget_tokens(self) -> int:
-        """Scale the transcript budget to the window of the model in use.
+    def _native_context_budget_tokens(
+        self,
+        state: CodingAgentState,
+        tool_specs: Sequence[Any] = (),
+    ) -> int:
+        """Return the transcript share of the run's single input allowance.
 
-        The run's model comes from the ambient selection scope, so this reflects
-        whatever the router will serve this round rather than a fixed ceiling.
+        The allowance is resolved and divided once, in ``_setup_workspace``, so
+        this reads a share rather than deriving a second ratio from the model
+        window. Tool schemas are subtracted here because they are only known
+        once the effective pool is visible, and they ride along on every request
+        without ever appearing in the transcript that gets measured.
+
+        Zero means no token budget applies and the static character ceiling is
+        the only bound, which is what happens when budget resolution degraded.
         """
-        resolve = getattr(self._llm_client, "resolve_context_budget", None)
-        if not callable(resolve):
+        shares = state.get("context_shares") or {}
+        transcript_tokens = int(shares.get("transcript_tokens", 0))
+        if transcript_tokens <= 0:
             return 0
-        budget = resolve(input_token_ratio=self._native_context_token_ratio)
-        return max(0, budget.input_tokens)
+        return max(0, transcript_tokens - _tool_schema_tokens(tool_specs))
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         tool_specs = self._visible_tool_specs(state)
@@ -182,7 +191,35 @@ class ToolLoopNodes:
                 context_chars=_native_messages_chars(native_messages),
             )
 
-        max_tokens = self._native_context_budget_tokens()
+        shares = state.get("context_shares") or {}
+        schema_tokens = _tool_schema_tokens(tool_specs)
+        if shares and int(shares.get("transcript_tokens", 0)) <= schema_tokens:
+            warnings.append(
+                "the model window leaves no room for a tool transcript after "
+                "evidence, history, and tool schemas"
+            )
+            terminal = self._native_terminal_plan(
+                state,
+                native_messages=native_messages,
+                answer=(
+                    "Agent stopped before the first model request because the "
+                    "resolved context budget leaves no room for a tool "
+                    "transcript. The model window allows "
+                    f"{shares.get('total_tokens', 0)} input tokens, of which the "
+                    f"tool schemas alone need {schema_tokens}. Raise "
+                    "LLM_CONTEXT_INPUT_TOKEN_RATIO, lower "
+                    "LLM_CONTEXT_EVIDENCE_RATIO or LLM_CONTEXT_HISTORY_RATIO, "
+                    "or route this run to a model with a larger window."
+                ),
+                status="blocked",
+                reason="context_budget_too_small",
+                compactions=state.get("native_context_compactions", 0),
+                context_chars=_native_messages_chars(native_messages),
+            )
+            terminal["context_warnings"] = warnings
+            return terminal
+
+        max_tokens = self._native_context_budget_tokens(state, tool_specs)
         reduction = _reduce_native_messages(
             native_messages,
             max_chars=self._native_context_max_chars,
@@ -278,6 +315,14 @@ class ToolLoopNodes:
             if exc.code != "context_overflow":
                 raise
             self._metrics.increment("agent_native_context_overflow_retries_total")
+            native_messages, seed_stage = self._resize_native_seed(
+                state,
+                native_messages,
+                max_chars=self._native_context_max_chars,
+                max_tokens=max_tokens,
+            )
+            if seed_stage is not None:
+                context_stages.append(seed_stage)
             recovery = _reduce_native_messages(
                 native_messages,
                 max_chars=self._native_context_max_chars,
@@ -288,13 +333,14 @@ class ToolLoopNodes:
                 max_compactions=self._native_max_compactions,
                 compressor=self._context_compressor,
                 force=True,
+                already_changed=seed_stage is not None,
             )
             self._record_context_reduction(recovery)
             native_messages = recovery.messages
             compactions = recovery.compactions
             context_chars = recovery.context_chars
             context_stages.extend(recovery.stages)
-            if recovery.exhausted or not recovery.changed:
+            if recovery.exhausted or not (recovery.changed or seed_stage):
                 warnings.append(
                     "provider reported context overflow and forced compaction "
                     "could not make progress"
@@ -537,6 +583,52 @@ class ToolLoopNodes:
             self._metrics.increment(
                 "agent_native_context_compaction_exhausted_total"
             )
+
+    def _resize_native_seed(
+        self,
+        state: CodingAgentState,
+        messages: list[dict[str, Any]],
+        *,
+        max_chars: int,
+        max_tokens: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Rebuild the seed against halved evidence and history shares.
+
+        The seed cannot be truncated in place — it is one JSON payload, and a
+        head/tail cut through it reaches the model as malformed JSON — so the
+        only safe way to shrink it is to assemble it again from smaller shares.
+        Reassembly drops the lowest-ranked evidence and shortens the history
+        excerpt while the task, workspace and warnings arrive intact.
+
+        Returns the messages unchanged when reassembly cannot make the seed
+        smaller, which is the honest answer when what remains is the user's own
+        request rather than context the harness chose to include.
+        """
+
+        if len(messages) < 2:
+            return messages, None
+        shares = dict(state.get("context_shares") or {})
+        seed_tokens = _native_messages_tokens(messages[:2])
+        if shares:
+            evidence_tokens = int(shares.get("evidence_tokens", 0)) // 2
+            history_tokens = int(shares.get("history_tokens", 0)) // 2
+        else:
+            evidence_tokens = max(1, seed_tokens // 4)
+            history_tokens = max(1, seed_tokens // 8)
+        shares["evidence_tokens"] = max(1, evidence_tokens)
+        shares["history_tokens"] = max(1, history_tokens)
+        rebuilt = native_tool_messages({**state, "context_shares": shares})
+        if _native_messages_tokens(rebuilt) >= seed_tokens:
+            return messages, None
+        resized = list(rebuilt) + list(messages[2:])
+        return resized, _context_stage(
+            "seed_resize",
+            resized,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            forced=True,
+            truncated=1,
+        )
 
     def _context_compaction_terminal(
         self,
@@ -1111,6 +1203,28 @@ def _native_messages_chars(messages: list[dict[str, Any]]) -> int:
     return len(_serialize_native_messages(messages))
 
 
+def _tool_schema_tokens(tool_specs: Sequence[Any]) -> int:
+    """Estimate what the tool schemas cost on every request.
+
+    Schemas never appear in the transcript the reduction ladder measures, but
+    they are sent alongside it, so a transcript budget that ignores them
+    over-promises by exactly their size.
+    """
+    if not tool_specs:
+        return 0
+    payload = [
+        {
+            "name": getattr(spec, "name", ""),
+            "description": getattr(spec, "description", ""),
+            "input_schema": getattr(spec, "input_schema", None),
+        }
+        for spec in tool_specs
+    ]
+    return estimate_text_tokens(
+        json.dumps(payload, ensure_ascii=False, default=str)
+    )
+
+
 def _native_messages_tokens(messages: Sequence[dict[str, Any]]) -> int:
     return estimate_text_tokens(_serialize_native_messages(messages))
 
@@ -1146,6 +1260,15 @@ class NativeContextReduction:
 class _NativeMessageGroup:
     messages: tuple[dict[str, Any], ...]
     protected: bool = False
+    verbatim: bool = False
+    """Whether this group must survive reduction byte-for-byte.
+
+    ``protected`` only stops a group from being dropped; the truncate pass runs
+    over every group. The seed's user message is one ``json.dumps`` payload, so
+    a head/tail cut through it would reach the model as malformed JSON. The seed
+    is instead sized field by field when it is assembled, which is why it can be
+    excluded from truncation here rather than merely being cut more gently.
+    """
 
 
 @dataclass(frozen=True)
@@ -1162,6 +1285,8 @@ class _NativeContextBudgetPolicy:
     ) -> _NativeMessageGroup:
         from ai_agent_platform.services.context_budget import fit_text_to_tokens
 
+        if item.verbatim:
+            return item
         remaining = overflow_tokens
         messages = list(item.messages)
         changed = False
@@ -1293,12 +1418,19 @@ def _reduce_native_messages(
     max_tokens: int = 0,
     compressor: Any = None,
     force: bool = False,
+    already_changed: bool = False,
 ) -> NativeContextReduction:
-    """Spend the cheapest native transcript reduction stage first."""
+    """Spend the cheapest native transcript reduction stage first.
+
+    ``already_changed`` reports progress a caller made before the ladder ran,
+    such as reassembling the seed from smaller shares. A forced pass that
+    changes nothing counts as exhausted, so without this a caller that had
+    already shrunk the transcript would be told recovery failed.
+    """
 
     current = list(messages)
     stages: list[dict[str, Any]] = []
-    changed = False
+    changed = already_changed
     over_budget = _native_context_over_budget(
         current,
         max_chars=max_chars,
@@ -1581,10 +1713,12 @@ def _native_message_groups(
             )
             for message in group
         )
+        seed = index < 2
         groups.append(
             _NativeMessageGroup(
                 messages=tuple(group),
-                protected=index < 2 or index == len(raw) - 1 or summary,
+                protected=seed or index == len(raw) - 1 or summary,
+                verbatim=seed,
             )
         )
     return groups

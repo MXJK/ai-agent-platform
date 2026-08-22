@@ -52,6 +52,22 @@ def _transcript(rounds: int, *, body_chars: int = 400) -> list[dict[str, object]
     return messages
 
 
+def _bulky_history() -> list[dict[str, str]]:
+    """Conversation history large enough to dominate the assembled seed.
+
+    The padding sits in history rather than in ``user_input`` because the seed
+    is now sized share by share at assembly: history is context the harness
+    chose to include and can drop again, while the request the user just sent
+    arrives intact and is never truncated to buy room.
+    """
+
+    return [
+        {"role": "user", "content": "earlier question " + "x" * 400},
+        {"role": "assistant", "content": "earlier answer " + "y" * 400},
+        {"role": "user", "content": "follow-up question " + "z" * 400},
+    ]
+
+
 def _assert_complete_pairs(
     testcase: unittest.TestCase,
     messages: list[dict[str, object]],
@@ -280,8 +296,8 @@ class LayeredTranscriptCompactionTests(unittest.TestCase):
             runtime = CodingAgentRuntime(planner=planner, metrics=metrics)
             result = runtime.run(
                 conversation_id="reactive_recovery",
-                user_input="explain app.py " + "x" * 1000,
-                history=[],
+                user_input="explain app.py",
+                history=_bulky_history(),
                 workspace_id="workspace",
                 workspace_root=temp_dir,
                 focus_files=["app.py"],
@@ -309,8 +325,8 @@ class LayeredTranscriptCompactionTests(unittest.TestCase):
             Path(temp_dir, "app.py").write_text("VALUE = 1\n", encoding="utf-8")
             result = CodingAgentRuntime(planner=planner, metrics=metrics).run(
                 conversation_id="reactive_failure",
-                user_input="explain app.py " + "x" * 1000,
-                history=[],
+                user_input="explain app.py",
+                history=_bulky_history(),
                 workspace_id="workspace",
                 workspace_root=temp_dir,
                 focus_files=["app.py"],

@@ -667,6 +667,8 @@ Call/result IDs and provider-critical message structure remain paired throughout
 Folding is capped by `AGENT_NATIVE_MAX_COMPACTIONS` (default `3`). A transcript
 that still cannot converge terminates as
 `blocked/context_compaction_exhausted` instead of spending another model call.
+The transcript budget is the transcript share of the run's single input
+allowance, less the measured cost of the tool schemas.
 Provider context-length failures are normalized to `context_overflow` and receive
 exactly one forced reduction plus one retry. Native reduction emits canonical SSE
 `context` events whose output contains a `stage` field, counts, budgets, the current
@@ -677,11 +679,32 @@ The related environment settings are:
 
 ```dotenv
 AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
-AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+LLM_CONTEXT_EVIDENCE_RATIO=0.25
+LLM_CONTEXT_HISTORY_RATIO=0.15
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
 AGENT_TOOL_RESULT_KEEP_RECENT=6
 AGENT_NATIVE_MAX_COMPACTIONS=3
 ```
+
+One place resolves the run's input allowance and divides it into named shares.
+The `setup_workspace` node derives the allowance from the window of the model
+about to serve the turn, gives evidence and conversation history their ratio of
+what remains, and leaves the rest to the native tool transcript; the shares are
+recorded in the run state and in that node's trace, and every later layer reads
+its own share instead of deriving a second ratio from the window.
+
+Shares apply while the seed is assembled rather than afterwards. Evidence drops
+whole low-ranked sources before the last survivor's `text` is trimmed, and the
+conversation excerpt is bounded by the history share instead of a fixed 1800
+characters. The seed is therefore always valid JSON: it is a single
+`json.dumps` payload, a head/tail cut through it would reach the model as
+malformed JSON, and reduction now marks the seed as not truncatable. On a
+provider `context_overflow` the recovery path rebuilds the seed from halved
+shares instead of cutting it. The request the user just sent is never trimmed to
+buy room. When tool schemas alone exhaust the window, the run ends as
+`blocked/context_budget_too_small` with an actionable configuration message
+rather than looping. `AGENT_NATIVE_CONTEXT_MAX_CHARS` and the static history
+constants remain as fallbacks used only when no model information is available.
 
 Every successful or failed result is returned under its call ID. Completed
 `(run_id, call_id)` executions can be replayed from the memory or PostgreSQL

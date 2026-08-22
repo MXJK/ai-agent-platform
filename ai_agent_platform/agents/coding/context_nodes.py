@@ -91,6 +91,9 @@ class ContextRetrievalNodes:
         self._knowledge_context_provider = runtime._knowledge_context_provider
         self._project_memory_provider = runtime._project_memory_provider
         self._max_rag_context_chars = runtime._max_rag_context_chars
+        self._llm_client = runtime._llm_client
+        self._context_evidence_ratio = runtime._context_evidence_ratio
+        self._context_history_ratio = runtime._context_history_ratio
         self._max_exploration_rounds = runtime._max_exploration_rounds
         self._max_read_tools_per_round = runtime._max_read_tools_per_round
         self._max_context_files = runtime._max_context_files
@@ -119,9 +122,11 @@ class ContextRetrievalNodes:
             raise ValueError("workspace_unavailable: execution root is inaccessible")
         for path in state.get("focus_files", []):
             _validate_relative_workspace_path(path, root)
+        shares = self._resolve_context_shares()
         return {
             "execution_root": str(root),
             "execution_workspace_mode": mode,
+            "context_shares": shares,
             "trace": _append_trace(
                 state,
                 node="setup_workspace",
@@ -131,8 +136,42 @@ class ContextRetrievalNodes:
                     "workspace_mode": mode,
                     "execution_root": str(root),
                     "focus_files": state.get("focus_files", []),
+                    "context_shares": shares,
                 },
             ),
+        }
+
+    def _resolve_context_shares(self) -> dict[str, int]:
+        """Resolve the run's input allowance once and divide it into shares.
+
+        This is the only place the allowance is resolved and divided. Every
+        later layer reads its own share out of the state instead of deriving a
+        ratio from the model window again, which is what let four independent
+        caps in three different units decide what reached the model.
+
+        Resolution stays best effort for the same reason the underlying budget
+        does: a cost guardrail must never be the reason a run cannot start.
+        """
+
+        from ai_agent_platform.services.context_budget import divide_context_budget
+
+        resolve = getattr(self._llm_client, "resolve_context_budget", None)
+        if not callable(resolve):
+            return {}
+        try:
+            budget = resolve()
+            shares = divide_context_budget(
+                budget.input_tokens,
+                evidence_ratio=self._context_evidence_ratio,
+                history_ratio=self._context_history_ratio,
+            )
+        except Exception:  # noqa: BLE001 - budget resolution is best effort
+            return {}
+        return {
+            "total_tokens": shares.total_tokens,
+            "evidence_tokens": shares.evidence_tokens,
+            "history_tokens": shares.history_tokens,
+            "transcript_tokens": shares.transcript_tokens,
         }
 
     def _load_project_instructions(

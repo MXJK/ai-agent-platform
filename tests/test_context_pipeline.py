@@ -6,9 +6,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.agents import GameAgentRuntime
+from ai_agent_platform.agents.coding.models import ContextSource
+from ai_agent_platform.agents.coding.planner import native_tool_messages
+from ai_agent_platform.agents.coding.runtime_support import (
+    MAX_AGENT_HISTORY_CHARS,
+)
 from ai_agent_platform.agents.coding.tool_loop_nodes import (
     _compact_native_messages,
 )
+from ai_agent_platform.services.context_budget import divide_context_budget
+from ai_agent_platform.token_counting import estimate_text_tokens
 from ai_agent_platform.core import MetricsRegistry, Settings
 from ai_agent_platform.api.routes.chat import create_chat_router
 from ai_agent_platform.integrations import LLMClient
@@ -245,6 +252,108 @@ class NativeTranscriptCompactionTests(unittest.TestCase):
         )
 
         self.assertIn("repo.read_file", compacted[2]["content"])
+
+
+class SeedContextShareTests(unittest.TestCase):
+    """The seed is sized by share at assembly, not truncated afterwards."""
+
+    def _state(self, shares: dict[str, int] | None = None) -> dict[str, object]:
+        state: dict[str, object] = {
+            "user_input": "explain the retry path",
+            "intent": "repo_qa",
+            "workspace_id": "workspace_main",
+            "focus_files": [],
+            "context_warnings": [],
+            "project_instructions": [],
+            "history": [
+                {"role": "user", "content": f"earlier question {index} " + "q" * 200}
+                for index in range(8)
+            ],
+            "context_sources": [
+                ContextSource(
+                    kind="knowledge_chunk",
+                    path=f"doc_{index}.md",
+                    start_line=None,
+                    end_line=None,
+                    text="evidence body " + "e" * 400,
+                    reason="retrieved",
+                    content_hash=f"hash_{index}",
+                )
+                for index in range(6)
+            ],
+        }
+        if shares is not None:
+            state["context_shares"] = shares
+        return state
+
+    def _seed_payload(self, state: dict[str, object]) -> dict[str, object]:
+        messages = native_tool_messages(state)
+        return json.loads(messages[1]["content"])
+
+    def test_a_smaller_window_produces_a_smaller_seed(self) -> None:
+        large = divide_context_budget(
+            40_000, evidence_ratio=0.25, history_ratio=0.15
+        )
+        small = divide_context_budget(
+            2_000, evidence_ratio=0.25, history_ratio=0.15
+        )
+
+        def seed_tokens(shares) -> int:
+            state = self._state(
+                {
+                    "evidence_tokens": shares.evidence_tokens,
+                    "history_tokens": shares.history_tokens,
+                    "transcript_tokens": shares.transcript_tokens,
+                }
+            )
+            return estimate_text_tokens(
+                json.dumps(native_tool_messages(state), ensure_ascii=False)
+            )
+
+        self.assertLess(seed_tokens(small), seed_tokens(large))
+
+    def test_evidence_over_its_share_still_serializes_as_valid_json(self) -> None:
+        state = self._state({"evidence_tokens": 120, "history_tokens": 60})
+
+        payload = self._seed_payload(state)
+
+        self.assertEqual(payload["task"], "explain the retry path")
+        self.assertLessEqual(
+            estimate_text_tokens(
+                json.dumps(payload["evidence"], ensure_ascii=False)
+            ),
+            120,
+        )
+
+    def test_evidence_drops_lowest_ranked_before_trimming_text(self) -> None:
+        state = self._state({"evidence_tokens": 200, "history_tokens": 60})
+
+        payload = self._seed_payload(state)
+
+        self.assertLess(len(payload["evidence"]), 6)
+        self.assertEqual(payload["evidence"][0]["path"], "doc_0.md")
+
+    def test_the_users_own_request_is_never_trimmed_to_buy_room(self) -> None:
+        state = self._state({"evidence_tokens": 1, "history_tokens": 1})
+
+        payload = self._seed_payload(state)
+
+        self.assertEqual(payload["task"], "explain the retry path")
+
+    def test_absent_shares_keep_the_static_fallback_behavior(self) -> None:
+        with_shares = self._seed_payload(
+            self._state({"evidence_tokens": 100, "history_tokens": 50})
+        )
+        without_shares = self._seed_payload(self._state())
+
+        self.assertLessEqual(
+            len(without_shares["conversation_context"]),
+            MAX_AGENT_HISTORY_CHARS,
+        )
+        self.assertEqual(len(without_shares["evidence"]), 6)
+        self.assertLess(
+            len(with_shares["evidence"]), len(without_shares["evidence"])
+        )
 
 
 class SummaryPromptTests(unittest.TestCase):
