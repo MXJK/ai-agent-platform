@@ -137,6 +137,14 @@ class MemoryAuditEvent:
 
 
 class ProjectMemoryRepository(Protocol):
+    def delete_workspace_state(self, *, workspace_id: str) -> list[str]:
+        """Delete all project-memory state scoped to one workspace.
+
+        The returned memory IDs let the service remove rebuildable vector rows
+        from whichever vector backend is configured.
+        """
+        ...
+
     def ensure_member(
         self, *, workspace_id: str, user_id: str, role: str
     ) -> WorkspaceMember:

@@ -1,11 +1,14 @@
 {
+  "suite_id": "l1_trajectory_v2",
   "workspace_id": "workspace_l1",
   "metric_thresholds": {
     "max_invalid_action_rate": 0.05,
     "max_mean_step_efficiency": 2.6,
     "max_budget_cap_rate": 0.25,
     "min_failure_recovery_rate": 1.0,
-    "min_citation_accuracy": 1.0
+    "min_citation_content_accuracy": 1.0,
+    "min_answer_path_grounding_rate": 1.0,
+    "min_fully_grounded_case_rate": 1.0
   },
   "fixtures": [
     {

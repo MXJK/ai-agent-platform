@@ -84,7 +84,7 @@ class ToolLoopNodes:
         )
         warnings = list(state.get("context_warnings", []))
         if not uses_native:
-            tool_calls = [
+            proposed_tool_calls = [
                 call
                 for call in self._planner.plan_tool_calls(state, tool_specs)
                 if call.name not in READ_ONLY_REPOSITORY_TOOLS
@@ -99,7 +99,7 @@ class ToolLoopNodes:
                         phase="plan",
                     ),
                 )
-                for call in tool_calls
+                for call in proposed_tool_calls
             ]
             denied_calls = [
                 call for call, item in permission_decisions if item.effect == "deny"
@@ -121,7 +121,9 @@ class ToolLoopNodes:
                 if item.effect == "ask"
             ]
             return {
-                "tool_calls": list(state.get("tool_calls", [])) + tool_calls,
+                "tool_calls": (
+                    list(state.get("tool_calls", [])) + proposed_tool_calls
+                ),
                 "analysis_tool_calls": analysis_calls,
                 "change_tool_calls": change_calls,
                 "validation_tool_calls": validation_calls,
@@ -136,7 +138,17 @@ class ToolLoopNodes:
                     node="plan_tools",
                     summary="基于已读证据规划变更、验证与审批。",
                     output={
-                        "planned_tools": [call.name for call in tool_calls],
+                        "planned_tools": [
+                            call.name for call in proposed_tool_calls
+                        ],
+                        "denied_tools": [
+                            _call_lifecycle_detail(
+                                call,
+                                reason=decision.reason,
+                            )
+                            for call, decision in permission_decisions
+                            if decision.effect == "deny"
+                        ],
                         "approval_required_tools": [
                             item["name"] for item in approval_tools
                         ],
@@ -409,8 +421,13 @@ class ToolLoopNodes:
                         item["name"] for item in approval_tools
                     ],
                     "suppressed_tools": [
-                        {"name": call.name, "reason": reason}
+                        _call_lifecycle_detail(call, reason=reason)
                         for call, reason in suppressed_calls
+                    ],
+                    "denied_tools": [
+                        _call_lifecycle_detail(call, reason=decision.reason)
+                        for call, decision in permission_decisions
+                        if decision.effect == "deny"
                     ],
                     "native": uses_native,
                     "round": native_round,
@@ -950,6 +967,16 @@ def _native_output_budget(
 
 _TRANSCRIPT_DIGEST_MAX_CHARS = 12000
 _TRANSCRIPT_SUMMARY_MAX_CHARS = 6000
+
+
+def _call_lifecycle_detail(call: ToolCall, *, reason: str) -> dict[str, Any]:
+    return {
+        "call_id": call.call_id,
+        "name": call.name,
+        "arguments": dict(call.arguments),
+        "source": call.source,
+        "reason": reason,
+    }
 
 
 def _native_messages_chars(messages: list[dict[str, Any]]) -> int:

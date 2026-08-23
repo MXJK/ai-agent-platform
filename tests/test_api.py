@@ -728,7 +728,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260822-model-config-dismiss-1',
+            '/static/app.js?v=20260823-eval-evidence-v2',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -830,6 +830,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn("listKnowledgeDocuments", script_response.text)
         self.assertIn("bulkDeleteKnowledgeDocuments", script_response.text)
         self.assertIn("document_filename_conflict", script_response.text)
+        self.assertIn("citation_content_accuracy", script_response.text)
+        self.assertIn("data-provider=", script_response.text)
+        self.assertIn("renderEvalCallLifecycle", script_response.text)
+        self.assertIn("renderEvalReadEvidence", script_response.text)
+        self.assertIn("强制基线会记录 forced=true", script_response.text)
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
         self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)

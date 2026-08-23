@@ -89,6 +89,54 @@ class _Authorizer:
 
 
 class ExecutionContextFactoryTests(unittest.TestCase):
+    def test_isolated_eval_snapshot_has_no_history_summary_or_user_profile(self) -> None:
+        class UserMemorySpy:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def context_for_user(self, *, user_id: str):
+                self.calls.append(user_id)
+                return "REAL OWNER PROFILE"
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions = _SessionService()
+            sessions.summary = SimpleNamespace(
+                content="REAL SUMMARY", summarized_message_count=1,
+                through_message_id="m1", version=1, source_chars=12,
+                updated_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            )
+            memory = UserMemorySpy()
+            factory = ExecutionContextFactory(
+                session_service=sessions,
+                workspace_service=_workspace_service(root, ("main", root)),
+                user_memory_service=memory,
+            )
+
+            snapshot = factory.create(
+                conversation_id="session_1",
+                user_message="eval fixture request",
+                workspace_id="main",
+                actor_user_id="alice",
+                model_selection=ModelSelection(
+                    mode="manual", preferred_provider="fake",
+                    preferred_model="registered-fake-v2",
+                ),
+                isolated=True,
+                entrypoint_metadata={"evaluation": {"isolated": True}},
+            )
+
+        self.assertEqual(snapshot.session.controlled_history, ())
+        self.assertIsNone(snapshot.session.summary)
+        self.assertEqual(memory.calls, [])
+        self.assertEqual(
+            snapshot.session.model_selection.preferred_model,
+            "registered-fake-v2",
+        )
+        self.assertTrue(
+            snapshot.metadata.entrypoint_metadata["evaluation"]["isolated"]
+        )
+
     def test_direct_mode_is_capability_gated_and_frozen_in_run_context(self) -> None:
         with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
             root = Path(temp_dir)

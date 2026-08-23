@@ -73,6 +73,51 @@ def candidate(
 
 
 class ProjectMemoryServiceTests(unittest.TestCase):
+    def test_delete_workspace_state_removes_members_memories_and_vectors(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "eval-project"
+            workspace.mkdir()
+            service, repository, vector = self._service(
+                root,
+                extractor=StaticExtractor([]),
+            )
+            service._workspace_service.register(  # noqa: SLF001
+                workspace_id="eval-project",
+                root_path=str(workspace),
+            )
+            service.ensure_workspace_admin(
+                workspace_id="eval-project",
+                actor_user_id="eval-principal",
+            )
+            service.update_settings(
+                workspace_id="eval-project",
+                actor_user_id="eval-principal",
+                mode="auto",
+            )
+            memory = service.create_manual(
+                workspace_id="eval-project",
+                actor_user_id="eval-principal",
+                kind="decision",
+                title="Ephemeral",
+                content="This must be removed with the eval workspace.",
+                importance=3,
+            )
+            vector.upsert(memory, [1.0] + [0.0] * 31)
+            self.assertIn(memory.id, vector.list_indexed(workspace_id="eval-project"))
+
+            service.delete_workspace_state(workspace_id="eval-project")
+
+            self.assertIsNone(
+                repository.get_member(
+                    workspace_id="eval-project",
+                    user_id="eval-principal",
+                )
+            )
+            self.assertIsNone(repository.get_memory(memory.id))
+            self.assertNotIn("eval-project", repository._settings)  # noqa: SLF001
+            self.assertEqual(vector.list_indexed(workspace_id="eval-project"), {})
+
     def test_active_l1_mutations_schedule_l2_l3_refresh(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

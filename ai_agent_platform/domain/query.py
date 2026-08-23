@@ -37,6 +37,8 @@ class QueryParams:
     skill_name: str | None = None
     skill_arguments: tuple[str, ...] = ()
     preferred_tool_name: str | None = None
+    evaluation: bool = False
+    evaluation_knowledge_base_ids: tuple[str, ...] = ()
     entrypoint: str = "sdk"
     entrypoint_metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -55,6 +57,11 @@ class QueryParams:
             self,
             "skill_arguments",
             tuple(str(item) for item in self.skill_arguments),
+        )
+        object.__setattr__(
+            self,
+            "evaluation_knowledge_base_ids",
+            tuple(str(item) for item in self.evaluation_knowledge_base_ids),
         )
         object.__setattr__(
             self,

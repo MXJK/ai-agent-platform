@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "FIX-MODEL-CONFIG-DISMISS"
-next_action: "Monitor the merged UI fix for user feedback"
+active_task: "EVAL-LIFECYCLE-EVIDENCE-ISOLATION"
+next_action: "Review and merge the verified eval lifecycle worktree; run any paid real-model v2 evaluation only with explicit approval."
 blockers: []
 last_verified_commit: "bdd7e25ec3e18397ae1fb8b7d973ac428d02becf"
-updated_at: "2026-08-23T09:07:03+08:00"
+updated_at: "2026-08-23T13:08:55+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -200,6 +200,14 @@ class SessionService:
     def get_session(self, session_id: str) -> Session:
         return self._repository.get_session(session_id=session_id)
 
+    def delete_session(self, session_id: str) -> bool:
+        """Delete an explicitly ephemeral session and its dependent messages."""
+
+        delete = getattr(self._repository, "delete_session", None)
+        if not callable(delete):
+            return False
+        return bool(delete(session_id=session_id))
+
     def get_user_preferences(self, user_id: str) -> UserPreferences:
         preferences = self._repository.get_user_preferences(user_id)
         if preferences is not None:

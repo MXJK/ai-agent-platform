@@ -37,16 +37,17 @@ a hard negative, and an empty-knowledge-base/no-evidence case.
 ```
 
 L0 answers "is the pipeline still working". L1 answers "did the run get there
-the right way". It drives the same full stack over HTTP, then grades the
-process.
+the right way". It creates and observes the run through the throwaway app and
+submits through the same `QueryService` isolated-Eval path as the in-app suite,
+then grades the process.
 
 **Constraints, not golden answers.** Each case in `trajectory_cases.json`
 declares what must hold, and nothing more:
 
 | Field | Meaning |
 | --- | --- |
-| `required_tools` | tools that must appear |
-| `forbidden_tools` | tools that must not appear — a write tool in a read-only task is a hard failure |
+| `required_tools` | tools that must have a matching real `ToolResult` |
+| `forbidden_tools` | proposed forbidden tools are planning warnings; executed forbidden tools are critical platform-safety failures |
 | `order_constraints` | `[before, after]` pairs, e.g. read the file before explaining it |
 | `max_steps` | upper bound on executed tool calls |
 | `expected_status` | terminal run status |
@@ -57,13 +58,20 @@ appropriate — `tests/test_agent_loop_characterization.py` drives the graph wit
 hand-written deterministic planners, so its goldens are pinned by this
 repository's own code rather than by a model.
 
+**Tool-call lifecycle.** A provider proposal is not an execution. Every case
+retains `proposed`, `accepted`, `executed`, `succeeded`, `failed`, `suppressed`,
+`denied`, and `pending approval` calls with call IDs, arguments, source, reason,
+and outcome where available. `executed` requires a `ToolResult` joined by call
+ID. Required tools, order constraints, step ceilings, and recovery use only this
+executed sequence; a proposal without a result is never assumed successful.
+
 **Four process metrics**, all collected automatically:
 
-1. **Invalid action rate** — `(repeated calls + suppressed calls) / (executed
-   calls + suppressed calls)`. Each executed call is counted at most once even
-   when it is both a repeat and a post-failure retry; the two are reported
-   separately. Suppressed calls come from the `suppressed_tools` field that
-   `plan_tools` writes into the run trace.
+1. **Invalid action rate** — `(exact repeated executed calls + suppressed calls)
+   / (executed calls + suppressed calls)`. Failed calls and post-failure retries
+   are reported separately, not double-counted as invalid. With no denominator
+   the value is `n/a`, not zero. Suppressed calls come from the structured
+   `suppressed_tools` trace field.
 2. **Step efficiency** — executed tool calls divided by the case's declared
    `reference_steps`, the number of calls a minimal correct plan needs. Graph
    nodes are not used: fixed pipeline stages would wash out the signal.
@@ -76,16 +84,29 @@ repository's own code rather than by a model.
    `recovered` (a different call succeeded afterwards), `retry_loop` (only the
    failing call was re-issued) or `gave_up` (no calls afterwards).
 
-**Citation verification** (`verify_citations: true`) checks three things
-programmatically, with no judge and no model:
+**Read evidence and citation verification** (`verify_citations: true`) uses one
+successful-read ledger. Initialization `ContextSource` records are merged with
+successful native `repo.read_file` results; the latter retain normalized
+workspace-relative path, normalized line range, exact content, SHA-256,
+truncation status, and call ID. Failed, suppressed, denied, or pending calls do
+not create evidence. `repo.search_code` can prove that a returned matching line
+exists, but cannot prove the whole file was read.
+
+The verifier checks three things programmatically, with no judge and no model:
 
 1. every cited path exists in the workspace;
 2. the content on disk at `start_line..end_line` equals the cited `text`,
    compared line by line with each line stripped, because `repo.search_code`
    strips matched lines while `repo.read_file` keeps them verbatim;
-3. every file path in the answer was actually read. A path is grounded when it
-   is a context-source path or appears inside the text of one — repeating a
-   filename the README mentioned is reporting, not inventing.
+3. every file path in the answer resolves to successful read evidence. A unique
+   basename may resolve to its read full path; duplicate basenames remain
+   ambiguous. Merely quoting a filename from README or a search result does not
+   ground the target file.
+
+This produces three independent metrics: `citation_content_accuracy` for
+scoreable path/range/content records, `answer_path_grounding_rate` for paths in
+the answer, and `fully_grounded_case_rate` for cases passing both checks. Each is
+`n/a` when it has no scoreable sample.
 
 `metric_thresholds` gates the suite. The current deterministic baseline is:
 
@@ -95,7 +116,9 @@ programmatically, with no judge and no model:
 | Mean step efficiency | 2.273 | ≤ 2.6 |
 | Budget cap rate | 0.125 | ≤ 0.25 |
 | Failure recovery rate | 1.000 | = 1.0 |
-| Citation accuracy | 1.000 | = 1.0 |
+| Citation content accuracy | 1.000 | = 1.0 |
+| Answer path grounding rate | 1.000 | = 1.0 |
+| Fully grounded case rate | 1.000 | = 1.0 |
 
 ## Running the same suite in the app, against a real model
 
@@ -106,26 +129,40 @@ in the app's own state volume, and the container image carries only
 `ai_agent_platform`, not `evals/`. That is why the analysis modules live in
 `ai_agent_platform/evaluation/` and this directory only holds the CLI.
 
-Open the **评测** page in the UI, pick a registered provider, and run. The page
-shows the pass rate, all five metrics, threshold and regression alerts, the run
-history, and per-case detail down to which constraint broke.
+Open the **评测** page in the UI, pick an enabled provider/model pair, and run.
+The page shows metric direction and denominator hints, token/time totals and
+per-case averages, proposed/executed/suppressed counts, the three citation
+metrics, alerts, history, and per-case call/evidence details.
 
 - `POST /api/v1/evals/runs` starts a run in the background; one at a time.
 - `GET /api/v1/evals/runs` and `/evals/runs/{id}` read history and detail.
-- `POST /api/v1/evals/runs/{id}/baseline` pins a run as the provider's baseline.
+- `POST /api/v1/evals/runs/{id}/baseline` manually pins a compatible baseline;
+  `force=true` is required for a run with critical alerts.
 - `GET /api/v1/evals/catalogue` describes the suite and the providers that
   actually have an enabled registered model. Anything else is refused with a
   400 rather than started — an unregistered provider produces an empty tool
   selection and every case fails with a permission denial that reads like an
   agent bug.
 
-Each provider carries **its own baseline**. A real model and the fake provider
-are not comparable: the real model actually enters the native tool loop, so its
-step counts, repeated calls and suppression counts differ in kind. The first
-completed run for a provider becomes its baseline; later runs report a signed
-delta and alert on regression beyond `regression_tolerance`. Two things are
-enforced for every provider regardless of baseline: a failed case, and citation
-accuracy below 1.0.
+An in-app Eval Run carries an explicit `evaluation=true` execution context. It
+still resolves the selected registered model and its secret inside the app, but
+the secret is never serialized into eval records. The context factory supplies
+no real profile, summary, or conversation history; retrieval skips project
+memory and the global knowledge-base catalogue, except for fixture KB IDs the
+suite explicitly allows. Query completion skips user/project-memory writes and
+background extraction. Every case session is deleted, then the run removes its
+workspace, temporary member/settings/memory rows, vector rows, and files. A
+generated temporary principal is used only as an authorization subject; the
+explicit evaluation flag—not its name—controls isolation.
+
+Baselines are keyed by **provider + model + suite ID + evaluator version**. A
+completed run is not trusted automatically: pinning is manual, requires all
+cases and complete metrics, and normally rejects critical alerts. The UI asks
+twice before sending an explicit forced pin. Eval runs and baselines also store
+an evaluator version and schema version; migration labels existing records as
+`legacy`, so they stay readable but cannot silently compare with evaluator 2.0
+and suite `l1_trajectory_v2`. Token and elapsed-time metrics generate relative
+regression warnings only; they are not uncalibrated hard failure gates.
 
 Step ceilings follow the same logic. `max_steps` is the fake-provider ceiling;
 `max_steps_by_provider` overrides it per provider. Which tools must and must not
@@ -137,9 +174,13 @@ deterministic tool failure so failure recovery can be measured. The fault is
 scoped to the eval's own workspace, so a user's concurrent run can never be hit.
 With it off, the metric reports n/a rather than a misleading 1.0.
 
-### Measured DeepSeek baseline
+### Legacy DeepSeek measurement (not a v2 baseline)
 
-`deepseek-v4-flash`, 8 cases, ~790k tokens, ~370s:
+The earlier `deepseek-v4-flash` run (8 cases, ~790k tokens, ~370s) used the old
+evaluator. Its `tool_calls` array was counted as executed even when no
+`ToolResult` existed, and native `read_file` results were missing from citation
+evidence. These historical numbers are retained only to explain the bug; they
+are explicitly `legacy` after migration and must not be compared with v2:
 
 | Metric | fake | deepseek |
 | --- | --- | --- |
@@ -148,20 +189,11 @@ With it off, the metric reports n/a rather than a misleading 1.0.
 | Mean step efficiency | 2.273 | 5.94 |
 | Budget cap rate | 0.125 | 0.125 |
 | Failure recovery rate | 1.000 | 1.000 |
-| Citation accuracy | 1.000 | 1.000 |
+| Legacy combined citation accuracy | 1.000 | 1.000 |
 
-The interesting column is the second one, and the interesting number is not the
-pass rate. Under the fake provider `suppressed_calls` is always zero because the
-native tool loop never runs; under DeepSeek it is 2–11 per case, which is what
-puts the invalid-action rate at 37%.
-
-Seven of eight cases failed on **ungrounded citations**, and they are true
-positives. Asked where `create_order` is implemented, the model read only
-`src/api/routes.py` and then wrote that `OrderService` is at
-`src/services/orders.py:1` and `submit` at `:4` — correct, but inferred from an
-import statement, for a file the run never opened. That is precisely the failure
-the citation checker exists to catch, and it is invisible under the fake
-provider, whose answer is an echo of its own prompt.
+The original raw run contained 170 proposals, 139 matching ToolResults, 30
+suppressed calls, and one pending approval. Re-running it under v2 would require
+a paid provider call and is intentionally not part of automated verification.
 
 ## Project-memory quality gates
 
@@ -180,15 +212,17 @@ of **this system's** logic — routing, exploration, suppression, budgets,
 citation bookkeeping — not a benchmark of model or answer quality. A passing
 run says nothing about how good the answers are.
 
-Two limits are worth stating explicitly:
+Three limits are worth stating explicitly:
 
 - The fake provider's answer is an echo of its prompt, so it cannot fabricate a
   citation. The hallucinated-citation detector is proven by
-  `tests/test_trajectory_evals.py` offline — and, as the DeepSeek baseline above
-  shows, it fires on a real model.
+  `tests/test_trajectory_evals.py` with explicit positive, search-only, failed
+  read, and ambiguous-basename cases. The legacy DeepSeek run motivated those
+  cases but is not valid v2 accuracy evidence.
 - The fake provider never enters the native tool loop, so `suppressed_tools` is
   always zero offline. That field is covered end to end by
-  `tests/test_native_tool_calling.py`, and is non-zero on every real-model run.
+  `tests/test_native_tool_calling.py`; no paid real-model rerun was performed for
+  evaluator v2.
 - A single real-model run is one sample. Run-to-run variance is not measured;
   `pass^k` is still a design item in DESIGN.md, not something these numbers
   account for.

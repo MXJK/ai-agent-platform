@@ -301,6 +301,23 @@ class CodingAgentRuntime:
         run_id = run_id or f"run_{uuid4().hex[:12]}"
         thread_id = run_id
         config = self._checkpoint_coordinator.config(thread_id)
+        evaluation_metadata = (
+            run_context.metadata.entrypoint_metadata.get("evaluation", {})
+            if run_context is not None
+            else {}
+        )
+        evaluation_isolated = bool(
+            isinstance(evaluation_metadata, dict)
+            and evaluation_metadata.get("isolated")
+        )
+        evaluation_knowledge_base_ids = (
+            [
+                str(item)
+                for item in evaluation_metadata.get("knowledge_base_ids", [])
+            ]
+            if isinstance(evaluation_metadata, dict)
+            else []
+        )
         self._recorder._save_record(
             run_id=run_id,
             conversation_id=conversation_id,
@@ -326,6 +343,8 @@ class CodingAgentRuntime:
             "cwd": cwd,
             "additional_directories": additional_directories,
             "enabled_tools": enabled_tools,
+            "evaluation_isolated": evaluation_isolated,
+            "evaluation_knowledge_base_ids": evaluation_knowledge_base_ids,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [

@@ -1710,7 +1710,13 @@ class NativeToolLoopTests(unittest.TestCase):
         self.assertEqual([item["call_id"] for item in executed], ["repeat_1"])
         self.assertEqual(
             suppressed,
-            [{"name": "demo.lookup", "reason": "repeated_tool_call"}],
+            [{
+                "call_id": "repeat_2",
+                "name": "demo.lookup",
+                "arguments": {"query": "same"},
+                "source": "planner",
+                "reason": "repeated_tool_call",
+            }],
         )
 
     def test_change_task_cannot_complete_before_successful_sandbox_mutation(self) -> None:

@@ -145,6 +145,10 @@ class QueryService:
             skill_name=params.skill_name,
             skill_arguments=params.skill_arguments,
             preferred_tool_name=params.preferred_tool_name,
+            evaluation=params.evaluation,
+            evaluation_knowledge_base_ids=(
+                list(params.evaluation_knowledge_base_ids)
+            ),
             entrypoint_type=params.entrypoint,
             entrypoint_metadata=params.metadata_dict(),
         )
@@ -163,6 +167,8 @@ class QueryService:
         routing_policy: str | None = None,
         cwd: str | None = None,
         additional_workspace_ids: Optional[list[str]] = None,
+        evaluation: bool = False,
+        evaluation_knowledge_base_ids: Optional[list[str]] = None,
     ) -> AgentRunRecord:
         return self.start(
             QueryParams(
@@ -177,12 +183,26 @@ class QueryService:
                 cwd=cwd,
                 additional_workspace_ids=tuple(additional_workspace_ids or ()),
                 actor_user_id=actor_user_id,
+                evaluation=evaluation,
+                evaluation_knowledge_base_ids=tuple(
+                    evaluation_knowledge_base_ids or ()
+                ),
                 entrypoint=(
                     self._execution_context_factory.entrypoint_type
                     if self._execution_context_factory is not None
                     else "sdk"
                 ),
-                entrypoint_metadata={"adapter": "AgentRunService"},
+                entrypoint_metadata={
+                    "adapter": "AgentRunService",
+                    "evaluation": {
+                        "isolated": True,
+                        "knowledge_base_ids": list(
+                            evaluation_knowledge_base_ids or ()
+                        ),
+                    }
+                    if evaluation
+                    else {},
+                },
             )
         )
 
@@ -206,6 +226,8 @@ class QueryService:
         skill_name: str | None = None,
         skill_arguments: tuple[str, ...] = (),
         preferred_tool_name: str | None = None,
+        evaluation: bool = False,
+        evaluation_knowledge_base_ids: Optional[list[str]] = None,
     ) -> AgentRunRecord:
         if mode is not None and mode not in {"auto", "manual"}:
             raise ValueError("Query mode must be auto or manual")
@@ -262,6 +284,14 @@ class QueryService:
                 mode=mode,
             )
         run_id = f"run_{uuid4().hex[:12]}"
+        snapshot_entrypoint_metadata = dict(entrypoint_metadata or {})
+        if evaluation:
+            snapshot_entrypoint_metadata["evaluation"] = {
+                "isolated": True,
+                "knowledge_base_ids": list(
+                    evaluation_knowledge_base_ids or ()
+                ),
+            }
         if self._execution_context_factory is not None:
             context_snapshot = self._execution_context_factory.create(
                 conversation_id=conversation_id,
@@ -274,10 +304,11 @@ class QueryService:
                 additional_workspace_ids=additional_workspace_ids or [],
                 run_id=run_id,
                 entrypoint_type=entrypoint_type,
-                entrypoint_metadata=entrypoint_metadata or {},
+                entrypoint_metadata=snapshot_entrypoint_metadata,
                 skill_name=skill_name,
                 skill_arguments=skill_arguments,
                 preferred_tool_name=preferred_tool_name,
+                isolated=evaluation,
             )
             resolved_actor = context_snapshot.identity.actor_user_id
             workspace_root = context_snapshot.project.workspace_root
@@ -300,8 +331,12 @@ class QueryService:
                     trace=[],
                     context_snapshot=context_snapshot,
                 )
-                preferences = self._session_service.get_user_preferences(
-                    resolved_actor
+                preferences = (
+                    None
+                    if evaluation
+                    else self._session_service.get_user_preferences(
+                        resolved_actor
+                    )
                 )
                 self._query_uow.persist_start(
                     record=record,
@@ -351,7 +386,9 @@ class QueryService:
                 "build_agent_context",
                 None,
             )
-            if callable(build_agent_context):
+            if evaluation:
+                history_payload = []
+            elif callable(build_agent_context):
                 history_payload = build_agent_context(
                     session_id=conversation_id,
                     max_context_messages=self._max_context_messages,
@@ -402,12 +439,13 @@ class QueryService:
             self._metrics.increment("agent_runs_rejected_total")
             self._mark_queued_run_failed(record.run_id, str(exc))
             raise
-        self._enqueue_user_memory(
-            user_id=resolved_actor,
-            message=message,
-            source_id=record.run_id,
-            workspace_id=workspace_id,
-        )
+        if not evaluation:
+            self._enqueue_user_memory(
+                user_id=resolved_actor,
+                message=message,
+                source_id=record.run_id,
+                workspace_id=workspace_id,
+            )
         self._metrics.increment("agent_runs_submitted_total")
         return record
 
@@ -898,11 +936,12 @@ class QueryService:
                 started_at=started_at,
             )
             logger.info("agent run finished", extra={"status": result.status})
-            self._record_assistant_message(
-                result,
-                user_message=message,
-                actor_user_id=actor_user_id,
-            )
+            if not _is_evaluation_record(record):
+                self._record_assistant_message(
+                    result,
+                    user_message=message,
+                    actor_user_id=actor_user_id,
+                )
 
     def execute_resume_task(
         self,
@@ -1259,6 +1298,13 @@ class QueryService:
         user_message: str | None = None,
         actor_user_id: str | None = None,
     ) -> None:
+        result_run_id = str(getattr(result, "run_id", "") or "")
+        if result_run_id:
+            try:
+                if _is_evaluation_record(self.get_run(result_run_id)):
+                    return
+            except (KeyError, AgentRunNotFoundError):
+                pass
         if result.status not in {"completed", "partial", "blocked"} or not result.answer:
             return
         if self._query_uow is not None:
@@ -1388,6 +1434,14 @@ class QueryService:
 
 def _assistant_message_id(run_id: str) -> str:
     return f"msg_{uuid5(NAMESPACE_URL, f'assistant:{run_id}').hex[:12]}"
+
+
+def _is_evaluation_record(record: AgentRunRecord) -> bool:
+    snapshot = record.context_snapshot
+    if snapshot is None:
+        return False
+    evaluation = snapshot.metadata.entrypoint_metadata.get("evaluation")
+    return bool(isinstance(evaluation, dict) and evaluation.get("isolated"))
 
 
 def _snapshot_approval_policy(snapshot: object) -> str:

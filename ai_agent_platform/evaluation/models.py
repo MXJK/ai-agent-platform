@@ -11,6 +11,11 @@ EVAL_STATUS_RUNNING = "running"
 EVAL_STATUS_COMPLETED = "completed"
 EVAL_STATUS_FAILED = "failed"
 
+EVALUATOR_VERSION = "2.0"
+EVAL_SCHEMA_VERSION = 2
+LEGACY_EVALUATOR_VERSION = "legacy"
+LEGACY_EVAL_SCHEMA_VERSION = 1
+
 ALERT_THRESHOLD = "threshold"
 ALERT_REGRESSION = "regression"
 ALERT_CASE = "case"
@@ -27,7 +32,16 @@ METRIC_DIRECTIONS: dict[str, str] = {
     "mean_step_efficiency": "lower_is_better",
     "budget_cap_rate": "lower_is_better",
     "failure_recovery_rate": "higher_is_better",
-    "citation_accuracy": "higher_is_better",
+    "citation_content_accuracy": "higher_is_better",
+    "answer_path_grounding_rate": "higher_is_better",
+    "fully_grounded_case_rate": "higher_is_better",
+    "tokens_per_case": "lower_is_better",
+    "total_tokens": "lower_is_better",
+    "elapsed_ms_per_case": "lower_is_better",
+    "elapsed_ms": "lower_is_better",
+    "proposed_calls": "lower_is_better",
+    "executed_calls": "lower_is_better",
+    "suppressed_calls": "lower_is_better",
 }
 
 
@@ -36,11 +50,20 @@ class EvalSuiteMetrics:
     """Suite-level numbers. ``None`` means no case measured it."""
 
     pass_rate: float
-    invalid_action_rate: float
+    invalid_action_rate: float | None
     mean_step_efficiency: float | None
-    budget_cap_rate: float
+    budget_cap_rate: float | None
     failure_recovery_rate: float | None
-    citation_accuracy: float | None
+    citation_content_accuracy: float | None
+    answer_path_grounding_rate: float | None = None
+    fully_grounded_case_rate: float | None = None
+    total_tokens: int = 0
+    tokens_per_case: float | None = None
+    elapsed_ms: int = 0
+    elapsed_ms_per_case: float | None = None
+    proposed_calls: int = 0
+    executed_calls: int = 0
+    suppressed_calls: int = 0
 
     def as_dict(self) -> dict[str, float | None]:
         return {
@@ -49,20 +72,46 @@ class EvalSuiteMetrics:
             "mean_step_efficiency": self.mean_step_efficiency,
             "budget_cap_rate": self.budget_cap_rate,
             "failure_recovery_rate": self.failure_recovery_rate,
-            "citation_accuracy": self.citation_accuracy,
+            "citation_content_accuracy": self.citation_content_accuracy,
+            "answer_path_grounding_rate": self.answer_path_grounding_rate,
+            "fully_grounded_case_rate": self.fully_grounded_case_rate,
+            "total_tokens": self.total_tokens,
+            "tokens_per_case": self.tokens_per_case,
+            "elapsed_ms": self.elapsed_ms,
+            "elapsed_ms_per_case": self.elapsed_ms_per_case,
+            "proposed_calls": self.proposed_calls,
+            "executed_calls": self.executed_calls,
+            "suppressed_calls": self.suppressed_calls,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "EvalSuiteMetrics":
         return cls(
             pass_rate=float(payload.get("pass_rate") or 0.0),
-            invalid_action_rate=float(payload.get("invalid_action_rate") or 0.0),
+            invalid_action_rate=_optional_float(payload.get("invalid_action_rate")),
             mean_step_efficiency=_optional_float(payload.get("mean_step_efficiency")),
-            budget_cap_rate=float(payload.get("budget_cap_rate") or 0.0),
+            budget_cap_rate=_optional_float(payload.get("budget_cap_rate")),
             failure_recovery_rate=_optional_float(
                 payload.get("failure_recovery_rate")
             ),
-            citation_accuracy=_optional_float(payload.get("citation_accuracy")),
+            citation_content_accuracy=_optional_float(
+                payload.get("citation_content_accuracy", payload.get("citation_accuracy"))
+            ),
+            answer_path_grounding_rate=_optional_float(
+                payload.get("answer_path_grounding_rate")
+            ),
+            fully_grounded_case_rate=_optional_float(
+                payload.get("fully_grounded_case_rate")
+            ),
+            total_tokens=int(payload.get("total_tokens") or 0),
+            tokens_per_case=_optional_float(payload.get("tokens_per_case")),
+            elapsed_ms=int(payload.get("elapsed_ms") or 0),
+            elapsed_ms_per_case=_optional_float(
+                payload.get("elapsed_ms_per_case")
+            ),
+            proposed_calls=int(payload.get("proposed_calls") or 0),
+            executed_calls=int(payload.get("executed_calls") or 0),
+            suppressed_calls=int(payload.get("suppressed_calls") or 0),
         )
 
 
@@ -78,6 +127,8 @@ class EvalCaseRecord:
     metrics: dict[str, Any] = field(default_factory=dict)
     citations: dict[str, Any] | None = None
     trace_nodes: tuple[str, ...] = ()
+    read_evidence: tuple[dict[str, Any], ...] = ()
+    agent_errors: tuple[dict[str, Any], ...] = ()
     error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -90,6 +141,8 @@ class EvalCaseRecord:
             "metrics": dict(self.metrics),
             "citations": dict(self.citations) if self.citations else None,
             "trace_nodes": list(self.trace_nodes),
+            "read_evidence": [dict(item) for item in self.read_evidence],
+            "agent_errors": [dict(item) for item in self.agent_errors],
             "error": self.error,
         }
 
@@ -104,6 +157,8 @@ class EvalCaseRecord:
             metrics=dict(payload.get("metrics") or {}),
             citations=payload.get("citations"),
             trace_nodes=tuple(payload.get("trace_nodes") or ()),
+            read_evidence=tuple(payload.get("read_evidence") or ()),
+            agent_errors=tuple(payload.get("agent_errors") or ()),
             error=str(payload.get("error") or ""),
         )
 
@@ -149,6 +204,8 @@ class EvalRunRecord:
     model: str
     status: str
     started_at: datetime
+    evaluator_version: str = EVALUATOR_VERSION
+    schema_version: int = EVAL_SCHEMA_VERSION
     finished_at: datetime | None = None
     total_cases: int = 0
     completed_cases: int = 0
@@ -172,12 +229,21 @@ class EvalRunRecord:
 
 @dataclass(frozen=True)
 class EvalBaseline:
-    """The run a provider's later runs are compared against."""
+    """A manually trusted run under one fully compatible evaluator key."""
 
     provider: str
+    model: str
+    suite_id: str
+    evaluator_version: str
+    schema_version: int
     run_id: str
     metrics: EvalSuiteMetrics
     pinned_at: datetime
+    forced: bool = False
+
+    @property
+    def key(self) -> tuple[str, str, str, str]:
+        return (self.provider, self.model, self.suite_id, self.evaluator_version)
 
 
 def utc_now() -> datetime:
