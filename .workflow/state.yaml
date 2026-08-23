@@ -3,6 +3,6 @@ status: "done"
 active_task: "EVAL-LIFECYCLE-EVIDENCE-ISOLATION"
 next_action: "Review and merge the verified eval lifecycle worktree; run any paid real-model v2 evaluation only with explicit approval."
 blockers: []
-last_verified_commit: "bdd7e25ec3e18397ae1fb8b7d973ac428d02becf"
-updated_at: "2026-08-23T13:08:55+08:00"
+last_verified_commit: "089100cec73a8d41b720b7d820677755e687d428"
+updated_at: "2026-08-23T13:30:34+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
