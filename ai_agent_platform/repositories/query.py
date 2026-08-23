@@ -20,7 +20,7 @@ class QueryUnitOfWork(Protocol):
         record: AgentRunRecord,
         message_id: str,
         message: str,
-        preferences: UserPreferences,
+        preferences: UserPreferences | None,
     ) -> Message:
         ...
 
@@ -51,7 +51,7 @@ class InMemoryQueryUnitOfWork:
         record: AgentRunRecord,
         message_id: str,
         message: str,
-        preferences: UserPreferences,
+        preferences: UserPreferences | None,
     ) -> Message:
         del preferences
         with self._sessions._lock, self._runs._lock:
@@ -146,7 +146,7 @@ class PostgresQueryUnitOfWork:
         record: AgentRunRecord,
         message_id: str,
         message: str,
-        preferences: UserPreferences,
+        preferences: UserPreferences | None,
     ) -> Message:
         from ai_agent_platform.repositories.postgres import _require_jsonb
 
@@ -217,14 +217,15 @@ class PostgresQueryUnitOfWork:
             )
             if stored is None:
                 raise RuntimeError("Query start message already exists")
-            self._sessions._save_user_preferences(
-                conn,
-                replace(
-                    preferences,
-                    last_active_session_id=record.conversation_id,
-                    updated_at=stored.created_at,
-                ),
-            )
+            if preferences is not None:
+                self._sessions._save_user_preferences(
+                    conn,
+                    replace(
+                        preferences,
+                        last_active_session_id=record.conversation_id,
+                        updated_at=stored.created_at,
+                    ),
+                )
         return stored
 
     def persist_assistant_once(
@@ -261,7 +262,7 @@ class SQLiteQueryUnitOfWork:
         record: AgentRunRecord,
         message_id: str,
         message: str,
-        preferences: UserPreferences,
+        preferences: UserPreferences | None,
     ) -> Message:
         with self._runs.database.transaction(immediate=True) as conn:
             self._runs.save_in_transaction(conn, record)
@@ -275,14 +276,15 @@ class SQLiteQueryUnitOfWork:
             )
             if stored is None:
                 raise RuntimeError("Query start message already exists")
-            self._sessions._save_user_preferences(
-                conn,
-                replace(
-                    preferences,
-                    last_active_session_id=record.conversation_id,
-                    updated_at=stored.created_at,
-                ),
-            )
+            if preferences is not None:
+                self._sessions._save_user_preferences(
+                    conn,
+                    replace(
+                        preferences,
+                        last_active_session_id=record.conversation_id,
+                        updated_at=stored.created_at,
+                    ),
+                )
         return stored
 
     def persist_assistant_once(

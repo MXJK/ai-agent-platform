@@ -18,6 +18,7 @@ from typing import Any, Callable, Protocol
 import uuid
 
 from ai_agent_platform.evaluation.citations import verify_citations
+from ai_agent_platform.evaluation.evidence import build_read_evidence_ledger
 from ai_agent_platform.evaluation.faults import ToolFaultController
 from ai_agent_platform.evaluation.models import (
     ALERT_CASE,
@@ -26,6 +27,8 @@ from ai_agent_platform.evaluation.models import (
     EVAL_STATUS_COMPLETED,
     EVAL_STATUS_FAILED,
     EVAL_STATUS_RUNNING,
+    EVALUATOR_VERSION,
+    EVAL_SCHEMA_VERSION,
     METRIC_DIRECTIONS,
     SEVERITY_CRITICAL,
     SEVERITY_WARNING,
@@ -66,7 +69,14 @@ TERMINAL_STATUSES = frozenset(
 # Correctness invariants that hold for every provider. Performance numbers are
 # compared against the provider's own baseline instead, because a real model and
 # the fake provider are not comparable on step counts.
-ALWAYS_ENFORCED_METRICS = ("citation_accuracy",)
+ALWAYS_ENFORCED_METRICS = (
+    "citation_content_accuracy",
+    "answer_path_grounding_rate",
+    "fully_grounded_case_rate",
+)
+RELATIVE_REGRESSION_METRICS = frozenset(
+    {"total_tokens", "tokens_per_case", "elapsed_ms", "elapsed_ms_per_case"}
+)
 
 
 class EvalRepository(Protocol):
@@ -83,7 +93,13 @@ class EvalRepository(Protocol):
         limit: int = 20,
     ) -> list[EvalRunRecord]: ...
 
-    def get_baseline(self, provider: str) -> EvalBaseline | None: ...
+    def get_baseline(
+        self,
+        provider: str,
+        model: str,
+        suite_id: str,
+        evaluator_version: str,
+    ) -> EvalBaseline | None: ...
 
     def set_baseline(self, baseline: EvalBaseline) -> EvalBaseline: ...
 
@@ -158,6 +174,8 @@ class EvalService:
 
         return {
             "suite_id": self._suite.suite_id,
+            "evaluator_version": EVALUATOR_VERSION,
+            "schema_version": EVAL_SCHEMA_VERSION,
             "fault_injection_enabled": self.fault_injection_enabled,
             "metric_thresholds": dict(self._suite.metric_thresholds),
             "regression_tolerance": dict(self._suite.regression_tolerance),
@@ -231,16 +249,18 @@ class EvalService:
 
         if self._model_registry is None:
             return []
-        seen: dict[str, dict[str, str]] = {}
+        seen: dict[tuple[str, str], dict[str, str]] = {}
         for item in self._model_registry.list_models():
             if not item.get("enabled"):
                 continue
             provider = str(item.get("provider") or "")
-            if not provider or provider in seen:
+            model = str(item.get("model") or "")
+            key = (provider, model)
+            if not provider or not model or key in seen:
                 continue
-            seen[provider] = {
+            seen[key] = {
                 "provider": provider,
-                "model": str(item.get("model") or ""),
+                "model": model,
                 "display_name": str(item.get("display_name") or provider),
             }
         return [seen[key] for key in sorted(seen)]
@@ -270,7 +290,7 @@ class EvalService:
         record = self._repository.get_run(run_id)
         if record is None:
             raise EvalRunNotFoundError(run_id)
-        return record
+        return self._with_baseline_state(record)
 
     def list_runs(
         self,
@@ -278,28 +298,88 @@ class EvalService:
         provider: str | None = None,
         limit: int = 20,
     ) -> list[EvalRunRecord]:
-        return self._repository.list_runs(provider=provider, limit=limit)
+        return [
+            self._with_baseline_state(item)
+            for item in self._repository.list_runs(provider=provider, limit=limit)
+        ]
 
-    def get_baseline(self, provider: str) -> EvalBaseline | None:
-        return self._repository.get_baseline(provider)
+    def get_baseline(
+        self,
+        provider: str,
+        model: str = "",
+        suite_id: str = "",
+        evaluator_version: str = EVALUATOR_VERSION,
+        schema_version: int | None = EVAL_SCHEMA_VERSION,
+    ) -> EvalBaseline | None:
+        baseline = self._repository.get_baseline(
+            provider,
+            model,
+            suite_id or self._suite.suite_id,
+            evaluator_version,
+        )
+        if (
+            baseline is not None
+            and schema_version is not None
+            and baseline.schema_version != schema_version
+        ):
+            return None
+        return baseline
 
-    def pin_baseline(self, run_id: str) -> EvalBaseline:
+    def _with_baseline_state(self, record: EvalRunRecord) -> EvalRunRecord:
+        baseline = self.get_baseline(
+            record.provider,
+            record.model,
+            record.suite_id,
+            record.evaluator_version,
+            record.schema_version,
+        )
+        baseline_run_id = baseline.run_id if baseline is not None else ""
+        return self._replace(
+            record,
+            baseline_run_id=baseline_run_id,
+            is_baseline=baseline_run_id == record.run_id,
+        )
+
+    def pin_baseline(self, run_id: str, *, force: bool = False) -> EvalBaseline:
         record = self.get_run(run_id)
         if record.status != EVAL_STATUS_COMPLETED or record.metrics is None:
             raise ValueError("only a completed eval run can become a baseline")
-        return self._repository.set_baseline(
+        if (
+            record.completed_cases != record.total_cases
+            or len(record.cases) != record.total_cases
+            or record.total_cases <= 0
+        ):
+            raise ValueError("an incomplete eval run cannot become a baseline")
+        has_critical = any(
+            item.severity == SEVERITY_CRITICAL for item in record.alerts
+        )
+        if has_critical and not force:
+            raise ValueError(
+                "a run with critical alerts requires force=true to become a baseline"
+            )
+        baseline = self._repository.set_baseline(
             EvalBaseline(
                 provider=record.provider,
+                model=record.model,
+                suite_id=record.suite_id,
+                evaluator_version=record.evaluator_version,
+                schema_version=record.schema_version,
                 run_id=record.run_id,
                 metrics=record.metrics,
                 pinned_at=utc_now(),
+                forced=has_critical and force,
             )
         )
+        self._repository.update_run(
+            self._replace(record, baseline_run_id=record.run_id, is_baseline=True)
+        )
+        return baseline
 
     def _execute(self, record: EvalRunRecord) -> None:
         started = time.perf_counter()
         workspace_root = self._workspace_root / record.run_id
         workspace_id = f"eval_{record.run_id}"
+        eval_actor_user_id = f"eval-principal:{record.run_id}"
         cases: list[EvalCaseRecord] = []
         try:
             workspace_root.mkdir(parents=True, exist_ok=True)
@@ -308,12 +388,12 @@ class EvalService:
                 workspace_id=workspace_id,
                 root_path=str(workspace_root),
             )
-            if self._memory_service is not None and self._actor_user_id:
+            if self._memory_service is not None:
                 # Same step the workspace route takes after registering: without
                 # it the actor has no membership and every run is denied.
                 self._memory_service.ensure_workspace_admin(
                     workspace_id=workspace_id,
-                    actor_user_id=self._actor_user_id,
+                    actor_user_id=eval_actor_user_id,
                 )
             for case in self._suite.cases:
                 cases.append(
@@ -323,6 +403,7 @@ class EvalService:
                         workspace_root=workspace_root,
                         provider=record.provider,
                         model=record.model,
+                        actor_user_id=eval_actor_user_id,
                     )
                 )
                 record = self._replace(
@@ -359,8 +440,10 @@ class EvalService:
         workspace_root: Path,
         provider: str,
         model: str,
+        actor_user_id: str,
     ) -> EvalCaseRecord:
         case_id = str(case.get("id") or "")
+        session_id = ""
         fault = case.get("fault_injection")
         if self._fault_controller is not None:
             if isinstance(fault, dict):
@@ -372,16 +455,19 @@ class EvalService:
             else:
                 self._fault_controller.disarm()
         try:
-            session = self._session_service.create_session(
-                self._actor_user_id or "eval_runner"
-            )
+            session = self._session_service.create_session(actor_user_id)
+            session_id = session.id
             submitted = self._query_service.submit_run(
                 conversation_id=session.id,
                 message=str(case["message"]),
                 workspace_id=workspace_id,
-                actor_user_id=self._actor_user_id or None,
+                actor_user_id=actor_user_id,
                 provider=provider or None,
                 model=model or None,
+                evaluation=True,
+                evaluation_knowledge_base_ids=list(
+                    getattr(self._suite, "fixture_knowledge_base_ids", ())
+                ),
             )
             status_body = self._await_run(submitted.run_id)
         except Exception as exc:  # noqa: BLE001 - one bad case must not kill the suite
@@ -396,6 +482,21 @@ class EvalService:
         finally:
             if self._fault_controller is not None:
                 self._fault_controller.disarm()
+            if session_id:
+                delete_session = getattr(
+                    self._session_service,
+                    "delete_session",
+                    None,
+                )
+                if callable(delete_session):
+                    try:
+                        delete_session(session_id)
+                    except Exception:  # noqa: BLE001 - cleanup is best effort
+                        logger.warning(
+                            "could not remove eval session %s",
+                            session_id,
+                            exc_info=True,
+                        )
 
         observation = RunObservation.from_run_status(case_id, status_body)
         result = status_body.get("result") or {}
@@ -404,11 +505,17 @@ class EvalService:
             observation,
             reference_steps=case.get("reference_steps"),
         )
+        read_evidence = build_read_evidence_ledger(
+            observation=observation,
+            workspace_root=workspace_root,
+            context_sources=result.get("context_sources", []),
+        )
         citations = (
             verify_citations(
                 context_sources=result.get("context_sources", []),
                 answer=str(result.get("answer") or ""),
                 workspace_root=workspace_root,
+                read_evidence=[item.as_dict() for item in read_evidence],
             )
             if case.get("verify_citations")
             else None
@@ -426,15 +533,37 @@ class EvalService:
                     "name": item.name,
                     "passed": item.passed,
                     "detail": item.detail,
+                    "severity": item.severity,
                 }
                 for item in constraints
             ),
             metrics={
+                "proposed_calls": metrics.proposed_calls,
+                "accepted_calls": metrics.accepted_calls,
                 "executed_calls": metrics.executed_calls,
+                "succeeded_calls": metrics.succeeded_calls,
                 "failed_calls": metrics.failed_calls,
                 "repeated_calls": metrics.repeated_calls,
                 "retries_after_failure": metrics.retries_after_failure,
                 "suppressed_calls": metrics.suppressed_calls,
+                "denied_calls": metrics.denied_calls,
+                "pending_approval_calls": metrics.pending_approval_calls,
+                "proposed_call_details": [
+                    item.as_dict() for item in observation.proposed_calls
+                ],
+                "executed_call_details": [
+                    item.as_dict() for item in observation.executed_calls
+                ],
+                "suppressed_call_details": [
+                    item.as_dict() for item in observation.suppressed_calls
+                ],
+                "denied_call_details": [
+                    item.as_dict() for item in observation.denied_calls
+                ],
+                "pending_approval_call_details": [
+                    item.as_dict()
+                    for item in observation.pending_approval_calls
+                ],
                 "invalid_action_rate": metrics.invalid_action_rate,
                 "reference_steps": metrics.reference_steps,
                 "step_efficiency": metrics.step_efficiency,
@@ -454,7 +583,14 @@ class EvalService:
                     "scored": citations.scored_count,
                     "unverifiable": len(citations.verdicts)
                     - citations.scored_count,
-                    "accuracy": citations.accuracy,
+                    "content_accuracy": citations.content_accuracy,
+                    "answer_path_count": len(citations.answer_paths),
+                    "grounded_answer_paths": citations.grounded_path_count,
+                    "answer_path_grounding_rate": (
+                        citations.answer_path_grounding_rate
+                    ),
+                    "fully_grounded": citations.fully_grounded,
+                    "scoreable": citations.scoreable,
                     "failures": [
                         {
                             "path": item.path,
@@ -467,11 +603,29 @@ class EvalService:
                         for item in citations.failures
                     ],
                     "ungrounded_paths": list(citations.ungrounded_paths),
+                    "answer_path_verdicts": [
+                        {
+                            "cited_path": item.cited_path,
+                            "resolved_path": item.resolved_path,
+                            "status": item.status,
+                            "detail": item.detail,
+                        }
+                        for item in citations.answer_paths
+                    ],
                 }
                 if citations is not None
                 else None
             ),
             trace_nodes=observation.trace_nodes,
+            read_evidence=tuple(item.as_dict() for item in read_evidence),
+            agent_errors=tuple(
+                item
+                for item in (
+                    list(status_body.get("errors") or ())
+                    + list(result.get("errors") or ())
+                )
+                if isinstance(item, dict)
+            ),
         )
 
     def _await_run(self, run_id: str) -> dict[str, Any]:
@@ -490,8 +644,15 @@ class EvalService:
         cases: list[EvalCaseRecord],
         started: float,
     ) -> EvalRunRecord:
-        metrics = self._aggregate(cases)
-        baseline = self._repository.get_baseline(record.provider)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        metrics = self._aggregate(cases, elapsed_ms=elapsed_ms)
+        baseline = self.get_baseline(
+            record.provider,
+            record.model,
+            record.suite_id,
+            record.evaluator_version,
+            record.schema_version,
+        )
         alerts = self._alerts(record.provider, metrics, cases, baseline)
         finished = self._replace(
             record,
@@ -503,27 +664,21 @@ class EvalService:
             metrics=metrics,
             alerts=tuple(alerts),
             baseline_run_id=baseline.run_id if baseline else "",
-            is_baseline=baseline is None,
+            is_baseline=bool(baseline and baseline.run_id == record.run_id),
             total_tokens=sum(
                 int(item.metrics.get("total_tokens") or 0) for item in cases
             ),
-            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            elapsed_ms=elapsed_ms,
         )
         self._repository.update_run(finished)
-        if baseline is None:
-            # The first completed run for a provider defines what "normal" is;
-            # there is nothing else to compare it against.
-            self._repository.set_baseline(
-                EvalBaseline(
-                    provider=finished.provider,
-                    run_id=finished.run_id,
-                    metrics=metrics,
-                    pinned_at=utc_now(),
-                )
-            )
         return finished
 
-    def _aggregate(self, cases: list[EvalCaseRecord]) -> EvalSuiteMetrics:
+    def _aggregate(
+        self,
+        cases: list[EvalCaseRecord],
+        *,
+        elapsed_ms: int,
+    ) -> EvalSuiteMetrics:
         measured = [_MetricsView(item.metrics) for item in cases if item.metrics]
         scored = sum(
             int((item.citations or {}).get("scored") or 0)
@@ -535,6 +690,25 @@ class EvalService:
             for item in cases
             if item.citations
         )
+        answer_paths = sum(
+            int((item.citations or {}).get("answer_path_count") or 0)
+            for item in cases
+            if item.citations
+        )
+        grounded_paths = sum(
+            int((item.citations or {}).get("grounded_answer_paths") or 0)
+            for item in cases
+            if item.citations
+        )
+        grounded_cases = [
+            item
+            for item in cases
+            if item.citations and (item.citations or {}).get("scoreable")
+        ]
+        total_tokens = sum(
+            int(item.metrics.get("total_tokens") or 0) for item in cases
+        )
+        case_count = len(cases)
         return EvalSuiteMetrics(
             pass_rate=(
                 sum(1 for item in cases if item.passed) / len(cases)
@@ -545,7 +719,27 @@ class EvalService:
             mean_step_efficiency=aggregate_step_efficiency(measured),
             budget_cap_rate=aggregate_budget_cap_rate(measured),
             failure_recovery_rate=aggregate_failure_recovery_rate(measured),
-            citation_accuracy=(verified / scored) if scored else None,
+            citation_content_accuracy=(verified / scored) if scored else None,
+            answer_path_grounding_rate=(
+                grounded_paths / answer_paths if answer_paths else None
+            ),
+            fully_grounded_case_rate=(
+                sum(
+                    1
+                    for item in grounded_cases
+                    if (item.citations or {}).get("fully_grounded")
+                )
+                / len(grounded_cases)
+                if grounded_cases
+                else None
+            ),
+            total_tokens=total_tokens,
+            tokens_per_case=(total_tokens / case_count if case_count else None),
+            elapsed_ms=elapsed_ms,
+            elapsed_ms_per_case=(elapsed_ms / case_count if case_count else None),
+            proposed_calls=sum(item.proposed_calls for item in measured),
+            executed_calls=sum(item.executed_calls for item in measured),
+            suppressed_calls=sum(item.suppressed_calls for item in measured),
         )
 
     def _alerts(
@@ -563,7 +757,7 @@ class EvalService:
             alerts.append(
                 EvalAlert(
                     kind=ALERT_CASE,
-                    severity=SEVERITY_CRITICAL,
+                    severity=_case_alert_severity(case),
                     metric="pass_rate",
                     message=f"{case.case_id}: {reason}",
                 )
@@ -603,8 +797,23 @@ class EvalService:
         return alerts
 
     def _cleanup(self, workspace_id: str, workspace_root: Path) -> None:
+        if self._memory_service is not None:
+            try:
+                self._memory_service.delete_workspace_state(
+                    workspace_id=workspace_id
+                )
+            except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                logger.warning(
+                    "could not remove project-memory state for eval workspace %s",
+                    workspace_id,
+                    exc_info=True,
+                )
         try:
-            self._workspace_service.remove(workspace_id)
+            purge = getattr(self._workspace_service, "purge_ephemeral", None)
+            if callable(purge):
+                purge(workspace_id)
+            else:
+                self._workspace_service.remove(workspace_id)
         except Exception:  # noqa: BLE001 - cleanup must not mask the real result
             logger.warning("could not remove eval workspace %s", workspace_id)
         shutil.rmtree(workspace_root, ignore_errors=True)
@@ -618,6 +827,8 @@ class EvalService:
             "model": record.model,
             "status": record.status,
             "started_at": record.started_at,
+            "evaluator_version": record.evaluator_version,
+            "schema_version": record.schema_version,
             "finished_at": record.finished_at,
             "total_cases": record.total_cases,
             "completed_cases": record.completed_cases,
@@ -640,6 +851,7 @@ class _MetricsView:
     """Adapts a persisted metrics dict back to the aggregate helpers."""
 
     def __init__(self, payload: dict[str, Any]) -> None:
+        self.proposed_calls = int(payload.get("proposed_calls") or 0)
         self.executed_calls = int(payload.get("executed_calls") or 0)
         self.repeated_calls = int(payload.get("repeated_calls") or 0)
         self.suppressed_calls = int(payload.get("suppressed_calls") or 0)
@@ -663,7 +875,10 @@ def _threshold_alerts(
         "max_mean_step_efficiency": "mean_step_efficiency",
         "max_budget_cap_rate": "budget_cap_rate",
         "min_failure_recovery_rate": "failure_recovery_rate",
-        "min_citation_accuracy": "citation_accuracy",
+        "min_citation_accuracy": "citation_content_accuracy",
+        "min_citation_content_accuracy": "citation_content_accuracy",
+        "min_answer_path_grounding_rate": "answer_path_grounding_rate",
+        "min_fully_grounded_case_rate": "fully_grounded_case_rate",
     }
     for key, metric in bounds.items():
         expected = thresholds.get(key)
@@ -702,7 +917,12 @@ def _regression_alerts(
         reference = baseline.get(metric)
         if actual is None or reference is None:
             continue
-        allowed = float(tolerance.get(metric, 0.0))
+        configured_tolerance = float(tolerance.get(metric, 0.0))
+        allowed = (
+            abs(reference) * configured_tolerance
+            if metric in RELATIVE_REGRESSION_METRICS
+            else configured_tolerance
+        )
         if direction == "lower_is_better":
             regressed = actual > reference + allowed
             delta = actual - reference
@@ -738,6 +958,13 @@ def _first_violation(case: EvalCaseRecord) -> str:
         failure = citations["failures"][0]
         return f"citation {failure.get('status')} at {failure.get('path')}"
     return "case did not pass"
+
+
+def _case_alert_severity(case: EvalCaseRecord) -> str:
+    failed = [item for item in case.constraints if not item.get("passed")]
+    if failed and all(item.get("severity") == "warning" for item in failed):
+        return SEVERITY_WARNING
+    return SEVERITY_CRITICAL
 
 
 def _default_status_serializer(record: Any) -> dict[str, Any]:

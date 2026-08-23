@@ -27,6 +27,51 @@ class SQLiteProjectMemoryRepository:
     def __init__(self, *, database: LocalStateDatabase) -> None:
         self.database = database
 
+    def delete_workspace_state(self, *, workspace_id: str) -> list[str]:
+        with self.database.transaction(immediate=True) as conn:
+            rows = conn.execute(
+                "SELECT id FROM project_memories WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            memory_ids = [str(row[0]) for row in rows]
+            conn.execute(
+                "DELETE FROM memory_index_outbox WHERE memory_id IN "
+                "(SELECT id FROM project_memories WHERE workspace_id = ?)",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM project_memory_evidence WHERE memory_id IN "
+                "(SELECT id FROM project_memories WHERE workspace_id = ?)",
+                (workspace_id,),
+            )
+            if self.database.fts5_available:
+                conn.execute(
+                    "DELETE FROM project_memories_fts WHERE memory_id IN "
+                    "(SELECT id FROM project_memories WHERE workspace_id = ?)",
+                    (workspace_id,),
+                )
+            conn.execute(
+                "DELETE FROM memory_audit_events WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM memory_extraction_jobs WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM project_memories WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM workspace_memory_settings WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+        return memory_ids
+
     def ensure_member(self, *, workspace_id: str, user_id: str, role: str) -> WorkspaceMember:
         with self.database.transaction(immediate=True) as conn:
             row = conn.execute(

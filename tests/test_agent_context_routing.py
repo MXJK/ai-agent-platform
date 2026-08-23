@@ -80,8 +80,10 @@ class FakeKnowledgeProvider:
             for index in range(count)
         ]
         self.fail = fail
+        self.list_calls = 0
 
     def list(self) -> list[KnowledgeBaseRecord]:
+        self.list_calls += 1
         return self.records
 
     def search(
@@ -146,6 +148,37 @@ class FakeMemoryProvider:
 
 
 class AgentContextRoutingTests(unittest.TestCase):
+    def test_isolated_eval_does_not_list_global_kbs_or_read_project_memory(self) -> None:
+        knowledge = FakeKnowledgeProvider()
+        memory = FakeMemoryProvider()
+        runtime = CodingAgentRuntime(
+            planner=RoutingPlanner(
+                route="rag", intent="repository_question", selected=["kb_00"],
+            ),
+            knowledge_context_provider=knowledge,
+            project_memory_provider=memory,
+        )
+        state: CodingAgentState = {
+            "user_input": "global product documentation",
+            "workspace_id": "eval_workspace",
+            "actor_user_id": "real_owner",
+            "context_warnings": [],
+            "evaluation_isolated": True,
+            "evaluation_knowledge_base_ids": [],
+            "intent": "repository_question",
+            "trace": [],
+        }
+
+        classified = runtime._context_nodes._classify_request(state)
+        memory_result = runtime._context_nodes._retrieve_project_memory(state)
+
+        self.assertEqual(knowledge.list_calls, 0)
+        self.assertEqual(memory.calls, 0)
+        self.assertEqual(classified["knowledge_base_catalog"], [])
+        self.assertEqual(classified["selected_knowledge_base_ids"], [])
+        self.assertEqual(classified["context_route"], "repo")
+        self.assertEqual(memory_result["memory_context_sources"], [])
+
     def test_generic_project_overview_prefers_live_repo_over_unrelated_rag(
         self,
     ) -> None:

@@ -88,6 +88,14 @@ class PostgresSessionRepository:
             )
         return session
 
+    def delete_session(self, session_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM sessions WHERE id = %s",
+                (session_id,),
+            )
+        return bool(cursor.rowcount)
+
     def list_sessions(
         self,
         *,
@@ -1692,6 +1700,14 @@ class PostgresWorkspaceRepository:
                 (workspace_id,),
             ).fetchone()
         return _workspace_from_row(row) if row is not None else None
+
+    def purge(self, workspace_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM workspaces WHERE id = %s",
+                (workspace_id,),
+            )
+        return bool(cursor.rowcount)
 
     def _connect(self):
         psycopg = _require_psycopg()

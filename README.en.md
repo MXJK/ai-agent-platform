@@ -1484,21 +1484,27 @@ The three suites answer different questions. `run_evals.py` is the L0 pipeline
 regression and RAG retrieval gate. `run_trajectory_evals.py` is the L1
 trajectory layer: it grades the process against declared constraints (required
 and forbidden tools, ordering, step ceilings) rather than a golden answer, and
-collects invalid-action rate, step efficiency, budget-cap rate, failure
-recovery and programmatic citation verification. `run_memory_evals.py` gates
-project-memory quality. All three run on the fake provider, so a passing run is
-not evidence of answer quality.
+separates proposed, accepted, executed, succeeded, failed, suppressed, denied,
+and pending-approval calls. Only calls joined to a real `ToolResult` are
+executed. It also builds a successful-read ledger and reports citation content
+accuracy, answer-path grounding, and fully grounded cases separately.
+`run_memory_evals.py` gates project-memory quality. All three run on the fake
+provider, so a passing run is not evidence of answer quality.
 
 The same L1 suite also runs **inside the app against a registered model**, from
-the 评测 page: pick a registered provider, run it, and the page shows the pass
-rate, all five metrics, threshold and regression alerts, run history and
-per-case constraint detail. A real-model run is billed by token and only one may
-run at a time. Baselines are per provider: the first completed run for a
-provider becomes its baseline and can be re-pinned from the page. The endpoints
+the 评测 page: pick a registered provider/model pair, run it, and the page shows
+lifecycle counts, citation metrics, token/time totals and averages, alerts,
+history, and per-case evidence. The explicit evaluation context excludes real
+profile/history, user/project memory, and global knowledge bases, then removes
+temporary sessions, workspace state, and files. A real-model run is billed by
+token and only one may run at a time. Baselines are manually pinned and keyed by
+provider + model + suite + evaluator version; legacy rows are not compared with
+evaluator v2. Critical runs require an explicit forced pin. The endpoints
 are `/api/v1/evals/catalogue`, `/api/v1/evals/runs`,
 `/api/v1/evals/runs/{run_id}` and `/api/v1/evals/runs/{run_id}/baseline`;
 the settings are `EVAL_STORE`, `EVAL_FAULT_INJECTION_ENABLED` and
 `EVAL_WORKSPACE_ROOT`.
 
-The layered plan is in [evals/DESIGN.md](evals/DESIGN.md); the measured fake and
-DeepSeek baselines are in [evals/README.md](evals/README.md).
+The layered plan is in [evals/DESIGN.md](evals/DESIGN.md); metric definitions
+and the compatibility boundary for legacy measurements are in
+[evals/README.md](evals/README.md).

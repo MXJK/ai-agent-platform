@@ -39,6 +39,46 @@ class InMemoryProjectMemoryRepository:
         self._audit_events: list[MemoryAuditEvent] = []
         self._lock = RLock()
 
+    def delete_workspace_state(self, *, workspace_id: str) -> list[str]:
+        with self._lock:
+            memory_ids = [
+                memory_id
+                for memory_id, memory in self._memories.items()
+                if memory.workspace_id == workspace_id
+            ]
+            memory_id_set = set(memory_ids)
+            for memory_id in memory_ids:
+                self._memories.pop(memory_id, None)
+            self._members = {
+                key: member
+                for key, member in self._members.items()
+                if member.workspace_id != workspace_id
+            }
+            self._settings.pop(workspace_id, None)
+            job_ids = {
+                job_id
+                for job_id, job in self._jobs.items()
+                if job.workspace_id == workspace_id
+            }
+            for job_id in job_ids:
+                self._jobs.pop(job_id, None)
+            self._job_sources = {
+                key: job_id
+                for key, job_id in self._job_sources.items()
+                if job_id not in job_ids and key[0] != workspace_id
+            }
+            self._index_events = {
+                event_id: event
+                for event_id, event in self._index_events.items()
+                if event.memory_id not in memory_id_set
+            }
+            self._audit_events = [
+                event
+                for event in self._audit_events
+                if event.workspace_id != workspace_id
+            ]
+            return memory_ids
+
     def ensure_member(
         self, *, workspace_id: str, user_id: str, role: str
     ) -> WorkspaceMember:
@@ -378,6 +418,44 @@ class PostgresProjectMemoryRepository:
     def __init__(self, *, database_url: str) -> None:
         self._database_url = database_url
         _require_psycopg()
+
+    def delete_workspace_state(self, *, workspace_id: str) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM project_memories WHERE workspace_id = %s",
+                (workspace_id,),
+            ).fetchall()
+            memory_ids = [str(row[0]) for row in rows]
+            conn.execute(
+                """
+                DELETE FROM memory_index_outbox
+                WHERE memory_id IN (
+                    SELECT id FROM project_memories WHERE workspace_id = %s
+                )
+                """,
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM memory_audit_events WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM memory_extraction_jobs WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM project_memories WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM workspace_memory_settings WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+            conn.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = %s",
+                (workspace_id,),
+            )
+        return memory_ids
 
     def ensure_member(
         self, *, workspace_id: str, user_id: str, role: str

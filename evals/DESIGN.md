@@ -2,10 +2,11 @@
 
 > **状态：阶段一已实现，L2–L3 仍是设计方案。**
 > 已落地：L1 轨迹约束、四项过程指标、引用真实性验证，见
-> `evals/run_trajectory_evals.py`、`evals/trajectory.py`、`evals/citations.py`、
-> `evals/trajectory_cases.json`，实测基线记录在 `evals/README.md`。
+> `evals/run_trajectory_evals.py`、`ai_agent_platform/evaluation/trajectory.py`、
+> `evaluation/evidence.py`、`evaluation/citations.py` 和 `evaluation/trajectory_cases.json`。
 > 已落地：L1 还能在 app 内对着**已注册的真实模型**跑，结果入库并在前端"评测"页
-> 展示成功率、五项指标、越界与相对基线的回归预警、历史与单例详情，见
+> 展示调用生命周期、三项引用指标、成本/耗时、越界与相对兼容基线的预警、历史与
+> 单例详情；运行上下文显式隔离用户/项目记忆与全局知识库，见
 > `ai_agent_platform/evaluation/`、`api/routes/evals.py`。
 > 未落地：L2 结果质量、L3 稳定性与成本、A/B 实验矩阵、自建 25 条数据集、
 > LLM judge、SWE-bench 子集。按 `INTERVIEW_NOTES/00` 的事实状态约定，未落地部分
@@ -78,12 +79,18 @@ L0 保持现状，不要改动。增量全部在 L1–L3。
 
 L1 套件报告里观察到的节点序列以 `trace (diagnostic)` 打印，不作为通过条件。
 
-### 四个自动采集的指标
+### 工具生命周期与四个自动指标
 
-1. **无效动作率** = (重复调用 + 失败后未换策略 + 被抑制的调用) / 总调用数
-   - 采集点现成：`agents/coding/tool_loop_nodes.py:263` 已有 `suppressed_calls`
-     和 `repeated_tool_call` 标记
-2. **步数效率** = 实际步数 / 参考最优步数
+轨迹先区分 `proposed`、`accepted`、`executed`、`succeeded`、`failed`、
+`suppressed`、`denied` 与 `pending approval`。其中 `executed` 必须能按 `call_id`
+关联到真实 `ToolResult`；没有结果的 proposal 不得默认成功。required/order/max steps 与
+失败恢复都只看 executed 序列。禁止工具只 proposed/denied 是模型规划 warning，真的
+executed 才是平台安全 critical。
+
+1. **无效动作率** = (实际执行的精确重复 + 被抑制调用) / (executed + suppressed)
+   - 失败和失败后重试另行报告，不重复塞进分子；没有分母报 `n/a`
+   - `agents/coding/tool_loop_nodes.py` 把抑制/拒绝原因和调用详情写入结构化 trace
+2. **步数效率** = 实际 executed 步数 / 参考最优步数
 3. **预算触顶率** —— 触发 `_max_exploration_rounds` 或 hard_budget 的 case 比例
    - golden 中已有 `hard_budget` 场景，扩成指标即可
 4. **失败恢复能力** —— 注入一个必然失败的工具调用，观察是换策略还是死磕重试
@@ -113,18 +120,34 @@ L1 存在的意义就是把第二种揪出来。
 
 ### 优先级 2：引用真实性验证（本项目最独特的指标，已在阶段一实现）
 
-实现落在 `evals/citations.py`，由 L1 套件的 `verify_citations` case 调用。它不依赖真实模型，所以提前到了阶段一，而不是等 L2。
+实现落在 `ai_agent_platform/evaluation/evidence.py` 与 `citations.py`，由 L1 套件的
+`verify_citations` case 调用。统一证据账本合并初始化 `ContextSource` 与成功的原生
+`repo.read_file` ToolResult，记录规范化相对路径、范围、内容/hash、截断状态与 call ID。
+搜索命中只证明匹配行存在；失败、抑制、拒绝、待审批调用不产生 read evidence。
 
-`result.context_sources` 携带 `path` / `start_line` / `end_line` / `text`，可以纯程序化
-验证三件事：
+验证器纯程序化检查三件事：
 
 1. 引用的 `path` 在工作区真实存在
 2. `start_line..end_line` 范围内的**实际文件内容**等于 `text`
    —— 抓模型幻觉出来的代码片段
-3. 答案中引用的路径 ⊆ 实际读过的 `context_sources` 路径
-   —— **幻觉引用检测**，抓"引用了从没读过的文件"
+3. 答案中引用的路径必须落到成功读取证据。唯一 basename 可映射完整路径，同名多个
+   文件时保持 ambiguous；README 或搜索结果里出现过目标文件名不算读过
 
-零成本、零主观、结论极硬。本项目的核心卖点是"可信上下文"，这组指标正是它的量化证明。
+结果拆成 `citation_content_accuracy`、`answer_path_grounding_rate` 和
+`fully_grounded_case_rate`；没有可评分样本一律为 `n/a`。零成本、零主观、结论极硬。
+
+### 应用内 Eval 的隔离与基线兼容
+
+- `QueryParams.evaluation` 是显式、可审计的隔离入口，不靠用户名约定。评测仍从应用内
+  模型注册表取得 Provider/Model/Secret，但记录里不保存 Secret。
+- Eval context 不注入真实 profile、controlled history 或 summary，不读写 user/project
+  memory，不刷新真实 project scene，不列出全局知识库；只有 suite fixture KB allowlist
+  可进入检索。完成后清理临时 session、workspace、成员、记忆/向量与目录。
+- 基线只能人工固化，键为 `provider + model + suite_id + evaluator_version`。Evaluator 与
+  schema 显式版本化，旧行迁移为 `legacy`，不会跨版本比较；critical Run 默认拒绝，
+  只有显式 `force=true` 与 UI 二次确认可覆盖。
+- `total_tokens`、`tokens_per_case`、`elapsed_ms`、`elapsed_ms_per_case` 当前只做同兼容基线
+  的相对回归 warning，不直接作为未校准硬门槛。
 
 ### 优先级 3：LLM judge（最后手段）
 
@@ -212,7 +235,7 @@ AgentBench / SWE-bench / τ-bench 本质是**模型 benchmark，不是系统 ben
 
 - **每次提交**：L0 + L1（fake 模型，秒级，零 API 成本）
 - **手动 / 每周**：L2 + L3（真实模型，有成本）
-- baseline 结果存盘，PR 中展示相对 baseline 的涨跌，而非绝对分数
+- 只对人工确认、版本兼容的 baseline 展示相对涨跌；没有兼容基线时不伪造 delta
 
 ---
 
@@ -246,8 +269,9 @@ AgentBench / SWE-bench / τ-bench 本质是**模型 benchmark，不是系统 ben
 | L0 case 数据 | `evals/agent_cases.json`、`evals/memory_cases.json` |
 | L1 轨迹 runner | `evals/run_trajectory_evals.py` |
 | L1 约束与指标 | `ai_agent_platform/evaluation/trajectory.py`、`evaluation/trajectory_cases.json` |
-| L1 引用验证 | `ai_agent_platform/evaluation/citations.py` |
-| L1 应用内服务与 API | `ai_agent_platform/evaluation/service.py`、`api/routes/evals.py` |
+| L1 读取证据与引用验证 | `ai_agent_platform/evaluation/evidence.py`、`evaluation/citations.py` |
+| L1 应用内服务、隔离与 API | `ai_agent_platform/evaluation/service.py`、`services/execution_context.py`、`services/query_service.py`、`api/routes/evals.py` |
+| L1 基线版本迁移 | `migrations/versions/20260823_0024_eval_evidence_versions.py` |
 | L1 前端评测页 | `ai_agent_platform/static/app.js`（`loadEvalDashboard`） |
 | 轨迹快照 | `tests/golden/agent_loop_trajectories.json` |
 | 工具循环与抑制标记 | `agents/coding/tool_loop_nodes.py` |

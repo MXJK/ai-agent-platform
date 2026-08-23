@@ -22,11 +22,20 @@ class EvalRunStartRequest(BaseModel):
 
 class EvalMetricsResponse(BaseModel):
     pass_rate: float
-    invalid_action_rate: float
+    invalid_action_rate: Optional[float]
     mean_step_efficiency: Optional[float]
-    budget_cap_rate: float
+    budget_cap_rate: Optional[float]
     failure_recovery_rate: Optional[float]
-    citation_accuracy: Optional[float]
+    citation_content_accuracy: Optional[float]
+    answer_path_grounding_rate: Optional[float]
+    fully_grounded_case_rate: Optional[float]
+    total_tokens: int
+    tokens_per_case: Optional[float]
+    elapsed_ms: int
+    elapsed_ms_per_case: Optional[float]
+    proposed_calls: int
+    executed_calls: int
+    suppressed_calls: int
 
 
 class EvalAlertResponse(BaseModel):
@@ -47,22 +56,34 @@ class EvalCaseResponse(BaseModel):
     metrics: dict[str, Any]
     citations: Optional[dict[str, Any]]
     trace_nodes: list[str]
+    read_evidence: list[dict[str, Any]]
+    agent_errors: list[dict[str, Any]]
     error: str
 
 
 class EvalBaselineResponse(BaseModel):
     provider: str
+    model: str
+    suite_id: str
+    evaluator_version: str
+    schema_version: int
     run_id: str
     metrics: EvalMetricsResponse
     pinned_at: str
+    forced: bool
 
     @classmethod
     def from_domain(cls, baseline: EvalBaseline) -> "EvalBaselineResponse":
         return cls(
             provider=baseline.provider,
+            model=baseline.model,
+            suite_id=baseline.suite_id,
+            evaluator_version=baseline.evaluator_version,
+            schema_version=baseline.schema_version,
             run_id=baseline.run_id,
             metrics=EvalMetricsResponse(**baseline.metrics.as_dict()),
             pinned_at=baseline.pinned_at.isoformat(),
+            forced=baseline.forced,
         )
 
 
@@ -71,6 +92,8 @@ class EvalRunSummaryResponse(BaseModel):
     suite_id: str
     provider: str
     model: str
+    evaluator_version: str
+    schema_version: int
     status: str
     started_at: str
     finished_at: Optional[str]
@@ -95,6 +118,8 @@ class EvalRunSummaryResponse(BaseModel):
             suite_id=record.suite_id,
             provider=record.provider,
             model=record.model,
+            evaluator_version=record.evaluator_version,
+            schema_version=record.schema_version,
             status=record.status,
             started_at=record.started_at.isoformat(),
             finished_at=(
@@ -173,6 +198,8 @@ class EvalProviderResponse(BaseModel):
 
 class EvalCatalogueResponse(BaseModel):
     suite_id: str
+    evaluator_version: str
+    schema_version: int
     fault_injection_enabled: bool
     metric_thresholds: dict[str, float]
     regression_tolerance: dict[str, float]

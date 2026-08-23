@@ -2251,12 +2251,21 @@ function renderSessionModelControls() {
 }
 
 const EVAL_METRIC_LABELS = {
-  pass_rate: { label: "用例通过率", hint: "约束与引用全部通过的用例占比", percent: true },
-  invalid_action_rate: { label: "无效动作率", hint: "重复调用与被抑制调用占全部动作", percent: true },
-  mean_step_efficiency: { label: "步数效率", hint: "实际工具调用 / 参考最优步数，越低越好", percent: false },
-  budget_cap_rate: { label: "预算触顶率", hint: "撞到探索或工具预算的用例占比", percent: true },
-  failure_recovery_rate: { label: "失败恢复率", hint: "工具失败后换策略而非死磕重试", percent: true },
-  citation_accuracy: { label: "引用准确率", hint: "引用的行号与磁盘内容逐行一致", percent: true },
+  pass_rate: { label: "用例通过率 ↑", hint: "通过用例 / 全部完成用例；越高越好", percent: true },
+  invalid_action_rate: { label: "无效动作率 ↓", hint: "(实际精确重复 + suppressed) / (executed + suppressed)；越低越好", percent: true },
+  mean_step_efficiency: { label: "步数效率 ↓", hint: "executed / 参考步数；不包含 suppressed；越低越好" },
+  budget_cap_rate: { label: "预算触顶率 ↓", hint: "预算触顶用例 / 有轨迹用例；越低越好", percent: true },
+  failure_recovery_rate: { label: "失败恢复率 ↑", hint: "换策略恢复 / 有真实 ToolResult 故障的用例；越高越好", percent: true },
+  citation_content_accuracy: { label: "引用内容准确率 ↑", hint: "磁盘内容一致证据 / 可评分证据；越高越好", percent: true },
+  answer_path_grounding_rate: { label: "答案路径落地率 ↑", hint: "有成功读取证据的答案路径 / 答案路径；越高越好", percent: true },
+  fully_grounded_case_rate: { label: "完全落地用例率 ↑", hint: "内容与路径均落地用例 / 可评分引用用例；越高越好", percent: true },
+  tokens_per_case: { label: "每用例 Token ↓", hint: "total_tokens / 完成用例；仅回归预警，无硬门槛", integer: true },
+  total_tokens: { label: "总 Token ↓", hint: "本次 Eval 全部用例 Token；仅回归预警，无硬门槛", integer: true },
+  elapsed_ms_per_case: { label: "每用例耗时 ↓", hint: "Eval 墙钟耗时 / 完成用例；仅回归预警，无硬门槛", milliseconds: true },
+  elapsed_ms: { label: "总耗时 ↓", hint: "本次 Eval 墙钟耗时；仅回归预警，无硬门槛", milliseconds: true },
+  proposed_calls: { label: "Proposed 调用 ↓", hint: "模型提出的调用总数；包含未执行、拒绝和待审批", integer: true },
+  executed_calls: { label: "Executed 调用 ↓", hint: "能按 call_id 找到真实 ToolResult 的调用总数", integer: true },
+  suppressed_calls: { label: "Suppressed 调用 ↓", hint: "平台抑制且未执行的调用总数；计入无效动作率", integer: true },
 };
 
 const EVAL_TERMINAL_STATUSES = new Set(["completed", "failed"]);
@@ -2264,6 +2273,12 @@ const EVAL_TERMINAL_STATUSES = new Set(["completed", "failed"]);
 function formatEvalMetric(name, value) {
   if (value === null || value === undefined) {
     return "n/a";
+  }
+  if (EVAL_METRIC_LABELS[name]?.milliseconds) {
+    return `${Math.round(value).toLocaleString()} ms`;
+  }
+  if (EVAL_METRIC_LABELS[name]?.integer) {
+    return Math.round(value).toLocaleString();
   }
   return EVAL_METRIC_LABELS[name]?.percent
     ? `${(value * 100).toFixed(1)}%`
@@ -2335,7 +2350,8 @@ function renderEvalProviderOptions() {
   runButton.disabled = false;
   select.innerHTML = providers.map((item) => {
     const paid = item.provider !== "fake";
-    return `<option value="${escapeHtml(item.provider)}" data-model="${escapeHtml(item.model)}">`
+    const key = `${item.provider}:${item.model}`;
+    return `<option value="${escapeHtml(key)}" data-provider="${escapeHtml(item.provider)}" data-model="${escapeHtml(item.model)}">`
       + `${escapeHtml(item.display_name)}（${escapeHtml(item.model)}${paid ? " · 计费" : " · 零成本"}）</option>`;
   }).join("");
   if (previous && select.querySelector(`option[value="${CSS.escape(previous)}"]`)) {
@@ -2453,15 +2469,23 @@ function renderEvalCases(detail) {
     const failed = (item.constraints || []).filter((entry) => !entry.passed);
     const stats = [
       `${metrics.executed_calls ?? 0} 步`,
+      `提议 ${metrics.proposed_calls ?? 0}`,
       metrics.step_efficiency == null ? null : `效率 ${Number(metrics.step_efficiency).toFixed(2)}`,
       metrics.repeated_calls ? `重复 ${metrics.repeated_calls}` : null,
       metrics.suppressed_calls ? `抑制 ${metrics.suppressed_calls}` : null,
+      metrics.denied_calls ? `拒绝 ${metrics.denied_calls}` : null,
+      metrics.pending_approval_calls ? `待审批 ${metrics.pending_approval_calls}` : null,
       metrics.budget_capped ? "预算触顶" : null,
       metrics.failure_recovery && metrics.failure_recovery !== "not_triggered"
         ? `失败恢复：${evalRecoveryLabel(metrics.failure_recovery)}`
         : null,
-      citations ? `引用 ${citations.verified}/${citations.scored}` : null,
-      metrics.total_tokens ? `${Number(metrics.total_tokens).toLocaleString()} tok` : null,
+      citations ? `内容 ${citations.verified}/${citations.scored}` : null,
+      citations?.answer_path_grounding_rate == null
+        ? null
+        : `路径 ${(citations.answer_path_grounding_rate * 100).toFixed(0)}%`,
+      `无效率 ${formatEvalMetric("invalid_action_rate", metrics.invalid_action_rate)}`,
+      metrics.total_tokens == null ? null : `${Number(metrics.total_tokens).toLocaleString()} tok`,
+      metrics.elapsed_ms == null ? null : formatEvalMetric("elapsed_ms", metrics.elapsed_ms),
     ].filter(Boolean);
     return `
       <details class="eval-case ${item.passed ? "passed" : "failed"}">
@@ -2481,10 +2505,60 @@ function renderEvalCases(detail) {
             ? `<ul class="eval-constraint-list">${citations.failures.map((entry) =>
               `<li><strong>${escapeHtml(entry.status)}</strong> ${escapeHtml(entry.path)}:${entry.start_line}-${entry.end_line}</li>`).join("")}</ul>`
             : ""}
+          ${renderEvalCallLifecycle(metrics)}
+          ${renderEvalReadEvidence(item.read_evidence || [])}
+          ${renderEvalAgentErrors(item.agent_errors || [])}
           <p class="eval-case-trace">${escapeHtml((item.trace_nodes || []).join(" › ") || "无轨迹")}</p>
         </div>
       </details>`;
   }).join("");
+}
+
+function renderEvalCallLifecycle(metrics) {
+  const groups = [
+    ["Proposed", metrics.proposed_call_details || []],
+    ["Executed", metrics.executed_call_details || []],
+    ["Suppressed", metrics.suppressed_call_details || []],
+    ["Denied", metrics.denied_call_details || []],
+    ["Pending approval", metrics.pending_approval_call_details || []],
+  ].filter(([, calls]) => calls.length);
+  if (!groups.length) {
+    return "";
+  }
+  return groups.map(([label, calls]) => `
+    <details class="eval-evidence-group">
+      <summary>${escapeHtml(label)} · ${calls.length}</summary>
+      <ul class="eval-constraint-list">${calls.map((call) => {
+        const outcome = call.ok == null ? "" : (call.ok ? " · ok" : " · failed");
+        const reason = call.reason ? ` · ${call.reason}` : "";
+        const args = truncate(JSON.stringify(call.arguments || {}), 240);
+        return `<li><strong>${escapeHtml(call.name || "unknown")}</strong> ${escapeHtml(call.call_id || "no-call-id")}${escapeHtml(outcome + reason)}<br><code>${escapeHtml(args)}</code></li>`;
+      }).join("")}</ul>
+    </details>`).join("");
+}
+
+function renderEvalReadEvidence(evidence) {
+  if (!evidence.length) {
+    return "";
+  }
+  return `
+    <details class="eval-evidence-group">
+      <summary>成功读取证据 · ${evidence.length}</summary>
+      <ul class="eval-constraint-list">${evidence.map((item) =>
+        `<li><strong>${escapeHtml(item.path || "unknown")}:${item.start_line ?? "?"}-${item.end_line ?? "?"}</strong> ${escapeHtml(item.source || "")} · ${escapeHtml(item.call_id || "initial-context")}${item.truncated ? " · truncated" : ""}</li>`).join("")}</ul>
+    </details>`;
+}
+
+function renderEvalAgentErrors(errors) {
+  if (!errors.length) {
+    return "";
+  }
+  return `
+    <details class="eval-evidence-group">
+      <summary>Agent 真实错误 · ${errors.length}</summary>
+      <ul class="eval-constraint-list">${errors.map((item) =>
+        `<li>${escapeHtml(truncate(JSON.stringify(item), 320))}</li>`).join("")}</ul>
+    </details>`;
 }
 
 function evalRecoveryLabel(value) {
@@ -2550,7 +2624,7 @@ function scheduleEvalPoll(runId) {
 
 async function startEvalRun() {
   const select = $("eval-provider-select");
-  const provider = select?.value || "fake";
+  const provider = select?.selectedOptions?.[0]?.dataset.provider || "fake";
   const model = select?.selectedOptions?.[0]?.dataset.model || "";
   if (provider !== "fake") {
     const confirmed = window.confirm(
@@ -2579,12 +2653,23 @@ async function pinEvalBaseline() {
   if (!state.evalRunId) {
     return;
   }
+  const criticalCount = Number(state.evalRun?.critical_alert_count || 0);
+  let force = false;
+  if (criticalCount) {
+    if (!window.confirm(`本次评测有 ${criticalCount} 个 critical 预警，默认禁止设为基线。是否进入强制确认？`)) {
+      return;
+    }
+    if (!window.confirm("再次确认：强制基线会记录 forced=true，但不会消除预警。继续？")) {
+      return;
+    }
+    force = true;
+  }
   try {
-    await fetchJson(`/evals/runs/${encodeURIComponent(state.evalRunId)}/baseline`, {
+    await fetchJson(`/evals/runs/${encodeURIComponent(state.evalRunId)}/baseline?force=${force}`, {
       method: "POST",
     });
     await loadEvalDashboard(state.evalRunId);
-    showToast("已设为该 Provider 的基线", "success");
+    showToast("已设为该 Provider / Model / Suite / Evaluator 的基线", "success");
   } catch (error) {
     showToast(humanizeError(error), "error");
   }

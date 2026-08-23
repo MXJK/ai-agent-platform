@@ -42,6 +42,8 @@ class CodingAgentState(TypedDict, total=False):
     cwd: str
     additional_directories: list[dict[str, Any]]
     enabled_tools: list[str]
+    evaluation_isolated: bool
+    evaluation_knowledge_base_ids: list[str]
     instructions_snapshotted: bool
     history: list[dict[str, str]]
     focus_files: list[str]

@@ -1376,19 +1376,30 @@ git diff --check
 
 三个套件分别回答不同问题：`run_evals.py` 是 L0 管道回归与 RAG 检索门槛；
 `run_trajectory_evals.py` 是 L1 轨迹评测，用约束（必须/禁止出现的工具、偏序、
-步数上限）而不是标准答案判定过程，并采集无效动作率、步数效率、预算触顶率、
-失败恢复能力四项指标与引用真实性验证；`run_memory_evals.py` 是项目记忆质量门槛。
+步数上限）而不是标准答案判定过程。工具调用按 proposed / accepted / executed /
+succeeded / failed / suppressed / denied / pending approval 分层；只有能按 `call_id`
+关联到真实 `ToolResult` 的调用才算 executed。无效动作率按“实际执行的精确重复 +
+被抑制调用”除以“实际执行 + 被抑制”计算；没有分母时显示 `n/a`。
+`run_memory_evals.py` 是项目记忆质量门槛。
 三者都跑在 fake provider 上，通过率不能当作答案质量证据。
 
 同一套 L1 还能在应用内对着**已注册的真实模型**跑，入口是前端"评测"页：选一个
-已注册 Provider 点运行，页面展示通过率、五项指标、越界与相对基线的回归预警、
-历史列表与单个用例的约束详情。真实模型运行按 Token 计费，一次只允许一个评测；
-基线按 Provider 分开，首个完成的运行成为该 Provider 的基线，之后可在页面重新固化。
+已注册的 Provider + Model 点运行，页面展示调用生命周期、三项引用指标、Token/耗时、
+越界与相对基线的回归预警、历史和单例详情。评测使用显式隔离标志：不注入真实用户
+画像/会话历史，不读写用户或项目记忆，不暴露全局知识库，只允许 suite 声明的 fixture
+KB；case 结束删除临时 session，run 结束删除 workspace、临时成员和项目记忆状态。
+Provider 凭据仍由应用内模型注册表解析，Secret 不进入评测记录。
+
+真实模型运行按 Token 计费，一次只允许一个评测，本仓库不会自动发起。基线必须人工
+固化，兼容键为 `provider + model + suite_id + evaluator_version`；首个 completed Run
+不会自动成为基线。带 critical alert 的 Run 默认拒绝固化，只有 API 的显式
+`force=true` 加 UI 二次确认才能覆盖。旧记录迁移为 `legacy` evaluator/schema，不会与
+当前 v2 evaluator 静默比较。Token 与耗时只做相对基线预警，不是未经校准的硬门槛。
 对应 API 为 `/api/v1/evals/catalogue`、`/api/v1/evals/runs`、
 `/api/v1/evals/runs/{run_id}` 与 `/api/v1/evals/runs/{run_id}/baseline`；
 配置项为 `EVAL_STORE`、`EVAL_FAULT_INJECTION_ENABLED`、`EVAL_WORKSPACE_ROOT`。
 
-分层设计见 [evals/DESIGN.md](evals/DESIGN.md)，fake 与 DeepSeek 的实测基线见
+分层设计见 [evals/DESIGN.md](evals/DESIGN.md)，离线口径与旧实测数据的兼容边界见
 [evals/README.md](evals/README.md)。
 
 ---

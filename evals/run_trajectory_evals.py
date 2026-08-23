@@ -1,7 +1,8 @@
 """Offline L1 trajectory eval runner.
 
-This is the zero-cost path: a throwaway app on the fake LLM provider, driven
-over HTTP the same way `run_evals.py` drives it. The analysis itself lives in
+This is the zero-cost path: a throwaway app on the fake LLM provider. Session
+creation and status serialization cross HTTP; submission uses the app's same
+``QueryService`` with the explicit isolated-Eval flag. The analysis lives in
 `ai_agent_platform.evaluation` because the container image only carries the
 package, and the same code has to serve the in-app runs against a real model.
 
@@ -43,6 +44,7 @@ from ai_agent_platform.evaluation import (
     aggregate_failure_recovery_rate,
     aggregate_invalid_action_rate,
     aggregate_step_efficiency,
+    build_read_evidence_ledger,
     check_constraints,
     load_suite,
     measure_trajectory,
@@ -109,7 +111,7 @@ class TrajectoryReport:
         return sum(1 for case in self.cases if case.passed)
 
     @property
-    def invalid_action_rate(self) -> float:
+    def invalid_action_rate(self) -> float | None:
         return aggregate_invalid_action_rate(case.metrics for case in self.cases)
 
     @property
@@ -125,7 +127,7 @@ class TrajectoryReport:
         return aggregate_failure_recovery_rate(case.metrics for case in self.cases)
 
     @property
-    def citation_accuracy(self) -> float | None:
+    def citation_content_accuracy(self) -> float | None:
         scored = sum(
             case.citations.scored_count
             for case in self.cases
@@ -137,6 +139,34 @@ class TrajectoryReport:
             if case.citations is not None
         )
         return (verified / scored) if scored else None
+
+    @property
+    def answer_path_grounding_rate(self) -> float | None:
+        path_count = sum(
+            len(case.citations.answer_paths)
+            for case in self.cases
+            if case.citations is not None
+        )
+        grounded = sum(
+            case.citations.grounded_path_count
+            for case in self.cases
+            if case.citations is not None
+        )
+        return (grounded / path_count) if path_count else None
+
+    @property
+    def fully_grounded_case_rate(self) -> float | None:
+        scoreable = [
+            case.citations
+            for case in self.cases
+            if case.citations is not None and case.citations.scoreable
+        ]
+        return (
+            sum(1 for report in scoreable if report.fully_grounded)
+            / len(scoreable)
+            if scoreable
+            else None
+        )
 
 
 def load_trajectory_suite(path: Path = DEFAULT_SUITE_PATH) -> EvalSuite:
@@ -236,24 +266,30 @@ def _run_trajectory_case(
         controller.disarm()
     session = client.post("/api/v1/sessions", json={"user_id": "l1_eval_runner"})
     session.raise_for_status()
-    run = client.post(
-        "/api/v1/agent/runs",
-        json={
-            "conversation_id": session.json()["id"],
-            "workspace_id": workspace_id,
-            "message": case["message"],
-        },
+    # Submission uses the same QueryService as the public Agent endpoint, with
+    # the explicit isolation flag used by in-app Eval. Status still crosses the
+    # HTTP serialization boundary below.
+    run = client.app.state.query_service.submit_run(
+        conversation_id=session.json()["id"],
+        workspace_id=workspace_id,
+        message=case["message"],
+        evaluation=True,
     )
-    run.raise_for_status()
-    status_body = _wait_for_run(client, run.json()["run_id"])
+    status_body = _wait_for_run(client, run.run_id)
     controller.disarm()
     observation = RunObservation.from_run_status(case_id, status_body)
     result = status_body.get("result") or {}
+    read_evidence = build_read_evidence_ledger(
+        observation=observation,
+        workspace_root=workspace_root,
+        context_sources=result.get("context_sources", []),
+    )
     citations = (
         verify_citations(
             context_sources=result.get("context_sources", []),
             answer=str(result.get("answer") or ""),
             workspace_root=workspace_root,
+            read_evidence=[item.as_dict() for item in read_evidence],
         )
         if case.get("verify_citations")
         else None
@@ -291,7 +327,10 @@ def _gate_failures(report: TrajectoryReport, thresholds: dict[str, float]) -> li
     }
     lower_bounds = {
         "min_failure_recovery_rate": report.failure_recovery_rate,
-        "min_citation_accuracy": report.citation_accuracy,
+        "min_citation_accuracy": report.citation_content_accuracy,
+        "min_citation_content_accuracy": report.citation_content_accuracy,
+        "min_answer_path_grounding_rate": report.answer_path_grounding_rate,
+        "min_fully_grounded_case_rate": report.fully_grounded_case_rate,
     }
     for name, actual in upper_bounds.items():
         configured = thresholds.get(name)
@@ -317,22 +356,31 @@ def _gate_failures(report: TrajectoryReport, thresholds: dict[str, float]) -> li
 
 def _format_suite_metrics(report: TrajectoryReport) -> str:
     return (
-        f"InvalidActionRate={report.invalid_action_rate:.3f}; "
+        f"InvalidActionRate={_format_optional(report.invalid_action_rate)}; "
         f"MeanStepEfficiency={_format_optional(report.mean_step_efficiency)}; "
         f"BudgetCapRate={report.budget_cap_rate:.3f}; "
         f"FailureRecoveryRate={_format_optional(report.failure_recovery_rate)}; "
-        f"CitationAccuracy={_format_optional(report.citation_accuracy)}"
+        "CitationContentAccuracy="
+        f"{_format_optional(report.citation_content_accuracy)}; "
+        "AnswerPathGroundingRate="
+        f"{_format_optional(report.answer_path_grounding_rate)}; "
+        "FullyGroundedCaseRate="
+        f"{_format_optional(report.fully_grounded_case_rate)}"
     )
 
 
 def _format_case_metrics(metrics: TrajectoryMetrics) -> str:
     parts = [
-        f"calls={metrics.executed_calls}",
+        f"proposed={metrics.proposed_calls}",
+        f"accepted={metrics.accepted_calls}",
+        f"executed={metrics.executed_calls}",
         f"failed={metrics.failed_calls}",
         f"repeated={metrics.repeated_calls}",
         f"retries_after_failure={metrics.retries_after_failure}",
         f"suppressed={metrics.suppressed_calls}",
-        f"invalid_action_rate={metrics.invalid_action_rate:.3f}",
+        f"denied={metrics.denied_calls}",
+        f"pending_approval={metrics.pending_approval_calls}",
+        f"invalid_action_rate={_format_optional(metrics.invalid_action_rate)}",
         f"step_efficiency={_format_optional(metrics.step_efficiency)}",
         f"budget_capped={metrics.budget_capped}",
         f"failure_recovery={metrics.failure_recovery}",
@@ -345,7 +393,11 @@ def _format_case_metrics(metrics: TrajectoryMetrics) -> str:
 def _format_citations(report: CitationReport) -> str:
     detail = (
         f"verified={report.verified_count}/{report.scored_count} "
-        f"unverifiable={len(report.verdicts) - report.scored_count}"
+        f"unverifiable={len(report.verdicts) - report.scored_count} "
+        f"content_accuracy={_format_optional(report.content_accuracy)} "
+        "answer_path_grounding_rate="
+        f"{_format_optional(report.answer_path_grounding_rate)} "
+        f"fully_grounded={report.fully_grounded}"
     )
     for verdict in report.failures:
         detail += (

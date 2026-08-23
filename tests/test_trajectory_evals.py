@@ -4,6 +4,7 @@ from typing import Any
 import unittest
 
 from ai_agent_platform.evaluation.citations import (
+    STATUS_AMBIGUOUS_BASENAME,
     STATUS_CONTENT_MISMATCH,
     STATUS_MISSING_FILE,
     STATUS_OUT_OF_RANGE,
@@ -12,6 +13,7 @@ from ai_agent_platform.evaluation.citations import (
     answer_citation_paths,
     verify_citations,
 )
+from ai_agent_platform.evaluation.evidence import build_read_evidence_ledger
 from evals.run_trajectory_evals import (
     format_report,
     load_trajectory_suite,
@@ -91,7 +93,48 @@ class TrajectoryConstraintTests(unittest.TestCase):
             observation, {"forbidden_tools": ["sandbox.write_file"]}
         )
 
-        self.assertFalse(verdicts["forbidden_tools"])
+        self.assertFalse(verdicts["forbidden_tools_proposed"])
+        self.assertFalse(verdicts["forbidden_tools_executed"])
+
+    def test_forbidden_tool_denied_is_planning_risk_not_execution(self) -> None:
+        observation = RunObservation.from_run_status(
+            "case",
+            {
+                "status": "blocked",
+                "result": {
+                    "tool_calls": [{
+                        "call_id": "denied_1",
+                        "name": "sandbox.write_file",
+                        "arguments": {"path": "a.py"},
+                        "source": "model",
+                    }],
+                    "tool_results": [],
+                    "trace": [{
+                        "node": "plan_tools",
+                        "output": {"denied_tools": [{
+                            "call_id": "denied_1",
+                            "name": "sandbox.write_file",
+                            "reason": "policy",
+                        }]},
+                    }],
+                    "context_sources": [],
+                    "answer": "",
+                },
+            },
+        )
+
+        verdicts = {
+            item.name: item
+            for item in check_constraints(
+                observation,
+                {"forbidden_tools": ["sandbox.write_file"]},
+            )
+        }
+
+        self.assertFalse(verdicts["forbidden_tools_proposed"].passed)
+        self.assertEqual(verdicts["forbidden_tools_proposed"].severity, "warning")
+        self.assertTrue(verdicts["forbidden_tools_executed"].passed)
+        self.assertEqual(len(observation.denied_calls), 1)
 
     def test_order_constraint_fails_when_the_prerequisite_never_ran(self) -> None:
         observation = _observation(
@@ -173,6 +216,152 @@ class TrajectoryConstraintTests(unittest.TestCase):
 
 
 class TrajectoryMetricTests(unittest.TestCase):
+    def test_proposed_without_tool_result_is_not_executed(self) -> None:
+        status = {
+            "status": "completed",
+            "result": {
+                "tool_calls": [
+                    {
+                        "call_id": f"call_{index}",
+                        "name": "repo.read_file",
+                        "arguments": {"path": f"{index}.py"},
+                        "source": "model",
+                    }
+                    for index in range(4)
+                ],
+                "tool_results": [
+                    {"call_id": f"call_{index}", "name": "repo.read_file", "ok": True}
+                    for index in range(2)
+                ],
+                "trace": [{
+                    "node": "plan_tools",
+                    "output": {"suppressed_tools": [
+                        {"call_id": "call_2", "name": "repo.read_file", "reason": "repeat"},
+                        {"call_id": "call_3", "name": "repo.read_file", "reason": "repeat"},
+                    ]},
+                }],
+                "context_sources": [],
+                "answer": "",
+            },
+        }
+
+        metrics = measure_trajectory(
+            RunObservation.from_run_status("case", status),
+            reference_steps=2,
+        )
+
+        self.assertEqual(metrics.proposed_calls, 4)
+        self.assertEqual(metrics.accepted_calls, 2)
+        self.assertEqual(metrics.executed_calls, 2)
+        self.assertEqual(metrics.suppressed_calls, 2)
+        self.assertEqual(metrics.step_efficiency, 1.0)
+        self.assertEqual(metrics.invalid_action_rate, 0.5)
+
+    def test_failed_denied_suppressed_and_pending_reads_create_no_evidence(self) -> None:
+        calls = [
+            {
+                "call_id": lifecycle,
+                "name": "repo.read_file",
+                "arguments": {"path": "src/orders.py"},
+                "source": "model",
+            }
+            for lifecycle in ("failed", "suppressed", "denied", "pending")
+        ]
+        observation = RunObservation.from_run_status(
+            "case",
+            {
+                "status": "waiting_approval",
+                "pending_approval": {
+                    "approval_required_tools": [{
+                        **calls[3],
+                        "reason": "approval required",
+                    }],
+                },
+                "result": {
+                    "tool_calls": calls,
+                    "tool_results": [{
+                        "call_id": "failed",
+                        "name": "repo.read_file",
+                        "ok": False,
+                        "result": {
+                            "path": "src/orders.py",
+                            "start_line": 1,
+                            "end_line": 1,
+                            "content": "must not count",
+                        },
+                    }],
+                    "trace": [{
+                        "node": "plan_tools",
+                        "output": {
+                            "suppressed_tools": [{
+                                **calls[1],
+                                "reason": "duplicate",
+                            }],
+                            "denied_tools": [{
+                                **calls[2],
+                                "reason": "policy",
+                            }],
+                        },
+                    }],
+                    "context_sources": [],
+                    "answer": "",
+                },
+            },
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            ledger = build_read_evidence_ledger(
+                observation=observation,
+                workspace_root=Path(temp_dir),
+            )
+
+        self.assertEqual(len(observation.executed_calls), 1)
+        self.assertEqual(len(observation.failed_calls), 1)
+        self.assertEqual(len(observation.suppressed_calls), 1)
+        self.assertEqual(len(observation.denied_calls), 1)
+        self.assertEqual(len(observation.pending_approval_calls), 1)
+        self.assertEqual(ledger, ())
+
+    def test_no_actions_have_no_invalid_action_sample(self) -> None:
+        metrics = measure_trajectory(_observation())
+
+        self.assertIsNone(metrics.invalid_action_rate)
+
+    def test_one_tool_result_cannot_execute_duplicate_call_ids_twice(self) -> None:
+        observation = RunObservation.from_run_status(
+            "case",
+            {
+                "status": "completed",
+                "result": {
+                    "tool_calls": [
+                        {
+                            "call_id": "same",
+                            "name": "repo.read_file",
+                            "arguments": {"path": "a.py"},
+                            "source": "model",
+                        },
+                        {
+                            "call_id": "same",
+                            "name": "repo.read_file",
+                            "arguments": {"path": "a.py"},
+                            "source": "model",
+                        },
+                    ],
+                    "tool_results": [{
+                        "call_id": "same",
+                        "name": "repo.read_file",
+                        "ok": True,
+                    }],
+                    "trace": [],
+                    "context_sources": [],
+                    "answer": "",
+                },
+            },
+        )
+
+        self.assertEqual(len(observation.proposed_calls), 2)
+        self.assertEqual(len(observation.executed_calls), 1)
+
     def test_repeated_call_raises_the_invalid_action_rate(self) -> None:
         observation = _observation(
             calls=[
@@ -342,6 +531,15 @@ class CitationVerificationTests(unittest.TestCase):
             "        return items\n",
             encoding="utf-8",
         )
+        (self.root / "README.md").write_text(
+            "Procedures live in docs/runbook.md.\n",
+            encoding="utf-8",
+        )
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "runbook.md").write_text(
+            "runbook\n",
+            encoding="utf-8",
+        )
         self.addCleanup(self._temp.cleanup)
 
     def _verify(
@@ -402,6 +600,32 @@ class CitationVerificationTests(unittest.TestCase):
         self.assertEqual(report.verdicts[0].status, STATUS_CONTENT_MISMATCH)
         self.assertFalse(report.passed)
         self.assertEqual(report.accuracy, 0.0)
+
+    def test_read_evidence_whitespace_must_match_disk_exactly(self) -> None:
+        report = self._verify(
+            [{
+                "kind": "file",
+                "path": "src/orders.py",
+                "start_line": 2,
+                "end_line": 2,
+                "text": "def submit(self, items):\n",
+            }]
+        )
+
+        self.assertEqual(report.verdicts[0].status, STATUS_CONTENT_MISMATCH)
+
+    def test_citation_path_cannot_escape_workspace(self) -> None:
+        report = self._verify(
+            [{
+                "kind": "file",
+                "path": "../../etc/passwd",
+                "start_line": 1,
+                "end_line": 1,
+                "text": "root",
+            }]
+        )
+
+        self.assertEqual(report.verdicts[0].status, STATUS_MISSING_FILE)
 
     def test_shifted_line_range_is_a_mismatch(self) -> None:
         report = self._verify(
@@ -477,6 +701,13 @@ class CitationVerificationTests(unittest.TestCase):
         self.assertIsNone(report.accuracy)
         self.assertTrue(report.passed)
 
+    def test_no_citations_reports_no_scoreable_samples(self) -> None:
+        report = self._verify([], answer="No file path is mentioned.")
+
+        self.assertIsNone(report.content_accuracy)
+        self.assertIsNone(report.answer_path_grounding_rate)
+        self.assertFalse(report.scoreable)
+
     def test_answer_citing_an_unread_file_is_ungrounded(self) -> None:
         report = self._verify(
             [
@@ -494,7 +725,7 @@ class CitationVerificationTests(unittest.TestCase):
         self.assertEqual(report.ungrounded_paths, ("src/billing.py",))
         self.assertFalse(report.passed)
 
-    def test_a_path_quoted_from_read_evidence_is_grounded(self) -> None:
+    def test_a_path_quoted_from_read_evidence_still_requires_its_own_read(self) -> None:
         report = self._verify(
             [
                 {
@@ -515,7 +746,7 @@ class CitationVerificationTests(unittest.TestCase):
             answer="README.md says procedures live in docs/runbook.md.",
         )
 
-        self.assertEqual(report.ungrounded_paths, ())
+        self.assertEqual(report.ungrounded_paths, ("docs/runbook.md",))
 
     def test_a_shortened_filename_is_grounded(self) -> None:
         report = self._verify(
@@ -532,6 +763,77 @@ class CitationVerificationTests(unittest.TestCase):
         )
 
         self.assertEqual(report.ungrounded_paths, ())
+
+    def test_ambiguous_shortened_filename_is_not_guessed(self) -> None:
+        (self.root / "other").mkdir()
+        (self.root / "other" / "orders.py").write_text("other\n", encoding="utf-8")
+        report = self._verify(
+            [
+                {
+                    "kind": "file", "path": "src/orders.py",
+                    "start_line": 1, "end_line": 1, "text": "class OrderService:\n",
+                },
+                {
+                    "kind": "file", "path": "other/orders.py",
+                    "start_line": 1, "end_line": 1, "text": "other\n",
+                },
+            ],
+            answer="See orders.py.",
+        )
+
+        self.assertEqual(report.answer_paths[0].status, STATUS_AMBIGUOUS_BASENAME)
+        self.assertFalse(report.passed)
+
+    def test_search_match_does_not_ground_an_answer_path(self) -> None:
+        report = self._verify(
+            [{
+                "kind": "search_match", "path": "src/orders.py",
+                "start_line": 1, "end_line": 1, "text": "class OrderService:",
+            }],
+            answer="src/orders.py defines the complete order flow.",
+        )
+
+        self.assertEqual(report.ungrounded_paths, ("src/orders.py",))
+        self.assertEqual(report.content_accuracy, 1.0)
+        self.assertEqual(report.answer_path_grounding_rate, 0.0)
+
+    def test_successful_native_read_builds_grounding_evidence(self) -> None:
+        observation = RunObservation.from_run_status(
+            "case",
+            {
+                "status": "completed",
+                "result": {
+                    "tool_calls": [{
+                        "call_id": "read_1", "name": "repo.read_file",
+                        "arguments": {"path": "src/orders.py"}, "source": "model",
+                    }],
+                    "tool_results": [{
+                        "call_id": "read_1", "name": "repo.read_file", "ok": True,
+                        "result": {
+                            "path": "src/orders.py", "start_line": 1, "end_line": 3,
+                            "content": (self.root / "src" / "orders.py").read_text(encoding="utf-8"),
+                            "content_hash": "a" * 64, "truncated": False,
+                        },
+                    }],
+                    "trace": [], "context_sources": [],
+                    "answer": "See orders.py.",
+                },
+            },
+        )
+        ledger = build_read_evidence_ledger(
+            observation=observation,
+            workspace_root=self.root,
+        )
+        report = verify_citations(
+            context_sources=[],
+            read_evidence=[item.as_dict() for item in ledger],
+            answer=observation.answer,
+            workspace_root=self.root,
+        )
+
+        self.assertEqual(ledger[0].call_id, "read_1")
+        self.assertEqual(report.answer_path_grounding_rate, 1.0)
+        self.assertTrue(report.passed)
 
     def test_prose_is_not_mistaken_for_a_citation(self) -> None:
         paths = answer_citation_paths(
@@ -554,7 +856,9 @@ class TrajectorySuiteTests(unittest.TestCase):
 
         self.assertLessEqual(report.invalid_action_rate, 0.05)
         self.assertIsNotNone(report.mean_step_efficiency)
-        self.assertEqual(report.citation_accuracy, 1.0)
+        self.assertEqual(report.citation_content_accuracy, 1.0)
+        self.assertEqual(report.answer_path_grounding_rate, 1.0)
+        self.assertEqual(report.fully_grounded_case_rate, 1.0)
         self.assertEqual(report.failure_recovery_rate, 1.0)
         # The budget metric is only meaningful if some case actually reaches a
         # budget; a suite where nothing ever caps proves nothing about it.

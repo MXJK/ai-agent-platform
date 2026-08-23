@@ -100,6 +100,21 @@ class WorkspaceServiceTests(unittest.TestCase):
             self.assertEqual(restored.created_at, created.created_at)
             self.assertEqual(restored.revision, created.revision)
 
+    def test_purge_ephemeral_leaves_no_workspace_tombstone(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "eval"
+            workspace.mkdir()
+            service = WorkspaceService(
+                store=InMemoryWorkspaceRepository(),
+                allowed_roots=(str(root),),
+            )
+            service.register(workspace_id="eval", root_path=str(workspace))
+
+            self.assertTrue(service.purge_ephemeral("eval"))
+
+            self.assertEqual(service.list_including_removed(), [])
+
     def test_reports_registered_workspace_path_availability(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

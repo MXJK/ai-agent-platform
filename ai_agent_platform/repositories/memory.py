@@ -109,6 +109,20 @@ class InMemorySessionRepository:
             except KeyError as exc:
                 raise SessionNotFoundError(session_id) from exc
 
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            if self._sessions.pop(session_id, None) is None:
+                return False
+            self._messages.pop(session_id, None)
+            self._conversation_summaries.pop(session_id, None)
+            for key in [
+                key
+                for key, value in self._token_usage.items()
+                if value.session_id == session_id
+            ]:
+                self._token_usage.pop(key, None)
+            return True
+
     def save_session(
         self,
         session: Session,
@@ -352,6 +366,10 @@ class InMemoryWorkspaceRepository:
             removed = replace(existing, updated_at=now, removed_at=now)
             self._workspaces[workspace_id] = removed
             return removed
+
+    def purge(self, workspace_id: str) -> bool:
+        with self._lock:
+            return self._workspaces.pop(workspace_id, None) is not None
 
 
 class InMemoryKnowledgeBaseRepository:

@@ -1,5 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from dataclasses import replace
+from types import SimpleNamespace
 import time
 import unittest
 
@@ -8,10 +10,16 @@ from fastapi.testclient import TestClient
 from ai_agent_platform.core import Settings
 from ai_agent_platform.evaluation.faults import ToolFaultController
 from ai_agent_platform.evaluation.models import (
+    EVAL_STATUS_COMPLETED,
+    SEVERITY_CRITICAL,
+    EvalAlert,
     EvalBaseline,
+    EvalCaseRecord,
+    EvalRunRecord,
     EvalSuiteMetrics,
     utc_now,
 )
+from ai_agent_platform.evaluation.service import EvalService
 from ai_agent_platform.evaluation.suite import load_suite
 from ai_agent_platform.evaluation.trajectory import check_constraints
 from ai_agent_platform.main import create_app
@@ -80,7 +88,14 @@ class ProviderAwareStepCeilingTests(unittest.TestCase):
                         }
                         for index in range(20)
                     ],
-                    "tool_results": [],
+                    "tool_results": [
+                        {
+                            "call_id": f"c{index}",
+                            "name": "repo.read_file",
+                            "ok": True,
+                        }
+                        for index in range(20)
+                    ],
                     "trace": [],
                     "context_sources": [],
                     "answer": "",
@@ -100,6 +115,32 @@ class ProviderAwareStepCeilingTests(unittest.TestCase):
 
         self.assertFalse(fake["max_steps"])
         self.assertTrue(deepseek["max_steps"])
+
+    def test_calls_without_results_do_not_consume_the_ceiling(self) -> None:
+        from ai_agent_platform.evaluation.trajectory import RunObservation
+
+        observation = RunObservation.from_run_status(
+            "case",
+            {
+                "status": "completed",
+                "result": {
+                    "tool_calls": [{
+                        "call_id": "proposed", "name": "repo.read_file",
+                        "arguments": {"path": "a.py"}, "source": "model",
+                    }],
+                    "tool_results": [], "trace": [],
+                    "context_sources": [], "answer": "",
+                },
+            },
+        )
+
+        verdict = {
+            item.name: item
+            for item in check_constraints(observation, {"max_steps": 0})
+        }
+
+        self.assertTrue(verdict["max_steps"].passed)
+        self.assertEqual(len(observation.executed_calls), 0)
 
 
 class EvalSuiteTests(unittest.TestCase):
@@ -131,7 +172,7 @@ class EvalSuiteTests(unittest.TestCase):
 
 
 class EvalApiTests(unittest.TestCase):
-    def test_run_completes_and_becomes_the_provider_baseline(self) -> None:
+    def test_run_completes_without_implicitly_becoming_baseline(self) -> None:
         with TemporaryDirectory() as temp_dir:
             with TestClient(
                 _app(temp_dir, eval_fault_injection_enabled=True)
@@ -153,10 +194,13 @@ class EvalApiTests(unittest.TestCase):
 
         self.assertEqual(detail["status"], "completed", detail["error"])
         self.assertEqual(detail["passed_cases"], detail["total_cases"])
-        self.assertTrue(detail["is_baseline"])
+        self.assertFalse(detail["is_baseline"])
+        self.assertEqual(detail["baseline_run_id"], "")
         self.assertEqual(detail["alerts"], [])
         self.assertEqual(detail["metrics"]["pass_rate"], 1.0)
-        self.assertEqual(detail["metrics"]["citation_accuracy"], 1.0)
+        self.assertEqual(detail["metrics"]["citation_content_accuracy"], 1.0)
+        self.assertEqual(detail["metrics"]["answer_path_grounding_rate"], 1.0)
+        self.assertEqual(detail["metrics"]["fully_grounded_case_rate"], 1.0)
         self.assertEqual(detail["metrics"]["failure_recovery_rate"], 1.0)
         self.assertGreater(detail["metrics"]["budget_cap_rate"], 0.0)
 
@@ -236,6 +280,9 @@ class EvalApiTests(unittest.TestCase):
                     "/api/v1/evals/runs", json={"provider": "fake"}
                 ).json()["run_id"]
                 _await_run(client, first)
+                first_pinned = client.post(
+                    f"/api/v1/evals/runs/{first}/baseline"
+                )
                 second = client.post(
                     "/api/v1/evals/runs", json={"provider": "fake"}
                 ).json()["run_id"]
@@ -245,6 +292,7 @@ class EvalApiTests(unittest.TestCase):
                 pinned = client.post(f"/api/v1/evals/runs/{second}/baseline")
                 repinned = client.get(f"/api/v1/evals/runs/{second}").json()
 
+        self.assertEqual(first_pinned.status_code, 200)
         self.assertEqual(detail["baseline_run_id"], first)
         self.assertEqual(detail["deltas"]["pass_rate"], 0.0)
         self.assertEqual([item["run_id"] for item in listing["runs"]], [second, first])
@@ -277,15 +325,220 @@ class EvalRepositoryTests(unittest.TestCase):
         self.assertEqual(newest, ["eval_2", "eval_1", "eval_0"])
         self.assertEqual(only_fake, ["eval_2", "eval_0"])
 
-    def test_baseline_is_per_provider(self) -> None:
+    def test_baseline_key_includes_model_suite_and_evaluator(self) -> None:
         repository = InMemoryEvalRepository()
         metrics = EvalSuiteMetrics(1.0, 0.0, 1.0, 0.0, 1.0, 1.0)
         repository.set_baseline(
-            EvalBaseline("fake", "eval_1", metrics, utc_now())
+            EvalBaseline(
+                provider="fake",
+                model="fake-v1",
+                suite_id="l1-v2",
+                evaluator_version="2.0",
+                schema_version=2,
+                run_id="eval_1",
+                metrics=metrics,
+                pinned_at=utc_now(),
+            )
         )
 
-        self.assertEqual(repository.get_baseline("fake").run_id, "eval_1")
-        self.assertIsNone(repository.get_baseline("deepseek"))
+        self.assertEqual(
+            repository.get_baseline("fake", "fake-v1", "l1-v2", "2.0").run_id,
+            "eval_1",
+        )
+        self.assertIsNone(
+            repository.get_baseline("fake", "fake-v2", "l1-v2", "2.0")
+        )
+        self.assertIsNone(
+            repository.get_baseline("fake", "fake-v1", "l1-v1", "2.0")
+        )
+        self.assertIsNone(
+            repository.get_baseline("fake", "fake-v1", "l1-v2", "1.0")
+        )
+
+
+class EvalIsolationAndBaselineTests(unittest.TestCase):
+    def test_schema_mismatched_baseline_is_not_comparable(self) -> None:
+        repository = InMemoryEvalRepository()
+        metrics = EvalSuiteMetrics(1.0, 0.0, 1.0, 0.0, None, None)
+        repository.set_baseline(
+            EvalBaseline(
+                provider="fake",
+                model="fake-v1",
+                suite_id="l1_trajectory_v2",
+                evaluator_version="2.0",
+                schema_version=1,
+                run_id="eval_old_schema",
+                metrics=metrics,
+                pinned_at=utc_now(),
+            )
+        )
+        service = EvalService(
+            repository=repository,
+            query_service=None,
+            session_service=None,
+            workspace_service=None,
+            workspace_root="/tmp/evals",
+        )
+
+        self.assertIsNone(
+            service.get_baseline(
+                "fake",
+                "fake-v1",
+                "l1_trajectory_v2",
+                "2.0",
+                2,
+            )
+        )
+
+    def test_critical_run_requires_force_to_pin(self) -> None:
+        repository = InMemoryEvalRepository()
+        metrics = EvalSuiteMetrics(0.0, 0.0, 1.0, 0.0, None, None)
+        record = EvalRunRecord(
+            run_id="eval_critical",
+            suite_id="l1_trajectory_v2",
+            provider="fake",
+            model="fake-v1",
+            status=EVAL_STATUS_COMPLETED,
+            started_at=utc_now(),
+            total_cases=1,
+            completed_cases=1,
+            cases=(EvalCaseRecord("case", False, "failed", "run_1"),),
+            metrics=metrics,
+            alerts=(
+                EvalAlert(
+                    kind="case", severity=SEVERITY_CRITICAL,
+                    metric="pass_rate", message="failed",
+                ),
+            ),
+        )
+        repository.create_run(record)
+        service = EvalService(
+            repository=repository,
+            query_service=None,
+            session_service=None,
+            workspace_service=None,
+            workspace_root="/tmp/evals",
+        )
+
+        with self.assertRaisesRegex(ValueError, "force=true"):
+            service.pin_baseline(record.run_id)
+        baseline = service.pin_baseline(record.run_id, force=True)
+
+        self.assertTrue(baseline.forced)
+        self.assertEqual(baseline.key, ("fake", "fake-v1", "l1_trajectory_v2", "2.0"))
+
+    def test_available_models_keeps_multiple_models_per_provider(self) -> None:
+        registry = SimpleNamespace(
+            list_models=lambda: [
+                {"provider": "fake", "model": "fake-v1", "display_name": "V1", "enabled": True},
+                {"provider": "fake", "model": "fake-v2", "display_name": "V2", "enabled": True},
+            ]
+        )
+        service = EvalService(
+            repository=InMemoryEvalRepository(), query_service=None,
+            session_service=None, workspace_service=None,
+            workspace_root="/tmp/evals", model_registry=registry,
+        )
+
+        self.assertEqual(
+            [(item["provider"], item["model"]) for item in service.available_providers()],
+            [("fake", "fake-v1"), ("fake", "fake-v2")],
+        )
+
+    def test_eval_submission_is_explicitly_isolated_and_session_is_deleted(self) -> None:
+        class QuerySpy:
+            def __init__(self) -> None:
+                self.submissions = []
+
+            def submit_run(self, **kwargs):
+                self.submissions.append(kwargs)
+                return SimpleNamespace(run_id="agent_eval_1")
+
+            def get_run(self, run_id):
+                return {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "pending_approval": None,
+                    "errors": [],
+                    "result": {
+                        "tool_calls": [], "tool_results": [], "trace": [],
+                        "context_sources": [], "answer": "done", "errors": [],
+                        "metrics": {"total_tokens": 7, "elapsed_ms": 3},
+                    },
+                }
+
+        class SessionSpy:
+            def __init__(self) -> None:
+                self.deleted = []
+
+            def create_session(self, user_id):
+                return SimpleNamespace(id="eval_session", user_id=user_id)
+
+            def delete_session(self, session_id):
+                self.deleted.append(session_id)
+                return True
+
+        class WorkspaceSpy:
+            def __init__(self) -> None:
+                self.removed = []
+                self.purged = []
+
+            def register(self, **kwargs):
+                return kwargs
+
+            def remove(self, workspace_id):
+                self.removed.append(workspace_id)
+
+            def purge_ephemeral(self, workspace_id):
+                self.purged.append(workspace_id)
+                return True
+
+        class MemorySpy:
+            def __init__(self) -> None:
+                self.admins = []
+                self.deleted = []
+
+            def ensure_workspace_admin(self, **kwargs):
+                self.admins.append(kwargs)
+
+            def delete_workspace_state(self, **kwargs):
+                self.deleted.append(kwargs["workspace_id"])
+
+        suite = replace(
+            load_suite(),
+            fixtures=({"filename": "README.md", "content": "fixture\n"},),
+            cases=({
+                "id": "isolated", "message": "inspect", "expected_status": "completed",
+            },),
+        )
+        query = QuerySpy()
+        sessions = SessionSpy()
+        workspaces = WorkspaceSpy()
+        memory = MemorySpy()
+        with TemporaryDirectory() as temp_dir:
+            service = EvalService(
+                repository=InMemoryEvalRepository(), query_service=query,
+                session_service=sessions, workspace_service=workspaces,
+                memory_service=memory,
+                workspace_root=temp_dir, actor_user_id="real_owner", suite=suite,
+                poll_interval_seconds=0, status_serializer=lambda value: value,
+            )
+            detail = service.start_run(
+                provider="fake", model="registered-fake-v2", blocking=True,
+            )
+
+        submission = query.submissions[0]
+        self.assertTrue(submission["evaluation"])
+        self.assertEqual(submission["provider"], "fake")
+        self.assertEqual(submission["model"], "registered-fake-v2")
+        self.assertNotEqual(submission["actor_user_id"], "real_owner")
+        self.assertTrue(submission["actor_user_id"].startswith("eval-principal:"))
+        self.assertEqual(memory.admins[0]["actor_user_id"], submission["actor_user_id"])
+        self.assertEqual(sessions.deleted, ["eval_session"])
+        workspace_id = f"eval_{detail.run_id}"
+        self.assertEqual(memory.deleted, [workspace_id])
+        self.assertEqual(workspaces.purged, [workspace_id])
+        self.assertEqual(workspaces.removed, [])
 
 
 if __name__ == "__main__":

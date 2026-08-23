@@ -44,12 +44,14 @@ from ai_agent_platform.services import (
 class _CaptureQueue:
     def __init__(self, on_submit=None) -> None:
         self.payloads: list[dict[str, object]] = []
+        self.names: list[str] = []
         self._on_submit = on_submit
 
     def submit(self, _name: str, _handler, **payload: object) -> None:
         if self._on_submit is not None:
             self._on_submit(payload)
         self.payloads.append(payload)
+        self.names.append(_name)
 
     def close(self) -> None:
         pass
@@ -133,6 +135,95 @@ class QueryContractTests(unittest.TestCase):
 
 
 class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_eval_flag_skips_user_and_project_memory_side_effects(self) -> None:
+        class UserMemorySpy:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.context_calls = []
+                self.capture_calls = []
+
+            def context_for_user(self, *, user_id):
+                self.context_calls.append(user_id)
+                return "REAL PROFILE"
+
+            def capture_user_message(self, **kwargs):
+                self.capture_calls.append(kwargs)
+
+        class ProjectMemorySpy:
+            def __init__(self) -> None:
+                self.extract_calls = []
+
+            def extract_and_store(self, **kwargs):
+                self.extract_calls.append(kwargs)
+
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            user_memory = UserMemorySpy()
+            project_memory = ProjectMemorySpy()
+            queue = _CaptureQueue()
+            context_factory = ExecutionContextFactory(
+                session_service=kernel["session_service"],
+                workspace_service=kernel["workspace_service"],
+                auth_mode="disabled",
+                entrypoint_type="api",
+                tool_registry=kernel["registry"],
+                user_memory_service=user_memory,
+            )
+            service = QueryService(
+                runtime=kernel["runtime"],
+                session_service=kernel["session_service"],
+                workspace_service=kernel["workspace_service"],
+                task_queue=queue,
+                execution_context_factory=context_factory,
+                query_uow=kernel["uow"],
+                user_memory_service=user_memory,
+                project_memory_service=project_memory,
+            )
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="isolated eval",
+                    workspace_id="workspace_main",
+                    provider="fake",
+                    model="registered-fake-v2",
+                    evaluation=True,
+                )
+            )
+            result = _result(record, answer="eval answer")
+            kernel["run_store"].save(
+                replace(record, status="completed", next_nodes=[], result=result)
+            )
+            service._record_assistant_message(result)
+
+            self.assertEqual(queue.names, ["agent_run"])
+            self.assertEqual(user_memory.context_calls, [])
+            self.assertEqual(user_memory.capture_calls, [])
+            self.assertEqual(project_memory.extract_calls, [])
+            self.assertEqual(record.context_snapshot.session.controlled_history, ())
+            self.assertEqual(
+                record.context_snapshot.metadata.entrypoint_metadata[
+                    "evaluation"
+                ],
+                {"isolated": True, "knowledge_base_ids": []},
+            )
+            messages = kernel["session_service"].list_messages(kernel["session_id"])
+            self.assertEqual([item.role for item in messages], ["user"])
+
+            ordinary = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="ordinary run",
+                    workspace_id="workspace_main",
+                )
+            )
+
+            self.assertIn("user_memory_extraction", queue.names)
+            self.assertIn("REAL PROFILE", [
+                item.content
+                for item in ordinary.context_snapshot.session.controlled_history
+            ])
+
     async def test_atomic_start_rolls_back_message_and_run_together(self) -> None:
         with TemporaryDirectory() as temp_dir:
             kernel = _kernel(Path(temp_dir))
@@ -457,6 +548,7 @@ def _kernel(root: Path, on_submit=None) -> dict[str, object]:
         "uow": uow,
         "queue": queue,
         "registry": registry,
+        "context_factory": context_factory,
     }
 
 

@@ -49,10 +49,20 @@ def create_evals_router(
     def catalogue() -> EvalCatalogueResponse:
         service = _service()
         payload = service.catalogue()
+        providers = service.available_providers()
         baselines = [
             EvalBaselineResponse.from_domain(baseline)
-            for provider in sorted(SUPPORTED_PROVIDERS)
-            if (baseline := service.get_baseline(provider)) is not None
+            for item in providers
+            if (
+                baseline := service.get_baseline(
+                    item["provider"],
+                    item["model"],
+                    payload["suite_id"],
+                    payload["evaluator_version"],
+                    payload["schema_version"],
+                )
+            )
+            is not None
         ]
         return EvalCatalogueResponse(
             **payload,
@@ -61,7 +71,7 @@ def create_evals_router(
             baselines=baselines,
             providers=[
                 EvalProviderResponse(**item)
-                for item in service.available_providers()
+                for item in providers
             ],
         )
 
@@ -110,17 +120,26 @@ def create_evals_router(
             raise HTTPException(status_code=404, detail="eval run not found") from exc
         return EvalRunDetailResponse.from_domain(
             record,
-            service.get_baseline(record.provider),
+            service.get_baseline(
+                record.provider,
+                record.model,
+                record.suite_id,
+                record.evaluator_version,
+                record.schema_version,
+            ),
         )
 
     @router.post(
         "/evals/runs/{run_id}/baseline",
         response_model=EvalBaselineResponse,
     )
-    def pin_baseline(run_id: str) -> EvalBaselineResponse:
+    def pin_baseline(
+        run_id: str,
+        force: bool = Query(default=False),
+    ) -> EvalBaselineResponse:
         service = _service()
         try:
-            baseline = service.pin_baseline(run_id)
+            baseline = service.pin_baseline(run_id, force=force)
         except EvalRunNotFoundError as exc:
             raise HTTPException(status_code=404, detail="eval run not found") from exc
         except ValueError as exc:

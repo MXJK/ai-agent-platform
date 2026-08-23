@@ -132,6 +132,15 @@ class ProjectMemoryService:
             role="admin",
         )
 
+    def delete_workspace_state(self, *, workspace_id: str) -> None:
+        """Remove all governed memory state for an ephemeral workspace."""
+
+        memory_ids = self._repository.delete_workspace_state(
+            workspace_id=workspace_id
+        )
+        for memory_id in memory_ids:
+            self._vector_store.delete(memory_id)
+
     def authorize(
         self,
         *,

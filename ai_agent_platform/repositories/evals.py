@@ -29,7 +29,13 @@ class EvalRepository(Protocol):
         limit: int = 20,
     ) -> list[EvalRunRecord]: ...
 
-    def get_baseline(self, provider: str) -> EvalBaseline | None: ...
+    def get_baseline(
+        self,
+        provider: str,
+        model: str,
+        suite_id: str,
+        evaluator_version: str,
+    ) -> EvalBaseline | None: ...
 
     def set_baseline(self, baseline: EvalBaseline) -> EvalBaseline: ...
 
@@ -38,7 +44,7 @@ class InMemoryEvalRepository:
     def __init__(self) -> None:
         self._runs: dict[str, EvalRunRecord] = {}
         self._order: list[str] = []
-        self._baselines: dict[str, EvalBaseline] = {}
+        self._baselines: dict[tuple[str, str, str, str], EvalBaseline] = {}
         self._lock = Lock()
 
     def create_run(self, record: EvalRunRecord) -> EvalRunRecord:
@@ -70,13 +76,21 @@ class InMemoryEvalRepository:
             records = [item for item in records if item.provider == provider]
         return records[: max(1, limit)]
 
-    def get_baseline(self, provider: str) -> EvalBaseline | None:
+    def get_baseline(
+        self,
+        provider: str,
+        model: str,
+        suite_id: str,
+        evaluator_version: str,
+    ) -> EvalBaseline | None:
         with self._lock:
-            return self._baselines.get(provider)
+            return self._baselines.get(
+                (provider, model, suite_id, evaluator_version)
+            )
 
     def set_baseline(self, baseline: EvalBaseline) -> EvalBaseline:
         with self._lock:
-            self._baselines[baseline.provider] = baseline
+            self._baselines[baseline.key] = baseline
             return baseline
 
 
@@ -94,17 +108,21 @@ class PostgresEvalRepository:
             conn.execute(
                 """
                 INSERT INTO eval_runs (
-                    run_id, suite_id, provider, model, status, started_at,
+                    run_id, suite_id, provider, model, evaluator_version,
+                    schema_version, status, started_at,
                     finished_at, total_cases, completed_cases, passed_cases,
                     metrics, cases, alerts, baseline_run_id, is_baseline,
                     fault_injection_enabled, total_tokens, elapsed_ms, error
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s
                 )
                 ON CONFLICT (run_id) DO UPDATE SET
                     status = EXCLUDED.status,
+                    evaluator_version = EXCLUDED.evaluator_version,
+                    schema_version = EXCLUDED.schema_version,
                     finished_at = EXCLUDED.finished_at,
                     total_cases = EXCLUDED.total_cases,
                     completed_cases = EXCLUDED.completed_cases,
@@ -124,6 +142,8 @@ class PostgresEvalRepository:
                     record.suite_id,
                     record.provider,
                     record.model,
+                    record.evaluator_version,
+                    record.schema_version,
                     record.status,
                     record.started_at,
                     record.finished_at,
@@ -167,20 +187,33 @@ class PostgresEvalRepository:
             ).fetchall()
         return [_run_from_row(row) for row in rows]
 
-    def get_baseline(self, provider: str) -> EvalBaseline | None:
+    def get_baseline(
+        self,
+        provider: str,
+        model: str,
+        suite_id: str,
+        evaluator_version: str,
+    ) -> EvalBaseline | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT provider, run_id, metrics, pinned_at "
-                "FROM eval_baselines WHERE provider = %s",
-                (provider,),
+                "SELECT provider, model, suite_id, evaluator_version, "
+                "schema_version, run_id, metrics, pinned_at, forced "
+                "FROM eval_baselines WHERE provider = %s AND model = %s "
+                "AND suite_id = %s AND evaluator_version = %s",
+                (provider, model, suite_id, evaluator_version),
             ).fetchone()
         if row is None:
             return None
         return EvalBaseline(
             provider=str(row[0]),
-            run_id=str(row[1]),
-            metrics=EvalSuiteMetrics.from_dict(row[2] or {}),
-            pinned_at=_as_datetime(row[3]),
+            model=str(row[1]),
+            suite_id=str(row[2]),
+            evaluator_version=str(row[3]),
+            schema_version=int(row[4]),
+            run_id=str(row[5]),
+            metrics=EvalSuiteMetrics.from_dict(row[6] or {}),
+            pinned_at=_as_datetime(row[7]),
+            forced=bool(row[8]),
         )
 
     def set_baseline(self, baseline: EvalBaseline) -> EvalBaseline:
@@ -188,18 +221,29 @@ class PostgresEvalRepository:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO eval_baselines (provider, run_id, metrics, pinned_at)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (provider) DO UPDATE SET
+                INSERT INTO eval_baselines (
+                    provider, model, suite_id, evaluator_version,
+                    schema_version, run_id, metrics, pinned_at, forced
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (provider, model, suite_id, evaluator_version)
+                DO UPDATE SET
+                    schema_version = EXCLUDED.schema_version,
                     run_id = EXCLUDED.run_id,
                     metrics = EXCLUDED.metrics,
-                    pinned_at = EXCLUDED.pinned_at
+                    pinned_at = EXCLUDED.pinned_at,
+                    forced = EXCLUDED.forced
                 """,
                 (
                     baseline.provider,
+                    baseline.model,
+                    baseline.suite_id,
+                    baseline.evaluator_version,
+                    baseline.schema_version,
                     baseline.run_id,
                     Jsonb(baseline.metrics.as_dict()),
                     baseline.pinned_at,
+                    baseline.forced,
                 ),
             )
         return baseline
@@ -210,7 +254,8 @@ class PostgresEvalRepository:
 
 
 _RUN_COLUMNS = """
-    run_id, suite_id, provider, model, status, started_at, finished_at,
+    run_id, suite_id, provider, model, evaluator_version, schema_version,
+    status, started_at, finished_at,
     total_cases, completed_cases, passed_cases, metrics, cases, alerts,
     baseline_run_id, is_baseline, fault_injection_enabled, total_tokens,
     elapsed_ms, error
@@ -223,21 +268,23 @@ def _run_from_row(row: tuple[Any, ...]) -> EvalRunRecord:
         suite_id=str(row[1]),
         provider=str(row[2]),
         model=str(row[3] or ""),
-        status=str(row[4]),
-        started_at=_as_datetime(row[5]),
-        finished_at=_as_datetime(row[6]) if row[6] else None,
-        total_cases=int(row[7] or 0),
-        completed_cases=int(row[8] or 0),
-        passed_cases=int(row[9] or 0),
-        metrics=EvalSuiteMetrics.from_dict(row[10]) if row[10] else None,
-        cases=tuple(EvalCaseRecord.from_dict(item) for item in (row[11] or [])),
-        alerts=tuple(EvalAlert.from_dict(item) for item in (row[12] or [])),
-        baseline_run_id=str(row[13] or ""),
-        is_baseline=bool(row[14]),
-        fault_injection_enabled=bool(row[15]),
-        total_tokens=int(row[16] or 0),
-        elapsed_ms=int(row[17] or 0),
-        error=str(row[18] or ""),
+        evaluator_version=str(row[4] or "legacy"),
+        schema_version=int(row[5] or 1),
+        status=str(row[6]),
+        started_at=_as_datetime(row[7]),
+        finished_at=_as_datetime(row[8]) if row[8] else None,
+        total_cases=int(row[9] or 0),
+        completed_cases=int(row[10] or 0),
+        passed_cases=int(row[11] or 0),
+        metrics=EvalSuiteMetrics.from_dict(row[12]) if row[12] else None,
+        cases=tuple(EvalCaseRecord.from_dict(item) for item in (row[13] or [])),
+        alerts=tuple(EvalAlert.from_dict(item) for item in (row[14] or [])),
+        baseline_run_id=str(row[15] or ""),
+        is_baseline=bool(row[16]),
+        fault_injection_enabled=bool(row[17]),
+        total_tokens=int(row[18] or 0),
+        elapsed_ms=int(row[19] or 0),
+        error=str(row[20] or ""),
     )
 
 

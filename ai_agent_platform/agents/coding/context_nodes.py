@@ -169,10 +169,26 @@ class ContextRetrievalNodes:
         warnings = list(state.get("context_warnings", []))
         catalog: list[dict[str, Any]] = []
         catalog_truncated = False
-        if self._knowledge_context_provider is not None:
+        allowed_eval_kbs = set(
+            state.get("evaluation_knowledge_base_ids", [])
+        )
+        isolated_without_fixture_kb = (
+            state.get("evaluation_isolated", False) and not allowed_eval_kbs
+        )
+        if (
+            self._knowledge_context_provider is not None
+            and not isolated_without_fixture_kb
+        ):
             try:
+                available = self._knowledge_context_provider.list()
+                if state.get("evaluation_isolated", False):
+                    available = [
+                        item
+                        for item in available
+                        if item.id in allowed_eval_kbs
+                    ]
                 catalog, catalog_truncated = _routing_catalog(
-                    self._knowledge_context_provider.list(),
+                    available,
                     query=state["user_input"],
                 )
             except Exception as exc:
@@ -191,6 +207,22 @@ class ContextRetrievalNodes:
                 **decision,
                 "context_route": route,
                 "route_reason": route_reason,
+                "selected_knowledge_base_ids": selected,
+            }
+        if state.get("evaluation_isolated", False):
+            selected = [
+                str(item)
+                for item in decision.get("selected_knowledge_base_ids", [])
+                if str(item) in allowed_eval_kbs
+            ]
+            decision = {
+                **decision,
+                "context_route": "hybrid" if selected else "repo",
+                "route_reason": (
+                    "evaluation fixture knowledge base selected"
+                    if selected
+                    else "isolated evaluation exposes no global knowledge bases"
+                ),
                 "selected_knowledge_base_ids": selected,
             }
         intent = str(decision.get("intent") or "repository_question")
@@ -402,6 +434,7 @@ class ContextRetrievalNodes:
         if (
             self._project_memory_provider is not None
             and state.get("intent") != "small_talk"
+            and not state.get("evaluation_isolated", False)
         ):
             try:
                 retrieved = self._project_memory_provider.retrieve(

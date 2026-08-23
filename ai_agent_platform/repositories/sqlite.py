@@ -61,6 +61,11 @@ class SQLiteSessionRepository:
             self._save_session(conn, session)
         return session
 
+    def delete_session(self, session_id: str) -> bool:
+        with self.database.transaction(immediate=True) as conn:
+            cursor = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        return bool(cursor.rowcount)
+
     def list_sessions(
         self,
         *,
@@ -583,6 +588,14 @@ class SQLiteWorkspaceRepository:
                 (_iso(now), _iso(now), workspace_id),
             )
         return replace(_workspace_from_row(row), removed_at=now, updated_at=now)
+
+    def purge(self, workspace_id: str) -> bool:
+        with self.database.transaction(immediate=True) as conn:
+            cursor = conn.execute(
+                "DELETE FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            )
+        return bool(cursor.rowcount)
 
 
 class SQLiteAgentRunRepository:

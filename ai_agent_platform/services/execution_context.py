@@ -144,6 +144,7 @@ class ExecutionContextFactory:
         skill_arguments: Sequence[str] = (),
         preferred_tool_name: str | None = None,
         prepare_execution_workspace: bool = True,
+        isolated: bool = False,
     ) -> RunContextSnapshot:
         session = self._session_service.get_session(session_id=conversation_id)
         if actor_user_id is not None and session.user_id != actor_user_id:
@@ -242,7 +243,9 @@ class ExecutionContextFactory:
             "build_agent_context",
             None,
         )
-        if callable(build_agent_context):
+        if isolated:
+            raw_history = []
+        elif callable(build_agent_context):
             try:
                 raw_history = build_agent_context(
                     session_id=conversation_id,
@@ -268,7 +271,7 @@ class ExecutionContextFactory:
                 {"role": item.role, "content": item.content}
                 for item in messages[-context_message_limit:]
             ]
-        if self._user_memory_service is not None:
+        if self._user_memory_service is not None and not isolated:
             profile_context = self._user_memory_service.context_for_user(
                 user_id=actor
             )
@@ -292,7 +295,11 @@ class ExecutionContextFactory:
             "get_conversation_summary",
             None,
         )
-        raw_summary = get_summary(conversation_id) if callable(get_summary) else None
+        raw_summary = (
+            get_summary(conversation_id)
+            if callable(get_summary) and not isolated
+            else None
+        )
         if raw_summary is not None:
             summary = ConversationSummarySnapshot(
                 content=raw_summary.content,

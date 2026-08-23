@@ -33,6 +33,9 @@ class WorkspaceStore(Protocol):
     def remove(self, workspace_id: str) -> WorkspaceRecord | None:
         ...
 
+    def purge(self, workspace_id: str) -> bool:
+        ...
+
 
 class WorkspaceNotFoundError(KeyError):
     pass
@@ -99,6 +102,11 @@ class WorkspaceService:
         if workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
         return workspace
+
+    def purge_ephemeral(self, workspace_id: str) -> bool:
+        """Hard-delete an internal ephemeral workspace after scoped cleanup."""
+
+        return self._store.purge(workspace_id)
 
     def is_available(self, workspace_id: str) -> bool:
         try:

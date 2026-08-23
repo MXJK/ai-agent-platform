@@ -18,7 +18,13 @@ DEFAULT_REGRESSION_TOLERANCE: dict[str, float] = {
     "mean_step_efficiency": 0.30,
     "budget_cap_rate": 0.15,
     "failure_recovery_rate": 0.0,
-    "citation_accuracy": 0.0,
+    "citation_content_accuracy": 0.0,
+    "answer_path_grounding_rate": 0.0,
+    "fully_grounded_case_rate": 0.0,
+    "tokens_per_case": 0.25,
+    "total_tokens": 0.25,
+    "elapsed_ms_per_case": 0.25,
+    "elapsed_ms": 0.25,
 }
 
 
@@ -30,6 +36,7 @@ class EvalSuite:
     cases: tuple[dict[str, Any], ...]
     metric_thresholds: dict[str, float]
     regression_tolerance: dict[str, float]
+    fixture_knowledge_base_ids: tuple[str, ...]
 
     @property
     def case_ids(self) -> tuple[str, ...]:
@@ -87,4 +94,8 @@ def load_suite(path: Path | str = DEFAULT_SUITE_PATH) -> EvalSuite:
             for key, value in (payload.get("metric_thresholds") or {}).items()
         },
         regression_tolerance=tolerance,
+        fixture_knowledge_base_ids=tuple(
+            str(item)
+            for item in payload.get("fixture_knowledge_base_ids", [])
+        ),
     )

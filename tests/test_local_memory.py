@@ -153,6 +153,8 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
         assert [
             item.id for item in workspaces.list_including_removed()
         ] == ["removed"]
+        assert workspaces.purge("removed")
+        assert workspaces.list_including_removed() == []
 
         reopened = _database(root)
         assert reopened.fts5_available == database.fts5_available
@@ -221,6 +223,22 @@ def test_l0_search_indexes_chinese_and_lists_recent_messages_without_query() -> 
         assert [item.session_id for item in recent] == [first.id]
 
 
+def test_sqlite_ephemeral_session_delete_cascades_messages() -> None:
+    with TemporaryDirectory() as root:
+        sessions = SQLiteSessionRepository(database=_database(root))
+        session = sessions.create_session("eval-principal")
+        sessions.add_message(
+            session_id=session.id,
+            role="user",
+            content="ephemeral",
+        )
+
+        assert sessions.delete_session(session.id)
+
+        with pytest.raises(SessionNotFoundError):
+            sessions.get_session(session.id)
+
+
 def test_sqlite_project_memory_scopes_lexical_and_vector_results() -> None:
     with TemporaryDirectory() as root:
         database = _database(root)
@@ -274,6 +292,45 @@ def test_sqlite_project_memory_scopes_lexical_and_vector_results() -> None:
         reopened = SQLiteProjectMemoryRepository(database=_database(root))
         assert reopened.get_memory(active.id).evidence[0].excerpt == active.content
         assert reopened.count_pending_index_events() >= 1
+
+
+def test_sqlite_project_memory_workspace_cleanup_removes_all_scoped_rows() -> None:
+    with TemporaryDirectory() as root:
+        database = _database(root)
+        repository = SQLiteProjectMemoryRepository(database=database)
+        repository.ensure_member(
+            workspace_id="eval-workspace",
+            user_id="eval-principal",
+            role="admin",
+        )
+        repository.update_settings(
+            workspace_id="eval-workspace",
+            mode="review",
+            updated_by="eval-principal",
+        )
+        memory = _project_memory(
+            memory_id="mem_eval",
+            workspace_id="eval-workspace",
+        )
+        _save_project_memory(repository, memory)
+
+        assert repository.delete_workspace_state(
+            workspace_id="eval-workspace"
+        ) == [memory.id]
+
+        with database.connect() as connection:
+            for table in (
+                "workspace_members",
+                "workspace_memory_settings",
+                "project_memories",
+                "project_memory_evidence",
+                "memory_extraction_jobs",
+                "memory_index_outbox",
+                "memory_audit_events",
+            ):
+                assert connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0] == 0
 
 
 def test_l3_routing_governance_profile_budget_and_complete_forget() -> None:

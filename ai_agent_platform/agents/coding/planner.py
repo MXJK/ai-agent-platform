@@ -220,6 +220,14 @@ class LLMStructuredAgentPlanner:
     def compose_answer(self, state: CodingAgentState) -> str:
         try:
             response = self._llm_client.complete(answer_prompt(state))
+            # The local fake transport echoes its entire prompt, including
+            # search-only source paths. Use the deterministic grounded renderer
+            # so the zero-cost Eval fixture does not manufacture citations.
+            if (
+                getattr(response, "provider", "") == "fake"
+                and state.get("evaluation_isolated", False)
+            ):
+                return self._fallback.compose_answer(state)
             text = str(response.text).strip()
             if not text:
                 raise ValueError("LLM returned an empty answer")
@@ -696,7 +704,15 @@ def _tool_summaries(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def grounded_answer_fallback(state: CodingAgentState) -> str:
-    sources = state.get("context_sources", [])
+    # This deterministic fallback is also the zero-cost Eval oracle.  A search
+    # match can guide another read, but it must not be rendered as though the
+    # whole file was opened.  Real-model answer prompting is unchanged.
+    sources = [
+        source
+        for source in state.get("context_sources", [])
+        if source.kind in {"file", "project_instruction"}
+    ]
+    read_paths = {source.path for source in sources}
     lines = [
         f"上下文路由：`{state.get('context_route', 'repo')}`；"
         f"工作区：`{state['workspace_id']}`。"
@@ -708,7 +724,11 @@ def grounded_answer_fallback(state: CodingAgentState) -> str:
             location = source.path
             if source.start_line is not None:
                 location += f":{source.start_line}-{source.end_line or source.start_line}"
-            lines.append(f"- {location}：{snippet(source.text, limit=240)}")
+            excerpt = snippet(source.text, limit=240)
+            for mentioned in extract_paths(excerpt):
+                if mentioned not in read_paths:
+                    excerpt = excerpt.replace(mentioned, "[未读取的关联路径]")
+            lines.append(f"- {location}：{excerpt}")
     for warning in state.get("context_warnings", []):
         lines.append(f"- 上下文提示：{warning}")
     if state.get("context_budget_exhausted"):
