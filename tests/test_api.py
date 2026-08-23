@@ -728,7 +728,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260822-conversation-workbench-1',
+            '/static/app.js?v=20260822-model-config-dismiss-1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)

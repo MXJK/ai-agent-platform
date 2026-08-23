@@ -2156,6 +2156,40 @@ function closeModelPicker({ restoreFocus = false } = {}) {
   if (restoreFocus) trigger.focus();
 }
 
+function closeComposerConfig({ restoreFocus = false } = {}) {
+  const config = $("composer-config");
+  if (!config.open) return;
+  config.open = false;
+  closeModelPicker();
+  if (restoreFocus) $("composer-model-btn").focus();
+}
+
+function bindComposerConfigDismissal() {
+  const config = $("composer-config");
+  const trigger = $("composer-model-btn");
+  document.addEventListener("click", (event) => {
+    if (
+      config.open
+      && !config.contains(event.target)
+      && !trigger.contains(event.target)
+    ) {
+      closeComposerConfig();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (
+      event.key !== "Escape"
+      || event.defaultPrevented
+      || !config.open
+      || !$("model-picker-menu").hidden
+    ) {
+      return;
+    }
+    event.preventDefault();
+    closeComposerConfig({ restoreFocus: true });
+  });
+}
+
 function toggleModelPicker() {
   const trigger = $("model-picker-trigger");
   if (trigger.disabled) return;
@@ -7219,6 +7253,7 @@ function bindEvents() {
     $("composer-config").open = true;
     window.setTimeout(() => $("composer-config").querySelector("summary").focus(), 0);
   });
+  bindComposerConfigDismissal();
   $("close-settings-btn").addEventListener("click", closeSettings);
   $("settings-dialog").addEventListener("click", (event) => {
     if (event.target === $("settings-dialog")) {
@@ -7433,6 +7468,7 @@ function bindEvents() {
     const current = options.indexOf(document.activeElement);
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       closeModelPicker({ restoreFocus: true });
     } else if (event.key === "ArrowDown" && options.length) {
       event.preventDefault();

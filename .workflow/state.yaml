@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
-active_task: "IN-APP-EVAL-DASHBOARD"
-next_action: "Start TOOL-RESULT-BUDGET; then CONTEXT-BUDGET-PRIMITIVES, LAYERED-TRANSCRIPT-COMPACTION, UNIFIED-CONTEXT-BUDGET in that order"
+status: "done"
+active_task: "FIX-MODEL-CONFIG-DISMISS"
+next_action: "Review the verified worktree and merge codex/fix-model-config-dismiss when approved"
 blockers: []
 last_verified_commit: "e7e6f980"
-updated_at: "2026-08-22T20:45:00+08:00"
+updated_at: "2026-08-22T22:55:03+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
