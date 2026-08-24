@@ -97,6 +97,9 @@ and a new capability boundary. Update `README.md`, `README.en.md`,
 ## Verification
 
 - `.venv/bin/python -m pytest -q` — `566 passed, 60 subtests passed`.
+  After rebasing onto `main`, the first full run had one transient
+  `test_history_and_baseline_pinning` timing failure; its isolated rerun and the
+  subsequent full run both passed.
 - `.venv/bin/python -m compileall ai_agent_platform tests evals` — passed.
 - Focused checkpoint/API/session/queue/Celery suite — `84 passed`.
 - `node --check ai_agent_platform/static/app.js` — passed.
