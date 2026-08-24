@@ -135,6 +135,8 @@ Run from `/private/tmp/aap-unified-wave2` using the root checkout interpreter:
   and checkpoint rollback/fork persistence: `68 passed, 19 subtests passed`.
 - Full suite after all independent-review fixes:
   `614 passed, 79 subtests passed in 66.38s`.
+- Final checkpoint consistency check executes both the post-compaction rollback and fork
+  branches and verifies the complete persisted share map after completion: PASS.
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`: PASS.
 - `git diff --check`: PASS.
 - `README.md`, `README.en.md` and `.env.example` are synchronized. The gitignored

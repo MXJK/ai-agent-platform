@@ -597,7 +597,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                                 cloned.values["context_shares"]["transcript_tokens"],
                                 5_400,
                             )
-                            if label != "after" or mode != "rollback":
+                            if label != "after":
                                 continue
                             runtime.restore_record(branch)
                             runtime._planner.decisions = 0
@@ -614,6 +614,10 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                                     "native_context_compactions"
                                 ],
                                 1,
+                            )
+                            self.assertEqual(
+                                completed_snapshot.values["context_shares"],
+                                cloned.values["context_shares"],
                             )
 
     def test_queued_steering_survives_worker_start_and_is_consumed(self) -> None:
