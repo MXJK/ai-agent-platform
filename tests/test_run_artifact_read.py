@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from ai_agent_platform.agents.coding.run_artifacts import (
@@ -11,7 +15,12 @@ from ai_agent_platform.agents.coding.run_artifacts import (
     canonical_tool_result,
     read_run_artifact,
 )
-from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.agents.coding.models import (
+    AgentRunRecord,
+    AgentRunResult,
+    CodingAgentState,
+)
+from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.agents.coding.tool_loop_nodes import (
     ToolLoopNodes,
@@ -21,9 +30,70 @@ from ai_agent_platform.agents.coding.tool_loop_nodes import (
     _serialize_tool_result,
 )
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
+from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.core.metrics import MetricsRegistry
+from ai_agent_platform.integrations.llm import LLMToolDecision
 from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.local_state import LocalStateDatabase
+from ai_agent_platform.repositories.postgres import (
+    _agent_result_from_json,
+    _agent_result_to_json,
+)
+from ai_agent_platform.repositories.sqlite import SQLiteAgentRunRepository
 from ai_agent_platform.token_counting import estimate_text_tokens
+
+
+class _InputThenCompletePlanner:
+    uses_native_tool_calling = True
+
+    def __init__(self) -> None:
+        self.decisions = 0
+
+    def classify_intent(self, user_input: str) -> dict[str, object]:
+        del user_input
+        return {
+            "intent": "code_explanation",
+            "reason": "artifact checkpoint test",
+            "confidence": 1.0,
+            "source": "test",
+        }
+
+    def plan_tool_calls(self, state, tool_specs):
+        del state, tool_specs
+        return []
+
+    def decide_tool_calls(self, messages, tool_specs, **kwargs):
+        del messages, tool_specs, kwargs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="checkpoint_input",
+                        name="agent.request_user_input",
+                        arguments={"question": "continue?"},
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        return LLMToolDecision(
+            text="complete",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+    def plan_repair_tool_calls(self, state, tool_specs):
+        del state, tool_specs
+        return []
+
+    def compose_answer(self, state):
+        del state
+        return "complete"
 
 
 class RunArtifactPrimitiveTests(unittest.TestCase):
@@ -369,6 +439,148 @@ class RunArtifactNodeTests(unittest.TestCase):
         self.assertNotIn("payload-", _serialize_tool_result(audit))
         self.assertNotIn("content", _serialize_tool_result(audit))
         self.assertEqual(audit["artifact_id"], self.artifact["id"])
+
+
+class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
+    def _artifact(self) -> dict[str, object]:
+        return build_run_tool_result_artifact(
+            {
+                "call_id": "persisted_call",
+                "name": "mcp:demo.lookup",
+                "ok": True,
+                "result": {"text": "跨 checkpoint 与后端🙂" * 40},
+            }
+        )
+
+    def test_pause_resume_and_selected_rollback_fork_inherit_exact_artifact_state(self) -> None:
+        artifact = self._artifact()
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(planner=_InputThenCompletePlanner())
+            waiting = runtime.run(
+                conversation_id="artifact_checkpoint",
+                user_input="inspect the artifact",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+            self.assertEqual(waiting.status, "waiting_input")
+            before = next(
+                item
+                for item in runtime.list_checkpoints(waiting.run_id)
+                if item.can_restore
+                and not runtime._checkpoint_coordinator.snapshot_by_id(
+                    waiting.thread_id,
+                    item.checkpoint_id,
+                ).values.get("artifacts")
+            )
+            current = runtime._checkpoint_coordinator.snapshot_for(
+                runtime._checkpoint_coordinator.config(waiting.thread_id)
+            )
+            after_config = runtime._graph.update_state(
+                current.config,
+                {"artifacts": [artifact]},
+            )
+            after = runtime._checkpoint_coordinator.snapshot_for(after_config)
+            after_id = str(after.config["configurable"]["checkpoint_id"])
+
+            for label, checkpoint_id, expected in (
+                ("before", before.checkpoint_id, []),
+                ("after", after_id, [artifact]),
+            ):
+                for mode in ("rollback", "fork"):
+                    with self.subTest(label=label, mode=mode):
+                        branch = runtime.prepare_checkpoint_branch(
+                            source_run_id=waiting.run_id,
+                            checkpoint_id=checkpoint_id,
+                            conversation_id=f"artifact_{label}_{mode}",
+                            mode=mode,
+                            message=f"{label} {mode}",
+                        )
+                        cloned = runtime._checkpoint_coordinator.snapshot_by_id(
+                            branch.thread_id,
+                            branch.checkpoint_id,
+                        )
+                        self.assertEqual(cloned.values.get("artifacts", []), expected)
+
+            completed = runtime.resume(
+                run_id=waiting.run_id,
+                approved=True,
+                feedback="continue",
+            )
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(completed.artifacts, [artifact])
+
+    def test_legacy_v2_tool_view_does_not_gain_read_artifact(self) -> None:
+        registry = create_coding_tool_registry()
+        coordinator = ToolAccessCoordinator(
+            tools=registry,
+            default_approval_policy="never",
+        )
+        legacy_snapshot = SimpleNamespace(
+            metadata=SimpleNamespace(schema_version=2, run_id="legacy_v2"),
+            tools=SimpleNamespace(enabled_tools=None),
+        )
+        restored = coordinator.restore_snapshot(legacy_snapshot)
+        self.assertNotIn(RUN_ARTIFACT_READ_TOOL, restored.allowed_names)
+
+    def test_agent_run_result_unicode_artifact_round_trips_memory_sqlite_postgres(self) -> None:
+        artifact = self._artifact()
+        result = AgentRunResult(
+            run_id="artifact_store",
+            thread_id="artifact_store",
+            conversation_id="conversation",
+            workspace_id="workspace",
+            status="completed",
+            checkpoint_id="checkpoint",
+            role="coding",
+            objective="readback",
+            intent="code_explanation",
+            context_route="repo",
+            selected_knowledge_base_ids=[],
+            answer="done",
+            graph_engine="langgraph",
+            context_sources=[],
+            tool_calls=[],
+            tool_results=[],
+            trace=[],
+            artifacts=[artifact],
+        )
+        record = AgentRunRecord(
+            run_id=result.run_id,
+            thread_id=result.thread_id,
+            conversation_id=result.conversation_id,
+            workspace_id=result.workspace_id,
+            workspace_root="/workspace",
+            status="completed",
+            checkpoint_id=result.checkpoint_id,
+            latest_node="compose_answer",
+            next_nodes=[],
+            trace=[],
+            result=result,
+        )
+
+        memory = InMemoryAgentRunStore()
+        memory.save(record)
+        self.assertEqual(memory.get(record.run_id).result.artifacts, [artifact])
+
+        with TemporaryDirectory() as temp_dir:
+            sqlite = SQLiteAgentRunRepository(
+                database=LocalStateDatabase(str(Path(temp_dir) / "state.sqlite3"))
+            )
+            sqlite.save(record)
+            loaded = sqlite.get(record.run_id)
+            assert loaded.result is not None
+            self.assertEqual(loaded.result.artifacts, [artifact])
+
+        postgres_json = _agent_result_to_json(result)
+        assert postgres_json is not None
+        postgres_roundtrip = _agent_result_from_json(
+            json.loads(json.dumps(postgres_json, ensure_ascii=False))
+        )
+        assert postgres_roundtrip is not None
+        self.assertEqual(postgres_roundtrip.artifacts, [artifact])
 
 
 if __name__ == "__main__":
