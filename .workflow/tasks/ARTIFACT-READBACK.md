@@ -61,29 +61,80 @@ context budget; structured compaction snapshots remain a later task.
       InMemory, SQLite, and the PostgreSQL JSON adapter without a migration.
 - [x] Focused checkpoint, native-tool, compaction, local-store, and PostgreSQL
       repository suites pass.
-- [ ] Independent read-only security/checkpoint review has no unresolved blocker.
-- [ ] Final full pytest and compileall pass on the branch head prepared for review.
+- [x] Independent read-only security/checkpoint review has no unresolved blocker.
+- [x] Final full pytest and compileall pass on the branch head prepared for review.
 
-## Verification so far
+## Decisions
 
-- Primitive/API compatibility: `5 passed`.
-- Reader integration plus native and layered regression suites:
-  `56 passed, 4 subtests passed`.
-- Lazy eviction/readback/forced-recovery/security matrix plus native/layered suites:
-  `59 passed, 6 subtests passed`.
-- Checkpoint, execution-context, local-memory, and PostgreSQL repository matrix:
-  `76 passed, 14 subtests passed`.
-- The first full run reached `632 passed, 85 subtests passed` with one legacy
-  characterization mismatch caused by emitting `artifact_id=-` when no Artifact
-  existed. The compatibility output has been corrected; final full verification
-  remains pending at this review checkpoint.
+- Keep the pure transcript reducer independent of LangGraph state. The runtime
+  resolves complete ToolResults by call identity immediately before reduction,
+  builds deterministic content-addressed Artifacts only for bodies the reducer
+  actually transforms, and returns the reduced messages and Artifact additions
+  in the same state update.
+- Treat duplicate `call_id` values with different or ambiguous results as unsafe
+  for lazy association. Ambiguous identities do not receive a guessed Artifact
+  ID, preventing a marker from pointing at another result body or at an
+  unpersisted Artifact.
+- Read only from the selected checkpoint's `artifacts` field. No global store,
+  hash index, caller-supplied Run identity, or cross-Run existence probe is
+  introduced.
+- Define the recoverable boundary as the complete `ToolResult.to_response()`
+  entering the Agent Harness. Provider or ToolRegistry truncation before that
+  boundary remains outside this feature's promise.
+- Budget the complete model-visible read envelope, not only the page body.
+  Readback messages are ephemeral and excluded from subsequent externalization.
+- Require both the persisted capability flag and the currently visible runtime
+  tool before execution. Legal schema-v1 and schema-v2 Run context snapshots do
+  not inherit `run.read_artifact`, including restored pending calls.
+- Reuse existing AgentRun/checkpoint JSON persistence; no database migration is
+  required. No metadata-only `/compact` behavior is added.
+- Defer root-checkout `INTERVIEW_NOTES` synchronization until after an approved
+  merge because those gitignored notes must describe the local `main` truth, not
+  an unmerged worktree branch.
+
+## Verification
+
+- Independent checkpoint/security review matrix:
+  `119 passed, 20 subtests passed`; no unresolved blocker.
+- Independent test-design/behavior review matrix:
+  `124 passed, 20 subtests passed`; no unresolved blocker.
+- Coordinator full suite on the reviewed implementation:
+  `.venv/bin/python -m pytest -q` ->
+  `640 passed, 87 subtests passed`.
+- Independent reviewer full suite on the same implementation:
+  `.venv/bin/python -m pytest -q` ->
+  `640 passed, 87 subtests passed`.
+- Required bytecode verification:
+  `.venv/bin/python -m compileall ai_agent_platform tests evals` -> passed.
+- Patch hygiene: `git diff --check` -> passed.
+- Focused verification additionally exercised real repository-tool execution,
+  the real MCP provider adapter with a fake client, native model-loop pagination,
+  forced Provider-overflow recovery, two executed LangGraph checkpoint forks,
+  legal legacy Run context restoration, InMemory/SQLite persistence, and the
+  PostgreSQL repository JSONB save/get path through `FakeConnection`.
 
 ## Result
 
-Implementation is complete and awaiting independent review plus final full
-verification. The branch is not merged. `.workflow/state.yaml` intentionally
-remains in `review`; `last_verified_commit` still identifies the previously
-closed main task and is not advanced until this task's final verified commit is
-known. Root-checkout, gitignored `INTERVIEW_NOTES` synchronization is deferred to
-the coordinator after explicit merge approval and is not modified from this
-worktree.
+Implementation, independent review, and required verification are complete with
+no unresolved blocker. The Artifact branch is not merged and is waiting for the
+user's explicit merge confirmation. The structured-compaction-snapshot second
+wave has not started.
+
+Non-blocking residual risks are confined to environment integration rather than
+the validated feature contract:
+
+- MCP behavior is covered through the real `MCPToolProvider` adapter with a fake
+  client, not every live stdio/HTTP transport or remote server implementation.
+- Provider overflow is covered through the runtime's real recovery path with a
+  scripted `context_overflow`, not a live hosted model/provider response.
+- PostgreSQL JSONB save/get behavior is covered through the real repository and
+  `FakeConnection`; a live PostgreSQL service and production network failures
+  were not exercised on this branch.
+- SSE body isolation is covered through stored InMemory events and the real
+  `AgentEventEncoder`; the HTTP streaming route, proxies, and external log/metric
+  exporters were not exercised end to end.
+
+Root-checkout, gitignored `INTERVIEW_NOTES` synchronization remains deferred
+until an approved merge so it records the local `main` architecture accurately.
+No production, test, README, workflow-state, merge, or second-wave change is part
+of this closeout documentation commit.
