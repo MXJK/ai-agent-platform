@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.run_artifacts import (
     build_run_tool_result_artifact,
     canonical_tool_result,
     read_run_artifact,
+    run_artifact_tool_spec,
 )
 from ai_agent_platform.agents.coding.models import (
     AgentRunRecord,
@@ -94,6 +95,78 @@ class _InputThenCompletePlanner:
     def compose_answer(self, state):
         del state
         return "complete"
+
+
+class _PagedArtifactPlanner(_InputThenCompletePlanner):
+    def __init__(self, artifact_id: str) -> None:
+        super().__init__()
+        self.artifact_id = artifact_id
+        self.pages: list[str] = []
+        self.processed_reads = 0
+        self.model_envelopes: list[dict[str, object]] = []
+        self.artifact_tool_visible = False
+
+    def decide_tool_calls(self, messages, tool_specs, **kwargs):
+        del kwargs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="checkpoint_input",
+                        name="agent.request_user_input",
+                        arguments={"question": "continue?"},
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.artifact_tool_visible = any(
+            spec.name == RUN_ARTIFACT_READ_TOOL for spec in tool_specs
+        )
+        reads = [
+            message
+            for message in messages
+            if message.get("role") == "tool"
+            and message.get("name") == RUN_ARTIFACT_READ_TOOL
+        ]
+        if len(reads) > self.processed_reads:
+            envelope = reads[-1]["content"]
+            self.model_envelopes.append(envelope)
+            page = envelope["result"]
+            self.pages.append(str(page["content"]))
+            self.processed_reads = len(reads)
+            next_offset = page["next_offset_chars"]
+            if next_offset is None:
+                return LLMToolDecision(
+                    text="read complete",
+                    tool_calls=[],
+                    model="scripted",
+                    provider="test",
+                    stop_reason="end_turn",
+                )
+            offset = int(next_offset)
+        else:
+            offset = 0
+        return LLMToolDecision(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    call_id=f"read_page_{offset}",
+                    name=RUN_ARTIFACT_READ_TOOL,
+                    arguments={
+                        "artifact_id": self.artifact_id,
+                        "offset_chars": offset,
+                        "max_tokens": 128,
+                    },
+                )
+            ],
+            model="scripted",
+            provider="test",
+            stop_reason="tool_use",
+        )
 
 
 class RunArtifactPrimitiveTests(unittest.TestCase):
@@ -206,6 +279,7 @@ class RunArtifactNodeTests(unittest.TestCase):
         self.nodes = object.__new__(ToolLoopNodes)
         self.nodes._metrics = MetricsRegistry()
         self.nodes._tool_result_max_tokens = 128
+        self.nodes._visible_tool_specs = lambda state: [run_artifact_tool_spec()]
 
     def test_checkpoint_state_reader_and_full_envelope_fit_harness_budget(self) -> None:
         call = ToolCall(
@@ -217,7 +291,10 @@ class RunArtifactNodeTests(unittest.TestCase):
             },
         )
         response = self.nodes._read_artifact(
-            {"artifacts": [self.artifact]},  # type: ignore[arg-type]
+            {
+                "artifacts": [self.artifact],
+                "run_artifact_read_enabled": True,
+            },  # type: ignore[arg-type]
             call,
         )
         message = _native_artifact_read_message(response, max_tokens=128)
@@ -239,7 +316,10 @@ class RunArtifactNodeTests(unittest.TestCase):
             arguments={"artifact_id": self.artifact["id"]},
         )
         response = self.nodes._read_artifact(
-            {"artifacts": [self.artifact]},  # type: ignore[arg-type]
+            {
+                "artifacts": [self.artifact],
+                "run_artifact_read_enabled": True,
+            },  # type: ignore[arg-type]
             call,
         )
         message = _native_artifact_read_message(response, max_tokens=128)
@@ -267,13 +347,13 @@ class RunArtifactNodeTests(unittest.TestCase):
         )
 
     def test_small_builtin_and_mcp_results_externalize_only_when_evicted(self) -> None:
-        for tool_name in ("repo.read_file", "mcp:demo.lookup"):
+        for tool_name in ("repo.read_file", "mcp.demo.lookup"):
             with self.subTest(tool_name=tool_name):
                 first = {
                     "call_id": "first_call",
                     "name": tool_name,
                     "ok": True,
-                    "result": {"text": "small-original-🙂-" * 80},
+                    "result": {"text": "small-original-🙂-" * 8},
                 }
                 recent = {
                     "call_id": "recent_call",
@@ -314,6 +394,15 @@ class RunArtifactNodeTests(unittest.TestCase):
                     },
                 ]
                 state: CodingAgentState = {"tool_results": [first, recent]}
+                inline_messages, eager_artifacts = self.nodes._budget_tool_results(
+                    [first]
+                )
+                self.assertEqual(eager_artifacts, [])
+                self.assertEqual(inline_messages[0]["content"], first)
+                self.assertLessEqual(
+                    estimate_text_tokens(_serialize_tool_result(first)),
+                    self.nodes._tool_result_max_tokens,
+                )
                 unchanged, unchanged_artifacts = self.nodes._reduce_with_run_artifacts(
                     state,
                     messages,
@@ -331,7 +420,7 @@ class RunArtifactNodeTests(unittest.TestCase):
                 reduction, artifacts = self.nodes._reduce_with_run_artifacts(
                     state,
                     messages,
-                    max_chars=_native_messages_chars(messages) - 300,
+                    max_chars=_native_messages_chars(messages) - 50,
                     max_tokens=0,
                     keep_messages=4,
                     tool_result_keep_recent=1,
@@ -415,6 +504,84 @@ class RunArtifactNodeTests(unittest.TestCase):
         )
         self.assertTrue(replay.messages)
 
+    def test_reused_call_id_never_creates_a_dangling_or_mismatched_marker(self) -> None:
+        old_result = {
+            "call_id": "reused_call",
+            "name": "mcp.demo.lookup",
+            "ok": True,
+            "result": {"text": "old-body-🙂" * 12},
+        }
+        new_result = {
+            "call_id": "reused_call",
+            "name": "mcp.demo.lookup",
+            "ok": True,
+            "result": {"text": "new-body-🙂" * 12},
+        }
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "request"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"call_id": "reused_call", "name": old_result["name"], "arguments": {}}
+                ],
+            },
+            {
+                "role": "tool",
+                "call_id": "reused_call",
+                "name": old_result["name"],
+                "content": old_result,
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"call_id": "reused_call", "name": new_result["name"], "arguments": {}}
+                ],
+            },
+            {
+                "role": "tool",
+                "call_id": "reused_call",
+                "name": new_result["name"],
+                "content": new_result,
+            },
+        ]
+        state: CodingAgentState = {"tool_results": [old_result, new_result]}
+        reduction, artifacts = self.nodes._reduce_with_run_artifacts(
+            state,
+            messages,
+            max_chars=_native_messages_chars(messages) - 50,
+            max_tokens=0,
+            keep_messages=4,
+            tool_result_keep_recent=1,
+            previous_compactions=0,
+            max_compactions=3,
+            artifacts=[],
+        )
+
+        self.assertTrue(reduction.changed)
+        persisted_ids = {str(item["id"]) for item in artifacts}
+        marker_ids = {
+            str(message["content"]["artifact_id"])
+            for message in reduction.messages
+            if message.get("role") == "tool"
+            and isinstance(message.get("content"), dict)
+            and message["content"].get("artifact_id")
+        }
+        self.assertLessEqual(marker_ids, persisted_ids)
+        self.assertNotIn(
+            str(build_run_tool_result_artifact(new_result)["id"]),
+            marker_ids,
+        )
+        for artifact_id in marker_ids:
+            self.assertTrue(
+                read_run_artifact(
+                    artifacts,
+                    {"artifact_id": artifact_id, "max_tokens": 64},
+                )["ranges"]
+            )
+
     def test_mcp_forged_id_is_not_readable_and_audit_has_no_body(self) -> None:
         forged_id = self.artifact["id"]
         mcp_result = {
@@ -432,13 +599,42 @@ class RunArtifactNodeTests(unittest.TestCase):
             arguments={"artifact_id": self.artifact["id"], "max_tokens": 64},
         )
         response = self.nodes._read_artifact(
-            {"artifacts": [self.artifact], "tool_results": [mcp_result]},  # type: ignore[arg-type]
+            {
+                "artifacts": [self.artifact],
+                "tool_results": [mcp_result],
+                "run_artifact_read_enabled": True,
+            },  # type: ignore[arg-type]
             call,
         )
         audit = artifact_read_trace(response)
         self.assertNotIn("payload-", _serialize_tool_result(audit))
         self.assertNotIn("content", _serialize_tool_result(audit))
         self.assertEqual(audit["artifact_id"], self.artifact["id"])
+
+    def test_hidden_capability_cannot_execute_a_restored_pending_read_call(self) -> None:
+        call = ToolCall(
+            call_id="legacy_pending_read",
+            name=RUN_ARTIFACT_READ_TOOL,
+            arguments={"artifact_id": self.artifact["id"]},
+        )
+        for state, visible_specs in (
+            ({"artifacts": [self.artifact]}, [run_artifact_tool_spec()]),
+            (
+                {
+                    "artifacts": [self.artifact],
+                    "run_artifact_read_enabled": True,
+                },
+                [],
+            ),
+        ):
+            with self.subTest(state_enabled=state.get("run_artifact_read_enabled")):
+                self.nodes._visible_tool_specs = lambda current, specs=visible_specs: specs
+                response = self.nodes._read_artifact(  # type: ignore[arg-type]
+                    state,
+                    call,
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error_code"], "artifact_not_found")
 
 
 class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
@@ -511,6 +707,58 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             )
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.artifacts, [artifact])
+
+    def test_native_model_loop_reads_and_reassembles_checkpoint_artifact_pages(self) -> None:
+        artifact = build_run_tool_result_artifact(
+            {
+                "call_id": "native_paged_source",
+                "name": "mcp.demo.lookup",
+                "ok": True,
+                "result": {"text": "native-visible-page-前缀🙂-" * 30},
+            }
+        )
+        planner = _PagedArtifactPlanner(str(artifact["id"]))
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(
+                planner=planner,
+                tool_result_max_tokens=128,
+            )
+            waiting = runtime.run(
+                conversation_id="artifact_native_pages",
+                user_input="read every artifact page",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+            self.assertEqual(waiting.status, "waiting_input")
+            current = runtime._checkpoint_coordinator.snapshot_for(
+                runtime._checkpoint_coordinator.config(waiting.thread_id)
+            )
+            runtime._graph.update_state(current.config, {"artifacts": [artifact]})
+
+            completed = runtime.resume(
+                run_id=waiting.run_id,
+                approved=True,
+                feedback="continue",
+            )
+
+        self.assertEqual(completed.status, "completed")
+        self.assertTrue(planner.artifact_tool_visible)
+        self.assertGreater(len(planner.pages), 1)
+        self.assertEqual(
+            "".join(planner.pages),
+            canonical_tool_result(artifact["content"]),
+        )
+        self.assertTrue(planner.model_envelopes)
+        for envelope in planner.model_envelopes:
+            self.assertEqual(envelope["name"], RUN_ARTIFACT_READ_TOOL)
+            self.assertTrue(envelope["ok"])
+            self.assertLessEqual(
+                estimate_text_tokens(_serialize_tool_result(envelope)),
+                128,
+            )
 
     def test_legacy_run_context_tool_views_do_not_gain_read_artifact(self) -> None:
         registry = create_coding_tool_registry()

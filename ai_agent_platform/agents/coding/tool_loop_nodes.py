@@ -672,6 +672,8 @@ class ToolLoopNodes:
 
         candidates = _native_reduction_artifact_candidates(state, messages)
         artifact_ids = _artifact_ids_by_call_id(artifacts)
+        for call_id in _ambiguous_native_tool_result_call_ids(state, messages):
+            artifact_ids.pop(call_id, None)
         artifact_ids.update(
             {
                 call_id: str(artifact["id"])
@@ -1200,6 +1202,28 @@ class ToolLoopNodes:
         state: CodingAgentState,
         call: ToolCall,
     ) -> dict[str, Any]:
+        read_visible = bool(
+            state.get("run_artifact_read_enabled", False)
+            and any(
+                spec.name == RUN_ARTIFACT_TOOL_NAME
+                for spec in self._visible_tool_specs(state)
+            )
+        )
+        if not read_visible:
+            self._metrics.increment("agent_run_artifact_read_errors_total")
+            return {
+                "call_id": call.call_id,
+                "name": RUN_ARTIFACT_TOOL_NAME,
+                "ok": False,
+                "error": "artifact is not available",
+                "error_code": "artifact_not_found",
+                "provider": "runtime",
+                "permission_level": "read_only",
+                "requires_approval": False,
+                "duration_ms": 0,
+                "cached": False,
+                "artifact_id": call.arguments.get("artifact_id"),
+            }
         arguments = dict(call.arguments)
         requested_tokens = arguments.get("max_tokens", 800)
         if (
@@ -1500,6 +1524,7 @@ def _native_reduction_artifact_candidates(
 ) -> dict[str, dict[str, Any]]:
     """Build in-memory candidates only for complete, non-ephemeral results."""
 
+    ambiguous_call_ids = _ambiguous_native_tool_result_call_ids(state, messages)
     full_messages = {
         str(message.get("call_id")): message.get("content")
         for message in messages
@@ -1516,6 +1541,7 @@ def _native_reduction_artifact_candidates(
         call_id = str(result.get("call_id") or "")
         if (
             not call_id
+            or call_id in ambiguous_call_ids
             or call_id in candidates
             or result.get("name") == RUN_ARTIFACT_TOOL_NAME
             or call_id not in full_messages
@@ -1525,6 +1551,38 @@ def _native_reduction_artifact_candidates(
             continue
         candidates[call_id] = build_tool_result_artifact(result)
     return candidates
+
+
+def _ambiguous_native_tool_result_call_ids(
+    state: CodingAgentState,
+    messages: Sequence[dict[str, Any]],
+) -> set[str]:
+    """Return reused identities that cannot safely address a single Artifact."""
+
+    def duplicates(call_ids: Sequence[str]) -> set[str]:
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for call_id in call_ids:
+            if call_id in seen:
+                repeated.add(call_id)
+            seen.add(call_id)
+        return repeated
+
+    message_call_ids = [
+        str(message.get("call_id"))
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("name") != RUN_ARTIFACT_TOOL_NAME
+        and message.get("ephemeral") is not True
+        and message.get("call_id")
+    ]
+    result_call_ids = [
+        str(result.get("call_id"))
+        for result in state.get("tool_results", [])
+        if result.get("name") != RUN_ARTIFACT_TOOL_NAME
+        and result.get("call_id")
+    ]
+    return duplicates(message_call_ids) | duplicates(result_call_ids)
 
 
 def _tool_result_was_reduced(
