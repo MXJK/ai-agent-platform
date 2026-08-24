@@ -88,9 +88,9 @@ context budget; structured compaction snapshots remain a later task.
   not inherit `run.read_artifact`, including restored pending calls.
 - Reuse existing AgentRun/checkpoint JSON persistence; no database migration is
   required. No metadata-only `/compact` behavior is added.
-- Defer root-checkout `INTERVIEW_NOTES` synchronization until after an approved
-  merge because those gitignored notes must describe the local `main` truth, not
-  an unmerged worktree branch.
+- Synchronize root-checkout `INTERVIEW_NOTES` only after an approved merge so
+  those gitignored notes describe the local `main` truth rather than an
+  unmerged worktree branch.
 
 ## Verification
 
@@ -106,6 +106,13 @@ context budget; structured compaction snapshots remain a later task.
   `640 passed, 87 subtests passed`.
 - Required bytecode verification:
   `.venv/bin/python -m compileall ai_agent_platform tests evals` -> passed.
+- Approved main integration `badd3371` was independently reverified in the root
+  checkout: `.venv/bin/python -m pytest -q` ->
+  `640 passed, 87 subtests passed`; required compileall -> passed.
+- Root-checkout `INTERVIEW_NOTES` was synchronized after the merge, and
+  `.venv/bin/python INTERVIEW_NOTES/validate.py` validated 24 Markdown files and
+  43 capabilities. Evidence-review warnings remained advisory and did not fail
+  validation.
 - Patch hygiene: `git diff --check` -> passed.
 - Focused verification additionally exercised real repository-tool execution,
   the real MCP provider adapter with a fake client, native model-loop pagination,
@@ -115,10 +122,12 @@ context budget; structured compaction snapshots remain a later task.
 
 ## Result
 
-Implementation, independent review, and required verification are complete with
-no unresolved blocker. The Artifact branch is not merged and is waiting for the
-user's explicit merge confirmation. The structured-compaction-snapshot second
-wave has not started.
+Implementation, independent review, approved merge, documentation synchronization,
+and required main verification are complete with no unresolved blocker. Commit
+`badd3371` merged the Artifact branch into the concurrently advanced local main;
+the only merge conflict was `.workflow/state.yaml`, resolved to preserve the
+Artifact task and re-run its verification. The structured-compaction-snapshot
+second wave has not started.
 
 Non-blocking residual risks are confined to environment integration rather than
 the validated feature contract:
@@ -134,7 +143,6 @@ the validated feature contract:
   `AgentEventEncoder`; the HTTP streaming route, proxies, and external log/metric
   exporters were not exercised end to end.
 
-Root-checkout, gitignored `INTERVIEW_NOTES` synchronization remains deferred
-until an approved merge so it records the local `main` architecture accurately.
-No production, test, README, workflow-state, merge, or second-wave change is part
-of this closeout documentation commit.
+The root-checkout, gitignored `INTERVIEW_NOTES` now records the checkpoint-local
+readback boundary and was validated. No push, deployment, migration, or
+second-wave change is part of this integration closeout.
