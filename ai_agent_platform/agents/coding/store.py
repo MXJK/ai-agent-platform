@@ -1,11 +1,16 @@
 """Agent-run storage implementations used by the coding runtime."""
 
 from threading import RLock
+from typing import Any
 
 from ai_agent_platform.agents.coding.models import (
     AgentRunEvent,
     AgentRunRecord,
     AgentToolExecution,
+)
+from ai_agent_platform.agents.coding.run_artifacts import (
+    RUN_ARTIFACT_READ_TOOL,
+    artifact_read_trace,
 )
 from ai_agent_platform.domain import QueryLifecycle
 
@@ -101,6 +106,13 @@ class InMemoryAgentRunStore:
     def save_tool_execution(self, execution: AgentToolExecution) -> None:
         with self._lock:
             self._tool_executions[(execution.run_id, execution.call_id)] = execution
+
+
+def _audit_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    output = dict(result)
+    if output.get("name") == RUN_ARTIFACT_READ_TOOL:
+        output["result"] = artifact_read_trace(result)
+    return output
 
 
 def events_for_record(
@@ -213,7 +225,7 @@ def events_for_record(
                             if succeeded
                             else f"Tool failed: {tool_name}."
                         ),
-                        output=dict(result),
+                        output=_audit_tool_result(result),
                     ),
                 )
             )

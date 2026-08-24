@@ -42,6 +42,8 @@
 - 复用 Agent Run 的追加式事件与最终结果，不创建第二套 Trace 存储。
 - 审计页只读；执行控制继续留在拥有该 Run 的助手消息中。
 - 保留完整 JSON 参数/结果并默认折叠，摘要层优先服务快速扫描。
+- `run.read_artifact` 复用既有无正文 observability 投影；审计事件保留 artifact ID、
+  范围、哈希与 Token 元数据，但不复制受保护的分页正文。
 
 ## Verification
 
@@ -52,11 +54,17 @@
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python INTERVIEW_NOTES/validate.py`：24 个 Markdown、43 个 capability 校验通过；已有 evidence-review 提示不阻塞。
 - 浏览器验证：1440×960 与 390×844 均无横向溢出；`#trace-audit` 直达保持正确视图；桌面时间线内部滚动；移动底栏单行且“更多”具有当前页语义。
 - Impeccable detector 使用降级正则模式；命中均位于既有 UI 区域，新 Trace 审计区无新增命中。独立终审第二轮结论：`SHIP`。
+- 合并到含 Artifact Readback 的最新 `main` 后，首轮全量测试捕获到审计事件复制
+  `run.read_artifact` 分页正文的回归；复用 `artifact_read_trace` 无正文投影修复后，
+  聚焦回归测试 2 passed，最终主分支全量验证为 645 passed、87 subtests passed。
 
 ## Result
 
 新增按身份授权的最近 Run 查询、完整工具/审批审计事件，以及独立只读 Trace 审计页。页面支持 Run 搜索与状态筛选、事件分类筛选、完整 JSON 折叠详情、活跃/暂停 Run 自动刷新，以及桌面/移动响应式布局；现有对话内 Trace 与审批控制保持不变。
 
+合并验证额外确认：普通工具结果保持完整审计；`run.read_artifact` 的受保护分页正文不进入
+持久化事件或 SSE，只保留 artifact 与完整性元数据。
+
 文档影响：已同步 `README.md`、`README.en.md`、模块化面试手册根入口、Part 04 和 `facts.json`，说明新页面、API、事件投影与授权边界。
 
-未创建 commit，验证覆盖当前工作树内容。
+任务分支已提交并合入本地 `main`；合并后的安全修复与最终验证覆盖当前工作树内容。

@@ -287,7 +287,9 @@ The browser workspace also includes:
   recent Agent Runs and presents a filterable, read-only event timeline for
   state transitions, nodes, exact tool selections and arguments, complete
   results or errors, approval requests, and approval decisions. Active and
-  suspended Runs refresh automatically, while the existing in-conversation
+  suspended Runs refresh automatically. `run.read_artifact` is the deliberate
+  exception: its event retains artifact identity, ranges, hashes, and token
+  metadata without copying protected page content. The existing in-conversation
   Trace and approval controls remain the live interaction surface;
   the shared composer omits a duplicate code-context strip, while the sidebar
   and settings manage the current workspace; there is no separate Code Agent page;
@@ -1004,8 +1006,10 @@ The event stream uses resumable cursors. The browser workbench builds the trace
 incrementally from SSE events, fetches one complete Run snapshot at a terminal
 state, and falls back to status polling if the stream fails or ends early.
 Terminal results project every call into a `tool_selected` event with exact
-arguments followed by its complete `tool_result` or `tool_error`. Approval
-resume appends an `approval_decided` event, including the actor and original
+arguments followed by its complete `tool_result` or `tool_error`. Artifact-read
+result events reuse the body-free observability projection for `run.read_artifact`,
+preserving artifact and integrity metadata without leaking page content.
+Approval resume appends an `approval_decided` event, including the actor and original
 request, before the Run is queued again. The audit page can therefore replay
 facts by sequence without relying on transient frontend state. Recent-Run
 listing is filtered by conversation ownership in `QueryService`.

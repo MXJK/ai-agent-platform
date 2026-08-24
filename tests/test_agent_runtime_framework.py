@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunResult,
     CodingAgentState,
 )
+from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_READ_TOOL
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.integrations.llm import LLMToolDecision
@@ -215,7 +216,17 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                     arguments={"path": "app.py"},
                     call_id="call_read",
                     source="model",
-                )
+                ),
+                ToolCall(
+                    name=RUN_ARTIFACT_READ_TOOL,
+                    arguments={
+                        "artifact_id": "tool_result_1234567890abcdef1234",
+                        "offset_chars": 0,
+                        "max_tokens": 128,
+                    },
+                    call_id="call_artifact_read",
+                    source="model",
+                ),
             ],
             tool_results=[
                 {
@@ -223,7 +234,26 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                     "name": "repo.read_file",
                     "ok": True,
                     "result": {"content": "VALUE = 1"},
-                }
+                },
+                {
+                    "call_id": "call_artifact_read",
+                    "name": RUN_ARTIFACT_READ_TOOL,
+                    "ok": True,
+                    "result": {
+                        "artifact_id": "tool_result_1234567890abcdef1234",
+                        "view": "page",
+                        "returned_chars": 16,
+                        "estimated_tokens": 4,
+                        "sha256": "abc123",
+                        "ranges": [
+                            {
+                                "start_char": 0,
+                                "end_char": 16,
+                                "content": "protected-value",
+                            }
+                        ],
+                    },
+                },
             ],
             trace=[],
         )
@@ -243,8 +273,23 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertLess(types.index("tool_result"), types.index("run_completed"))
         selected = next(event for event in events if event.type == "tool_selected")
         completed = next(event for event in events if event.type == "tool_result")
+        artifact_read = next(
+            event
+            for event in events
+            if event.type == "tool_result"
+            and event.output.get("name") == RUN_ARTIFACT_READ_TOOL
+        )
         self.assertEqual(selected.output["arguments"], {"path": "app.py"})
         self.assertEqual(completed.output["result"]["content"], "VALUE = 1")
+        self.assertEqual(
+            artifact_read.output["result"]["artifact_id"],
+            "tool_result_1234567890abcdef1234",
+        )
+        self.assertNotIn("protected-value", str(artifact_read.output))
+        self.assertEqual(
+            artifact_read.output["result"]["ranges"],
+            [{"start_char": 0, "end_char": 16}],
+        )
 
     def test_terminal_run_cannot_be_overwritten_by_stale_active_snapshot(self) -> None:
         store = InMemoryAgentRunStore()
