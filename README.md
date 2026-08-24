@@ -82,10 +82,7 @@ App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App �
 .venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
 ```
 
-REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/compact [instruction]`、
-`/resume` 和 `/exit`。`/compact` 会为下一次 Query 冻结一次性强制压缩标记；使用原生工具
-调用的 Provider 会在第一次模型请求前执行一次有序压缩，并把可选 instruction 逐字保留
-在当前请求中。
+REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
 普通输入在同一个 session 中逐轮创建 Query；运行期间按 `Ctrl+C` 会向当前 Run 发送
 `cancel`，不会把信号处理安装进 SDK、Service 或领域模型。`/resume [run_id]
 [approve|deny] [message]` 对 `waiting_approval` 使用 resume，对 `waiting_input`/`paused`
@@ -650,6 +647,11 @@ Harness 只允许一次强制压缩和一次重试，第二次同类错误立即
 `fits`；checkpoint 分支继承的历史阶段额外标记 `replayed` 及来源 Run/checkpoint，避免被
 误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。图的独立保险仍由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
+
+本阶段不暴露手动 `/compact`：CLI 的每次普通输入都会创建新 Run，只给新 Run 写一个
+“强制压缩”标记并不能收缩既有 Session 或旧 Run 的上下文。真正的手动压缩需要在统一预算、
+结构化快照与 Session 压缩 API 中同时定义 instruction、Token 前后值和可观测结果，延后到
+后续上下文预算阶段实现。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
 root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一

@@ -457,7 +457,6 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             for channel in (
                 "native_context_compactions",
                 "native_context_reduction_stages",
-                "native_context_force_compaction",
             ):
                 checkpoint["channel_values"].pop(channel, None)
             legacy_thread = "run_legacy_checkpoint"
@@ -480,7 +479,6 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 if channel in {
                     "native_context_compactions",
                     "native_context_reduction_stages",
-                    "native_context_force_compaction",
                 }:
                     continue
                 writes_by_task[str(task_id)].append((str(channel), value))
@@ -519,9 +517,8 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
 
         self.assertEqual(branch_snapshot.values["native_context_compactions"], 0)
         self.assertEqual(branch_snapshot.values["native_context_reduction_stages"], [])
-        self.assertFalse(branch_snapshot.values["native_context_force_compaction"])
 
-    def test_checkpoint_clone_preserves_compaction_count_and_force_consumption(self) -> None:
+    def test_checkpoint_clone_preserves_compaction_count_and_stages(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "README.md").write_text("demo\n", encoding="utf-8")
@@ -542,10 +539,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 source.thread_id,
                 selected_info.checkpoint_id,
             )
-            for label, count, force in (
-                ("before", 0, True),
-                ("after", 1, False),
-            ):
+            for label, count in (("before", 0), ("after", 1)):
                 with self.subTest(label=label):
                     config = runtime._graph.update_state(
                         selected.config,
@@ -554,7 +548,6 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                             "native_context_reduction_stages": [
                                 {"stage": "fold", "compacted": count}
                             ],
-                            "native_context_force_compaction": force,
                         },
                     )
                     snapshot = runtime._checkpoint_coordinator.snapshot_for(config)
@@ -578,9 +571,6 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                         cloned.values["native_context_compactions"], count
                     )
                     self.assertEqual(
-                        cloned.values["native_context_force_compaction"], force
-                    )
-                    self.assertEqual(
                         cloned.values["native_context_reduction_stages"],
                         [{"stage": "fold", "compacted": count}],
                     )
@@ -600,11 +590,6 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                                 "native_context_compactions"
                             ],
                             1,
-                        )
-                        self.assertFalse(
-                            completed_snapshot.values[
-                                "native_context_force_compaction"
-                            ]
                         )
 
     def test_queued_steering_survives_worker_start_and_is_consumed(self) -> None:

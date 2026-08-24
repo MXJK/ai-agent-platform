@@ -204,7 +204,6 @@ class ToolLoopNodes:
             previous_compactions=state.get("native_context_compactions", 0),
             max_compactions=self._native_max_compactions,
             compressor=self._context_compressor,
-            force=bool(state.get("native_context_force_compaction")),
         )
         self._record_context_reduction(reduction)
         native_messages = reduction.messages
@@ -505,7 +504,6 @@ class ToolLoopNodes:
             "native_context_compactions": compactions,
             "native_context_chars": _native_messages_chars(native_messages),
             "native_context_reduction_stages": context_stages,
-            "native_context_force_compaction": False,
             "terminal_status": terminal_status,
             "terminal_reason": terminal_reason,
             "context_warnings": warnings,
@@ -626,7 +624,6 @@ class ToolLoopNodes:
             "native_context_compactions": compactions,
             "native_context_chars": context_chars,
             "native_context_reduction_stages": list(context_stages),
-            "native_context_force_compaction": False,
             "trace": _append_trace(
                 state,
                 node="plan_tools",
@@ -1646,12 +1643,17 @@ def _native_message_groups(
             )
             for message in group
         )
+        verbatim_user = any(message.get("role") == "user" for message in group)
         groups.append(
             _NativeMessageGroup(
                 messages=tuple(group),
-                protected=index < 2 or index == len(raw) - 1 or summary,
-                truncation_protected=index < 2
-                or any(message.get("role") == "user" for message in group),
+                protected=(
+                    index < 2
+                    or index == len(raw) - 1
+                    or summary
+                    or verbatim_user
+                ),
+                truncation_protected=index < 2 or verbatim_user,
             )
         )
     return groups

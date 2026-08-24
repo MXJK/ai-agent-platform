@@ -133,7 +133,7 @@ class CliApplication:
         self._prepare_context()
         self.error_stream.write(
             "AI Agent REPL. Use /skills, /tools, /mcp, /permissions, "
-            "/compact, /resume, or /exit.\n"
+            "/resume, or /exit.\n"
         )
         self.error_stream.flush()
         while True:
@@ -199,15 +199,8 @@ class CliApplication:
         mode: str,
         skill_name: str | None = None,
         skill_arguments: Sequence[str] = (),
-        force_context_compaction: bool = False,
     ) -> QueryParams:
         assert self.session_id is not None
-        metadata: dict[str, object] = {
-            "adapter": mode,
-            "transport": "stdio",
-        }
-        if force_context_compaction:
-            metadata["force_context_compaction"] = True
         return QueryParams(
             conversation_id=self.session_id,
             message=message,
@@ -221,7 +214,7 @@ class CliApplication:
             skill_name=skill_name,
             skill_arguments=tuple(skill_arguments),
             entrypoint="cli",
-            entrypoint_metadata=metadata,
+            entrypoint_metadata={"adapter": mode, "transport": "stdio"},
         )
 
     async def _stream(
@@ -406,21 +399,6 @@ class CliApplication:
             except (QueryStateError, RuntimeError, ValueError) as exc:
                 self._write_diagnostic("error", {"message": str(exc)})
             return False
-        if command == "/compact":
-            instruction = " ".join(arguments).strip()
-            message = "Compact the current working context before continuing."
-            if instruction:
-                message += f" Preserve this instruction: {instruction}"
-            await self._stream(
-                self.sdk.query(
-                    self._query_params(
-                        message,
-                        mode="repl",
-                        force_context_compaction=True,
-                    )
-                )
-            )
-            return False
         snapshot = self._effective_snapshot()
         factory = self.runtime.execution_context_factory
         catalog = (
@@ -507,7 +485,6 @@ class CliApplication:
                     "/tools",
                     "/mcp",
                     "/permissions",
-                    "/compact",
                     "/resume",
                     "/exit",
                 ],

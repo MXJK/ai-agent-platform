@@ -379,7 +379,6 @@ class LayeredTranscriptCompactionTests(unittest.TestCase):
             "enabled_tools": [],
             "native_tool_messages": _transcript(6, body_chars=900),
             "native_context_compactions": 1,
-            "native_context_force_compaction": True,
             "native_tool_round": 0,
             "native_tool_call_count": 0,
             "native_tool_signatures": [],
@@ -406,6 +405,72 @@ class LayeredTranscriptCompactionTests(unittest.TestCase):
             expected,
         )
         self.assertEqual(update["terminal_status"], "completed")
+        self.assertEqual(runtime.get_run(record.run_id).steering_messages, [])
+
+    def test_multiple_queued_steering_messages_block_instead_of_dropping_first(self) -> None:
+        first = "first-steering-" + "甲" * 700
+        second = "second-steering-" + "乙" * 700
+        planner = _OverflowPlanner(never_call=True)
+        runtime = CodingAgentRuntime(
+            planner=planner,
+            native_context_max_chars=1200,
+            native_max_compactions=1,
+        )
+        record = AgentRunRecord(
+            run_id="run_multiple_steering",
+            thread_id="run_multiple_steering",
+            conversation_id="session",
+            workspace_id="workspace",
+            workspace_root="/workspace",
+            status="running",
+            checkpoint_id="checkpoint",
+            latest_node="plan_tools",
+            next_nodes=["plan_tools"],
+            trace=[],
+            steering_messages=[first, second],
+        )
+        runtime._run_store.save(record)
+        state = {
+            "run_id": record.run_id,
+            "conversation_id": record.conversation_id,
+            "workspace_id": record.workspace_id,
+            "workspace_root": record.workspace_root,
+            "authorized_workspace_root": record.workspace_root,
+            "workspace_role": "owner",
+            "actor_user_id": "demo_user",
+            "approval_policy": "never",
+            "enabled_tools": [],
+            "native_tool_messages": _transcript(4, body_chars=500),
+            "native_context_compactions": 1,
+            "native_tool_round": 0,
+            "native_tool_call_count": 0,
+            "native_tool_signatures": [],
+            "native_soft_limit_warned": False,
+            "native_no_progress_rounds": 0,
+            "native_unfulfilled_change_rounds": 0,
+            "native_consecutive_failures": 0,
+            "context_warnings": [],
+            "intent": "code_explanation",
+            "tool_calls": [],
+            "tool_results": [],
+            "trace": [],
+        }
+
+        update = runtime._tool_loop_nodes._plan_tools(state)
+
+        self.assertEqual(update["terminal_status"], "blocked")
+        self.assertEqual(
+            update["terminal_reason"],
+            "context_compaction_exhausted",
+        )
+        self.assertEqual(planner.calls, 0)
+        user_contents = [
+            str(message.get("content") or "")
+            for message in update["native_tool_messages"]
+            if message.get("role") == "user"
+        ]
+        self.assertIn("User steering for the active run: " + first, user_contents)
+        self.assertIn("User steering for the active run: " + second, user_contents)
         self.assertEqual(runtime.get_run(record.run_id).steering_messages, [])
 
     def test_invalid_multi_call_boundary_blocks_before_reduction(self) -> None:

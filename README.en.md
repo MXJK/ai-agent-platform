@@ -74,10 +74,7 @@ The installed entrypoints are thin adapters over `RuntimeContainer` and
 
 Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
 keeps one conversation across turns and provides `/skills`, `/tools`, `/mcp`,
-`/permissions`, `/compact [instruction]`, `/resume`, and `/exit`. `/compact` freezes
-a one-shot forced-compaction flag onto the next Query; native-tool providers run an
-ordered reduction before their first model request and preserve the optional
-instruction verbatim. `Ctrl+C` during a Run requests cancellation
+`/permissions`, `/resume`, and `/exit`. `Ctrl+C` during a Run requests cancellation
 of that Run; signal handling exists only in the process-owning CLI, never in the SDK
 or Query Kernel.
 
@@ -685,6 +682,13 @@ Native reduction emits canonical SSE `context` events with a `stage` field; stag
 inherited by a checkpoint branch are marked `replayed` with their source Run and
 checkpoint. Related metrics use the `agent_native_context_*` prefix.
 `AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.
+
+This phase does not expose a manual `/compact` command. Every ordinary CLI input
+creates a new Run, so attaching a force flag to that Run cannot reduce an existing
+Session or an older Run transcript. A real manual command requires the unified budget,
+structured snapshot, and Session compression API to define its instruction semantics,
+before/after token evidence, and observable outcome together; it is deferred to the
+next context-budget phase.
 
 ```dotenv
 AGENT_NATIVE_CONTEXT_MAX_CHARS=48000

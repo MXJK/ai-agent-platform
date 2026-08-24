@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 
 from ai_agent_platform.api import entrypoint as api_entrypoint
-from ai_agent_platform.agents.coding_agent import _clone_checkpoint_run_context
 from ai_agent_platform.cli import (
     CliApplication,
     CliInterruptController,
@@ -231,20 +230,6 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                 runtime.close()
 
         self.assertEqual(record.status, "completed")
-        cloned = _clone_checkpoint_run_context(
-            record.context_snapshot,
-            run_id="run_restored",
-            conversation_id=record.conversation_id,
-            source_run_id=record.run_id,
-            source_checkpoint_id=record.checkpoint_id or "checkpoint",
-            mode="rollback",
-            message="continue without replaying the command",
-        )
-        self.assertIsNotNone(cloned)
-        self.assertNotIn(
-            "force_context_compaction",
-            cloned.metadata.entrypoint_metadata,
-        )
         invocation = record.context_snapshot.metadata.entrypoint_metadata[
             "skill_invocation"
         ]
@@ -258,42 +243,6 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
             "review",
             record.context_snapshot.tools.enabled_tools,
         )
-
-    async def test_compact_command_forces_native_reduction_with_instruction(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-            runtime = build_runtime(_settings(root), role="cli")
-            errors = io.StringIO()
-            try:
-                application = CliApplication(
-                    runtime,
-                    workspace_root=root,
-                    workspace_id="workspace",
-                    input_stream=io.StringIO(
-                        "/compact preserve deployment decisions\n/exit\n"
-                    ),
-                    output_stream=io.StringIO(),
-                    error_stream=errors,
-                )
-                self.assertEqual(await application.run_repl(), 0)
-                record = runtime.coding_agent_runtime.get_run(
-                    application.last_run_id
-                )
-            finally:
-                runtime.close()
-
-        self.assertIn("/compact", errors.getvalue())
-        self.assertTrue(
-            record.context_snapshot.metadata.entrypoint_metadata[
-                "force_context_compaction"
-            ]
-        )
-        self.assertIn(
-            "preserve deployment decisions",
-            record.context_snapshot.session.user_message,
-        )
-        self.assertEqual(record.status, "completed")
 
     async def test_disabled_and_missing_tool_skill_commands_are_rejected_stably(self) -> None:
         for enabled_skills, required_tools, expected_code in (

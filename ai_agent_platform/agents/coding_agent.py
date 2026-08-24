@@ -392,12 +392,6 @@ class CodingAgentRuntime:
             "native_context_compactions": 0,
             "native_context_chars": 0,
             "native_context_reduction_stages": [],
-            "native_context_force_compaction": bool(
-                run_context is not None
-                and run_context.metadata.entrypoint_metadata.get(
-                    "force_context_compaction"
-                )
-            ),
             "native_artifacts_collected": False,
             "terminal_status": "",
             "terminal_reason": "",
@@ -816,16 +810,13 @@ class CodingAgentRuntime:
                 "execution_root": execution_root,
                 "started_at": perf_counter(),
                 # Legacy checkpoints predate these channels. Normalize them on
-                # clone while preserving exact consumed/unconsumed state for
-                # checkpoints created by the layered compaction runtime.
+                # clone while preserving exact state for checkpoints created
+                # by the layered compaction runtime.
                 "native_context_compactions": int(
                     selected.values.get("native_context_compactions", 0)
                 ),
                 "native_context_reduction_stages": list(
                     selected.values.get("native_context_reduction_stages", [])
-                ),
-                "native_context_force_compaction": bool(
-                    selected.values.get("native_context_force_compaction", False)
                 ),
                 "trace": _checkpoint_branch_trace(
                     selected.values.get("trace", []),
@@ -1199,9 +1190,6 @@ def _clone_checkpoint_run_context(
     entrypoint_metadata = (
         dict(entrypoint_metadata) if isinstance(entrypoint_metadata, dict) else {}
     )
-    # A manual /compact flag is a one-shot command consumed by the source Run.
-    # Historical branches inherit the durable state flag, never stale metadata.
-    entrypoint_metadata.pop("force_context_compaction", None)
     entrypoint_metadata["checkpoint_restore"] = {
         "source_run_id": source_run_id,
         "source_checkpoint_id": source_checkpoint_id,
