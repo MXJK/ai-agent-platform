@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import unittest
 from dataclasses import replace
@@ -34,8 +35,10 @@ from ai_agent_platform.agents.coding.tool_loop_nodes import (
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.core.metrics import MetricsRegistry
-from ai_agent_platform.integrations.llm import LLMToolDecision
-from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.domain import RunContextSnapshot
+from ai_agent_platform.integrations.llm import LLMProviderError, LLMToolDecision
+from ai_agent_platform.integrations.mcp import MCPTool, MCPToolProvider
+from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.repositories.postgres import (
     _agent_result_from_json,
@@ -168,6 +171,100 @@ class _PagedArtifactPlanner(_InputThenCompletePlanner):
             model="scripted",
             provider="test",
             stop_reason="tool_use",
+        )
+
+
+class _SmallResultMCPClient:
+    def list_tools(self) -> list[MCPTool]:
+        return [
+            MCPTool(
+                name="lookup",
+                description="Return a small deterministic lookup result.",
+                input_schema={
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"match": {"type": "string"}},
+                    "required": ["match"],
+                    "additionalProperties": False,
+                },
+                permission_level="read_only",
+            )
+        ]
+
+    def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        if name != "lookup":
+            raise ValueError(name)
+        return {"match": f"found:{arguments['query']}:前缀🙂"}
+
+
+class _OverflowAfterSmallResultsPlanner(_InputThenCompletePlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pre_overflow_messages: list[dict[str, object]] = []
+
+    def decide_tool_calls(self, messages, tool_specs, **kwargs):
+        del tool_specs, kwargs
+        self.decisions += 1
+        if self.decisions in (1, 2):
+            label = "old" if self.decisions == 1 else "recent"
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id=f"small_{label}",
+                        name="repo.read_file",
+                        arguments={"path": f"{label}.txt"},
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        if self.decisions == 3:
+            self.pre_overflow_messages = list(messages)
+            raise LLMProviderError(
+                "maximum context length exceeded",
+                code="context_overflow",
+            )
+        return LLMToolDecision(
+            text="Recovered after one retry.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
+class _CheckpointReplayPlanner(_InputThenCompletePlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mode = "seed"
+
+    def reset_for_replay(self) -> None:
+        self.mode = "replay"
+        self.decisions = 0
+
+    def decide_tool_calls(self, messages, tool_specs, **kwargs):
+        if self.mode == "seed":
+            return super().decide_tool_calls(messages, tool_specs, **kwargs)
+        del messages, tool_specs, kwargs
+        self.decisions += 1
+        if self.decisions == 1:
+            raise LLMProviderError(
+                "maximum context length exceeded",
+                code="context_overflow",
+            )
+        return LLMToolDecision(
+            text="replayed",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
         )
 
 
@@ -349,101 +446,151 @@ class RunArtifactNodeTests(unittest.TestCase):
         )
 
     def test_small_builtin_and_mcp_results_externalize_only_when_evicted(self) -> None:
-        for tool_name in ("repo.read_file", "mcp.demo.lookup"):
-            with self.subTest(tool_name=tool_name):
-                first = {
-                    "call_id": "first_call",
-                    "name": tool_name,
-                    "ok": True,
-                    "result": {"text": "small-original-🙂-" * 8},
-                }
-                recent = {
-                    "call_id": "recent_call",
-                    "name": tool_name,
-                    "ok": True,
-                    "result": {"text": "recent"},
-                }
-                messages = [
-                    {"role": "system", "content": "system"},
-                    {"role": "user", "content": "request"},
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {"call_id": "first_call", "name": tool_name, "arguments": {}}
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "call_id": "first_call",
-                        "name": tool_name,
-                        "content": first,
-                        "is_error": False,
-                    },
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {"call_id": "recent_call", "name": tool_name, "arguments": {}}
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "call_id": "recent_call",
-                        "name": tool_name,
-                        "content": recent,
-                        "is_error": False,
-                    },
+        harness_max_tokens = 512
+        self.nodes._tool_result_max_tokens = harness_max_tokens
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "tiny.txt").write_text("small built-in 前缀🙂\n", encoding="utf-8")
+            registry = create_coding_tool_registry(
+                mcp_providers=[
+                    MCPToolProvider(
+                        server_name="demo",
+                        client=_SmallResultMCPClient(),
+                    )
                 ]
-                state: CodingAgentState = {"tool_results": [first, recent]}
-                inline_messages, eager_artifacts = self.nodes._budget_tool_results(
-                    [first]
-                )
-                self.assertEqual(eager_artifacts, [])
-                self.assertEqual(inline_messages[0]["content"], first)
-                self.assertLessEqual(
-                    estimate_text_tokens(_serialize_tool_result(first)),
-                    self.nodes._tool_result_max_tokens,
-                )
-                unchanged, unchanged_artifacts = self.nodes._reduce_with_run_artifacts(
-                    state,
-                    messages,
-                    max_chars=_native_messages_chars(messages) + 1,
-                    max_tokens=0,
-                    keep_messages=4,
-                    tool_result_keep_recent=1,
-                    previous_compactions=0,
-                    max_compactions=3,
-                    artifacts=[],
-                )
-                self.assertFalse(unchanged.changed)
-                self.assertEqual(unchanged_artifacts, [])
+            )
+            context = ToolExecutionContext(
+                conversation_id="artifact_small",
+                workspace_id="workspace",
+                workspace_root=str(root),
+                authorized_workspace_root=str(root),
+                run_id="run_small_results",
+                approval_policy="never",
+            )
+            cases = (
+                ("repo.read_file", {"path": "tiny.txt"}),
+                ("mcp.demo.lookup", {"query": "alpha"}),
+            )
+            for tool_name, arguments in cases:
+                with self.subTest(tool_name=tool_name):
+                    first = registry.execute(
+                        ToolCall(
+                            call_id=f"first_{tool_name}",
+                            name=tool_name,
+                            arguments=arguments,
+                        ),
+                        context=context,
+                    ).to_response()
+                    recent = registry.execute(
+                        ToolCall(
+                            call_id=f"recent_{tool_name}",
+                            name=tool_name,
+                            arguments=arguments,
+                        ),
+                        context=context,
+                    ).to_response()
+                    self.assertTrue(first["ok"], first)
+                    self.assertTrue(recent["ok"], recent)
+                    first_call_id = str(first["call_id"])
+                    recent_call_id = str(recent["call_id"])
+                    messages = [
+                        {"role": "system", "content": "system"},
+                        {"role": "user", "content": "request"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "call_id": first_call_id,
+                                    "name": tool_name,
+                                    "arguments": arguments,
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "call_id": first_call_id,
+                            "name": tool_name,
+                            "content": first,
+                            "is_error": False,
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "call_id": recent_call_id,
+                                    "name": tool_name,
+                                    "arguments": arguments,
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "call_id": recent_call_id,
+                            "name": tool_name,
+                            "content": recent,
+                            "is_error": False,
+                        },
+                    ]
+                    state: CodingAgentState = {"tool_results": [first, recent]}
+                    inline_messages, eager_artifacts = self.nodes._budget_tool_results(
+                        [first]
+                    )
+                    self.assertEqual(eager_artifacts, [])
+                    self.assertEqual(inline_messages[0]["content"], first)
+                    self.assertLessEqual(
+                        estimate_text_tokens(_serialize_tool_result(first)),
+                        harness_max_tokens,
+                    )
+                    unchanged, unchanged_artifacts = self.nodes._reduce_with_run_artifacts(
+                        state,
+                        messages,
+                        max_chars=_native_messages_chars(messages) + 1,
+                        max_tokens=0,
+                        keep_messages=4,
+                        tool_result_keep_recent=1,
+                        previous_compactions=0,
+                        max_compactions=3,
+                        artifacts=[],
+                    )
+                    self.assertFalse(unchanged.changed)
+                    self.assertEqual(unchanged_artifacts, [])
 
-                reduction, artifacts = self.nodes._reduce_with_run_artifacts(
-                    state,
-                    messages,
-                    max_chars=_native_messages_chars(messages) - 50,
-                    max_tokens=0,
-                    keep_messages=4,
-                    tool_result_keep_recent=1,
-                    previous_compactions=0,
-                    max_compactions=3,
-                    artifacts=[],
-                )
-                self.assertTrue(reduction.changed)
-                self.assertEqual([item["call_id"] for item in artifacts], ["first_call"])
-                marker = next(
-                    item
-                    for item in reduction.messages
-                    if item.get("call_id") == "first_call"
-                )
-                self.assertTrue(marker["content"]["evicted"])
-                self.assertEqual(marker["content"]["artifact_id"], artifacts[0]["id"])
-                page = read_run_artifact(
-                    artifacts,
-                    {"artifact_id": artifacts[0]["id"], "max_tokens": 64},
-                )
-                self.assertIn("small-original", page["ranges"][0]["content"])
+                    reduction, artifacts = self.nodes._reduce_with_run_artifacts(
+                        state,
+                        messages,
+                        max_chars=_native_messages_chars(messages) - 50,
+                        max_tokens=0,
+                        keep_messages=4,
+                        tool_result_keep_recent=1,
+                        previous_compactions=0,
+                        max_compactions=3,
+                        artifacts=[],
+                    )
+                    self.assertTrue(reduction.changed)
+                    self.assertEqual(
+                        [item["call_id"] for item in artifacts],
+                        [first_call_id],
+                    )
+                    marker = next(
+                        item
+                        for item in reduction.messages
+                        if item.get("call_id") == first_call_id
+                    )
+                    self.assertTrue(marker["content"]["evicted"])
+                    self.assertEqual(
+                        marker["content"]["artifact_id"],
+                        artifacts[0]["id"],
+                    )
+                    page = read_run_artifact(
+                        artifacts,
+                        {"artifact_id": artifacts[0]["id"], "max_tokens": 2000},
+                    )
+                    self.assertEqual(
+                        "".join(item["content"] for item in page["ranges"]),
+                        canonical_tool_result(first),
+                    )
 
     def test_forced_recovery_externalizes_and_replay_is_idempotent(self) -> None:
         first = {
@@ -734,6 +881,256 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.artifacts, [artifact])
 
+    def test_provider_overflow_lazy_externalizes_small_result_in_recovery_update(self) -> None:
+        planner = _OverflowAfterSmallResultsPlanner()
+        metrics = MetricsRegistry()
+        harness_max_tokens = 512
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "old.txt").write_text("old small result 前缀🙂\n", encoding="utf-8")
+            (root / "recent.txt").write_text(
+                "recent small result 后缀🙂\n",
+                encoding="utf-8",
+            )
+            runtime = CodingAgentRuntime(
+                planner=planner,
+                tool_result_keep_recent=1,
+                tool_result_max_tokens=harness_max_tokens,
+                metrics=metrics,
+            )
+            completed = runtime.run(
+                conversation_id="artifact_overflow_lazy",
+                user_input="read both files, then recover from provider overflow",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.answer, "Recovered after one retry.")
+        self.assertEqual(planner.decisions, 4)
+        pre_overflow_results = [
+            message
+            for message in planner.pre_overflow_messages
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(len(pre_overflow_results), 2)
+        for message in pre_overflow_results:
+            content = message["content"]
+            self.assertFalse(content.get("truncated", False))
+            self.assertFalse(content.get("evicted", False))
+            self.assertNotIn("artifact_id", content)
+            self.assertLessEqual(
+                estimate_text_tokens(_serialize_tool_result(content)),
+                harness_max_tokens,
+            )
+
+        current = runtime._checkpoint_coordinator.snapshot_for(
+            runtime._checkpoint_coordinator.config(completed.thread_id)
+        )
+        artifacts = list(current.values.get("artifacts", []))
+        markers = [
+            message
+            for message in current.values.get("native_tool_messages", [])
+            if message.get("role") == "tool"
+            and isinstance(message.get("content"), dict)
+            and message["content"].get("evicted") is True
+        ]
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(artifacts[0]["call_id"], "small_old")
+        self.assertEqual(markers[0]["call_id"], "small_old")
+        self.assertEqual(markers[0]["content"]["artifact_id"], artifacts[0]["id"])
+        self.assertEqual(completed.artifacts, artifacts)
+        coherent_recovery_checkpoints = 0
+        for checkpoint in runtime.list_checkpoints(completed.run_id):
+            snapshot = runtime._checkpoint_coordinator.snapshot_by_id(
+                completed.thread_id,
+                checkpoint.checkpoint_id,
+            )
+            snapshot_marker_ids = {
+                str(message["content"]["artifact_id"])
+                for message in snapshot.values.get("native_tool_messages", [])
+                if message.get("role") == "tool"
+                and isinstance(message.get("content"), dict)
+                and message["content"].get("evicted") is True
+            }
+            if not snapshot_marker_ids:
+                continue
+            coherent_recovery_checkpoints += 1
+            snapshot_artifact_ids = {
+                str(item["id"])
+                for item in snapshot.values.get("artifacts", [])
+            }
+            self.assertLessEqual(snapshot_marker_ids, snapshot_artifact_ids)
+        self.assertGreater(coherent_recovery_checkpoints, 0)
+        self.assertEqual(
+            metrics.snapshot()["counters"][
+                "agent_native_context_overflow_retries_total"
+            ],
+            1,
+        )
+        recovery_stages = [
+            stage
+            for trace in completed.trace
+            for stage in (trace.get("output") or {}).get(
+                "context_reduction_stages",
+                [],
+            )
+            if stage.get("forced")
+        ]
+        self.assertTrue(recovery_stages)
+
+    def test_two_checkpoint_replays_persist_identical_lazy_artifact_markers(self) -> None:
+        planner = _CheckpointReplayPlanner()
+        harness_max_tokens = 512
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "old.txt").write_text("checkpoint old 前缀🙂\n", encoding="utf-8")
+            (root / "recent.txt").write_text(
+                "checkpoint recent 后缀🙂\n",
+                encoding="utf-8",
+            )
+            registry = create_coding_tool_registry()
+            runtime = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+                tool_result_keep_recent=1,
+                tool_result_max_tokens=harness_max_tokens,
+            )
+            source = runtime.run(
+                run_id="run_artifact_replay_source",
+                conversation_id="artifact_replay_source",
+                user_input="prepare replay checkpoint",
+                history=[],
+                workspace_id="workspace",
+                workspace_root=str(root),
+            )
+            self.assertEqual(source.status, "waiting_input")
+            selected_info = next(
+                item
+                for item in runtime.list_checkpoints(source.run_id)
+                if item.next_nodes == ["plan_tools"]
+            )
+            selected = runtime._checkpoint_coordinator.snapshot_by_id(
+                source.thread_id,
+                selected_info.checkpoint_id,
+            )
+            execution_context = ToolExecutionContext(
+                conversation_id=source.conversation_id,
+                workspace_id=source.workspace_id,
+                workspace_root=str(root),
+                authorized_workspace_root=str(root),
+                run_id=source.run_id,
+                approval_policy="never",
+            )
+            tool_results = [
+                registry.execute(
+                    ToolCall(
+                        call_id=f"checkpoint_{label}",
+                        name="repo.read_file",
+                        arguments={"path": f"{label}.txt"},
+                    ),
+                    context=execution_context,
+                ).to_response()
+                for label in ("old", "recent")
+            ]
+            self.assertTrue(all(result["ok"] for result in tool_results))
+            self.assertTrue(
+                all(
+                    estimate_text_tokens(_serialize_tool_result(result))
+                    <= harness_max_tokens
+                    for result in tool_results
+                )
+            )
+            replay_messages: list[dict[str, object]] = [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "replay request"},
+            ]
+            for label, result in zip(("old", "recent"), tool_results):
+                replay_messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "call_id": f"checkpoint_{label}",
+                                    "name": "repo.read_file",
+                                    "arguments": {"path": f"{label}.txt"},
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "call_id": f"checkpoint_{label}",
+                            "name": "repo.read_file",
+                            "content": result,
+                            "is_error": False,
+                        },
+                    ]
+                )
+            replay_config = runtime._graph.update_state(
+                selected.config,
+                {
+                    "native_tool_messages": replay_messages,
+                    "tool_results": tool_results,
+                    "artifacts": [],
+                    "native_tool_call_count": 2,
+                    "native_tool_signatures": [],
+                    "native_context_compactions": 0,
+                    "native_context_reduction_stages": [],
+                },
+            )
+            replay_snapshot = runtime._checkpoint_coordinator.snapshot_for(
+                replay_config
+            )
+            replay_checkpoint_id = str(
+                replay_snapshot.config["configurable"]["checkpoint_id"]
+            )
+            branches = [
+                runtime.prepare_checkpoint_branch(
+                    source_run_id=source.run_id,
+                    checkpoint_id=replay_checkpoint_id,
+                    conversation_id=f"artifact_replay_{label}",
+                    mode="fork",
+                    run_id=f"run_artifact_replay_{label}",
+                )
+                for label in ("a", "b")
+            ]
+            for branch in branches:
+                runtime.restore_record(branch)
+
+            replay_shapes: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            for branch in branches:
+                planner.reset_for_replay()
+                completed = runtime.run_from_checkpoint(branch.run_id)
+                self.assertEqual(completed.status, "completed")
+                current = runtime._checkpoint_coordinator.snapshot_for(
+                    runtime._checkpoint_coordinator.config(branch.thread_id)
+                )
+                artifacts = list(current.values.get("artifacts", []))
+                marker_ids = tuple(
+                    str(message["content"]["artifact_id"])
+                    for message in current.values.get("native_tool_messages", [])
+                    if message.get("role") == "tool"
+                    and isinstance(message.get("content"), dict)
+                    and message["content"].get("evicted") is True
+                )
+                artifact_ids = tuple(str(item["id"]) for item in artifacts)
+                self.assertEqual(len(artifact_ids), 1)
+                self.assertEqual(marker_ids, artifact_ids)
+                self.assertEqual(completed.artifacts, artifacts)
+                self.assertTrue(
+                    read_run_artifact(
+                        artifacts,
+                        {"artifact_id": artifact_ids[0], "max_tokens": 64},
+                    )["ranges"]
+                )
+                replay_shapes.append((artifact_ids, marker_ids))
+
+        self.assertEqual(replay_shapes[0], replay_shapes[1])
+
     def test_native_model_loop_reads_and_reassembles_checkpoint_artifact_pages(self) -> None:
         sentinel = "ARTIFACT-READ-AUDIT-SENTINEL-91f34c"
         artifact = build_run_tool_result_artifact(
@@ -864,23 +1261,110 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             tools=registry,
             default_approval_policy="never",
         )
-        for schema_version, enabled_tools in (
-            (1, None),
-            (2, ("repo.read_file",)),
-        ):
-            with self.subTest(schema_version=schema_version):
-                legacy_snapshot = SimpleNamespace(
-                    metadata=SimpleNamespace(
-                        schema_version=schema_version,
-                        run_id=f"legacy_v{schema_version}",
-                    ),
-                    tools=SimpleNamespace(enabled_tools=enabled_tools),
-                )
-                restored = coordinator.restore_snapshot(legacy_snapshot)
-                self.assertNotIn(
-                    RUN_ARTIFACT_READ_TOOL,
-                    restored.allowed_names,
-                )
+        project_config: dict[str, object] = {}
+        config_json = json.dumps(
+            project_config,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload: dict[str, object] = {
+            "identity": {
+                "actor_user_id": "legacy_user",
+                "auth_mode": "disabled",
+                "workspace_role": "admin",
+            },
+            "session": {
+                "conversation_id": "legacy_conversation",
+                "user_message": "resume legacy checkpoint",
+                "controlled_history": [],
+                "summary": None,
+                "model_selection": {},
+            },
+            "project": {
+                "workspace_id": "legacy_workspace",
+                "workspace_root": "/workspace",
+                "workspace_revision": 1,
+                "cwd": "/workspace",
+                "git": {
+                    "available": False,
+                    "is_repository": False,
+                    "head": None,
+                    "branch": None,
+                    "dirty": {
+                        "is_dirty": False,
+                        "changed_count": 0,
+                        "staged_count": 0,
+                        "unstaged_count": 0,
+                        "untracked_count": 0,
+                        "sample_paths": [],
+                        "truncated": False,
+                    },
+                    "diagnostics": [],
+                },
+                "project_config": project_config,
+            },
+            "instructions": {
+                "sources": [],
+                "focus_files": [],
+                "max_chars": 0,
+                "diagnostics": [],
+            },
+            "additional_directories": [],
+            "metadata": {
+                "run_id": "legacy_v1",
+                "created_at": "2026-08-24T00:00:00Z",
+                "entrypoint_type": "api",
+                "config_version": "sha256:"
+                + hashlib.sha256(config_json.encode("utf-8")).hexdigest()[:16],
+                "schema_version": 1,
+                "entrypoint_metadata": {},
+            },
+        }
+        legacy_v1 = RunContextSnapshot.from_dict(payload)
+        self.assertIsNone(legacy_v1.tools.enabled_tools)
+        restored_v1 = coordinator.restore_snapshot(legacy_v1)
+        self.assertNotIn(RUN_ARTIFACT_READ_TOOL, restored_v1.allowed_names)
+
+        enabled_v2 = ["repo.read_file"]
+        encoded_tools = json.dumps(
+            enabled_v2,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        payload_v2 = json.loads(json.dumps(payload))
+        payload_v2["metadata"]["run_id"] = "legacy_v2"
+        payload_v2["metadata"]["schema_version"] = 2
+        payload_v2["tools"] = {
+            "enabled_tools": enabled_v2,
+            "source": "legacy_registry_view",
+            "version": "sha256:"
+            + hashlib.sha256(encoded_tools.encode("utf-8")).hexdigest()[:16],
+        }
+        legacy_v2 = RunContextSnapshot.from_dict(payload_v2)
+        restored_v2 = coordinator.restore_snapshot(legacy_v2)
+        self.assertEqual(restored_v2.allowed_names, ("repo.read_file",))
+        self.assertNotIn(RUN_ARTIFACT_READ_TOOL, restored_v2.allowed_names)
+
+        nodes = object.__new__(ToolLoopNodes)
+        nodes._metrics = MetricsRegistry()
+        nodes._tool_result_max_tokens = 128
+        nodes._visible_tool_specs = coordinator.visible_tool_specs
+        artifact = self._artifact()
+        pending_response = nodes._read_artifact(
+            {
+                "run_id": legacy_v1.metadata.run_id,
+                "enabled_tools": list(restored_v1.allowed_names),
+                "artifacts": [artifact],
+            },  # type: ignore[arg-type]
+            ToolCall(
+                call_id="legacy_restored_pending_read",
+                name=RUN_ARTIFACT_READ_TOOL,
+                arguments={"artifact_id": artifact["id"]},
+            ),
+        )
+        self.assertFalse(pending_response["ok"])
+        self.assertEqual(pending_response["error_code"], "artifact_not_found")
 
     def test_agent_run_result_unicode_artifact_round_trips_memory_sqlite_postgres(self) -> None:
         artifact = self._artifact()
