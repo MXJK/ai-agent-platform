@@ -13,6 +13,7 @@ from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.integrations.execution_workspace import ExecutionWorkspaceRuntime
 from ai_agent_platform.tools import register_repository_tools, register_sandbox_tools
 from ai_agent_platform.skills import SkillLoaderTool
+from ai_agent_platform.agents.coding.run_artifacts import register_run_artifact_tool
 
 
 def create_coding_tool_registry(
@@ -42,6 +43,7 @@ def create_coding_tool_registry(
     )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
+    register_run_artifact_tool(registry)
     registry.register(
         "agent.request_user_input",
         request_user_input_tool,
