@@ -50,6 +50,7 @@ class ToolLoopNodes:
     def __init__(self, runtime: Any) -> None:
         self._planner = runtime._planner
         self._change_loop = runtime._change_loop
+        self._max_read_tools_per_round = runtime._max_read_tools_per_round
         self._max_tool_rounds = runtime._max_tool_rounds
         self._max_tool_calls = runtime._max_tool_calls
         self._native_context_max_chars = runtime._native_context_max_chars
@@ -164,7 +165,10 @@ class ToolLoopNodes:
 
         native_messages = list(state.get("native_tool_messages", []))
         if not native_messages:
-            native_messages = native_tool_messages(state)
+            native_messages = native_tool_messages(
+                state,
+                max_parallel_read_calls=self._max_read_tools_per_round,
+            )
         native_messages = self._control_policy.consume_steering(state, native_messages)
         control_action = self._control_policy.consume_action(state)
         if control_action == "pause":
@@ -358,14 +362,57 @@ class ToolLoopNodes:
             0,
             self._max_tool_calls - state.get("native_tool_call_count", 0),
         )
-        per_turn_limit = (
-            1
-            if bool(getattr(self._planner, "single_tool_per_turn", False))
-            else remaining_calls
+        tools_for_state = self._tools_for_state(state)
+        permission_context = self._tool_use_context(state)
+        all_permission_decisions = [
+            (
+                call,
+                tools_for_state.resolve_permission(
+                    call,
+                    permission_context,
+                    phase="plan",
+                ),
+            )
+            for call in all_proposed_calls
+        ]
+        permission_by_identity = {
+            id(call): permission for call, permission in all_permission_decisions
+        }
+        specs_by_name = {spec.name: spec for spec in tool_specs}
+
+        def is_parallel_read(call: ToolCall) -> bool:
+            spec = specs_by_name.get(call.name)
+            permission = permission_by_identity[id(call)]
+            return bool(
+                getattr(self._planner, "parallel_read_tools", False)
+                and spec is not None
+                and spec.permission_level == "read_only"
+                and not spec.requires_approval
+                and spec.idempotent
+                and call.name != "agent.request_user_input"
+                and permission.effect == "allow"
+            )
+
+        budgeted_calls = all_proposed_calls[:remaining_calls]
+        hard_budget_dropped = all_proposed_calls[remaining_calls:]
+        serialize_turn = bool(
+            getattr(self._planner, "single_tool_per_turn", False)
         )
-        accepted_count = min(remaining_calls, per_turn_limit)
-        proposed_calls = all_proposed_calls[:accepted_count]
-        dropped_calls = all_proposed_calls[accepted_count:]
+        if serialize_turn and budgeted_calls:
+            if is_parallel_read(budgeted_calls[0]):
+                proposed_calls = []
+                for call in budgeted_calls:
+                    if (
+                        len(proposed_calls) >= self._max_read_tools_per_round
+                        or not is_parallel_read(call)
+                    ):
+                        break
+                    proposed_calls.append(call)
+            else:
+                proposed_calls = budgeted_calls[:1]
+        else:
+            proposed_calls = budgeted_calls
+        turn_dropped = budgeted_calls[len(proposed_calls):]
         previous_signatures = set(state.get("native_tool_signatures", []))
         tool_calls: list[ToolCall] = []
         suppressed_calls: list[tuple[ToolCall, str]] = []
@@ -376,12 +423,20 @@ class ToolLoopNodes:
                 continue
             previous_signatures.add(signature)
             tool_calls.append(call)
-        dropped_reason = (
-            "single_tool_turn"
-            if remaining_calls > 0 and per_turn_limit == 1
-            else "hard_tool_call_budget"
+        for call in turn_dropped:
+            reason = (
+                "read_batch_limit"
+                if (
+                    proposed_calls
+                    and len(proposed_calls) >= self._max_read_tools_per_round
+                    and is_parallel_read(call)
+                )
+                else "single_tool_turn"
+            )
+            suppressed_calls.append((call, reason))
+        suppressed_calls.extend(
+            (call, "hard_tool_call_budget") for call in hard_budget_dropped
         )
-        suppressed_calls.extend((call, dropped_reason) for call in dropped_calls)
         if suppressed_calls:
             warnings.append(
                 f"native tool loop suppressed {len(suppressed_calls)} call(s)"
@@ -433,20 +488,17 @@ class ToolLoopNodes:
             for call in tool_calls
             if call.name in SANDBOX_ARTIFACT_TOOLS and call not in analysis_calls
         )
-        permission_context = self._tool_use_context(state)
         permission_decisions = [
-            (
-                call,
-                self._tools_for_state(state).resolve_permission(
-                    call,
-                    permission_context,
-                    phase="plan",
-                ),
-            )
+            (call, permission_by_identity[id(call)])
             for call in tool_calls
         ]
         denied_calls = [call for call, item in permission_decisions if item.effect == "deny"]
         tool_calls = [call for call, item in permission_decisions if item.effect != "deny"]
+        parallel_read_batch = bool(
+            len(tool_calls) > 1
+            and len({call.call_id for call in tool_calls}) == len(tool_calls)
+            and all(is_parallel_read(call) for call in tool_calls)
+        )
         approval_tools = [
             _permission_approval_item(
                 call,
@@ -485,6 +537,7 @@ class ToolLoopNodes:
         return {
             "tool_calls": list(state.get("tool_calls", [])) + all_proposed_calls,
             "native_pending_tool_calls": tool_calls,
+            "native_parallel_read_batch": parallel_read_batch,
             "analysis_tool_calls": analysis_calls,
             "change_tool_calls": change_calls,
             "validation_tool_calls": validation_calls,
@@ -532,6 +585,7 @@ class ToolLoopNodes:
                     "soft_limit_warned": soft_warned,
                     "hard_round_limit": self._max_tool_rounds,
                     "hard_call_limit": self._max_tool_calls,
+                    "parallel_read_batch": parallel_read_batch,
                     "context_compactions": compactions,
                     "context_reduction_stages": context_stages,
                 },
@@ -748,42 +802,54 @@ class ToolLoopNodes:
         if state.get("native_tool_loop_active"):
             calls = list(state.get("native_pending_tool_calls", []))
             results: list[dict[str, Any]] = []
-            for call in calls:
-                if call.name == "agent.request_user_input":
-                    response = interrupt(
-                        {
-                            "type": "input_required",
-                            "question": str(call.arguments.get("question") or ""),
-                            "context": str(call.arguments.get("context") or ""),
-                            "call_id": call.call_id,
-                        }
-                    )
-                    if isinstance(response, dict):
-                        answer = str(
-                            response.get("message")
-                            or response.get("feedback")
-                            or response.get("answer")
-                            or ""
-                        ).strip()
+            parallel_read_batch = bool(
+                state.get("native_parallel_read_batch") and len(calls) > 1
+            )
+            if parallel_read_batch:
+                results = self._change_loop.execute_tool_calls(
+                    state,
+                    calls,
+                    parallel_read_only=True,
+                )
+            else:
+                for call in calls:
+                    if call.name == "agent.request_user_input":
+                        response = interrupt(
+                            {
+                                "type": "input_required",
+                                "question": str(call.arguments.get("question") or ""),
+                                "context": str(call.arguments.get("context") or ""),
+                                "call_id": call.call_id,
+                            }
+                        )
+                        if isinstance(response, dict):
+                            answer = str(
+                                response.get("message")
+                                or response.get("feedback")
+                                or response.get("answer")
+                                or ""
+                            ).strip()
+                        else:
+                            answer = str(response or "").strip()
+                        results.append(
+                            {
+                                "call_id": call.call_id,
+                                "name": call.name,
+                                "ok": bool(answer),
+                                "result": {"answer": answer},
+                                "error": None if answer else "user supplied no answer",
+                                "error_code": None if answer else "empty_user_input",
+                                "provider": "runtime",
+                                "permission_level": "read_only",
+                                "requires_approval": False,
+                                "duration_ms": 0,
+                                "cached": False,
+                            }
+                        )
                     else:
-                        answer = str(response or "").strip()
-                    results.append(
-                        {
-                            "call_id": call.call_id,
-                            "name": call.name,
-                            "ok": bool(answer),
-                            "result": {"answer": answer},
-                            "error": None if answer else "user supplied no answer",
-                            "error_code": None if answer else "empty_user_input",
-                            "provider": "runtime",
-                            "permission_level": "read_only",
-                            "requires_approval": False,
-                            "duration_ms": 0,
-                            "cached": False,
-                        }
-                    )
-                else:
-                    results.extend(self._change_loop.execute_tool_calls(state, [call]))
+                        results.extend(
+                            self._change_loop.execute_tool_calls(state, [call])
+                        )
             result_messages, result_artifacts = self._budget_tool_results(results)
             native_messages = list(state.get("native_tool_messages", []))
             native_messages.extend(result_messages)
@@ -828,6 +894,7 @@ class ToolLoopNodes:
                 ),
                 "native_tool_messages": native_messages,
                 "native_pending_tool_calls": [],
+                "native_parallel_read_batch": False,
                 "analysis_tool_calls": [],
                 "change_tool_calls": [],
                 "validation_tool_calls": [],
@@ -858,6 +925,7 @@ class ToolLoopNodes:
                         "called_tools": [result["name"] for result in results],
                         "success_count": sum(1 for item in results if item.get("ok")),
                         "failure_count": sum(1 for item in results if not item.get("ok")),
+                        "parallel_read_batch": parallel_read_batch,
                         "consecutive_failures": consecutive_failures,
                         "no_progress_rounds": no_progress,
                     },

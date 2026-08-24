@@ -584,9 +584,12 @@ Google Developer API 的工具调用 Token 预检把 system instruction 与工�
 继续降级为文本观察，不伪造 `thought_signature`。Provider JSON 错误的 message 会先做
 凭据脱敏与长度裁剪再进入 Run 错误，便于定位协议问题而不返回请求正文。
 
-生产规划器每轮最多接受一个工具调用；OpenAI 请求同时设置
-`parallel_tool_calls=false`，其他 Provider 即使返回多个调用也只执行第一个并为其余调用
-回灌 `single_tool_turn`。变更 Prompt 要求一次只修改一个文件并优先使用小
+生产规划器允许每轮接受一组连续、独立、幂等、无需审批的 `read_only` 调用，批次受
+`AGENT_MAX_READ_TOOLS_PER_ROUND` 和剩余硬调用预算共同限制；执行器并发运行这组读取，
+但按模型提议顺序回灌结果。OpenAI 启用 `parallel_tool_calls`，Anthropic 允许并行
+`tool_use`；Harness 仍会校验 ToolSpec 与本轮权限，所以写入、验证、需审批工具、用户输入
+以及读写混合计划每轮只接受一个，其余调用回灌 `single_tool_turn`，超过读取批次上限的
+调用回灌 `read_batch_limit`。变更 Prompt 继续要求一次只修改一个文件并优先使用小
 `sandbox.apply_patch`，避免把多个完整文件塞进一个 JSON 参数。当前仍使用各 Provider 的
 结构化工具参数协议，没有假装 DeepSeek/Anthropic/Google 已支持 OpenAI 的 freeform
 `apply_patch` custom tool。

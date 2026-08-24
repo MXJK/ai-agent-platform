@@ -1,7 +1,7 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "LAYERED-TRANSCRIPT-COMPACTION"
-next_action: "Start wave 2 in independent codex worktrees: unified context budget first, then Artifact readback and structured compaction snapshots."
+active_task: "PARALLEL-READ-TOOL-CALLS"
+next_action: "Re-run verification after integrating the latest main, then push main as authorized."
 blockers: []
 last_verified_commit: "47be3d75bd1a818e75f1d60ee9fd133b64a1aa29"
 updated_at: "2026-08-24T12:25:48+08:00"

@@ -153,6 +153,12 @@ class LLMStructuredAgentPlanner:
     def single_tool_per_turn(self) -> bool:
         return True
 
+    @property
+    def parallel_read_tools(self) -> bool:
+        """Allow the harness to batch only safe read-only calls."""
+
+        return True
+
     def decide_tool_calls(
         self,
         messages: list[dict[str, Any]],
@@ -408,7 +414,11 @@ def select_knowledge_bases(
     return (positive or [item_id for _, item_id in scored[:1]])[:3]
 
 
-def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
+def native_tool_messages(
+    state: CodingAgentState,
+    *,
+    max_parallel_read_calls: int = 1,
+) -> list[dict[str, Any]]:
     sources = [
         {
             "kind": source.kind,
@@ -441,8 +451,12 @@ def native_tool_messages(state: CodingAgentState) -> list[dict[str, Any]]:
         "After observing tool results, either call another useful tool or provide "
         "a grounded final answer. Cite source paths and line ranges. Do not repeat "
         "an identical tool call, and do not claim an action succeeded unless its "
-        "tool result reports success. Emit at most one tool call per turn. For "
-        "repository changes, make one focused file change at a time and prefer a "
+        "tool result reports success. You may emit up to "
+        f"{max(1, max_parallel_read_calls)} independent, idempotent, approval-free "
+        "read-only tool calls in one turn when they can safely run in parallel. "
+        "Do not mix such reads with a mutation, validation, approval-requiring "
+        "call, or user-input request. Emit at most one non-read-only call per turn. "
+        "For repository changes, make one focused file change at a time and prefer a "
         "small sandbox.apply_patch operation over embedding several complete files "
         "in one sandbox.write_file call. Observe each result before continuing."
     )

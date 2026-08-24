@@ -1096,7 +1096,7 @@ class LLMClient:
                 for spec in tools
                 ],
                 "tool_choice": "none" if disable_tool_calls else "auto",
-                "parallel_tool_calls": False,
+                "parallel_tool_calls": not disable_tool_calls,
             })
         body = self._post_json(
             "https://api.openai.com/v1/responses",
@@ -1193,7 +1193,7 @@ class LLMClient:
                 "tool_choice": (
                     {"type": "none"}
                     if disable_tool_calls
-                    else {"type": "auto", "disable_parallel_tool_use": True}
+                    else {"type": "auto", "disable_parallel_tool_use": False}
                 ),
             })
         if system:

@@ -381,6 +381,7 @@ class CodingAgentRuntime:
             "native_tool_round": 0,
             "native_tool_call_count": 0,
             "native_pending_tool_calls": [],
+            "native_parallel_read_batch": False,
             "native_tool_signatures": [],
             "native_tool_loop_active": False,
             "native_tool_answer": "",

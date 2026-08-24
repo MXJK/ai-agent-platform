@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from typing import Any, Callable
@@ -322,13 +323,45 @@ class ChangeLoopExecutor:
         self,
         state: CodingAgentState,
         tool_calls: list[ToolCall],
+        *,
+        parallel_read_only: bool = False,
     ) -> list[dict[str, Any]]:
         context = self._tool_use_context(state)
         tools = self._tools_for_state(state)
+        if parallel_read_only and self._is_parallel_read_batch(tool_calls, tools):
+            with ThreadPoolExecutor(
+                max_workers=len(tool_calls),
+                thread_name_prefix="agent-read",
+            ) as executor:
+                futures = [
+                    executor.submit(self._execute_tool_call, call, context, tools)
+                    for call in tool_calls
+                ]
+                # Preserve model-proposed order even when later reads finish first.
+                return [future.result() for future in futures]
         return [
             self._execute_tool_call(tool_call, context, tools)
             for tool_call in tool_calls
         ]
+
+    @staticmethod
+    def _is_parallel_read_batch(tool_calls: list[ToolCall], tools: Any) -> bool:
+        if len(tool_calls) <= 1:
+            return False
+        call_ids = [call.call_id for call in tool_calls]
+        if len(set(call_ids)) != len(call_ids):
+            return False
+        for call in tool_calls:
+            spec = tools.get_spec(call.name)
+            if (
+                spec is None
+                or spec.permission_level != "read_only"
+                or spec.requires_approval
+                or not spec.idempotent
+                or call.name == "agent.request_user_input"
+            ):
+                return False
+        return True
 
     def _tools_for_state(self, state: CodingAgentState):
         return self._pool_provider(state)

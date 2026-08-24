@@ -615,13 +615,19 @@ or runtime calls to text rather than fabricating a `thought_signature`.
 Provider JSON error messages are credential-redacted and length-bounded before
 entering Run diagnostics, without retaining the request body.
 
-The production planner accepts at most one tool call per turn. OpenAI also uses
-`parallel_tool_calls=false`; extra calls returned by another provider are not
-executed and receive a synthetic `single_tool_turn` result. Mutation prompts ask
-for one file and a small `sandbox.apply_patch` at a time instead of embedding
-multiple complete files in one JSON argument. Provider adapters still use their
-native structured-argument formats; this does not claim freeform OpenAI
-`apply_patch` custom-tool support for DeepSeek, Anthropic, or Google.
+The production planner may accept one consecutive batch of independent,
+idempotent, approval-free `read_only` calls per turn. The batch is bounded by
+`AGENT_MAX_READ_TOOLS_PER_ROUND` and the remaining hard call budget; the executor
+runs those reads concurrently while replaying results in model-proposed order.
+OpenAI enables `parallel_tool_calls` and Anthropic permits parallel `tool_use`,
+but the harness still checks each ToolSpec and effective permission. Mutations,
+validations, approval-bound tools, user input, and mixed read/write plans remain
+limited to one accepted call per turn; extra calls receive `single_tool_turn`,
+while reads beyond the batch cap receive `read_batch_limit`. Mutation prompts
+still ask for one file and a small `sandbox.apply_patch` at a time instead of
+embedding multiple complete files in one JSON argument. Provider adapters still
+use their native structured-argument formats; this does not claim freeform
+OpenAI `apply_patch` custom-tool support for DeepSeek, Anthropic, or Google.
 
 Malformed tool-argument JSON is retryable. Output-limit finish reasons are
 classified as truncation, and `LLMClient` retries within `LLM_MAX_RETRIES` after

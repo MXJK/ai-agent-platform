@@ -80,6 +80,7 @@ class CodingAgentState(TypedDict, total=False):
     native_tool_round: int
     native_tool_call_count: int
     native_pending_tool_calls: list[ToolCall]
+    native_parallel_read_batch: bool
     native_tool_signatures: list[str]
     native_tool_loop_active: bool
     native_tool_answer: str

@@ -3,6 +3,7 @@ from pathlib import Path
 import shlex
 import sys
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -604,7 +605,7 @@ class NativeProviderMappingTests(unittest.TestCase):
             payloads[0]["tools"][0]["name"],
             "repo_read_file",
         )
-        self.assertFalse(payloads[0]["parallel_tool_calls"])
+        self.assertTrue(payloads[0]["parallel_tool_calls"])
         result_item = next(
             item
             for item in payloads[1]["input"]
@@ -675,6 +676,7 @@ class NativeProviderMappingTests(unittest.TestCase):
         # Replayed tool blocks are only valid while the request still declares
         # the tools, so finalization forbids calls through tool_choice instead.
         self.assertEqual(captured["tools"][0]["name"], "repo_read_file")
+        self.assertFalse(captured["parallel_tool_calls"])
         self.assertEqual(captured["tool_choice"], "none")
         self.assertTrue(
             any(item.get("type") == "function_call_output" for item in captured["input"])
@@ -860,6 +862,9 @@ class NativeProviderMappingTests(unittest.TestCase):
         self.assertEqual(decision.tool_calls[0].name, "repo.read_file")
         self.assertEqual(decision.usage, LLMUsage(input_tokens=11, output_tokens=5))
         self.assertEqual(captured["tools"][0]["name"], "repo_read_file")
+        self.assertFalse(
+            captured["tool_choice"]["disable_parallel_tool_use"]
+        )
 
     def test_google_maps_function_call_and_provider_content(self) -> None:
         response_content = types.Content(
@@ -1089,6 +1094,41 @@ class SingleToolNativePlanner(ScriptedNativePlanner):
         )
         return LLMToolDecision(
             text="Only one tool was executed in the turn.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
+class ParallelReadNativePlanner(ScriptedNativePlanner):
+    single_tool_per_turn = True
+    parallel_read_tools = True
+
+    def __init__(self, calls: list[ToolCall]) -> None:
+        super().__init__()
+        self.calls = calls
+        self.observed_tool_messages: list[dict[str, object]] = []
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=self.calls,
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.observed_tool_messages = [
+            message
+            for message in messages
+            if message.get("role") == "tool"
+            and str(message.get("call_id") or "").startswith("batch_")
+        ]
+        return LLMToolDecision(
+            text="Observed the bounded read batch.",
             tool_calls=[],
             model="scripted",
             provider="test",
@@ -1668,6 +1708,288 @@ class NativeToolLoopTests(unittest.TestCase):
         ]
         self.assertEqual([item["call_id"] for item in executed], ["single_1"])
         self.assertTrue(planner.observed_suppression)
+
+    def test_safe_read_batch_runs_concurrently_and_preserves_order(self) -> None:
+        barrier = Barrier(2)
+
+        def lookup(query):
+            barrier.wait(timeout=2)
+            return {"query": query}
+
+        calls = [
+            ToolCall(
+                call_id=f"batch_{index}",
+                name="demo.lookup",
+                arguments={"query": query},
+            )
+            for index, query in enumerate(("slow-first", "fast-second"), start=1)
+        ]
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lookup,
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            planner = ParallelReadNativePlanner(calls)
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+            ).run(
+                conversation_id="sess_parallel_read_batch",
+                user_input="look up two independent values",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        executed = [
+            item for item in result.tool_results if item.get("name") == "demo.lookup"
+        ]
+        self.assertEqual(
+            [item["call_id"] for item in executed],
+            ["batch_1", "batch_2"],
+        )
+        self.assertTrue(all(item["ok"] for item in executed))
+        self.assertEqual(
+            [message["call_id"] for message in planner.observed_tool_messages],
+            ["batch_1", "batch_2"],
+        )
+        plan_step = next(
+            step
+            for step in result.trace
+            if step["node"] == "plan_tools"
+            and step["output"].get("round") == 1
+        )
+        inspect_step = next(
+            step
+            for step in result.trace
+            if step["node"] == "inspect_repository"
+            and step["output"].get("parallel_read_batch")
+        )
+        self.assertTrue(plan_step["output"]["parallel_read_batch"])
+        self.assertEqual(inspect_step["output"]["called_tools"], [
+            "demo.lookup",
+            "demo.lookup",
+        ])
+
+    def test_parallel_read_batch_respects_existing_per_round_limit(self) -> None:
+        calls = [
+            ToolCall(
+                call_id=f"batch_{index}",
+                name="demo.lookup",
+                arguments={"query": str(index)},
+            )
+            for index in range(1, 4)
+        ]
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lambda query: {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            planner = ParallelReadNativePlanner(calls)
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+                max_read_tools_per_round=2,
+            ).run(
+                conversation_id="sess_parallel_read_limit",
+                user_input="look up three values with a two-read cap",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        executed = [
+            item for item in result.tool_results if item.get("name") == "demo.lookup"
+        ]
+        suppressed = [
+            item
+            for step in result.trace
+            for item in step["output"].get("suppressed_tools", [])
+        ]
+        self.assertEqual(
+            [item["call_id"] for item in executed],
+            ["batch_1", "batch_2"],
+        )
+        self.assertEqual(
+            [(item["call_id"], item["reason"]) for item in suppressed],
+            [("batch_3", "read_batch_limit")],
+        )
+
+    def test_parallel_reads_do_not_share_a_turn_with_a_mutation(self) -> None:
+        calls = [
+            ToolCall(
+                call_id="batch_read",
+                name="demo.lookup",
+                arguments={"query": "evidence"},
+            ),
+            ToolCall(
+                call_id="batch_write",
+                name="sandbox.write_file",
+                arguments={"path": "should-not-exist.txt", "content": "unsafe"},
+            ),
+        ]
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lambda query: {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            planner = ParallelReadNativePlanner(calls)
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=planner,
+            ).run(
+                conversation_id="sess_parallel_read_write_boundary",
+                user_input="inspect evidence before deciding whether to write",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+            write_created = (root / "should-not-exist.txt").exists()
+
+        suppressed = [
+            item
+            for step in result.trace
+            for item in step["output"].get("suppressed_tools", [])
+        ]
+        self.assertFalse(write_created)
+        self.assertEqual(
+            [(item["call_id"], item["reason"]) for item in suppressed],
+            [("batch_write", "single_tool_turn")],
+        )
+
+    def test_approval_requiring_reads_are_not_batched(self) -> None:
+        calls = [
+            ToolCall(
+                call_id=f"batch_approval_{index}",
+                name="demo.approval_lookup",
+                arguments={"query": str(index)},
+            )
+            for index in range(1, 3)
+        ]
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.approval_lookup",
+                lambda query: {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+                requires_approval=True,
+            )
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=ParallelReadNativePlanner(calls),
+            ).run(
+                conversation_id="sess_parallel_read_approval_boundary",
+                user_input="request two approval-bound lookups",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        approval_calls = (result.pending_approval or {}).get(
+            "approval_required_tools", []
+        )
+        suppressed = [
+            item
+            for step in result.trace
+            for item in step["output"].get("suppressed_tools", [])
+        ]
+        self.assertEqual(result.status, "waiting_approval")
+        self.assertEqual(
+            [item["call_id"] for item in approval_calls],
+            ["batch_approval_1"],
+        )
+        self.assertEqual(
+            [(item["call_id"], item["reason"]) for item in suppressed],
+            [("batch_approval_2", "single_tool_turn")],
+        )
+
+    def test_duplicate_call_ids_cannot_enter_parallel_execution(self) -> None:
+        calls = [
+            ToolCall(
+                call_id="batch_duplicate",
+                name="demo.lookup",
+                arguments={"query": query},
+            )
+            for query in ("first", "second")
+        ]
+        invocations: list[str] = []
+        with TemporaryDirectory() as temp_dir:
+            registry = create_coding_tool_registry()
+            registry.register(
+                "demo.lookup",
+                lambda query: invocations.append(query) or {"query": query},
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                output_schema={"type": "object"},
+            )
+            result = CodingAgentRuntime(
+                tool_registry=registry,
+                planner=ParallelReadNativePlanner(calls),
+            ).run(
+                conversation_id="sess_parallel_read_duplicate_call_id",
+                user_input="look up two values using a malformed duplicate call id",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=temp_dir,
+            )
+
+        lookup_results = [
+            item for item in result.tool_results if item.get("name") == "demo.lookup"
+        ]
+        plan_step = next(
+            step
+            for step in result.trace
+            if step["node"] == "plan_tools"
+            and step["output"].get("round") == 1
+        )
+        inspect_step = next(
+            step
+            for step in result.trace
+            if step["node"] == "inspect_repository"
+            and "parallel_read_batch" in step["output"]
+        )
+        self.assertFalse(plan_step["output"]["parallel_read_batch"])
+        self.assertFalse(inspect_step["output"]["parallel_read_batch"])
+        self.assertEqual(invocations, ["first"])
+        self.assertEqual(
+            [item.get("error_code") for item in lookup_results],
+            [None, "tool_call_identity_conflict"],
+        )
 
     def test_plan_tools_trace_records_suppressed_calls_for_trajectory_evals(
         self,
