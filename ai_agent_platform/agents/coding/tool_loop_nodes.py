@@ -2341,10 +2341,13 @@ def _folded_native_summary(
             artifact_id = content.get("artifact_id") or (
                 artifact_ids_by_call_id or {}
             ).get(str(message.get("call_id") or ""))
+            artifact_detail = (
+                f" artifact_id={artifact_id}" if artifact_id else ""
+            )
             summary_items.append(
                 f"tool {message.get('name')} ok={content.get('ok')} "
-                f"error={content.get('error') or '-'} "
-                f"artifact_id={artifact_id or '-'} result={preview}"
+                f"error={content.get('error') or '-'}{artifact_detail} "
+                f"result={preview}"
             )
         else:
             summary_items.append(

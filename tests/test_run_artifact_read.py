@@ -512,18 +512,29 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             self.assertEqual(completed.status, "completed")
             self.assertEqual(completed.artifacts, [artifact])
 
-    def test_legacy_v2_tool_view_does_not_gain_read_artifact(self) -> None:
+    def test_legacy_run_context_tool_views_do_not_gain_read_artifact(self) -> None:
         registry = create_coding_tool_registry()
         coordinator = ToolAccessCoordinator(
             tools=registry,
             default_approval_policy="never",
         )
-        legacy_snapshot = SimpleNamespace(
-            metadata=SimpleNamespace(schema_version=2, run_id="legacy_v2"),
-            tools=SimpleNamespace(enabled_tools=None),
-        )
-        restored = coordinator.restore_snapshot(legacy_snapshot)
-        self.assertNotIn(RUN_ARTIFACT_READ_TOOL, restored.allowed_names)
+        for schema_version, enabled_tools in (
+            (1, None),
+            (2, ("repo.read_file",)),
+        ):
+            with self.subTest(schema_version=schema_version):
+                legacy_snapshot = SimpleNamespace(
+                    metadata=SimpleNamespace(
+                        schema_version=schema_version,
+                        run_id=f"legacy_v{schema_version}",
+                    ),
+                    tools=SimpleNamespace(enabled_tools=enabled_tools),
+                )
+                restored = coordinator.restore_snapshot(legacy_snapshot)
+                self.assertNotIn(
+                    RUN_ARTIFACT_READ_TOOL,
+                    restored.allowed_names,
+                )
 
     def test_agent_run_result_unicode_artifact_round_trips_memory_sqlite_postgres(self) -> None:
         artifact = self._artifact()
