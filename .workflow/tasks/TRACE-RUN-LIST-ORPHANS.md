@@ -35,6 +35,8 @@
 - 完整验证：`646 passed, 87 subtests passed`。
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - `git diff --check`：通过。
+- 合并后在 `main` 重跑完整验证：`646 passed, 87 subtests passed`，compileall 通过。
+- `.venv/bin/python INTERVIEW_NOTES/validate.py`：通过（24 个 Markdown 文件、43 项能力）。
 
 ## Result
 
@@ -42,8 +44,8 @@
 孤儿 Run 后继续返回有效 Run。单 Run 查询、会话删除和权限判定的既有语义未修改，也不
 在读取路径自动删除历史 Run。
 
-文档影响：已更新中英文 README；根 checkout 的 gitignored 模块化面试手册应在批准合并
-后同步，避免在 `main` 仍运行旧代码时提前描述未合入行为。
+文档影响：已更新中英文 README，并在合并后同步根 checkout 的 gitignored 模块化面试
+手册，记录孤儿 Run 的集合查询容错边界。
 
 实现与自动化验证已完成，用户已批准提交并合并到 `main`。按用户要求本次不重启 Docker
 app、不做真实 PostgreSQL 数据回归，也不推送远端；这些操作留给后续明确授权。
