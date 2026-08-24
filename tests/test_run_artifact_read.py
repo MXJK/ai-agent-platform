@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import unittest
 from dataclasses import replace
 import json
@@ -41,6 +42,7 @@ from ai_agent_platform.repositories.postgres import (
     _agent_result_to_json,
 )
 from ai_agent_platform.repositories.sqlite import SQLiteAgentRunRepository
+from ai_agent_platform.services.query_events import AgentEventEncoder
 from ai_agent_platform.token_counting import estimate_text_tokens
 
 
@@ -636,6 +638,30 @@ class RunArtifactNodeTests(unittest.TestCase):
                 self.assertFalse(response["ok"])
                 self.assertEqual(response["error_code"], "artifact_not_found")
 
+    def test_artifact_from_another_run_state_is_not_found(self) -> None:
+        other_artifact = build_run_tool_result_artifact(
+            {
+                "call_id": "run_b_source",
+                "name": "repo.read_file",
+                "ok": True,
+                "result": {"text": "run-b-only"},
+            }
+        )
+        response = self.nodes._read_artifact(
+            {
+                "run_id": "run_b",
+                "artifacts": [other_artifact],
+                "run_artifact_read_enabled": True,
+            },  # type: ignore[arg-type]
+            ToolCall(
+                call_id="cross_run_read",
+                name=RUN_ARTIFACT_READ_TOOL,
+                arguments={"artifact_id": self.artifact["id"]},
+            ),
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error_code"], "artifact_not_found")
+
 
 class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
     def _artifact(self) -> dict[str, object]:
@@ -709,40 +735,61 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             self.assertEqual(completed.artifacts, [artifact])
 
     def test_native_model_loop_reads_and_reassembles_checkpoint_artifact_pages(self) -> None:
+        sentinel = "ARTIFACT-READ-AUDIT-SENTINEL-91f34c"
         artifact = build_run_tool_result_artifact(
             {
                 "call_id": "native_paged_source",
                 "name": "mcp.demo.lookup",
                 "ok": True,
-                "result": {"text": "native-visible-page-前缀🙂-" * 30},
+                "result": {
+                    "text": ("native-visible-page-前缀🙂-" * 15)
+                    + sentinel
+                    + ("-tail-后缀🙂" * 15)
+                },
             }
         )
         planner = _PagedArtifactPlanner(str(artifact["id"]))
+        metrics = MetricsRegistry()
+        run_store = InMemoryAgentRunStore()
+        captured_logs: list[str] = []
+
+        class _CaptureHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                captured_logs.append(self.format(record))
+
+        log_handler = _CaptureHandler()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(log_handler)
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "README.md").write_text("demo\n", encoding="utf-8")
             runtime = CodingAgentRuntime(
                 planner=planner,
+                run_store=run_store,
                 tool_result_max_tokens=128,
+                metrics=metrics,
             )
-            waiting = runtime.run(
-                conversation_id="artifact_native_pages",
-                user_input="read every artifact page",
-                history=[],
-                workspace_id="workspace",
-                workspace_root=str(root),
-            )
-            self.assertEqual(waiting.status, "waiting_input")
-            current = runtime._checkpoint_coordinator.snapshot_for(
-                runtime._checkpoint_coordinator.config(waiting.thread_id)
-            )
-            runtime._graph.update_state(current.config, {"artifacts": [artifact]})
+            try:
+                waiting = runtime.run(
+                    conversation_id="artifact_native_pages",
+                    user_input="read every artifact page",
+                    history=[],
+                    workspace_id="workspace",
+                    workspace_root=str(root),
+                )
+                self.assertEqual(waiting.status, "waiting_input")
+                current = runtime._checkpoint_coordinator.snapshot_for(
+                    runtime._checkpoint_coordinator.config(waiting.thread_id)
+                )
+                runtime._graph.update_state(current.config, {"artifacts": [artifact]})
 
-            completed = runtime.resume(
-                run_id=waiting.run_id,
-                approved=True,
-                feedback="continue",
-            )
+                completed = runtime.resume(
+                    run_id=waiting.run_id,
+                    approved=True,
+                    feedback="continue",
+                )
+            finally:
+                root_logger.removeHandler(log_handler)
 
         self.assertEqual(completed.status, "completed")
         self.assertTrue(planner.artifact_tool_visible)
@@ -751,6 +798,7 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
             "".join(planner.pages),
             canonical_tool_result(artifact["content"]),
         )
+        self.assertIn(sentinel, "".join(planner.pages))
         self.assertTrue(planner.model_envelopes)
         for envelope in planner.model_envelopes:
             self.assertEqual(envelope["name"], RUN_ARTIFACT_READ_TOOL)
@@ -759,6 +807,56 @@ class RunArtifactCheckpointAndStoreTests(unittest.TestCase):
                 estimate_text_tokens(_serialize_tool_result(envelope)),
                 128,
             )
+        serialized_trace = _serialize_tool_result(completed.trace)
+        self.assertNotIn(sentinel, serialized_trace)
+        artifact_reads = [
+            read
+            for trace in completed.trace
+            for read in (trace.get("output") or {}).get("artifact_reads", [])
+        ]
+        self.assertGreater(len(artifact_reads), 1)
+        required_metadata = {
+            "artifact_id",
+            "call_id",
+            "tool",
+            "view",
+            "ranges",
+            "returned_chars",
+            "estimated_tokens",
+            "sha256",
+            "error_code",
+        }
+        for read in artifact_reads:
+            self.assertTrue(required_metadata.issubset(read))
+            self.assertEqual(read["artifact_id"], artifact["id"])
+            self.assertEqual(read["tool"], RUN_ARTIFACT_READ_TOOL)
+            self.assertTrue(read["ranges"])
+
+        stored_events = run_store.list_events(completed.run_id)
+        serialized_events = _serialize_tool_result(
+            [
+                {
+                    "sequence": event.sequence,
+                    "type": event.type,
+                    "output": event.output,
+                }
+                for event in stored_events
+            ]
+        )
+        self.assertNotIn(sentinel, serialized_events)
+        encoder = AgentEventEncoder()
+        sse = "".join(
+            encoder.encode_sse(encoder.from_stored(completed.run_id, event))
+            for event in stored_events
+        )
+        self.assertNotIn(sentinel, sse)
+        self.assertIn(str(artifact["id"]), sse)
+        self.assertNotIn(sentinel, _serialize_tool_result(metrics.snapshot()))
+        self.assertGreater(
+            metrics.snapshot()["counters"]["agent_run_artifact_reads_total"],
+            1,
+        )
+        self.assertNotIn(sentinel, "\n".join(captured_logs))
 
     def test_legacy_run_context_tool_views_do_not_gain_read_artifact(self) -> None:
         registry = create_coding_tool_registry()

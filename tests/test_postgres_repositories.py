@@ -1,12 +1,16 @@
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 from ai_agent_platform.agents.coding.models import (
     AgentRunEvent,
     AgentRunRecord,
+    AgentRunResult,
     AgentToolExecution,
+)
+from ai_agent_platform.agents.coding.run_artifacts import (
+    build_run_tool_result_artifact,
 )
 from ai_agent_platform.domain import ChangeSetRecord, ConversationSummary
 from ai_agent_platform.repositories.change_sets import PostgresChangeSetRepository
@@ -462,6 +466,91 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("agent_runs.status NOT IN", sql)
         self.assertIn("RETURNING status", sql)
         self.assertIn("WHERE EXISTS", connection.calls[1][0])
+
+    def test_agent_run_repository_round_trips_artifact_through_jsonb_save_and_get(self) -> None:
+        artifact = build_run_tool_result_artifact(
+            {
+                "call_id": "postgres_artifact_source",
+                "name": "mcp.demo.lookup",
+                "ok": True,
+                "result": {"text": "Postgres JSONB 回读🙂"},
+            }
+        )
+        result = AgentRunResult(
+            run_id="artifact_postgres",
+            thread_id="artifact_postgres",
+            conversation_id="session_artifact",
+            workspace_id="workspace_main",
+            status="completed",
+            checkpoint_id="checkpoint_artifact",
+            role="coding",
+            objective="artifact readback",
+            intent="code_explanation",
+            context_route="repo",
+            selected_knowledge_base_ids=[],
+            answer="done",
+            graph_engine="langgraph",
+            context_sources=[],
+            tool_calls=[],
+            tool_results=[],
+            trace=[],
+            artifacts=[artifact],
+        )
+        record = AgentRunRecord(
+            run_id=result.run_id,
+            thread_id=result.thread_id,
+            conversation_id=result.conversation_id,
+            workspace_id=result.workspace_id,
+            workspace_root="/workspace/code",
+            status="completed",
+            checkpoint_id=result.checkpoint_id,
+            latest_node="compose_answer",
+            next_nodes=[],
+            trace=[],
+            result=result,
+        )
+        stored_row = (
+            record.run_id,
+            record.thread_id,
+            record.conversation_id,
+            record.workspace_id,
+            record.workspace_root,
+            record.status,
+            record.checkpoint_id,
+            record.latest_node,
+            [],
+            [],
+            asdict(result),
+            None,
+            None,
+            [],
+            None,
+            [],
+            None,
+        )
+        connection = FakeConnection(
+            [("completed",), None, None, None, stored_row]
+        )
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.postgres._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresAgentRunRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            repository.save(record)
+            loaded = repository.get(record.run_id)
+
+        save_sql, save_params = connection.calls[0]
+        self.assertIn("INSERT INTO agent_runs", save_sql)
+        self.assertEqual(save_params[10]["artifacts"], [artifact])
+        self.assertEqual(connection.calls[-1][1], (record.run_id,))
+        assert loaded.result is not None
+        self.assertEqual(loaded.result.artifacts, [artifact])
 
     def test_agent_run_repository_loads_latest_run_for_conversation(self) -> None:
         row = (
