@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AGENT-CHECKPOINT-TIME-TRAVEL"
-next_action: "Monitor checkpoint time travel on main and address feedback; no deployment is scheduled."
+active_task: "LAYERED-TRANSCRIPT-COMPACTION"
+next_action: "Await user approval before merging codex/layered-compaction-wave1; then begin wave 2."
 blockers: []
-last_verified_commit: "efca769f52ba86b8d5e8324a3d3eaf621eaf624d"
-updated_at: "2026-08-24T10:03:15+08:00"
+last_verified_commit: "206e5260d254cd884b528bb683a5b117fde3f686"
+updated_at: "2026-08-24T12:06:18+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
