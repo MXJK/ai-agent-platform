@@ -1,5 +1,5 @@
 project_id: "ai-agent-platform"
-status: "review"
+status: "active"
 active_task: "ARTIFACT-READBACK"
 next_action: "Complete independent review and final full verification for codex/artifact-readback-wave2, then report the branch and wait for explicit merge confirmation."
 blockers: []
