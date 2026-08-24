@@ -3139,7 +3139,6 @@ function resetLatestAgentRunState() {
   state.checkpointRunId = "";
   state.selectedCheckpointId = "";
   state.currentChangeSet = null;
-  renderActiveRunControl();
 }
 
 function normalizedMessageText(value) {
@@ -3980,7 +3979,8 @@ function renderInlineAgentCheckpoint(contentNode, body) {
       </label>
       <p class="inline-checkpoint-error" role="alert" hidden></p>
       <div class="inline-checkpoint-actions">
-        <button class="button danger" type="button" data-inline-agent-action="reject">拒绝执行</button>
+        <button class="button danger" type="button" data-inline-run-action="cancel">取消 Run</button>
+        <button class="button ghost" type="button" data-inline-agent-action="reject">拒绝执行</button>
         <button class="button primary" type="button" data-inline-agent-action="approve">确认并继续</button>
       </div>
     `;
@@ -4004,6 +4004,7 @@ function renderInlineAgentCheckpoint(contentNode, body) {
       </label>
       <p class="inline-checkpoint-error" role="alert" hidden></p>
       <div class="inline-checkpoint-actions">
+        <button class="button danger" type="button" data-inline-run-action="cancel">取消 Run</button>
         <button class="button primary" type="button" data-inline-agent-action="continue">继续运行</button>
       </div>
     `;
@@ -4012,6 +4013,11 @@ function renderInlineAgentCheckpoint(contentNode, body) {
   card.querySelectorAll("[data-inline-agent-action]").forEach((button) => {
     button.addEventListener("click", () => {
       handleInlineAgentAction(contentNode, body, button.dataset.inlineAgentAction, card);
+    });
+  });
+  card.querySelectorAll("[data-inline-run-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleInlineRunControl(contentNode, body, button.dataset.inlineRunAction, card);
     });
   });
   if (shouldFocusCheckpoint) {
@@ -4067,7 +4073,7 @@ async function handleInlineRunControl(contentNode, body, action, controls) {
     showToast("这条运行记录不属于当前会话，请重新打开对应会话", "warning");
     return;
   }
-  const input = controls.querySelector("input");
+  const input = controls.querySelector("input, textarea");
   const message = input?.value.trim() || "";
   if (action === "steer" && !message) {
     input.setAttribute("aria-invalid", "true");
@@ -4075,9 +4081,11 @@ async function handleInlineRunControl(contentNode, body, action, controls) {
     return;
   }
   const errorNode = controls.querySelector(".inline-control-error");
+  const checkpointErrorNode = controls.querySelector(".inline-checkpoint-error");
   controls.setAttribute("aria-busy", "true");
-  controls.querySelectorAll("button, input").forEach((node) => { node.disabled = true; });
-  errorNode.hidden = true;
+  controls.querySelectorAll("button, input, textarea").forEach((node) => { node.disabled = true; });
+  if (errorNode) errorNode.hidden = true;
+  if (checkpointErrorNode) checkpointErrorNode.hidden = true;
   try {
     const nextBody = await fetchJson(
       `/agent/runs/${encodeURIComponent(runId)}/${action}`,
@@ -4098,9 +4106,12 @@ async function handleInlineRunControl(contentNode, body, action, controls) {
     }[action] || "运行状态已更新", action === "cancel" ? "warning" : "success");
   } catch (error) {
     controls.removeAttribute("aria-busy");
-    controls.querySelectorAll("button, input").forEach((node) => { node.disabled = false; });
-    errorNode.textContent = humanizeError(error);
-    errorNode.hidden = false;
+    controls.querySelectorAll("button, input, textarea").forEach((node) => { node.disabled = false; });
+    const visibleErrorNode = errorNode || checkpointErrorNode;
+    if (visibleErrorNode) {
+      visibleErrorNode.textContent = humanizeError(error);
+      visibleErrorNode.hidden = false;
+    }
   }
 }
 
@@ -4155,7 +4166,12 @@ function ensureInlineChangeReview(contentNode) {
     card = document.createElement("section");
     card.className = "inline-change-review";
     card.setAttribute("aria-live", "polite");
-    bubble.appendChild(card);
+    const footer = bubble.querySelector(".inline-run-footer");
+    if (footer) {
+      bubble.insertBefore(card, footer);
+    } else {
+      bubble.appendChild(card);
+    }
   }
   return card;
 }
@@ -4529,6 +4545,7 @@ function renderAgentChatResponse(
         showToast(`ChangeSet 加载失败：${humanizeError(error)}`, "error");
       });
     }
+    renderInlineRunFooter(contentNode, body);
   }
 }
 
@@ -5094,106 +5111,45 @@ function activeRunPresentation(body) {
   return presentations[status] || ["AGENT RUN", humanizeStatus(status), "可查看当前执行记录"];
 }
 
-function renderActiveRunControl(body = state.latestRunBody) {
-  const control = $("active-run-control");
-  if (!control) return;
-  const runId = agentRunId(body);
-  const conversationId = agentRunConversationId(body);
-  if (!runId || !conversationId || conversationId !== state.conversationId) {
-    control.hidden = true;
-    control.removeAttribute("data-status");
-    return;
-  }
+function renderInlineRunFooter(contentNode, body) {
+  const bubble = contentNode.closest(".chat-bubble");
+  if (!bubble) return;
+  const runId = agentRunId(body)
+    || contentNode.closest("[data-agent-run-id]")?.dataset.agentRunId
+    || "";
   const status = agentRunStatus(body);
-  const [kicker, title, detail] = activeRunPresentation(body);
-  const resumable = ["waiting_input", "paused"].includes(status);
-  const active = ["queued", "running"].includes(status);
-  const final = FINAL_RUN_STATUSES.has(status);
-  control.hidden = false;
-  control.dataset.status = status;
-  control.dataset.runId = runId;
-  $("active-run-kicker").textContent = kicker;
-  $("active-run-title").textContent = title;
-  $("active-run-detail").textContent = detail;
-  $("active-run-message-field").hidden = !resumable;
-  $("active-run-pause-btn").hidden = status !== "running";
-  $("active-run-continue-btn").hidden = !resumable;
-  $("active-run-cancel-btn").hidden = !(active || SUSPENDED_RUN_STATUSES.has(status));
-  $("active-run-checkpoints-btn").hidden = status === "queued";
-  if (final) {
-    $("active-run-message-input").value = "";
-  }
-  control.querySelectorAll("button, input").forEach((node) => {
-    node.disabled = false;
-  });
-  control.removeAttribute("aria-busy");
-}
-
-function setActiveRunControlBusy(busy) {
-  const control = $("active-run-control");
-  control.toggleAttribute("aria-busy", busy);
-  control.querySelectorAll("button, input").forEach((node) => {
-    node.disabled = busy;
-  });
-}
-
-async function handleActiveRunControl(action) {
-  const body = state.latestRunBody;
-  const runId = agentRunId(body);
-  const conversationId = agentRunConversationId(body);
-  if (!runId || conversationId !== state.conversationId) {
-    showToast("当前 Run 已切换，请重新加载会话", "warning");
+  let footer = bubble.querySelector(".inline-run-footer");
+  if (!runId || !status) {
+    footer?.remove();
     return;
   }
-  const message = $("active-run-message-input").value.trim();
-  setActiveRunControlBusy(true);
-  try {
-    const nextBody = await fetchJson(
-      `/agent/runs/${encodeURIComponent(runId)}/${action}`,
-      { method: "POST", body: JSON.stringify({ message }) },
-    );
-    if (runId !== state.latestRunId || conversationId !== state.conversationId) return;
-    renderAgentRun(nextBody);
-    setChatStatusFromRun(nextBody);
-    if (action !== "continue") {
-      showToast(action === "pause"
-        ? "暂停请求已发送，将在下一个安全边界生效"
-        : "取消请求已发送", action === "cancel" ? "warning" : "success");
-      return;
-    }
-
-    $("active-run-message-input").value = "";
-    let contentNode = chatContentForRun(runId);
-    if (!contentNode) {
-      contentNode = appendChatMessage("assistant", "", null, { runId });
-    }
-    const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
-    const presenter = createAgentProgressPresenter(contentNode, startedAt, {
-      initialTrace: agentRunTrace(body),
-    });
-    startResponseTimer(contentNode, startedAt);
-    await presenter.update(nextBody);
-    const finalBody = await watchRunUntilTerminal({
-      runId,
-      conversationId,
-      preserveChat: true,
-      onProgress: (latestBody) => presenter.update(latestBody),
-    });
-    if (finalBody && runId === state.latestRunId && conversationId === state.conversationId) {
-      await presenter.update(finalBody);
-      setChatStatusFromRun(finalBody);
-    }
-    if (TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
-      stopResponseTimer(contentNode);
-    }
-    await Promise.allSettled([refreshCurrentSessionMetadata(), refreshRecentSessions()]);
-  } catch (error) {
-    showToast(humanizeError(error), "error");
-  } finally {
-    if (runId === state.latestRunId && conversationId === state.conversationId) {
-      renderActiveRunControl();
-    }
+  if (!footer) {
+    footer = document.createElement("section");
   }
+  const [, title, detail] = activeRunPresentation(body);
+  const checkpointAvailable = status !== "queued";
+  footer.className = "inline-run-footer";
+  footer.dataset.runId = runId;
+  footer.dataset.status = status;
+  footer.setAttribute("aria-label", "Agent Run 状态与检查点");
+  footer.innerHTML = `
+    <div class="inline-run-footer-copy">
+      <span class="inline-run-status-dot" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </div>
+    </div>
+    ${checkpointAvailable ? `
+      <button class="button ghost inline-checkpoint-history-button" type="button" data-inline-checkpoint-history>
+        ${iconMarkup("branch")}查看检查点
+      </button>
+    ` : ""}
+  `;
+  footer.querySelector("[data-inline-checkpoint-history]")?.addEventListener("click", () => {
+    openCheckpointHistory(runId).catch((error) => showToast(humanizeError(error), "error"));
+  });
+  bubble.appendChild(footer);
 }
 
 function checkpointTitle(checkpoint) {
@@ -5372,7 +5328,6 @@ function renderAgentRun(body) {
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
-  renderActiveRunControl(body);
 }
 
 async function refreshRun(
@@ -5444,7 +5399,6 @@ function renderStreamedAgentProgress(events, runId = state.latestRunId) {
   };
   setTrace(body.trace);
   renderOverview();
-  renderActiveRunControl();
   return body;
 }
 
@@ -7739,24 +7693,6 @@ function bindEvents() {
   $("settings-dialog").addEventListener("click", (event) => {
     if (event.target === $("settings-dialog")) {
       closeSettings();
-    }
-  });
-  $("active-run-checkpoints-btn").addEventListener("click", () => {
-    openCheckpointHistory().catch((error) => showToast(humanizeError(error), "error"));
-  });
-  $("active-run-pause-btn").addEventListener("click", () => {
-    handleActiveRunControl("pause");
-  });
-  $("active-run-continue-btn").addEventListener("click", () => {
-    handleActiveRunControl("continue");
-  });
-  $("active-run-cancel-btn").addEventListener("click", () => {
-    handleActiveRunControl("cancel");
-  });
-  $("active-run-message-input").addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.isComposing) {
-      event.preventDefault();
-      handleActiveRunControl("continue");
     }
   });
   $("close-checkpoint-history-btn").addEventListener("click", closeCheckpointHistory);

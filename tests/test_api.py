@@ -787,11 +787,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260824-checkpoint-time-travel-v2',
+            '/static/styles.css?v=20260824-inline-checkpoint-footer-v1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260824-checkpoint-time-travel-v2',
+            '/static/app.js?v=20260824-inline-checkpoint-footer-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -842,10 +842,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="session-search-input"', response.text)
         self.assertIn('id="archived-session-notice"', response.text)
         self.assertIn('id="active-session-header"', response.text)
-        self.assertIn('id="active-run-control"', response.text)
-        self.assertIn('id="active-run-pause-btn"', response.text)
-        self.assertIn('id="active-run-continue-btn"', response.text)
-        self.assertIn('id="active-run-checkpoints-btn"', response.text)
+        self.assertNotIn('id="active-run-control"', response.text)
+        self.assertNotIn('id="active-run-checkpoints-btn"', response.text)
         self.assertIn('id="checkpoint-history-dialog"', response.text)
         self.assertIn('id="checkpoint-history-list"', response.text)
         self.assertIn('id="checkpoint-fork-btn"', response.text)
@@ -881,7 +879,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data-inline-agent-action", script_response.text)
         self.assertIn("inline-agent-controls", script_response.text)
         self.assertIn("data-inline-run-action", script_response.text)
-        self.assertIn("renderActiveRunControl", script_response.text)
+        self.assertIn("renderInlineRunFooter", script_response.text)
+        self.assertIn("data-inline-checkpoint-history", script_response.text)
+        self.assertIn("取消 Run", script_response.text)
+        self.assertIn("bubble.appendChild(footer)", script_response.text)
+        self.assertIn("bubble.insertBefore(card, footer)", script_response.text)
+        self.assertNotIn("renderActiveRunControl", script_response.text)
         self.assertIn("openCheckpointHistory", script_response.text)
         self.assertIn("restoreSelectedCheckpoint", script_response.text)
         self.assertIn("/checkpoints?limit=200", script_response.text)
@@ -917,7 +920,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".document-actions", stylesheet_response.text)
         self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)
         self.assertIn(".inline-agent-controls", stylesheet_response.text)
-        self.assertIn(".active-run-control", stylesheet_response.text)
+        self.assertIn(".inline-run-footer", stylesheet_response.text)
+        self.assertNotIn(".active-run-control", stylesheet_response.text)
         self.assertIn(".checkpoint-history-dialog", stylesheet_response.text)
         self.assertIn(".checkpoint-card", stylesheet_response.text)
         self.assertIn(".inline-change-review", stylesheet_response.text)

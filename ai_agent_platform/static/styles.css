@@ -8212,173 +8212,83 @@ body.inspector-hidden .inspector {
   }
 }
 
-/* Persistent Run controls and checkpoint time travel */
-.chat-workbench.has-conversation {
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-}
-
-.active-run-control {
-  display: grid;
-  width: min(100%, 920px);
-  grid-template-columns: auto minmax(150px, 0.8fr) minmax(180px, 1fr) auto;
+/* Response-owned Run status and checkpoint time travel */
+.inline-run-footer {
+  display: flex;
+  width: min(640px, 100%);
   align-items: center;
-  gap: 12px;
-  margin: 10px auto 0;
-  padding: 10px 12px;
-  border: 1px solid var(--line-strong);
-  border-left: 3px solid var(--signal);
-  border-radius: var(--radius-md);
-  background:
-    linear-gradient(100deg, var(--signal-soft), transparent 34%),
-    var(--surface-soft);
-  box-shadow: var(--shadow-sm);
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
 }
 
-.active-run-control[hidden] {
-  display: none;
+.inline-run-footer-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
 }
 
-.active-run-signal {
-  position: relative;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-}
-
-.active-run-signal span,
-.active-run-signal i {
-  position: absolute;
-  border-radius: 50%;
-}
-
-.active-run-signal span {
-  width: 9px;
-  height: 9px;
-  background: var(--signal);
-  box-shadow: 0 0 14px rgba(98, 214, 194, 0.55);
-}
-
-.active-run-signal i {
-  width: 26px;
-  height: 26px;
-  border: 1px solid rgba(98, 214, 194, 0.44);
-  animation: active-run-pulse 1.8s ease-out infinite;
-}
-
-.active-run-copy {
+.inline-run-footer-copy > div {
   display: grid;
   min-width: 0;
   gap: 2px;
 }
 
-.active-run-copy > span {
-  color: var(--signal);
-  font-family: var(--font-mono);
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: 0.13em;
-}
-
-.active-run-copy strong {
+.inline-run-footer-copy strong,
+.inline-run-footer-copy small {
   overflow: hidden;
-  font-family: var(--font-display);
-  font-size: 13px;
-  font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.active-run-copy small {
-  overflow: hidden;
+.inline-run-footer-copy strong {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 760;
+}
+
+.inline-run-footer-copy small {
   color: var(--muted);
   font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.active-run-message-field {
-  min-width: 0;
+.inline-run-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 2px 8px rgba(98, 214, 194, 0.34);
 }
 
-.active-run-message-field input {
-  width: 100%;
+.inline-run-footer[data-status="queued"] .inline-run-status-dot {
+  background: var(--muted);
+  box-shadow: none;
+}
+
+.inline-run-footer[data-status="waiting_approval"] .inline-run-status-dot,
+.inline-run-footer[data-status="waiting_input"] .inline-run-status-dot,
+.inline-run-footer[data-status="paused"] .inline-run-status-dot,
+.inline-run-footer[data-status="blocked"] .inline-run-status-dot {
+  background: var(--amber);
+  box-shadow: 0 2px 8px rgba(228, 185, 110, 0.3);
+}
+
+.inline-run-footer[data-status="cancelled"] .inline-run-status-dot,
+.inline-run-footer[data-status="failed"] .inline-run-status-dot {
+  background: var(--red);
+  box-shadow: 0 2px 8px rgba(245, 138, 157, 0.28);
+}
+
+.inline-checkpoint-history-button {
   min-height: 34px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--canvas-deep);
-  color: var(--ink);
-  font: 10px/1.4 var(--font-body);
-}
-
-.active-run-message-field input:focus {
-  border-color: var(--brand);
-  outline: 2px solid var(--brand-soft);
-  outline-offset: 1px;
-}
-
-.active-run-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.active-run-actions .button {
-  min-height: 34px;
-  padding-inline: 9px;
+  flex: 0 0 auto;
+  padding-inline: 10px;
   font-size: 9px;
   white-space: nowrap;
-}
-
-.active-run-control[data-status="paused"],
-.active-run-control[data-status="waiting_input"] {
-  border-left-color: var(--amber);
-  background:
-    linear-gradient(100deg, var(--amber-soft), transparent 34%),
-    var(--surface-soft);
-}
-
-.active-run-control[data-status="paused"] .active-run-copy > span,
-.active-run-control[data-status="waiting_input"] .active-run-copy > span {
-  color: var(--amber);
-}
-
-.active-run-control[data-status="paused"] .active-run-signal span,
-.active-run-control[data-status="waiting_input"] .active-run-signal span {
-  background: var(--amber);
-  box-shadow: 0 0 14px rgba(228, 185, 110, 0.5);
-}
-
-.active-run-control[data-status="paused"] .active-run-signal i,
-.active-run-control[data-status="waiting_input"] .active-run-signal i,
-.active-run-control[data-status="waiting_approval"] .active-run-signal i,
-.active-run-control[data-status="completed"] .active-run-signal i,
-.active-run-control[data-status="partial"] .active-run-signal i,
-.active-run-control[data-status="blocked"] .active-run-signal i,
-.active-run-control[data-status="cancelled"] .active-run-signal i,
-.active-run-control[data-status="failed"] .active-run-signal i {
-  animation: none;
-}
-
-.active-run-control[data-status="completed"],
-.active-run-control[data-status="partial"],
-.active-run-control[data-status="blocked"],
-.active-run-control[data-status="cancelled"],
-.active-run-control[data-status="failed"] {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  border-left-color: var(--line-strong);
-  background: var(--surface-soft);
-}
-
-.active-run-control[data-status="failed"] {
-  border-left-color: var(--red);
-}
-
-@keyframes active-run-pulse {
-  0% { opacity: 0.8; transform: scale(0.5); }
-  80%, 100% { opacity: 0; transform: scale(1.15); }
 }
 
 .checkpoint-history-dialog {
@@ -8715,40 +8625,19 @@ body.inspector-hidden .inspector {
 }
 
 @media (max-width: 900px) {
-  .active-run-control {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
-
-  .active-run-message-field {
-    grid-column: 2 / -1;
-    grid-row: 2;
-  }
-
   .checkpoint-history-body {
     grid-template-columns: minmax(280px, 0.86fr) minmax(330px, 1.14fr);
   }
 }
 
 @media (max-width: 680px) {
-  .active-run-control {
-    width: calc(100% - 2px);
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 8px;
-    padding: 9px;
+  .inline-run-footer {
+    align-items: flex-start;
   }
 
-  .active-run-actions,
-  .active-run-message-field {
-    grid-column: 1 / -1;
-  }
-
-  .active-run-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .active-run-actions .button {
-    justify-content: center;
+  .inline-run-footer-copy small {
+    overflow: visible;
+    white-space: normal;
   }
 
   .checkpoint-history-dialog,
@@ -8799,11 +8688,5 @@ body.inspector-hidden .inspector {
 
   .checkpoint-history-footer {
     padding: 12px 16px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .active-run-signal i {
-    animation: none;
   }
 }

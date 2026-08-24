@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260824-checkpoint-time-travel-v2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260824-inline-checkpoint-footer-v1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -180,31 +180,6 @@
               </button>
             </div>
           </header>
-
-          <section id="active-run-control" class="active-run-control" aria-label="当前 Agent 运行控制" hidden>
-            <div class="active-run-signal" aria-hidden="true"><span></span><i></i></div>
-            <div class="active-run-copy">
-              <span id="active-run-kicker">ACTIVE RUN</span>
-              <strong id="active-run-title">Agent 正在运行</strong>
-              <small id="active-run-detail">将在下一个安全边界响应控制操作</small>
-            </div>
-            <label id="active-run-message-field" class="active-run-message-field" hidden>
-              <span class="sr-only">继续运行时的补充方向</span>
-              <input id="active-run-message-input" maxlength="4000" placeholder="继续时可补充新的方向" />
-            </label>
-            <div class="active-run-actions">
-              <button id="active-run-checkpoints-btn" class="button ghost" type="button">
-                <svg class="app-icon" aria-hidden="true"><use href="#icon-branch"></use></svg>
-                检查点
-              </button>
-              <button id="active-run-pause-btn" class="button secondary" type="button">
-                <svg class="app-icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
-                暂停
-              </button>
-              <button id="active-run-continue-btn" class="button primary" type="button" hidden>继续运行</button>
-              <button id="active-run-cancel-btn" class="button danger" type="button">取消</button>
-            </div>
-          </section>
 
           <div id="chat-output" class="conversation" aria-label="对话内容" tabindex="0">
             <div class="welcome-state">
@@ -1255,6 +1230,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260824-checkpoint-time-travel-v2" defer></script>
+    <script src="/static/app.js?v=20260824-inline-checkpoint-footer-v1" defer></script>
   </body>
 </html>

@@ -289,9 +289,10 @@ The browser workspace also includes:
   browser only exposes content mounted under `/workspaces`; every selection still
   passes the allowed-root check. The macOS Finder picker remains a non-default
   local-development compatibility implementation;
-- approval, input, and pause checkpoints rendered inside the matching assistant
-  message plus a persistent Run ribbon under the conversation header. Running
-  work can be paused or cancelled, suspended work can continue with a new direction,
+- approval, input, pause, Run controls, and checkpoint history access rendered at
+  the bottom of the matching assistant message, without a ribbon above the
+  conversation. Running work can be steered, paused, or cancelled, suspended work
+  can continue with a new direction,
   and any finished Run exposes a Git-like checkpoint rail. Restoring a historical
   boundary always creates a new Run: it can continue in the current conversation or
   fork the prefix before the source Run into a new conversation, while preserving
