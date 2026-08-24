@@ -457,6 +457,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             for channel in (
                 "native_context_compactions",
                 "native_context_reduction_stages",
+                "context_shares",
             ):
                 checkpoint["channel_values"].pop(channel, None)
             legacy_thread = "run_legacy_checkpoint"
@@ -479,6 +480,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 if channel in {
                     "native_context_compactions",
                     "native_context_reduction_stages",
+                    "context_shares",
                 }:
                     continue
                 writes_by_task[str(task_id)].append((str(channel), value))
@@ -517,6 +519,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
 
         self.assertEqual(branch_snapshot.values["native_context_compactions"], 0)
         self.assertEqual(branch_snapshot.values["native_context_reduction_stages"], [])
+        self.assertEqual(branch_snapshot.values["context_shares"], {})
 
     def test_checkpoint_clone_preserves_compaction_count_and_stages(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -548,6 +551,15 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                             "native_context_reduction_stages": [
                                 {"stage": "fold", "compacted": count}
                             ],
+                            "context_shares": {
+                                "total_tokens": 10_000,
+                                "system_tokens": 300,
+                                "tool_schema_tokens": 700,
+                                "evidence_tokens": 2_250,
+                                "history_tokens": 1_350,
+                                "transcript_tokens": 5_400,
+                                "message_tokens": 9_300,
+                            },
                         },
                     )
                     snapshot = runtime._checkpoint_coordinator.snapshot_for(config)
@@ -573,6 +585,10 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                     self.assertEqual(
                         cloned.values["native_context_reduction_stages"],
                         [{"stage": "fold", "compacted": count}],
+                    )
+                    self.assertEqual(
+                        cloned.values["context_shares"]["transcript_tokens"],
+                        5_400,
                     )
                     if label == "after":
                         runtime.restore_record(branch)

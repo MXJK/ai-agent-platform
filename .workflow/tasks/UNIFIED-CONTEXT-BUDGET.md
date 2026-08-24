@@ -56,19 +56,19 @@ On the agent path, conversation history passes four gates, each with its own uni
 
 ## Acceptance criteria
 
-- [ ] Exactly one place resolves the allowance and divides it; no layer re-derives a
+- [x] Exactly one place resolves the allowance and divides it; no layer re-derives a
       ratio from the window on its own.
-- [ ] The seed is measured against its share before the loop starts, and can be reduced
+- [x] The seed is measured against its share before the loop starts, and can be reduced
       rather than being protected unconditionally.
-- [ ] A small-window model produces a proportionally smaller seed, verified by a test
+- [x] A small-window model produces a proportionally smaller seed, verified by a test
       that runs the same request against two window sizes.
-- [ ] Setting the fallback constants to their current values restores today's behavior,
+- [x] Setting the fallback constants to their current values restores today's behavior,
       giving an escape hatch equivalent to the `LLM_MAX_CONTEXT_MESSAGES` floor/ceiling
       pattern already used.
-- [ ] The compaction breaker from LAYERED-TRANSCRIPT-COMPACTION is in place first, since
+- [x] The compaction breaker from LAYERED-TRANSCRIPT-COMPACTION is in place first, since
       this task is what makes seed overflow reachable.
-- [ ] `.venv/bin/python -m pytest -q` passes.
-- [ ] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
+- [x] `.venv/bin/python -m pytest -q` passes.
+- [x] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
 - [ ] `README.md`, `INTERVIEW_NOTES.md`, the affected `INTERVIEW_NOTES/*.md` Parts and
       `INTERVIEW_NOTES/facts.json` updated; `.venv/bin/python INTERVIEW_NOTES/validate.py`
       passes. Stale claims about the old per-layer character caps are removed, not left
@@ -94,7 +94,71 @@ On the agent path, conversation history passes four gates, each with its own uni
   eviction, externalization and the compaction breaker.
 - Sizing happens at assembly, not after. Assembling an oversized seed and compacting it
   afterwards wastes the retrieval work and, for the protected seed, does not even work.
+- Fixed overhead is explicit rather than hidden inside the transcript share. The
+  authority records `system_tokens` and `tool_schema_tokens`; evidence and history split
+  what remains, and transcript receives the exact remainder. The native ladder measures
+  all messages against `total_tokens - tool_schema_tokens`, because system and seed are
+  already present in that serialized message list.
+- User messages are hard chronological barriers for semantic folding. Each contiguous
+  non-user segment is summarized in place, so older, interleaved, checkpoint, queued and
+  pause/resume steering remain byte-exact and in their original timeline. If system seed
+  plus verbatim user messages alone exceed the unified allowance, the run blocks as
+  `context_budget_too_small` rather than weakening those instructions.
+- Production history remains bounded at the submission boundary: Session assembly
+  freezes `RunContextSnapshot.controlled_history` under its message ceiling and token
+  budget. Coding Runtime persists that already-controlled list without a second 12-item
+  slice, then history share controls the native model projection. A legacy checkpoint or
+  unavailable model budget uses the static message/character fallbacks.
 
 ## Verification
 
+Run from `/private/tmp/aap-unified-wave2` using the root checkout interpreter:
+
+- Characterization before implementation: existing context/layered/checkpoint suite
+  passed with `53 passed, 12 subtests passed`; the newly added unified-share tests then
+  failed at collection because `ContextShares` did not exist.
+- Focused final regression suite covering unified shares, configuration migration,
+  Layered fold/overflow behavior, checkpoint cloning and legacy restore:
+  `88 passed, 12 subtests passed`.
+- Full suite: `607 passed, 68 subtests passed in 46.60s`.
+- `.venv/bin/python -m compileall ai_agent_platform tests evals`: PASS.
+- `git diff --check`: PASS.
+- `README.md`, `README.en.md` and `.env.example` are synchronized. The gitignored
+  `INTERVIEW_NOTES/` tree is absent from worktrees; its affected Parts, facts and
+  validator remain a post-merge root-checkout action, so the combined documentation
+  acceptance item intentionally remains unchecked.
+
 ## Result
+
+The Agent path now has one model-aware input-budget authority. `setup_workspace`
+resolves the serving model allowance once, measures system prompt and visible tool
+schemas, divides the remainder into evidence/history/transcript shares, and persists the
+named values in LangGraph state and trace. Later layers only read those values; the
+independent `agent_native_context_token_ratio` and Runtime's duplicate 12-message history
+gate are removed.
+
+Seed assembly is field-aware and JSON-safe. Evidence drops low-ranked sources before
+trimming one source's `text`; history uses its token share and may retain more than the
+legacy fixed message/character caps; a zero share removes optional evidence/history.
+RAG and transcript character limits are active only when no model shares exist. The
+current request, initial seed, every user steering message and checkpoint direction stay
+verbatim. Provider overflow may rebuild optional seed fields at half shares, then still
+receives exactly the existing one forced reduction and one retry.
+
+The Layered ladder remains pure and keeps assistant/multi-tool/result groups atomic.
+During this task a Wave-1 regression was found and fixed: folding used to summarize old
+user messages before drop/truncate protections ran. Folding now treats user groups as
+in-place chronological barriers and summarizes only contiguous non-user segments. This
+fix is a merge blocker for the Unified branch.
+
+Small windows stop before a Provider call as `blocked/context_budget_too_small`, with
+separate system/tool-schema evidence in the message. Legacy checkpoints normalize a
+missing `context_shares` channel to `{}` and keep static fallback behavior; new rollback
+and fork branches preserve the resolved shares and the existing replayed compaction-stage
+semantics.
+
+No manual or metadata-only `/compact` path was added. Artifact persistence/readback is
+also intentionally absent: the later Artifact wave should externalize eviction candidates
+at the stateful `_plan_tools` boundary before invoking `_reduce_native_messages`, while
+`_reduce_native_messages` and `_evict_old_tool_results` remain side-effect-free budget
+primitives.

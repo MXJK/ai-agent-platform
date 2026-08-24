@@ -135,7 +135,8 @@ class CodingAgentRuntime:
         max_consecutive_failures: int = 3,
         native_context_max_chars: int = 48000,
         native_context_keep_messages: int = 10,
-        native_context_token_ratio: float = 0.5,
+        context_evidence_ratio: float = 0.25,
+        context_history_ratio: float = 0.15,
         tool_result_keep_recent: int = 6,
         native_max_compactions: int = 3,
         plan_max_output_tokens: int = 4096,
@@ -144,7 +145,6 @@ class CodingAgentRuntime:
         tool_result_max_tokens: int = 2000,
         graph_recursion_limit: int = 128,
         approval_policy: str = "on_request",
-        max_history_messages: int = 12,
         knowledge_context_provider: KnowledgeContextProvider | None = None,
         project_memory_provider: ProjectMemoryContextProvider | None = None,
         max_rag_context_chars: int = 6000,
@@ -173,7 +173,8 @@ class CodingAgentRuntime:
         self._max_consecutive_failures = max_consecutive_failures
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
-        self._native_context_token_ratio = native_context_token_ratio
+        self._context_evidence_ratio = context_evidence_ratio
+        self._context_history_ratio = context_history_ratio
         if tool_result_keep_recent <= 0:
             raise ValueError("tool_result_keep_recent must be greater than 0")
         if native_max_compactions <= 0:
@@ -193,7 +194,6 @@ class CodingAgentRuntime:
         if approval_policy not in {"always", "on_request", "never"}:
             raise ValueError("unsupported approval_policy")
         self._approval_policy = approval_policy
-        self._max_history_messages = max_history_messages
         self._knowledge_context_provider = knowledge_context_provider
         self._project_memory_provider = project_memory_provider
         self._max_rag_context_chars = max_rag_context_chars
@@ -370,7 +370,11 @@ class CodingAgentRuntime:
                         else message.content
                     ),
                 }
-                for message in history[-self._max_history_messages :]
+                # Production callers pass SessionService's already bounded and
+                # frozen controlled_history. Preserve that input here so the
+                # run's token share, rather than a second message-count gate,
+                # decides how much reaches native seed assembly.
+                for message in history
             ],
             "trace": [],
             "errors": [],
@@ -403,6 +407,7 @@ class CodingAgentRuntime:
                 if run_context is not None
                 else []
             ),
+            "context_shares": {},
             "knowledge_base_catalog": [],
             "selected_knowledge_base_ids": [],
             "context_route": "repo",
@@ -817,6 +822,12 @@ class CodingAgentRuntime:
                 ),
                 "native_context_reduction_stages": list(
                     selected.values.get("native_context_reduction_stages", [])
+                ),
+                # Unified-budget checkpoints persist their resolved model shares.
+                # Legacy checkpoints deliberately restore an empty mapping so all
+                # assembly layers use the documented static fallback ceilings.
+                "context_shares": dict(
+                    selected.values.get("context_shares", {})
                 ),
                 "trace": _checkpoint_branch_trace(
                     selected.values.get("trace", []),

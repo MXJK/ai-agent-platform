@@ -8,6 +8,7 @@ import unittest
 from ai_agent_platform.agents.coding.models import AgentRunRecord
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.tool_loop_nodes import (
+    _fold_native_messages,
     _native_messages_tokens,
     _native_tool_pair_error,
     _reduce_native_messages,
@@ -180,6 +181,70 @@ def _large_result_registry() -> ToolRegistry:
 
 
 class LayeredTranscriptCompactionTests(unittest.TestCase):
+    def test_fold_keeps_old_user_steering_exact_beyond_keep_window(self) -> None:
+        steering = "old-steering-" + "逐字保留" * 200
+        messages = _transcript(6, body_chars=500)
+        messages.insert(4, {"role": "user", "content": steering})
+
+        folded, compactions, _ = _fold_native_messages(
+            messages,
+            max_chars=100_000,
+            max_tokens=0,
+            keep_messages=2,
+            previous_compactions=0,
+            force=True,
+        )
+
+        self.assertEqual(compactions, 1)
+        self.assertEqual(
+            [
+                message["content"]
+                for message in folded
+                if message.get("role") == "user" and "old-steering" in str(message.get("content"))
+            ],
+            [steering],
+        )
+
+    def test_fold_keeps_multiple_interleaved_user_messages_exact_and_ordered(self) -> None:
+        first = "first-interleaved-" + "甲" * 500
+        second = "second-interleaved-" + "乙" * 500
+        messages = _transcript(6, body_chars=500)
+        messages.insert(4, {"role": "user", "content": first})
+        messages.insert(9, {"role": "user", "content": second})
+
+        folded, compactions, _ = _fold_native_messages(
+            messages,
+            max_chars=100_000,
+            max_tokens=0,
+            keep_messages=2,
+            previous_compactions=0,
+            force=True,
+        )
+
+        self.assertEqual(compactions, 1)
+        self.assertEqual(
+            [
+                message["content"]
+                for message in folded
+                if message.get("role") == "user"
+                and "interleaved" in str(message.get("content"))
+            ],
+            [first, second],
+        )
+        timeline = []
+        for message in folded[2:]:
+            content = str(message.get("content") or "")
+            if content.startswith("Earlier native tool transcript summary"):
+                timeline.append("summary")
+            elif content == first:
+                timeline.append("first")
+            elif content == second:
+                timeline.append("second")
+        self.assertEqual(
+            timeline,
+            ["summary", "first", "summary", "second", "summary"],
+        )
+
     def test_microcompact_keeps_pairs_and_only_evicts_old_tool_bodies(self) -> None:
         messages = _transcript(8)
 

@@ -24,6 +24,7 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_VALIDATION_TOOLS,
 )
 from ai_agent_platform.agents.coding.text import snippet
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 MAX_AGENT_HISTORY_MESSAGES = 6
 MAX_AGENT_HISTORY_CHARS = 1800
@@ -299,15 +300,34 @@ def build_workspace_query(state: CodingAgentState) -> str:
     return "\n".join(parts)
 
 
+def _history_chars_for_tokens(
+    history: list[dict[str, Any]],
+    max_tokens: int,
+) -> int:
+    """Convert a token share using this conversation's measured text density."""
+
+    text = "".join(str(message.get("content") or "") for message in history)
+    tokens = estimate_text_tokens(text)
+    if tokens <= 0:
+        return max(1, max_tokens * 4)
+    return max(1, (len(text) * max_tokens) // tokens)
+
+
 def recent_conversation_context(
     state: CodingAgentState,
     *,
     max_messages: int = MAX_AGENT_HISTORY_MESSAGES,
     max_chars: int = MAX_AGENT_HISTORY_CHARS,
+    max_tokens: int | None = None,
 ) -> str:
-    """Return a bounded, newest-first-selected conversation excerpt."""
+    """Return a newest-first excerpt using a model share or static fallback."""
 
     history = state.get("history", [])
+    if max_tokens is not None:
+        if max_tokens <= 0:
+            return ""
+        max_chars = _history_chars_for_tokens(history, max_tokens)
+        max_messages = max(max_messages, len(history))
     summary_message = next(
         (
             message
@@ -351,7 +371,18 @@ def recent_conversation_context(
         if remaining_chars <= 0:
             break
     lines = ([summary_line] if summary_line else []) + list(reversed(selected))
-    return "\n".join(lines)[:max_chars]
+    excerpt = "\n".join(lines)[:max_chars]
+    if max_tokens is None or estimate_text_tokens(excerpt) <= max_tokens:
+        return excerpt
+    from ai_agent_platform.services.context_budget import fit_text_to_tokens
+
+    return fit_text_to_tokens(
+        excerpt,
+        max_tokens,
+        estimate_tokens=estimate_text_tokens,
+    )
+
+
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
     return {
         "type": "tool_plan_review",

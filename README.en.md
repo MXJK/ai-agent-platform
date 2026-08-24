@@ -664,7 +664,8 @@ oversized result becomes a head/tail placeholder with its original token
 estimate and `artifact_id`; the exact result remains available as a
 `tool_result` Run artifact. Existing per-tool character caps remain a second
 line of defense, and `agent_tool_results_truncated_total` counts these events.
-Above `AGENT_NATIVE_CONTEXT_MAX_CHARS` or the model-derived native token budget,
+Above `AGENT_NATIVE_CONTEXT_MAX_CHARS` or the unified input allowance minus the
+tool-schema share,
 the harness reduces the transcript in a fixed order. It first replaces older tool
 result bodies with one-line markers while keeping the newest
 `AGENT_TOOL_RESULT_KEEP_RECENT` results complete (default `6`). If still over
@@ -688,11 +689,36 @@ creates a new Run, so attaching a force flag to that Run cannot reduce an existi
 Session or an older Run transcript. A real manual command requires the unified budget,
 structured snapshot, and Session compression API to define its instruction semantics,
 before/after token evidence, and observable outcome together; it is deferred to the
-next context-budget phase.
+structured-snapshot phase.
+
+One authority resolves and divides the model input allowance in `setup_workspace`.
+It first measures explicit fixed shares for the system prompt and visible tool
+schemas, then assigns `LLM_CONTEXT_EVIDENCE_RATIO` (default `0.25`) and
+`LLM_CONTEXT_HISTORY_RATIO` (default `0.15`) from what remains; the native tool
+transcript receives the exact remainder. The named shares add back up to the one
+allowance derived through `LLM_CONTEXT_INPUT_TOKEN_RATIO`, persist in run state and
+the setup trace, and are read by every later layer without another window ratio.
+
+Evidence and history are fitted field by field while the seed is assembled. Lower
+ranked evidence sources are dropped before the final source's `text` is trimmed,
+history keeps the newest messages within its token share, and the RAG character cap
+is only a fallback when model information is unavailable. The system prompt, current
+request, checkpoint directions, and all steering stay verbatim, so seed JSON remains
+parseable. Provider overflow recovery rebuilds optional seed fields at smaller shares
+before the one forced reduction and retry. A window whose fixed overhead leaves no
+transcript capacity blocks before the provider as `context_budget_too_small`.
+
+The production boundary stays finite: Session assembly first freezes
+`RunContextSnapshot.controlled_history` under its message ceiling and token budget.
+Coding Runtime keeps that already-controlled input in checkpoint state without a
+second 12-message slice, and the history share decides the native model view. Direct
+Runtime callers get the same share-based projection; static message and character
+limits apply only when model shares are unavailable.
 
 ```dotenv
 AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
-AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+LLM_CONTEXT_EVIDENCE_RATIO=0.25
+LLM_CONTEXT_HISTORY_RATIO=0.15
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
 AGENT_TOOL_RESULT_KEEP_RECENT=6
 AGENT_NATIVE_MAX_COMPACTIONS=3
