@@ -724,11 +724,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260822-conversation-workbench-1',
+            '/static/styles.css?v=20260823-thinking-process-v1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260823-eval-evidence-v2',
+            '/static/app.js?v=20260823-thinking-process-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -880,6 +880,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("onSubmitted", script_response.text)
         self.assertIn("renderExecutionProcess", script_response.text)
         self.assertIn("traceToolNames", script_response.text)
+        self.assertIn("executionProcessPresentation", script_response.text)
+        self.assertIn("formatWorkDuration", script_response.text)
+        self.assertIn("details.dataset.elapsedMs", script_response.text)
+        self.assertIn("Agent 运行已停止。", script_response.text)
+        self.assertIn('aria-current="step"', script_response.text)
+        self.assertIn('aria-live="polite" aria-atomic="true"', script_response.text)
         self.assertIn("renderResponseMetrics", script_response.text)
         self.assertIn('class="welcome-signal"', script_response.text)
         self.assertIn("--signal: #62d6c2", stylesheet_response.text)
@@ -920,6 +926,9 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("repository_id", script_response.text)
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
         self.assertIn(".execution-process", stylesheet_response.text)
+        self.assertIn(".execution-step-marker", stylesheet_response.text)
+        self.assertIn(".execution-process.complete:not([open])", stylesheet_response.text)
+        self.assertIn("@keyframes execution-spin", stylesheet_response.text)
         self.assertIn(".response-metrics", stylesheet_response.text)
         self.assertIn(".slash-command-menu", stylesheet_response.text)
         self.assertIn(".jump-to-latest", stylesheet_response.text)

@@ -298,6 +298,19 @@ function formatDuration(value) {
   return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
 }
 
+function formatWorkDuration(value) {
+  const seconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
+  if (seconds < 1) {
+    return "不到 1 秒";
+  }
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes} 分${remainder ? ` ${remainder} 秒` : ""}`;
+}
+
 function formatTokenCount(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
 }
@@ -352,6 +365,39 @@ function traceToolNames(trace) {
   return names;
 }
 
+function executionProcessPresentation(status) {
+  const normalized = status === "done" ? "completed" : status;
+  const presentations = {
+    completed: { title: "已工作", tone: "status-complete", stepState: "complete" },
+    partial: { title: "部分完成", tone: "status-attention", stepState: "attention" },
+    blocked: { title: "工作受阻", tone: "status-attention", stepState: "attention" },
+    waiting_approval: { title: "等待审批", tone: "status-attention", stepState: "attention" },
+    waiting_input: { title: "等待补充", tone: "status-attention", stepState: "attention" },
+    paused: { title: "已暂停", tone: "status-attention", stepState: "attention" },
+    failed: { title: "工作中断", tone: "status-failed", stepState: "failed" },
+    cancelled: { title: "已停止", tone: "status-cancelled", stepState: "cancelled" },
+  };
+  return presentations[normalized] || {
+    title: "正在工作",
+    tone: "status-running",
+    stepState: "current",
+  };
+}
+
+function executionStepState(index, length, presentation) {
+  return index < length - 1 ? "complete" : presentation.stepState;
+}
+
+function executionStepStateLabel(value) {
+  return {
+    complete: "已完成",
+    current: "当前步骤",
+    attention: "等待继续",
+    failed: "失败",
+    cancelled: "已停止",
+  }[value] || "执行步骤";
+}
+
 function ensureExecutionProcess(contentNode) {
   const bubble = contentNode.closest(".chat-bubble");
   let details = bubble.querySelector(".execution-process");
@@ -363,10 +409,15 @@ function ensureExecutionProcess(contentNode) {
       <summary>
         <span class="execution-summary-main">
           <span class="execution-indicator" aria-hidden="true"></span>
-          <strong>正在思考</strong>
-          <span class="execution-summary-text">准备执行…</span>
+          <span class="execution-summary-copy">
+            <span class="execution-summary-line">
+              <strong class="execution-title">正在工作</strong>
+              <span class="execution-duration">不到 1 秒</span>
+            </span>
+            <span class="execution-summary-text" role="status" aria-live="polite" aria-atomic="true">准备执行…</span>
+          </span>
         </span>
-        <span class="execution-duration">0 ms</span>
+        <span class="execution-chevron" aria-hidden="true"></span>
       </summary>
       <div class="execution-body">
         <ol class="execution-steps"></ol>
@@ -390,39 +441,79 @@ function renderExecutionProcess(
 ) {
   const details = ensureExecutionProcess(contentNode);
   const terminal = TERMINAL_RUN_STATUSES.has(status) || status === "done";
+  const wasTerminal = details.dataset.terminal === "true";
+  const presentation = executionProcessPresentation(status);
   const tools = traceToolNames(trace);
   const steps = trace.length
     ? trace
+    : terminal
+    ? []
     : [{
         step: 1,
         node: fallbackNode || "model_request",
         summary: fallbackSummary || "正在建立请求并等待响应。",
         output: {},
       }];
+  details.classList.remove(
+    "status-running",
+    "status-complete",
+    "status-attention",
+    "status-failed",
+    "status-cancelled",
+  );
+  details.classList.add(presentation.tone);
   details.classList.toggle("complete", terminal);
-  details.open = !terminal;
-  details.querySelector(".execution-summary-main strong").textContent = terminal
-    ? "思考过程"
-    : "正在思考";
+  details.dataset.status = status === "done" ? "completed" : status;
+  details.dataset.terminal = String(terminal);
+  const displayedElapsedMs = Math.max(
+    Number(details.dataset.elapsedMs || 0),
+    Number(elapsedMs || 0),
+  );
+  details.dataset.elapsedMs = String(displayedElapsedMs);
+  if (terminal && !wasTerminal) {
+    details.open = false;
+  } else if (!terminal && wasTerminal) {
+    details.open = true;
+  }
+  details.querySelector(".execution-title").textContent = presentation.title;
+  const terminalSummary = steps.length
+    ? `${steps.length} 个步骤${tools.length ? ` · ${tools.length} 个工具` : ""}`
+    : "没有阶段详情";
+  const latestStep = steps.at(-1);
   details.querySelector(".execution-summary-text").textContent = terminal
-    ? `${steps.length} 个阶段${tools.length ? ` · ${tools.length} 个工具` : ""}`
-    : humanizeAgentNode(steps.at(-1)?.node);
-  details.querySelector(".execution-duration").textContent = formatDuration(elapsedMs);
+    ? presentation.stepState === "complete"
+      ? terminalSummary
+      : `${latestStep ? humanizeAgentNode(latestStep.node) : terminalSummary}${
+          steps.length ? ` · ${steps.length} 个步骤` : ""
+        }${tools.length ? ` · ${tools.length} 个工具` : ""}`
+    : humanizeAgentNode(latestStep?.node);
+  details.querySelector(".execution-duration").textContent = formatWorkDuration(displayedElapsedMs);
   details.querySelector(".execution-steps").innerHTML = steps
-    .map((step, index) => `
-      <li>
-        <span class="execution-step-index">${escapeHtml(step.step ?? index + 1)}</span>
+    .map((step, index) => {
+      const stepState = executionStepState(index, steps.length, presentation);
+      return `
+      <li class="${escapeHtml(stepState)}"${stepState === "current" ? ' aria-current="step"' : ""}>
+        <span class="execution-step-marker" aria-hidden="true"></span>
         <div>
-          <strong>${escapeHtml(humanizeAgentNode(step.node))}</strong>
+          <strong><span class="sr-only">${escapeHtml(index + 1)}，${escapeHtml(
+            executionStepStateLabel(stepState),
+          )}：</span>${escapeHtml(humanizeAgentNode(step.node))}</strong>
           <p>${escapeHtml(step.summary || "")}</p>
         </div>
       </li>
-    `)
+    `;
+    })
     .join("");
+  if (!steps.length) {
+    details.querySelector(".execution-steps").innerHTML =
+      '<li class="execution-step-empty">本次运行没有返回可解释的阶段详情。</li>';
+  }
   const toolList = details.querySelector(".execution-tools");
   toolList.hidden = tools.length === 0;
   toolList.innerHTML = tools.length
-    ? `<span>工具</span>${tools.map((name) => `<code>${escapeHtml(name)}</code>`).join("")}`
+    ? `<span class="execution-tools-label"><svg class="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span>相关工具</span></span><span class="execution-tool-list">${tools
+        .map((name) => `<code>${escapeHtml(name)}</code>`)
+        .join("")}</span>`
     : "";
   return details;
 }
@@ -433,7 +524,9 @@ function startResponseTimer(contentNode, startedAt) {
     const duration = contentNode.closest(".chat-bubble")
       ?.querySelector(".execution-duration");
     if (duration) {
-      duration.textContent = formatDuration(performance.now() - startedAt);
+      const elapsedMs = performance.now() - startedAt;
+      duration.textContent = formatWorkDuration(elapsedMs);
+      duration.closest(".execution-process").dataset.elapsedMs = String(elapsedMs);
     }
   }, 200);
   responseTimers.set(contentNode, timer);
@@ -4387,7 +4480,9 @@ function renderAgentChatResponse(
       : "Agent 正在运行 LangGraph 工作流。",
   });
 
-  if (!holdAnswer && ["completed", "partial", "blocked", "cancelled"].includes(actualStatus)) {
+  if (!holdAnswer && actualStatus === "cancelled") {
+    contentNode.innerHTML = "<p><em>Agent 运行已停止。</em></p>";
+  } else if (!holdAnswer && ["completed", "partial", "blocked"].includes(actualStatus)) {
     contentNode.innerHTML = result.answer
       ? renderMarkdown(result.answer)
       : "<p>Agent 已完成，但没有返回文本内容。</p>";
@@ -4402,12 +4497,7 @@ function renderAgentChatResponse(
       requestId: body.request_id || "",
     });
   } else {
-    const currentNode = trace.at(-1)?.node || body?.latest_node;
-    contentNode.innerHTML = `<p class="response-placeholder">${escapeHtml(
-      currentNode
-        ? `${humanizeAgentNode(currentNode)}…`
-        : "Agent 正在理解任务并规划下一步…",
-    )}</p>`;
+    contentNode.innerHTML = "";
   }
 
   if (result.metrics) {
