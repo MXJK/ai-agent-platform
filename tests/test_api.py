@@ -660,6 +660,19 @@ class ApiTests(unittest.TestCase):
                         for item in second_result["result"]["context_sources"]
                     )
                 )
+                recent_runs = client.get(
+                    "/api/v1/agent/runs",
+                    params={"limit": 1},
+                )
+                self.assertEqual(recent_runs.status_code, 200)
+                self.assertEqual(
+                    recent_runs.json()["runs"][0]["run_id"],
+                    second.json()["run_id"],
+                )
+                self.assertEqual(
+                    recent_runs.json()["runs"][0]["status"],
+                    second_result["status"],
+                )
                 latest_run = client.get(
                     f"/api/v1/sessions/{session_id}/agent/runs/latest"
                 )
@@ -787,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260824-inline-checkpoint-footer-v1',
+            '/static/styles.css?v=20260824-auditable-trace-v4',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260824-inline-checkpoint-footer-v1',
+            '/static/app.js?v=20260824-auditable-trace-v4',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -851,6 +864,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="rename-current-session-btn"', response.text)
         self.assertIn('id="mobile-more-btn"', response.text)
         self.assertIn('id="mobile-more-menu"', response.text)
+        self.assertIn('data-view="trace-audit"', response.text)
+        self.assertIn('data-view="evals"><svg', response.text)
+        self.assertIn('id="trace-audit-view"', response.text)
+        self.assertIn('id="trace-audit-timeline"', response.text)
+        self.assertIn('data-audit-filter="tool"', response.text)
         self.assertIn('id="composer-config" class="composer-config"', response.text)
         self.assertNotIn('class="conversation" aria-live=', response.text)
         self.assertIn('class="welcome-signal"', response.text)
@@ -874,6 +892,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("new AbortController()", script_response.text)
         self.assertIn('fetchJson("/users/me/preferences"', script_response.text)
         self.assertIn("restoreInitialSession", script_response.text)
+        self.assertIn("switchView(initialView, true)", script_response.text)
         self.assertIn("restoreLatestAgentRun", script_response.text)
         self.assertIn("inline-agent-checkpoint", script_response.text)
         self.assertIn("data-inline-agent-action", script_response.text)
@@ -915,6 +934,15 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data-provider=", script_response.text)
         self.assertIn("renderEvalCallLifecycle", script_response.text)
         self.assertIn("renderEvalReadEvidence", script_response.text)
+        self.assertIn('fetchJson("/agent/runs?limit=50")', script_response.text)
+        self.assertIn("buildAuditEvents", script_response.text)
+        self.assertIn("approval_decided", script_response.text)
+        self.assertIn('"evals", "trace-audit"', script_response.text)
+        self.assertLess(
+            script_response.text.index('type.includes("error")'),
+            script_response.text.index('type.startsWith("tool_")'),
+        )
+        self.assertIn("查看精确参数", script_response.text)
         self.assertIn("强制基线会记录 forced=true", script_response.text)
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
@@ -1018,6 +1046,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".slash-command-menu", stylesheet_response.text)
         self.assertIn(".jump-to-latest", stylesheet_response.text)
         self.assertIn("width: fit-content", stylesheet_response.text)
+        self.assertIn(".trace-audit-layout", stylesheet_response.text)
+        self.assertIn(".trace-audit-timeline", stylesheet_response.text)
+        self.assertIn(".trace-audit-payload", stylesheet_response.text)
 
     def test_composer_capabilities_expose_effective_skill_and_freeze_invocation(self) -> None:
         with TemporaryDirectory() as temp_dir:

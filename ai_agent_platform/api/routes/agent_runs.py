@@ -25,6 +25,8 @@ from ai_agent_platform.schemas import (
     AgentRunRequest,
     AgentRunResumeRequest,
     AgentRunStatusResponse,
+    AgentRunSummaryResponse,
+    AgentRunsResponse,
     ComposerCapabilitiesResponse,
 )
 from ai_agent_platform.services import QueryService, WorkspaceNotFoundError
@@ -131,6 +133,23 @@ def create_agent_runs_router(
                 detail=str(exc),
             ) from exc
         return AgentRunStatusResponse.from_domain(record)
+
+    @router.get("/agent/runs", response_model=AgentRunsResponse)
+    def list_agent_runs(
+        http_request: Request,
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> AgentRunsResponse:
+        records = query_service.list_runs_for_actor(
+            (
+                request_user_id(http_request, settings)
+                if settings.auth_mode != "disabled"
+                else None
+            ),
+            limit=limit,
+        )
+        return AgentRunsResponse(
+            runs=[AgentRunSummaryResponse.from_domain(record) for record in records]
+        )
 
     @router.post(
         "/agent/runs/{run_id}/resume",

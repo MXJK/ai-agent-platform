@@ -329,6 +329,9 @@ class AgentRunStore(Protocol):
     ) -> Optional[AgentRunRecord]:
         ...
 
+    def list_recent(self, *, limit: int = 50) -> list[AgentRunRecord]:
+        ...
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         ...
 

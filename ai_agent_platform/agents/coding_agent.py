@@ -1033,6 +1033,12 @@ class CodingAgentRuntime:
         record = get_latest(conversation_id)
         return self.get_run(record.run_id) if record is not None else None
 
+    def list_recent_runs(self, *, limit: int = 50) -> list[AgentRunRecord]:
+        list_recent = getattr(self._run_store, "list_recent", None)
+        if not callable(list_recent):
+            return []
+        return [self.get_run(record.run_id) for record in list_recent(limit=limit)]
+
     def effective_tool_pool(self, run_id: str):
         """Return the restored v3 pool or explicit legacy v1/v2 view for one Run."""
 

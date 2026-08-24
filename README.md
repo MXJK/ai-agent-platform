@@ -313,6 +313,10 @@ Token 时才作为后备。
   当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；当前 Compose
   禁用容器原生目录选择器，网页目录浏览器只展示挂载到 `/workspaces` 的内容，所有选中
   路径仍经过允许根校验；macOS Finder 选择器仅作为非默认本机开发兼容实现保留；
+- 独立的 `Trace 审计` 页（`/#trace-audit`）按当前身份列出最近 Agent Run，并以可筛选的
+  只读事件时间线展示状态转移、节点、精确工具选择与参数、完整结果或错误、审批请求与
+  审批决定。运行中和暂停态会自动刷新，历史 Run 也可从持久化事件重放；原有会话内
+  Trace/审批控件继续承担实时操作，不与审计页互相依赖；
 - Agent 审批、追问、暂停、运行控制和 checkpoint 入口都显示在对应助手消息的底部，
   不占用会话标题与对话上方空间；运行中可转向、暂停或取消，暂停或等待输入时可补充
   方向并继续，任意终态也可打开 Git 风格 checkpoint 轨迹。历史可恢复节点会创建全新的
@@ -917,6 +921,7 @@ curl -X POST http://localhost:8000/api/v1/agent/runs \
 
 ```text
 GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/agent/runs?limit=50
 GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
@@ -935,7 +940,10 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 轮询、SSE 与 QueryService 的异步迭代器都读取同一个 append-only EventStore，并通过同一
 `AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。浏览器工作台直接从
 SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接失败或提前结束时回退到状态
-轮询。终态包括 `completed`、
+轮询。终态结果会把每个调用投影为带完整参数的 `tool_selected`，再记录完整
+`tool_result` 或 `tool_error`；审批恢复在重新入队前追加含操作者与原始请求的
+`approval_decided`。因此审计页不需要依赖瞬时前端状态，也能按 sequence 复盘执行事实。
+最近 Run 列表在 QueryService 中按会话归属过滤，不会跨身份暴露记录。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
 `waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
 一次运行，并把审批、追问或暂停控件重新挂回原助手消息，同时恢复常驻 Run 控制条。

@@ -62,6 +62,10 @@ class InMemoryAgentRunStore:
                 None,
             )
 
+    def list_recent(self, *, limit: int = 50) -> list[AgentRunRecord]:
+        with self._lock:
+            return list(reversed(self._runs.values()))[:limit]
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         with self._lock:
             if run_id not in self._runs:
@@ -172,6 +176,47 @@ def events_for_record(
                         ),
                     )
                 )
+    if record.result is not None:
+        for call in record.result.tool_calls:
+            candidates.append(
+                (
+                    f"tool-call:{call.call_id}",
+                    AgentRunEvent(
+                        sequence=0,
+                        type="tool_selected",
+                        status="running",
+                        node=None,
+                        summary=f"Tool selected: {call.name}.",
+                        output={
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "source": call.source,
+                        },
+                    ),
+                )
+            )
+        for result_index, result in enumerate(record.result.tool_results):
+            call_id = str(result.get("call_id") or f"result-{result_index + 1}")
+            tool_name = str(result.get("name") or "unknown")
+            succeeded = bool(result.get("ok"))
+            candidates.append(
+                (
+                    f"tool-result:{call_id}:{result_index}",
+                    AgentRunEvent(
+                        sequence=0,
+                        type="tool_result" if succeeded else "tool_error",
+                        status="running",
+                        node=None,
+                        summary=(
+                            f"Tool completed: {tool_name}."
+                            if succeeded
+                            else f"Tool failed: {tool_name}."
+                        ),
+                        output=dict(result),
+                    ),
+                )
+            )
     terminal = QueryLifecycle.status_event(record.status)
     if terminal is not None:
         event_type, summary = terminal

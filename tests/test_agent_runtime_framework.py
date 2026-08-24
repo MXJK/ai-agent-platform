@@ -9,7 +9,11 @@ from unittest.mock import patch
 from langgraph.checkpoint.base import create_checkpoint
 
 from ai_agent_platform.agents.coding.change_loop import ChangeLoopExecutor
-from ai_agent_platform.agents.coding.models import AgentRunRecord, CodingAgentState
+from ai_agent_platform.agents.coding.models import (
+    AgentRunRecord,
+    AgentRunResult,
+    CodingAgentState,
+)
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.integrations.llm import LLMToolDecision
@@ -170,6 +174,77 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         assert latest is not None
         self.assertEqual(latest.run_id, "run_latest")
         self.assertIsNone(store.get_latest_for_conversation("missing"))
+        self.assertEqual(
+            [record.run_id for record in store.list_recent(limit=2)],
+            ["run_latest", "run_other"],
+        )
+
+    def test_terminal_result_projects_tool_calls_and_results_into_audit_events(self) -> None:
+        store = InMemoryAgentRunStore()
+        base = AgentRunRecord(
+            run_id="run_tools",
+            thread_id="run_tools",
+            conversation_id="session_1",
+            workspace_id="workspace_main",
+            workspace_root="/workspace",
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup_workspace"],
+            trace=[],
+        )
+        store.save(base)
+        result = AgentRunResult(
+            run_id=base.run_id,
+            thread_id=base.thread_id,
+            conversation_id=base.conversation_id,
+            workspace_id=base.workspace_id,
+            status="completed",
+            checkpoint_id="checkpoint_done",
+            role="coding agent",
+            objective="inspect",
+            intent="repository_question",
+            context_route="repo",
+            selected_knowledge_base_ids=[],
+            answer="done",
+            graph_engine="langgraph",
+            context_sources=[],
+            tool_calls=[
+                ToolCall(
+                    name="repo.read_file",
+                    arguments={"path": "app.py"},
+                    call_id="call_read",
+                    source="model",
+                )
+            ],
+            tool_results=[
+                {
+                    "call_id": "call_read",
+                    "name": "repo.read_file",
+                    "ok": True,
+                    "result": {"content": "VALUE = 1"},
+                }
+            ],
+            trace=[],
+        )
+        store.save(
+            replace(
+                base,
+                status="completed",
+                latest_node="compose_answer",
+                next_nodes=[],
+                result=result,
+            )
+        )
+
+        events = store.list_events(base.run_id)
+        types = [event.type for event in events]
+        self.assertLess(types.index("tool_selected"), types.index("tool_result"))
+        self.assertLess(types.index("tool_result"), types.index("run_completed"))
+        selected = next(event for event in events if event.type == "tool_selected")
+        completed = next(event for event in events if event.type == "tool_result")
+        self.assertEqual(selected.output["arguments"], {"path": "app.py"})
+        self.assertEqual(completed.output["result"]["content"], "VALUE = 1")
 
     def test_terminal_run_cannot_be_overwritten_by_stale_active_snapshot(self) -> None:
         store = InMemoryAgentRunStore()

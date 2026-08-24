@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260824-inline-checkpoint-footer-v1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260824-auditable-trace-v4" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -113,9 +113,13 @@
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
             <span><strong>会话记录</strong><small>历史消息与摘要</small></span>
           </button>
-          <button class="nav-item" type="button" data-view="evals">
+          <button class="nav-item mobile-overflow-nav" type="button" data-view="evals">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-gauge"></use></svg></span>
             <span><strong>评测</strong><small>轨迹约束、指标与预警</small></span>
+          </button>
+          <button class="nav-item mobile-overflow-nav" type="button" data-view="trace-audit">
+            <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-shield"></use></svg></span>
+            <span><strong>Trace 审计</strong><small>工具、审批与状态转移</small></span>
           </button>
           <button class="nav-item mobile-primary" type="button" data-view="activity">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-activity"></use></svg></span>
@@ -133,6 +137,8 @@
           <button type="button" data-view="memory"><svg class="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span></button>
           <button type="button" data-view="models"><svg class="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg><span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span></button>
           <button type="button" data-view="tools"><svg class="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span><strong>工具</strong><small>Skill 与 MCP 管理</small></span></button>
+          <button type="button" data-view="evals"><svg class="app-icon" aria-hidden="true"><use href="#icon-gauge"></use></svg><span><strong>评测</strong><small>轨迹约束、指标与预警</small></span></button>
+          <button type="button" data-view="trace-audit"><svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg><span><strong>Trace 审计</strong><small>工具、审批与状态转移</small></span></button>
           <button id="mobile-more-settings-btn" type="button"><svg class="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg><span><strong>工作区设置</strong><small>选择 Agent 操作的文件夹</small></span></button>
         </div>
 
@@ -991,6 +997,92 @@
           </article>
         </section>
 
+        <section id="trace-audit-view" class="view-panel" data-view-panel="trace-audit" aria-labelledby="trace-audit-title" hidden>
+          <header class="view-header compact trace-audit-page-header">
+            <div>
+              <h1 id="trace-audit-title">Trace 审计</h1>
+              <p>按 Run 复盘 Agent 的工具选择、精确参数、执行结果、错误、审批和状态转移。</p>
+            </div>
+            <button id="refresh-trace-audit-btn" class="button secondary" type="button">
+              <svg class="app-icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+              刷新 Trace
+            </button>
+          </header>
+
+          <div class="trace-audit-layout">
+            <aside class="trace-run-browser" aria-labelledby="trace-run-browser-title">
+              <div class="trace-run-browser-heading">
+                <div><h2 id="trace-run-browser-title">最近 Run</h2><p id="trace-run-count">正在加载…</p></div>
+              </div>
+              <div class="trace-run-filters">
+                <label for="trace-run-search">搜索 Run 或会话</label>
+                <input id="trace-run-search" type="search" placeholder="run_… / session_…" spellcheck="false" />
+                <label for="trace-run-status-filter">状态</label>
+                <select id="trace-run-status-filter">
+                  <option value="all">全部状态</option>
+                  <option value="active">运行中与挂起</option>
+                  <option value="completed">已完成</option>
+                  <option value="failed">失败或受阻</option>
+                  <option value="cancelled">已取消</option>
+                </select>
+              </div>
+              <div id="trace-run-list" class="trace-run-list" aria-live="polite" aria-busy="true">
+                <div class="trace-audit-skeleton" aria-label="正在加载最近 Run"><span></span><span></span><span></span></div>
+              </div>
+            </aside>
+
+            <section class="trace-audit-detail" aria-labelledby="trace-audit-detail-title">
+              <div id="trace-audit-empty" class="trace-audit-empty">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                <h2 id="trace-audit-detail-title">选择一次 Run 开始审计</h2>
+                <p>这里会按追加式事件顺序展示状态、节点、工具、审批和错误事实。</p>
+              </div>
+
+              <div id="trace-audit-content" hidden>
+                <header class="trace-audit-detail-header">
+                  <div>
+                    <div class="trace-audit-title-line">
+                      <h2 id="trace-audit-run-id">—</h2>
+                      <span id="trace-audit-status" class="status-pill neutral"><span class="status-dot" aria-hidden="true"></span>未知</span>
+                    </div>
+                    <p id="trace-audit-node">等待 Run 详情…</p>
+                  </div>
+                  <span id="trace-audit-live" class="trace-live-indicator" hidden><span aria-hidden="true"></span>实时更新</span>
+                </header>
+
+                <dl class="trace-audit-meta">
+                  <div><dt>会话</dt><dd id="trace-audit-session">—</dd></div>
+                  <div><dt>工作区</dt><dd id="trace-audit-workspace">—</dd></div>
+                  <div><dt>Checkpoint</dt><dd id="trace-audit-checkpoint">—</dd></div>
+                  <div><dt>事件游标</dt><dd id="trace-audit-cursor">—</dd></div>
+                </dl>
+
+                <div class="trace-audit-counts" aria-label="Trace 摘要">
+                  <span><strong id="trace-count-events">0</strong>事件</span>
+                  <span><strong id="trace-count-tools">0</strong>工具</span>
+                  <span><strong id="trace-count-approvals">0</strong>审批</span>
+                  <span><strong id="trace-count-errors">0</strong>错误</span>
+                </div>
+
+                <div class="trace-audit-toolbar">
+                  <div class="trace-audit-category-filter" role="group" aria-label="筛选审计事件">
+                    <button class="active" type="button" data-audit-filter="all" aria-pressed="true">全部</button>
+                    <button type="button" data-audit-filter="state" aria-pressed="false">状态</button>
+                    <button type="button" data-audit-filter="tool" aria-pressed="false">工具</button>
+                    <button type="button" data-audit-filter="approval" aria-pressed="false">审批</button>
+                    <button type="button" data-audit-filter="error" aria-pressed="false">错误</button>
+                  </div>
+                  <span id="trace-audit-visible-count">0 条</span>
+                </div>
+
+                <ol id="trace-audit-timeline" class="trace-audit-timeline" aria-live="polite" aria-atomic="false">
+                  <li class="trace-audit-placeholder">正在装载审计事实…</li>
+                </ol>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section id="activity-view" class="view-panel" data-view-panel="activity" aria-labelledby="activity-title" hidden>
           <header class="view-header compact">
             <div>
@@ -1230,6 +1322,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260824-inline-checkpoint-footer-v1" defer></script>
+    <script src="/static/app.js?v=20260824-auditable-trace-v4" defer></script>
   </body>
 </html>

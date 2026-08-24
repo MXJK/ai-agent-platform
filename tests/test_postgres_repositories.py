@@ -501,6 +501,61 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("ORDER BY created_at DESC, id DESC", sql)
         self.assertEqual(params, ("session_1",))
 
+    def test_agent_run_repository_lists_recent_runs(self) -> None:
+        rows = [
+            (
+                "run_new",
+                "run_new",
+                "session_2",
+                "workspace_main",
+                "/workspace/code",
+                "running",
+                None,
+                "inspect_repository",
+                ["inspect_repository"],
+                [],
+                None,
+                None,
+                None,
+                [],
+                None,
+                [],
+            ),
+            (
+                "run_old",
+                "run_old",
+                "session_1",
+                "workspace_main",
+                "/workspace/code",
+                "completed",
+                "checkpoint_1",
+                "compose_answer",
+                [],
+                [],
+                None,
+                None,
+                None,
+                [],
+                None,
+                [],
+            ),
+        ]
+        connection = FakeConnection([rows])
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ):
+            repository = PostgresAgentRunRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            recent = repository.list_recent(limit=2)
+
+        self.assertEqual([record.run_id for record in recent], ["run_new", "run_old"])
+        sql, params = connection.calls[0]
+        self.assertIn("ORDER BY created_at DESC, id DESC", sql)
+        self.assertEqual(params, (2,))
+
     def test_agent_runtime_events_and_tool_identity_use_durable_tables(self) -> None:
         connection = FakeConnection(
             [

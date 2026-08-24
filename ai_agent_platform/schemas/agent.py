@@ -352,6 +352,53 @@ class AgentRunStatusResponse(BaseModel):
         )
 
 
+class AgentRunSummaryResponse(BaseModel):
+    run_id: str
+    conversation_id: str
+    workspace_id: str
+    status: str
+    checkpoint_id: Optional[str]
+    latest_node: Optional[str]
+    trace_count: int
+    tool_call_count: int
+    error_count: int
+    has_pending_approval: bool
+
+    @classmethod
+    def from_domain(cls, record: AgentRunRecord) -> "AgentRunSummaryResponse":
+        result = record.result
+        pending_tool_calls_value = (
+            record.pending_approval.get("tool_calls", [])
+            if record.pending_approval is not None
+            else []
+        )
+        pending_tool_calls = (
+            pending_tool_calls_value
+            if isinstance(pending_tool_calls_value, list)
+            else []
+        )
+        return cls(
+            run_id=record.run_id,
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            status=record.status,
+            checkpoint_id=record.checkpoint_id,
+            latest_node=record.latest_node,
+            trace_count=len(record.trace),
+            tool_call_count=(
+                len(result.tool_calls)
+                if result is not None
+                else len(pending_tool_calls)
+            ),
+            error_count=len(record.errors) + (1 if record.error else 0),
+            has_pending_approval=record.pending_approval is not None,
+        )
+
+
+class AgentRunsResponse(BaseModel):
+    runs: list[AgentRunSummaryResponse]
+
+
 class AgentCheckpointResponse(BaseModel):
     checkpoint_id: str
     parent_checkpoint_id: Optional[str]
