@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -15,6 +17,9 @@ from ai_agent_platform.agents.coding.checkpoint_coordinator import (
 from ai_agent_platform.agents.coding.context_nodes import ContextRetrievalNodes
 from ai_agent_platform.agents.coding.graph_builder import build_coding_agent_graph
 from ai_agent_platform.agents.coding.models import (
+    AgentCheckpoint,
+    AgentCheckpointNotFoundError,
+    AgentCheckpointRestoreError,
     AgentPlanner,
     AgentRunInvalidStateError,
     AgentRunEvent,
@@ -215,6 +220,7 @@ class CodingAgentRuntime:
         self._checkpoint_coordinator = CheckpointResumeCoordinator(
             graph=self._graph,
             recursion_limit=self._graph_recursion_limit,
+            checkpointer=self._checkpointer,
         )
         self._recorder = RunRecorder(self)
 
@@ -629,6 +635,321 @@ class CodingAgentRuntime:
             workspace_root=record.workspace_root,
         )
 
+    def list_checkpoints(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentCheckpoint]:
+        record = self.get_run(run_id)
+        checkpoints: list[AgentCheckpoint] = []
+        for snapshot in self._checkpoint_coordinator.history(
+            record.thread_id,
+            limit=limit,
+        ):
+            configurable = snapshot.config.get("configurable", {})
+            checkpoint_id = str(configurable.get("checkpoint_id") or "")
+            if not checkpoint_id:
+                continue
+            parent = snapshot.parent_config or {}
+            parent_id = str(
+                parent.get("configurable", {}).get("checkpoint_id") or ""
+            ) or None
+            metadata = dict(snapshot.metadata or {})
+            trace = list(snapshot.values.get("trace", []))
+            latest = trace[-1] if trace else {}
+            interrupts = list(snapshot.interrupts or ())
+            interrupt = None
+            if interrupts:
+                value = getattr(interrupts[0], "value", None)
+                interrupt = dict(value) if isinstance(value, dict) else {
+                    "type": "interrupt",
+                    "detail": str(value or "checkpoint interrupted"),
+                }
+            next_nodes = [str(item) for item in snapshot.next]
+            step = int(metadata.get("step", -1))
+            checkpoints.append(
+                AgentCheckpoint(
+                    checkpoint_id=checkpoint_id,
+                    parent_checkpoint_id=parent_id,
+                    created_at=(
+                        str(snapshot.created_at)
+                        if snapshot.created_at is not None
+                        else None
+                    ),
+                    step=step,
+                    source=str(metadata.get("source") or "loop"),
+                    next_nodes=next_nodes,
+                    latest_node=(str(latest.get("node")) if latest else None),
+                    summary=(
+                        str(latest.get("summary") or "")
+                        if latest
+                        else "Agent run accepted."
+                    ),
+                    interrupt=interrupt,
+                    changed_files=[
+                        str(item)
+                        for item in snapshot.values.get("changed_files", [])
+                    ],
+                    tool_call_count=len(snapshot.values.get("tool_results", [])),
+                    can_restore=bool(next_nodes),
+                    is_current=checkpoint_id == record.checkpoint_id,
+                    origin_run_id=(
+                        str(metadata.get("origin_run_id"))
+                        if metadata.get("origin_run_id")
+                        else None
+                    ),
+                    origin_checkpoint_id=(
+                        str(metadata.get("origin_checkpoint_id"))
+                        if metadata.get("origin_checkpoint_id")
+                        else None
+                    ),
+                    restore_mode=(
+                        str(metadata.get("restore_mode"))
+                        if metadata.get("restore_mode")
+                        else None
+                    ),
+                )
+            )
+        return checkpoints
+
+    def prepare_checkpoint_branch(
+        self,
+        *,
+        source_run_id: str,
+        checkpoint_id: str,
+        conversation_id: str,
+        mode: str,
+        message: str = "",
+        run_id: str | None = None,
+    ) -> AgentRunRecord:
+        if mode not in {"rollback", "fork"}:
+            raise ValueError("checkpoint restore mode must be rollback or fork")
+        source = self.get_run(source_run_id)
+        if source.status in QueryLifecycle.ACTIVE_STATUSES:
+            raise AgentCheckpointRestoreError(
+                "pause the active Run before restoring one of its checkpoints"
+            )
+        try:
+            selected = self._checkpoint_coordinator.snapshot_by_id(
+                source.thread_id,
+                checkpoint_id,
+            )
+        except KeyError as exc:
+            raise AgentCheckpointNotFoundError(
+                source_run_id,
+                checkpoint_id,
+            ) from exc
+        metadata = dict(selected.metadata or {})
+        if not selected.next:
+            raise AgentCheckpointRestoreError(
+                "the selected checkpoint has no resumable next graph node"
+            )
+        execution = (
+            source.context_snapshot.execution_workspace
+            if source.context_snapshot is not None
+            else None
+        )
+        branch_run_id = run_id or f"run_{uuid4().hex[:12]}"
+        branch_message = (message or "").strip()
+        execution_override: dict[str, object] | None = None
+        prepared_execution = False
+        try:
+            if execution is not None:
+                if self._execution_workspace_runtime is None:
+                    if not Path(execution.execution_root).exists():
+                        raise AgentCheckpointRestoreError(
+                            "the checkpoint execution workspace is no longer available"
+                        )
+                else:
+                    # A historical graph state must never share the source Run's
+                    # mutable execution root. Freeze a fresh baseline for the new
+                    # Run from the currently registered source workspace instead.
+                    branch_execution = self._execution_workspace_runtime.prepare(
+                        run_id=branch_run_id,
+                        workspace_id=source.workspace_id,
+                        source_root=source.workspace_root,
+                        mode=execution.mode,
+                        directory_key=(
+                            f"{conversation_id}:{source.workspace_id}:{branch_run_id}"
+                        ),
+                    )
+                    execution_override = branch_execution.to_dict()
+                    prepared_execution = True
+
+            context_snapshot = _clone_checkpoint_run_context(
+                source.context_snapshot,
+                run_id=branch_run_id,
+                conversation_id=conversation_id,
+                source_run_id=source.run_id,
+                source_checkpoint_id=checkpoint_id,
+                mode=mode,
+                message=branch_message,
+                execution_workspace_override=execution_override,
+            )
+            execution_root = (
+                context_snapshot.execution_workspace.execution_root
+                if context_snapshot is not None
+                and context_snapshot.execution_workspace is not None
+                else str(selected.values.get("execution_root") or source.workspace_root)
+            )
+            state_overrides: dict[str, Any] = {
+                "run_id": branch_run_id,
+                "conversation_id": conversation_id,
+                "workspace_id": source.workspace_id,
+                "workspace_root": source.workspace_root,
+                "execution_root": execution_root,
+                "started_at": perf_counter(),
+            }
+            config = self._checkpoint_coordinator.clone_checkpoint(
+                selected,
+                thread_id=branch_run_id,
+                state_overrides=state_overrides,
+                metadata={
+                    "source": "checkpoint_restore",
+                    "origin_run_id": source.run_id,
+                    "origin_checkpoint_id": checkpoint_id,
+                    "restore_mode": mode,
+                },
+            )
+            cloned = self._checkpoint_coordinator.snapshot_for(config)
+            if cloned is None:
+                raise AgentCheckpointRestoreError("cloned checkpoint is unavailable")
+        except AgentCheckpointRestoreError:
+            if prepared_execution:
+                self._cleanup_checkpoint_execution_workspace(
+                    run_id=branch_run_id,
+                    workspace_id=source.workspace_id,
+                )
+            raise
+        except Exception as exc:
+            if prepared_execution:
+                self._cleanup_checkpoint_execution_workspace(
+                    run_id=branch_run_id,
+                    workspace_id=source.workspace_id,
+                )
+            raise AgentCheckpointRestoreError(
+                f"unable to prepare the checkpoint execution workspace: {exc}"
+            ) from exc
+        trace = _snapshot_trace(cloned)
+        return AgentRunRecord(
+            run_id=branch_run_id,
+            thread_id=branch_run_id,
+            conversation_id=conversation_id,
+            workspace_id=source.workspace_id,
+            workspace_root=source.workspace_root,
+            status="queued",
+            checkpoint_id=_checkpoint_id(cloned),
+            latest_node=_latest_trace_node(cloned),
+            next_nodes=_next_nodes(cloned),
+            trace=trace,
+            steering_messages=[branch_message] if branch_message else [],
+            context_snapshot=context_snapshot,
+        )
+
+    def run_from_checkpoint(self, run_id: str) -> AgentRunResult:
+        record = self.get_run(run_id)
+        if record.status != "queued":
+            raise AgentRunInvalidStateError(run_id, record.status)
+        if record.context_snapshot is not None:
+            execution = record.context_snapshot.execution_workspace
+            if execution is not None and self._execution_workspace_runtime is not None:
+                self._execution_workspace_runtime.restore(
+                    execution.to_dict(),
+                    authorized_source_root=record.workspace_root,
+                )
+            self._tool_access.restore_snapshot(record.context_snapshot)
+        self._run_store.save(replace(record, status="running"))
+        config = self._checkpoint_coordinator.config(record.thread_id)
+        if record.checkpoint_id:
+            config["configurable"]["checkpoint_id"] = record.checkpoint_id
+        try:
+            state, llm_usage = self._checkpoint_coordinator.invoke_from_checkpoint(
+                config
+            )
+            state = _merge_llm_usage(state, llm_usage)
+        except Exception as exc:
+            snapshot = self._checkpoint_coordinator.snapshot_for(config)
+            self._run_store.save(
+                AgentRunRecord(
+                    run_id=record.run_id,
+                    thread_id=record.thread_id,
+                    conversation_id=record.conversation_id,
+                    workspace_id=record.workspace_id,
+                    workspace_root=record.workspace_root,
+                    status="failed",
+                    checkpoint_id=_checkpoint_id(snapshot),
+                    latest_node=_latest_trace_node(snapshot),
+                    next_nodes=_next_nodes(snapshot),
+                    trace=_snapshot_trace(snapshot),
+                    error=str(exc),
+                    errors=_snapshot_errors(snapshot)
+                    + [_error_from_exception("checkpoint_restore", exc, attempt=1, max_attempts=1)],
+                    context_snapshot=record.context_snapshot,
+                )
+            )
+            raise
+        return self._recorder._finish_invocation(
+            config=config,
+            state=state,
+            run_id=record.run_id,
+            thread_id=record.thread_id,
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+            workspace_root=record.workspace_root,
+        )
+
+    def record_checkpoint_branch_created(
+        self,
+        record: AgentRunRecord,
+        *,
+        source_run_id: str,
+        source_checkpoint_id: str,
+        mode: str,
+    ) -> None:
+        self._recorder.append_event(
+            record.run_id,
+            AgentRunEvent(
+                sequence=0,
+                type="run_checkpoint_restored",
+                status=record.status,
+                node=record.latest_node,
+                summary="Agent run created from a historical checkpoint.",
+                output={
+                    "source_run_id": source_run_id,
+                    "source_checkpoint_id": source_checkpoint_id,
+                    "restore_mode": mode,
+                    "conversation_id": record.conversation_id,
+                },
+            ),
+        )
+
+    def discard_checkpoint_thread(
+        self,
+        thread_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> None:
+        delete_thread = getattr(self._checkpointer, "delete_thread", None)
+        if callable(delete_thread):
+            delete_thread(thread_id)
+        if workspace_id:
+            self._cleanup_checkpoint_execution_workspace(
+                run_id=thread_id,
+                workspace_id=workspace_id,
+            )
+
+    def _cleanup_checkpoint_execution_workspace(
+        self,
+        *,
+        run_id: str,
+        workspace_id: str,
+    ) -> None:
+        if self._execution_workspace_runtime is None:
+            return
+        context = SimpleNamespace(run_id=run_id, workspace_id=workspace_id)
+        self._execution_workspace_runtime.cleanup(context)
+
     def get_run(self, run_id: str) -> AgentRunRecord:
         try:
             record = self._run_store.get(run_id)
@@ -815,6 +1136,50 @@ class CodingAgentRuntime:
             action=action,
             actor_user_id=actor_user_id,
         )
+
+
+def _clone_checkpoint_run_context(
+    snapshot: RunContextSnapshot | None,
+    *,
+    run_id: str,
+    conversation_id: str,
+    source_run_id: str,
+    source_checkpoint_id: str,
+    mode: str,
+    message: str,
+    execution_workspace_override: dict[str, object] | None = None,
+) -> RunContextSnapshot | None:
+    if snapshot is None:
+        return None
+    payload = snapshot.to_dict()
+    session = payload["session"]
+    assert isinstance(session, dict)
+    session["conversation_id"] = conversation_id
+    session["user_message"] = message or (
+        f"Continue from checkpoint {source_checkpoint_id}."
+    )
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    metadata["run_id"] = run_id
+    metadata["created_at"] = datetime.now(timezone.utc).isoformat()
+    metadata["entrypoint_type"] = "checkpoint_restore"
+    entrypoint_metadata = metadata.get("entrypoint_metadata")
+    entrypoint_metadata = (
+        dict(entrypoint_metadata) if isinstance(entrypoint_metadata, dict) else {}
+    )
+    entrypoint_metadata["checkpoint_restore"] = {
+        "source_run_id": source_run_id,
+        "source_checkpoint_id": source_checkpoint_id,
+        "mode": mode,
+    }
+    metadata["entrypoint_metadata"] = entrypoint_metadata
+    if execution_workspace_override is not None:
+        payload["execution_workspace"] = dict(execution_workspace_override)
+    else:
+        execution = payload.get("execution_workspace")
+        if isinstance(execution, dict):
+            execution["run_id"] = run_id
+    return RunContextSnapshot.from_dict(payload)
 
 
 def _execution_path(source_root: str, execution_root: str, source_path: str) -> str:

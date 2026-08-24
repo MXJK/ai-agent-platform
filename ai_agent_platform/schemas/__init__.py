@@ -1,5 +1,9 @@
 from .agent import (
     AgentChangeSummaryResponse,
+    AgentCheckpointResponse,
+    AgentCheckpointRestoreRequest,
+    AgentCheckpointRestoreResponse,
+    AgentCheckpointsResponse,
     AgentRunRequest,
     AgentRunEventsResponse,
     AgentRunEventResponse,
@@ -116,6 +120,10 @@ from .memory import (
 __all__ = [
     "AddMessageRequest",
     "AgentChangeSummaryResponse",
+    "AgentCheckpointResponse",
+    "AgentCheckpointRestoreRequest",
+    "AgentCheckpointRestoreResponse",
+    "AgentCheckpointsResponse",
     "AgentRunRequest",
     "AgentRunEventsResponse",
     "AgentRunEventResponse",

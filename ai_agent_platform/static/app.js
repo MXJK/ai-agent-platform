@@ -55,6 +55,10 @@ const state = {
   latestRunId: "",
   latestRunStatus: "",
   latestRunConversationId: "",
+  latestRunBody: null,
+  checkpointHistory: [],
+  checkpointRunId: "",
+  selectedCheckpointId: "",
   healthStatus: "checking",
   sessionStorageMode: "unknown",
   sessions: [],
@@ -3130,7 +3134,12 @@ function resetLatestAgentRunState() {
   state.latestRunId = "";
   state.latestRunStatus = "";
   state.latestRunConversationId = "";
+  state.latestRunBody = null;
+  state.checkpointHistory = [];
+  state.checkpointRunId = "";
+  state.selectedCheckpointId = "";
   state.currentChangeSet = null;
+  renderActiveRunControl();
 }
 
 function normalizedMessageText(value) {
@@ -5065,14 +5074,305 @@ async function runAgent({
   }
 }
 
+function activeRunPresentation(body) {
+  const status = agentRunStatus(body);
+  const latestNode = body?.latest_node || body?.result?.latest_node || "";
+  const presentations = {
+    queued: ["QUEUED RUN", "Agent 正在排队", "任务已提交，等待执行器接手"],
+    running: ["ACTIVE RUN", "Agent 正在运行", latestNode
+      ? `当前阶段：${humanizeAgentNode(latestNode)} · 控制操作将在安全边界生效`
+      : "暂停与取消会在下一个安全边界生效"],
+    waiting_approval: ["APPROVAL REQUIRED", "Agent 等待你的确认", "请在对话内查看工具计划并批准或拒绝"],
+    waiting_input: ["INPUT REQUIRED", "Agent 等待新的方向", "补充信息后可从当前 checkpoint 继续"],
+    paused: ["RUN PAUSED", "Agent 已暂停", "执行状态已保留，可继续运行或选择历史 checkpoint"],
+    completed: ["RUN COMPLETE", "Agent 已完成", "可查看 checkpoint 历史并从任意可恢复节点创建新 Run"],
+    partial: ["RUN PARTIAL", "Agent 部分完成", "可查看结果，或从历史 checkpoint 创建新 Run"],
+    blocked: ["RUN BLOCKED", "Agent 运行受阻", "可查看 checkpoint 历史并尝试新的执行方向"],
+    cancelled: ["RUN CANCELLED", "Agent 已取消", "历史 checkpoint 仍然保留"],
+    failed: ["RUN FAILED", "Agent 运行失败", body?.error || "可从失败前的 checkpoint 创建新 Run"],
+  };
+  return presentations[status] || ["AGENT RUN", humanizeStatus(status), "可查看当前执行记录"];
+}
+
+function renderActiveRunControl(body = state.latestRunBody) {
+  const control = $("active-run-control");
+  if (!control) return;
+  const runId = agentRunId(body);
+  const conversationId = agentRunConversationId(body);
+  if (!runId || !conversationId || conversationId !== state.conversationId) {
+    control.hidden = true;
+    control.removeAttribute("data-status");
+    return;
+  }
+  const status = agentRunStatus(body);
+  const [kicker, title, detail] = activeRunPresentation(body);
+  const resumable = ["waiting_input", "paused"].includes(status);
+  const active = ["queued", "running"].includes(status);
+  const final = FINAL_RUN_STATUSES.has(status);
+  control.hidden = false;
+  control.dataset.status = status;
+  control.dataset.runId = runId;
+  $("active-run-kicker").textContent = kicker;
+  $("active-run-title").textContent = title;
+  $("active-run-detail").textContent = detail;
+  $("active-run-message-field").hidden = !resumable;
+  $("active-run-pause-btn").hidden = status !== "running";
+  $("active-run-continue-btn").hidden = !resumable;
+  $("active-run-cancel-btn").hidden = !(active || SUSPENDED_RUN_STATUSES.has(status));
+  $("active-run-checkpoints-btn").hidden = status === "queued";
+  if (final) {
+    $("active-run-message-input").value = "";
+  }
+  control.querySelectorAll("button, input").forEach((node) => {
+    node.disabled = false;
+  });
+  control.removeAttribute("aria-busy");
+}
+
+function setActiveRunControlBusy(busy) {
+  const control = $("active-run-control");
+  control.toggleAttribute("aria-busy", busy);
+  control.querySelectorAll("button, input").forEach((node) => {
+    node.disabled = busy;
+  });
+}
+
+async function handleActiveRunControl(action) {
+  const body = state.latestRunBody;
+  const runId = agentRunId(body);
+  const conversationId = agentRunConversationId(body);
+  if (!runId || conversationId !== state.conversationId) {
+    showToast("当前 Run 已切换，请重新加载会话", "warning");
+    return;
+  }
+  const message = $("active-run-message-input").value.trim();
+  setActiveRunControlBusy(true);
+  try {
+    const nextBody = await fetchJson(
+      `/agent/runs/${encodeURIComponent(runId)}/${action}`,
+      { method: "POST", body: JSON.stringify({ message }) },
+    );
+    if (runId !== state.latestRunId || conversationId !== state.conversationId) return;
+    renderAgentRun(nextBody);
+    setChatStatusFromRun(nextBody);
+    if (action !== "continue") {
+      showToast(action === "pause"
+        ? "暂停请求已发送，将在下一个安全边界生效"
+        : "取消请求已发送", action === "cancel" ? "warning" : "success");
+      return;
+    }
+
+    $("active-run-message-input").value = "";
+    let contentNode = chatContentForRun(runId);
+    if (!contentNode) {
+      contentNode = appendChatMessage("assistant", "", null, { runId });
+    }
+    const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
+    const presenter = createAgentProgressPresenter(contentNode, startedAt, {
+      initialTrace: agentRunTrace(body),
+    });
+    startResponseTimer(contentNode, startedAt);
+    await presenter.update(nextBody);
+    const finalBody = await watchRunUntilTerminal({
+      runId,
+      conversationId,
+      preserveChat: true,
+      onProgress: (latestBody) => presenter.update(latestBody),
+    });
+    if (finalBody && runId === state.latestRunId && conversationId === state.conversationId) {
+      await presenter.update(finalBody);
+      setChatStatusFromRun(finalBody);
+    }
+    if (TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
+      stopResponseTimer(contentNode);
+    }
+    await Promise.allSettled([refreshCurrentSessionMetadata(), refreshRecentSessions()]);
+  } catch (error) {
+    showToast(humanizeError(error), "error");
+  } finally {
+    if (runId === state.latestRunId && conversationId === state.conversationId) {
+      renderActiveRunControl();
+    }
+  }
+}
+
+function checkpointTitle(checkpoint) {
+  if (checkpoint.latest_node) return humanizeAgentNode(checkpoint.latest_node);
+  if (checkpoint.next_nodes?.length) return `进入 ${humanizeAgentNode(checkpoint.next_nodes[0])}`;
+  return checkpoint.step < 0 ? "Run 起点" : "执行结束";
+}
+
+function checkpointStateLabel(checkpoint) {
+  if (checkpoint.is_current) return "当前状态";
+  if (checkpoint.interrupt) return "暂停边界";
+  if (!checkpoint.can_restore) return "仅供查看";
+  return "可恢复";
+}
+
+function checkpointBadges(checkpoint) {
+  const badges = [];
+  if (checkpoint.is_current) badges.push("current");
+  if (checkpoint.interrupt) badges.push("interrupt");
+  if (checkpoint.origin_run_id) badges.push(checkpoint.restore_mode || "branch");
+  if (!checkpoint.can_restore) badges.push("terminal");
+  return badges;
+}
+
+function renderCheckpointHistory() {
+  const list = $("checkpoint-history-list");
+  const checkpoints = state.checkpointHistory;
+  $("checkpoint-run-label").textContent = state.checkpointRunId
+    ? state.checkpointRunId.slice(0, 12)
+    : "—";
+  if (!checkpoints.length) {
+    list.innerHTML = '<div class="empty-state">此 Run 尚未生成 checkpoint。</div>';
+    state.selectedCheckpointId = "";
+    renderCheckpointDetail();
+    return;
+  }
+  if (!checkpoints.some((item) => item.checkpoint_id === state.selectedCheckpointId)) {
+    state.selectedCheckpointId = (checkpoints.find((item) => item.can_restore) || checkpoints[0]).checkpoint_id;
+  }
+  list.innerHTML = checkpoints.map((checkpoint) => {
+    const selected = checkpoint.checkpoint_id === state.selectedCheckpointId;
+    const badges = checkpointBadges(checkpoint);
+    return `
+      <button class="checkpoint-card${checkpoint.is_current ? " current" : ""}${checkpoint.interrupt ? " interrupted" : ""}"
+        type="button" role="option" aria-selected="${selected}" data-checkpoint-id="${escapeHtml(checkpoint.checkpoint_id)}">
+        <span class="checkpoint-node" aria-hidden="true"></span>
+        <span class="checkpoint-card-copy">
+          <strong>${escapeHtml(checkpointTitle(checkpoint))}</strong>
+          <small>${escapeHtml(checkpoint.summary || `下一节点：${(checkpoint.next_nodes || []).map(humanizeAgentNode).join("、") || "无"}`)}</small>
+          ${badges.length ? `<span class="checkpoint-card-badges">${badges.map((badge) => `<span>${escapeHtml(badge)}</span>`).join("")}</span>` : ""}
+        </span>
+        <span class="checkpoint-card-time">${escapeHtml(formatDate(checkpoint.created_at))}</span>
+      </button>
+    `;
+  }).join("");
+  renderCheckpointDetail();
+}
+
+function renderCheckpointDetail() {
+  const checkpoint = state.checkpointHistory.find(
+    (item) => item.checkpoint_id === state.selectedCheckpointId,
+  );
+  $("checkpoint-detail-empty").hidden = Boolean(checkpoint);
+  $("checkpoint-detail").hidden = !checkpoint;
+  if (!checkpoint) return;
+  $("checkpoint-detail-step").textContent = checkpoint.step < 0
+    ? "RUN START"
+    : `STEP ${checkpoint.step}`;
+  $("checkpoint-detail-title").textContent = checkpointTitle(checkpoint);
+  $("checkpoint-detail-state").textContent = checkpointStateLabel(checkpoint);
+  $("checkpoint-detail-summary").textContent = checkpoint.summary || "该 checkpoint 没有额外摘要。";
+  $("checkpoint-detail-id").textContent = checkpoint.checkpoint_id;
+  $("checkpoint-detail-next").textContent = checkpoint.next_nodes?.length
+    ? checkpoint.next_nodes.map(humanizeAgentNode).join(" → ")
+    : "无（图已结束）";
+  $("checkpoint-detail-tools").textContent = formatTokenCount(checkpoint.tool_call_count);
+  $("checkpoint-detail-files").textContent = checkpoint.changed_files?.length
+    ? checkpoint.changed_files.join("、")
+    : "无";
+  const sourceIsActive = state.checkpointRunId === state.latestRunId
+    && ["queued", "running"].includes(state.latestRunStatus);
+  const enabled = checkpoint.can_restore && !sourceIsActive;
+  $("checkpoint-fork-btn").disabled = !enabled;
+  $("checkpoint-rollback-btn").disabled = !enabled;
+  $("checkpoint-action-error").hidden = true;
+  $("checkpoint-history-status").textContent = sourceIsActive
+    ? "请先暂停当前 Run，再从历史 checkpoint 创建新路径。"
+    : checkpoint.can_restore
+      ? "恢复会创建新 Run；原 Run 与 checkpoint 会完整保留。"
+      : "此节点没有待执行的下一步，仅供审阅。";
+}
+
+async function openCheckpointHistory(runId = state.latestRunId) {
+  if (!runId) {
+    showToast("当前会话还没有 Agent Run", "warning");
+    return;
+  }
+  state.checkpointRunId = runId;
+  state.checkpointHistory = [];
+  state.selectedCheckpointId = "";
+  $("checkpoint-direction-input").value = "";
+  $("checkpoint-history-list").innerHTML = '<div class="empty-state">正在读取 checkpoint…</div>';
+  $("checkpoint-history-status").textContent = "正在读取执行图历史…";
+  $("checkpoint-history-dialog").showModal();
+  try {
+    const response = await fetchJson(
+      `/agent/runs/${encodeURIComponent(runId)}/checkpoints?limit=200`,
+    );
+    if (runId !== state.checkpointRunId || !$("checkpoint-history-dialog").open) return;
+    state.checkpointHistory = response.checkpoints || [];
+    renderCheckpointHistory();
+  } catch (error) {
+    state.checkpointHistory = [];
+    $("checkpoint-history-list").innerHTML = `<div class="empty-state">${escapeHtml(humanizeError(error))}</div>`;
+    $("checkpoint-history-status").textContent = "Checkpoint 历史加载失败。";
+  }
+}
+
+function closeCheckpointHistory() {
+  const dialog = $("checkpoint-history-dialog");
+  if (dialog.open) dialog.close();
+}
+
+async function restoreSelectedCheckpoint(mode) {
+  const checkpoint = state.checkpointHistory.find(
+    (item) => item.checkpoint_id === state.selectedCheckpointId,
+  );
+  if (!checkpoint || !checkpoint.can_restore) return;
+  const runId = state.checkpointRunId;
+  const message = $("checkpoint-direction-input").value.trim();
+  const errorNode = $("checkpoint-action-error");
+  const dialog = $("checkpoint-history-dialog");
+  dialog.setAttribute("aria-busy", "true");
+  dialog.querySelectorAll("button, textarea").forEach((node) => { node.disabled = true; });
+  errorNode.hidden = true;
+  let restoreError = "";
+  let restoreAccepted = false;
+  try {
+    const response = await fetchJson(
+      `/agent/runs/${encodeURIComponent(runId)}/checkpoints/${encodeURIComponent(checkpoint.checkpoint_id)}/restore`,
+      { method: "POST", body: JSON.stringify({ mode, message }) },
+    );
+    restoreAccepted = true;
+    const conversationId = response.forked_conversation_id || response.conversation_id;
+    closeCheckpointHistory();
+    await refreshRecentSessions().catch(() => null);
+    await loadSession(true, conversationId);
+    showToast(mode === "fork"
+      ? "已从 checkpoint 分叉为新会话，并启动新的 Run"
+      : "已从 checkpoint 创建新的执行路径", "success");
+  } catch (error) {
+    if (restoreAccepted) {
+      showToast(`新的执行路径已创建，但界面切换失败：${humanizeError(error)}`, "warning");
+    } else {
+      restoreError = humanizeError(error);
+    }
+  } finally {
+    dialog.removeAttribute("aria-busy");
+    if (dialog.open) {
+      dialog.querySelectorAll("button, textarea").forEach((node) => { node.disabled = false; });
+      renderCheckpointDetail();
+      if (restoreError) {
+        errorNode.textContent = restoreError;
+        errorNode.hidden = false;
+      }
+    }
+  }
+}
+
 function renderAgentRun(body) {
   const result = body.result || {};
   state.latestRunId = body.run_id || result.run_id || "";
   state.latestRunStatus = body.status || result.status || "";
   state.latestRunConversationId = agentRunConversationId(body);
+  state.latestRunBody = body;
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
+  renderActiveRunControl(body);
 }
 
 async function refreshRun(
@@ -5137,8 +5437,14 @@ function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
 function renderStreamedAgentProgress(events, runId = state.latestRunId) {
   const body = agentProgressBodyFromEvents(events, runId);
   state.latestRunStatus = body.status;
+  state.latestRunBody = {
+    ...(state.latestRunBody || {}),
+    ...body,
+    conversation_id: state.latestRunConversationId || state.conversationId,
+  };
   setTrace(body.trace);
   renderOverview();
+  renderActiveRunControl();
   return body;
 }
 
@@ -7434,6 +7740,41 @@ function bindEvents() {
     if (event.target === $("settings-dialog")) {
       closeSettings();
     }
+  });
+  $("active-run-checkpoints-btn").addEventListener("click", () => {
+    openCheckpointHistory().catch((error) => showToast(humanizeError(error), "error"));
+  });
+  $("active-run-pause-btn").addEventListener("click", () => {
+    handleActiveRunControl("pause");
+  });
+  $("active-run-continue-btn").addEventListener("click", () => {
+    handleActiveRunControl("continue");
+  });
+  $("active-run-cancel-btn").addEventListener("click", () => {
+    handleActiveRunControl("cancel");
+  });
+  $("active-run-message-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      handleActiveRunControl("continue");
+    }
+  });
+  $("close-checkpoint-history-btn").addEventListener("click", closeCheckpointHistory);
+  $("checkpoint-history-done-btn").addEventListener("click", closeCheckpointHistory);
+  $("checkpoint-history-dialog").addEventListener("click", (event) => {
+    if (event.target === $("checkpoint-history-dialog")) closeCheckpointHistory();
+  });
+  $("checkpoint-history-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-checkpoint-id]");
+    if (!card) return;
+    state.selectedCheckpointId = card.dataset.checkpointId;
+    renderCheckpointHistory();
+  });
+  $("checkpoint-fork-btn").addEventListener("click", () => {
+    restoreSelectedCheckpoint("fork");
+  });
+  $("checkpoint-rollback-btn").addEventListener("click", () => {
+    restoreSelectedCheckpoint("rollback");
   });
   $("open-workspace-picker-btn").addEventListener("click", (event) => {
     openWorkspacePicker(null, event.currentTarget);

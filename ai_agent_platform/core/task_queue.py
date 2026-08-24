@@ -163,6 +163,9 @@ class CeleryTaskQueue:
     TASK_NAMES = {
         "agent_run": "ai_agent_platform.agent_run",
         "agent_resume": "ai_agent_platform.agent_resume",
+        "agent_checkpoint_restore": (
+            "ai_agent_platform.agent_checkpoint_restore"
+        ),
         "memory_extraction": "ai_agent_platform.memory_extraction",
         "memory_index_outbox": "ai_agent_platform.memory_index_outbox",
         "conversation_compression": "ai_agent_platform.conversation_compression",

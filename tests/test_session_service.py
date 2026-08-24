@@ -79,6 +79,37 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(renamed.title, "手工标题")
         self.assertEqual(renamed.title_source, "manual")
 
+    def test_checkpoint_fork_copies_only_the_conversation_prefix(self) -> None:
+        source = self.service.create_session(user_id="user_fork")
+        self.service.add_message(source.id, "user", "earlier question")
+        self.service.add_message(source.id, "assistant", "earlier answer")
+        self.service.add_message(
+            source.id,
+            "user",
+            "source run question",
+            source_run_id="run_source",
+        )
+        self.service.add_message(
+            source.id,
+            "assistant",
+            "source run answer",
+            source_run_id="run_source",
+        )
+
+        forked = self.service.fork_session_from_run(
+            source_session_id=source.id,
+            source_run_id="run_source",
+            actor_user_id="user_fork",
+        )
+
+        copied = self.service.list_messages(forked.id)
+        self.assertEqual(
+            [(item.role, item.content) for item in copied],
+            [("user", "earlier question"), ("assistant", "earlier answer")],
+        )
+        self.assertTrue(forked.title.endswith("· 分叉"))
+        self.assertEqual(forked.composer_mode, "agent")
+
     def test_search_cursor_and_archive_contract(self) -> None:
         first = self.service.create_session(user_id="user_list")
         self.service.add_message(first.id, "user", "alpha body")

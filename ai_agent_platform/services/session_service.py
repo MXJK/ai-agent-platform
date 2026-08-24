@@ -146,6 +146,37 @@ class SessionService:
             preferences=preferences,
         )
 
+    def fork_session_from_run(
+        self,
+        *,
+        source_session_id: str,
+        source_run_id: str,
+        actor_user_id: str,
+    ) -> Session:
+        source = self.get_session(source_session_id)
+        if source.user_id != actor_user_id:
+            raise PermissionError("conversation access denied")
+        forked = self.create_session(actor_user_id)
+        for message in self.list_messages(source_session_id):
+            if message.source_run_id == source_run_id:
+                break
+            self.add_message(
+                session_id=forked.id,
+                role=message.role,
+                content=message.content,
+            )
+        title = f"{source.title} · 分叉"
+        return self.update_session(
+            session_id=forked.id,
+            actor_user_id=actor_user_id,
+            title=title[:120],
+            provider=source.provider,
+            model=source.model,
+            thinking_level=source.thinking_level,
+            workspace_id=source.workspace_id,
+            composer_mode="agent",
+        )
+
     def list_sessions(self) -> list[Session]:
         return self._repository.list_sessions()
 

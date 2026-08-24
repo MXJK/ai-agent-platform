@@ -266,6 +266,11 @@ class CeleryTaskQueueTests(unittest.TestCase):
                 workspace_id="workspace_main",
             )
             queue.submit(
+                "agent_checkpoint_restore",
+                lambda: None,
+                run_id="run_branch",
+            )
+            queue.submit(
                 "memory_extraction",
                 lambda: None,
                 workspace_id="workspace_main",
@@ -290,14 +295,18 @@ class CeleryTaskQueueTests(unittest.TestCase):
         self.assertEqual(calls[0].args, ("ai_agent_platform.agent_run",))
         self.assertEqual(
             calls[1].args,
-            ("ai_agent_platform.memory_extraction",),
+            ("ai_agent_platform.agent_checkpoint_restore",),
         )
         self.assertEqual(
             calls[2].args,
-            ("ai_agent_platform.memory_index_outbox",),
+            ("ai_agent_platform.memory_extraction",),
         )
         self.assertEqual(
             calls[3].args,
+            ("ai_agent_platform.memory_index_outbox",),
+        )
+        self.assertEqual(
+            calls[4].args,
             ("ai_agent_platform.conversation_compression",),
         )
         UUID(calls[0].kwargs["task_id"])

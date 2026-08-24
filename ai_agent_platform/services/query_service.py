@@ -16,6 +16,11 @@ from ai_agent_platform.agents.coding_agent import (
     CodingAgentRuntime,
 )
 from ai_agent_platform.agents.coding.models import AgentRunEvent
+from ai_agent_platform.agents.coding.models import (
+    AgentCheckpoint,
+    AgentCheckpointNotFoundError,
+    AgentCheckpointRestoreError,
+)
 from ai_agent_platform.core import (
     InProcessTaskQueue,
     MetricsRegistry,
@@ -704,6 +709,117 @@ class QueryService:
         self._assert_actor(record, actor_user_id)
         return record
 
+    def list_checkpoints_for_actor(
+        self,
+        run_id: str,
+        actor_user_id: str | None,
+        *,
+        limit: int = 100,
+    ) -> tuple[AgentRunRecord, list[AgentCheckpoint]]:
+        record = self.get_run_for_actor(run_id, actor_user_id)
+        list_checkpoints = getattr(self._runtime, "list_checkpoints", None)
+        if not callable(list_checkpoints):
+            raise RuntimeError("Agent runtime does not expose checkpoint history")
+        return record, list_checkpoints(run_id, limit=limit)
+
+    def restore_checkpoint(
+        self,
+        *,
+        run_id: str,
+        checkpoint_id: str,
+        mode: str,
+        message: str = "",
+        actor_user_id: str | None = None,
+    ) -> tuple[AgentRunRecord, Any | None]:
+        source = self.get_run_for_actor(run_id, actor_user_id)
+        source_session = self._session_service.get_session(source.conversation_id)
+        resolved_actor = actor_user_id or source_session.user_id
+        if mode == "rollback" and source_session.archived_at is not None:
+            from ai_agent_platform.repositories import SessionArchivedError
+
+            raise SessionArchivedError(source.conversation_id)
+        forked_session = None
+        target_conversation_id = source.conversation_id
+        if mode == "fork":
+            forked_session = self._session_service.fork_session_from_run(
+                source_session_id=source.conversation_id,
+                source_run_id=source.run_id,
+                actor_user_id=resolved_actor,
+            )
+            target_conversation_id = forked_session.id
+
+        restore_message = _checkpoint_restore_message(
+            source,
+            checkpoint_id=checkpoint_id,
+            mode=mode,
+            message=message,
+        )
+        prepare = getattr(self._runtime, "prepare_checkpoint_branch", None)
+        if not callable(prepare):
+            raise RuntimeError("Agent runtime does not support checkpoint restoration")
+        try:
+            record = prepare(
+                source_run_id=run_id,
+                checkpoint_id=checkpoint_id,
+                conversation_id=target_conversation_id,
+                mode=mode,
+                message=message,
+            )
+            QueryLifecycle.assert_transition(None, "queued")
+            if self._query_uow is not None:
+                self._query_uow.persist_start(
+                    record=record,
+                    message_id=f"msg_{uuid4().hex[:12]}",
+                    message=restore_message,
+                    preferences=self._session_service.get_user_preferences(
+                        resolved_actor
+                    ),
+                )
+            else:
+                self._runtime.restore_record(record)
+                self._session_service.add_message(
+                    session_id=target_conversation_id,
+                    role="user",
+                    content=restore_message,
+                    source_run_id=record.run_id,
+                )
+        except Exception:
+            discard = getattr(self._runtime, "discard_checkpoint_thread", None)
+            if "record" in locals() and callable(discard):
+                discard(record.thread_id, workspace_id=record.workspace_id)
+            if forked_session is not None:
+                self._session_service.delete_session(forked_session.id)
+            raise
+
+        record_event = getattr(
+            self._runtime,
+            "record_checkpoint_branch_created",
+            None,
+        )
+        if callable(record_event):
+            record_event(
+                record,
+                source_run_id=run_id,
+                source_checkpoint_id=checkpoint_id,
+                mode=mode,
+            )
+        try:
+            self._task_queue.submit(
+                "agent_checkpoint_restore",
+                self.execute_checkpoint_restore_task,
+                run_id=record.run_id,
+                actor_user_id=resolved_actor,
+            )
+        except TaskQueueError as exc:
+            self._mark_queued_run_failed(record.run_id, str(exc))
+            self._metrics.increment("agent_checkpoint_restores_rejected_total")
+            raise
+        self._metrics.increment("agent_checkpoint_restores_submitted_total")
+        self._metrics.increment(
+            f"agent_checkpoint_restore_{mode}_submitted_total"
+        )
+        return record, forked_session
+
     def get_latest_run_for_actor(
         self,
         conversation_id: str,
@@ -942,6 +1058,90 @@ class QueryService:
                     user_message=message,
                     actor_user_id=actor_user_id,
                 )
+
+    def execute_checkpoint_restore_task(
+        self,
+        *,
+        run_id: str,
+        actor_user_id: str | None = None,
+        broker_redelivered: bool = False,
+    ) -> None:
+        started_at = perf_counter()
+        record = self.get_run(run_id)
+        if broker_redelivered and record.status == "running":
+            self._metrics.increment("agent_checkpoint_restore_worker_lost_total")
+            self.fail_run_task(
+                run_id=run_id,
+                error=(
+                    "worker was lost during checkpoint restoration; automatic "
+                    "replay was blocked to prevent duplicate side effects"
+                ),
+                attempt=1,
+                max_attempts=1,
+            )
+            return
+        if record.status != "queued":
+            self._metrics.increment(
+                "agent_checkpoint_restore_duplicate_deliveries_total"
+            )
+            if record.result is not None:
+                self._record_assistant_message(record.result)
+            return
+        with log_context(
+            run_id=run_id,
+            conversation_id=record.conversation_id,
+            workspace_id=record.workspace_id,
+        ):
+            try:
+                if (
+                    record.context_snapshot is not None
+                    and self._can_restore_tool_access()
+                ):
+                    self._restore_tool_access(record.context_snapshot)
+                snapshot_selection = (
+                    record.context_snapshot.session.model_selection.to_dict()
+                    if record.context_snapshot is not None
+                    else None
+                )
+                with model_selection_scope(
+                    ModelSelection(**snapshot_selection)
+                    if snapshot_selection
+                    else None
+                ):
+                    with model_usage_scope(
+                        session_id=record.conversation_id,
+                        workspace_id=record.workspace_id,
+                        operation="agent",
+                        resource_id=run_id,
+                    ):
+                        result = self._runtime.run_from_checkpoint(run_id)
+            except ToolPoolRestoreError:
+                self._record_execution_metrics(
+                    status="failed",
+                    started_at=started_at,
+                )
+                self._fail_tool_pool_restore(run_id)
+                return
+            except Exception as exc:
+                self._record_execution_metrics(
+                    status="failed",
+                    started_at=started_at,
+                )
+                logger.exception("agent checkpoint restoration failed")
+                raise AgentRunExecutionError(str(exc)) from exc
+            self._record_execution_metrics(
+                status=result.status,
+                started_at=started_at,
+            )
+            self._record_assistant_message(
+                result,
+                user_message=(
+                    record.context_snapshot.session.user_message
+                    if record.context_snapshot is not None
+                    else None
+                ),
+                actor_user_id=actor_user_id,
+            )
 
     def execute_resume_task(
         self,
@@ -1434,6 +1634,22 @@ class QueryService:
 
 def _assistant_message_id(run_id: str) -> str:
     return f"msg_{uuid5(NAMESPACE_URL, f'assistant:{run_id}').hex[:12]}"
+
+
+def _checkpoint_restore_message(
+    source: AgentRunRecord,
+    *,
+    checkpoint_id: str,
+    mode: str,
+    message: str,
+) -> str:
+    action = "回到历史检查点继续" if mode == "rollback" else "从历史检查点分叉"
+    direction = (message or "").strip()
+    suffix = f"\n\n新方向：{direction}" if direction else ""
+    return (
+        f"{action}：Run {source.run_id} / checkpoint {checkpoint_id}。"
+        f"{suffix}"
+    )
 
 
 def _is_evaluation_record(record: AgentRunRecord) -> bool:

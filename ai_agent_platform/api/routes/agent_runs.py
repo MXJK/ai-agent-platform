@@ -1,16 +1,24 @@
 import time
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from ai_agent_platform.agents.coding_agent import (
     AgentRunInvalidStateError,
     AgentRunNotFoundError,
 )
+from ai_agent_platform.agents.coding.models import (
+    AgentCheckpointNotFoundError,
+    AgentCheckpointRestoreError,
+)
 from ai_agent_platform.core import Settings, TaskQueueError, request_user_id
 from ai_agent_platform.domain import QueryCommand, QueryLifecycle, QueryParams
 from ai_agent_platform.repositories import SessionArchivedError, SessionNotFoundError
 from ai_agent_platform.schemas import (
+    AgentCheckpointRestoreRequest,
+    AgentCheckpointRestoreResponse,
+    AgentCheckpointResponse,
+    AgentCheckpointsResponse,
     AgentRunEventsResponse,
     AgentRunEventResponse,
     AgentRunControlRequest,
@@ -186,6 +194,91 @@ def create_agent_runs_router(
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         return AgentRunStatusResponse.from_domain(record)
+
+    @router.get(
+        "/agent/runs/{run_id}/checkpoints",
+        response_model=AgentCheckpointsResponse,
+    )
+    def get_agent_run_checkpoints(
+        run_id: str,
+        request: Request,
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> AgentCheckpointsResponse:
+        try:
+            record, checkpoints = query_service.list_checkpoints_for_actor(
+                run_id,
+                (
+                    request_user_id(request, settings)
+                    if settings.auth_mode != "disabled"
+                    else None
+                ),
+                limit=limit,
+            )
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return AgentCheckpointsResponse(
+            run_id=record.run_id,
+            current_checkpoint_id=record.checkpoint_id,
+            checkpoints=[
+                AgentCheckpointResponse.from_domain(item) for item in checkpoints
+            ],
+        )
+
+    @router.post(
+        "/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore",
+        response_model=AgentCheckpointRestoreResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def restore_agent_run_checkpoint(
+        run_id: str,
+        checkpoint_id: str,
+        restore: AgentCheckpointRestoreRequest,
+        request: Request,
+    ) -> AgentCheckpointRestoreResponse:
+        try:
+            record, forked_session = query_service.restore_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+                mode=restore.mode,
+                message=restore.message,
+                actor_user_id=(
+                    request_user_id(request, settings)
+                    if settings.auth_mode != "disabled"
+                    else None
+                ),
+            )
+        except (AgentRunNotFoundError, AgentCheckpointNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SessionArchivedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="archived conversation must be restored before rollback",
+            ) from exc
+        except AgentCheckpointRestoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except TaskQueueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return AgentCheckpointRestoreResponse(
+            mode=restore.mode,
+            source_run_id=run_id,
+            source_checkpoint_id=checkpoint_id,
+            conversation_id=record.conversation_id,
+            forked_conversation_id=(
+                forked_session.id if forked_session is not None else None
+            ),
+            run=AgentRunStatusResponse.from_domain(record),
+        )
 
     @router.get(
         "/sessions/{conversation_id}/agent/runs/latest",

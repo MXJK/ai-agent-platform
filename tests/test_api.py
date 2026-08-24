@@ -694,6 +694,69 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual(workspace_usage["conversation_count"], 1)
 
+    def test_completed_patch_only_run_can_fork_from_historical_checkpoint(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            (workspace / "app.py").write_text("VALUE = 'current'\n", encoding="utf-8")
+            with self._client(root) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "tester"},
+                ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/project",
+                    json={"root_path": str(workspace)},
+                ).raise_for_status()
+                started = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "message": "read app.py",
+                        "workspace_id": "project",
+                        "focus_files": ["app.py"],
+                    },
+                )
+                self.assertEqual(started.status_code, 202, started.text)
+                source_run_id = started.json()["run_id"]
+                source_execution_root = Path(started.json()["execution_root"])
+                source_result = wait_for_run(client, source_run_id)
+                self.assertEqual(source_result["status"], "completed")
+                self.assertFalse(source_execution_root.exists())
+
+                history = client.get(
+                    f"/api/v1/agent/runs/{source_run_id}/checkpoints",
+                    params={"limit": 200},
+                )
+                self.assertEqual(history.status_code, 200, history.text)
+                selected = next(
+                    checkpoint
+                    for checkpoint in history.json()["checkpoints"]
+                    if checkpoint["can_restore"]
+                )
+                restored = client.post(
+                    f"/api/v1/agent/runs/{source_run_id}/checkpoints/"
+                    f"{selected['checkpoint_id']}/restore",
+                    json={"mode": "fork", "message": "take another path"},
+                )
+                self.assertEqual(restored.status_code, 202, restored.text)
+                restored_body = restored.json()
+                branch = restored_body["run"]
+                self.assertNotEqual(branch["run_id"], source_run_id)
+                self.assertNotEqual(
+                    restored_body["forked_conversation_id"],
+                    session_id,
+                )
+                self.assertNotEqual(branch["execution_root"], str(source_execution_root))
+                branch_result = wait_for_run(client, branch["run_id"])
+
+                self.assertEqual(branch_result["status"], "completed")
+                self.assertEqual(
+                    client.get(f"/api/v1/agent/runs/{source_run_id}").json()["status"],
+                    "completed",
+                )
+
     def test_removed_repository_index_endpoints_return_404(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
             response = client.post(
@@ -724,11 +787,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260823-thinking-process-v1',
+            '/static/styles.css?v=20260824-checkpoint-time-travel-v2',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260823-thinking-process-v1',
+            '/static/app.js?v=20260824-checkpoint-time-travel-v2',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -779,6 +842,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="session-search-input"', response.text)
         self.assertIn('id="archived-session-notice"', response.text)
         self.assertIn('id="active-session-header"', response.text)
+        self.assertIn('id="active-run-control"', response.text)
+        self.assertIn('id="active-run-pause-btn"', response.text)
+        self.assertIn('id="active-run-continue-btn"', response.text)
+        self.assertIn('id="active-run-checkpoints-btn"', response.text)
+        self.assertIn('id="checkpoint-history-dialog"', response.text)
+        self.assertIn('id="checkpoint-history-list"', response.text)
+        self.assertIn('id="checkpoint-fork-btn"', response.text)
+        self.assertIn('id="checkpoint-rollback-btn"', response.text)
         self.assertIn('id="rename-current-session-btn"', response.text)
         self.assertIn('id="mobile-more-btn"', response.text)
         self.assertIn('id="mobile-more-menu"', response.text)
@@ -810,6 +881,13 @@ class ApiTests(unittest.TestCase):
         self.assertIn("data-inline-agent-action", script_response.text)
         self.assertIn("inline-agent-controls", script_response.text)
         self.assertIn("data-inline-run-action", script_response.text)
+        self.assertIn("renderActiveRunControl", script_response.text)
+        self.assertIn("openCheckpointHistory", script_response.text)
+        self.assertIn("restoreSelectedCheckpoint", script_response.text)
+        self.assertIn("/checkpoints?limit=200", script_response.text)
+        self.assertIn('restoreSelectedCheckpoint("fork")', script_response.text)
+        self.assertIn('restoreSelectedCheckpoint("rollback")', script_response.text)
+        self.assertIn("新的执行路径已创建，但界面切换失败", script_response.text)
         self.assertIn("inline-change-review", script_response.text)
         self.assertIn("data-inline-change-action", script_response.text)
         self.assertIn("已在执行时写入", script_response.text)
@@ -839,6 +917,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".document-actions", stylesheet_response.text)
         self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)
         self.assertIn(".inline-agent-controls", stylesheet_response.text)
+        self.assertIn(".active-run-control", stylesheet_response.text)
+        self.assertIn(".checkpoint-history-dialog", stylesheet_response.text)
+        self.assertIn(".checkpoint-card", stylesheet_response.text)
         self.assertIn(".inline-change-review", stylesheet_response.text)
         self.assertIn(".change-file-row", stylesheet_response.text)
         self.assertIn("scroll-margin-block: 96px 340px", stylesheet_response.text)

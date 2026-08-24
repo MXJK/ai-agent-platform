@@ -104,6 +104,31 @@ def execute_agent_resume(task, **payload: Any) -> None:
     )
 
 
+@celery_app.task(bind=True, name="ai_agent_platform.agent_checkpoint_restore")
+def execute_agent_checkpoint_restore(task, **payload: Any) -> None:
+    run_id = str(payload["run_id"])
+    execute_reliable_task(
+        task=task,
+        task_name="agent_checkpoint_restore",
+        task_reference=run_id,
+        settings=settings,
+        handler=lambda: (
+            get_worker_services().query_service.execute_checkpoint_restore_task(
+                **payload,
+                broker_redelivered=is_broker_redelivery(task),
+            )
+        ),
+        failure_handler=lambda error, attempt, max_attempts: (
+            get_worker_services().query_service.fail_run_task(
+                run_id=run_id,
+                error=error,
+                attempt=attempt,
+                max_attempts=max_attempts,
+            )
+        ),
+    )
+
+
 @celery_app.task(bind=True, name="ai_agent_platform.memory_extraction")
 def execute_memory_extraction(task, **payload: Any) -> None:
     source_id = str(payload["source_id"])

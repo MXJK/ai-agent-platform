@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
-from ai_agent_platform.agents.coding.models import AgentRunEvent, ContextSource
+from ai_agent_platform.agents.coding.models import (
+    AgentCheckpoint,
+    AgentRunEvent,
+    ContextSource,
+)
 from ai_agent_platform.schemas.chat import (
     LLMProviderName,
     LLMRoutingPolicy,
@@ -105,6 +109,13 @@ class AgentRunResumeRequest(BaseModel):
 class AgentRunControlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    message: str = Field(default="", max_length=4000)
+
+
+class AgentCheckpointRestoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["rollback", "fork"]
     message: str = Field(default="", max_length=4000)
 
 
@@ -339,6 +350,44 @@ class AgentRunStatusResponse(BaseModel):
             branch_name=(execution.branch_name if execution is not None else None),
             worktree_path=(execution.worktree_path if execution is not None else None),
         )
+
+
+class AgentCheckpointResponse(BaseModel):
+    checkpoint_id: str
+    parent_checkpoint_id: Optional[str]
+    created_at: Optional[str]
+    step: int
+    source: str
+    next_nodes: list[str]
+    latest_node: Optional[str]
+    summary: str
+    interrupt: Optional[dict[str, Any]]
+    changed_files: list[str]
+    tool_call_count: int
+    can_restore: bool
+    is_current: bool
+    origin_run_id: Optional[str]
+    origin_checkpoint_id: Optional[str]
+    restore_mode: Optional[str]
+
+    @classmethod
+    def from_domain(cls, checkpoint: AgentCheckpoint) -> "AgentCheckpointResponse":
+        return cls(**checkpoint.__dict__)
+
+
+class AgentCheckpointsResponse(BaseModel):
+    run_id: str
+    current_checkpoint_id: Optional[str]
+    checkpoints: list[AgentCheckpointResponse]
+
+
+class AgentCheckpointRestoreResponse(BaseModel):
+    mode: Literal["rollback", "fork"]
+    source_run_id: str
+    source_checkpoint_id: str
+    conversation_id: str
+    forked_conversation_id: Optional[str]
+    run: AgentRunStatusResponse
 
 
 class AgentRunEventResponse(BaseModel):

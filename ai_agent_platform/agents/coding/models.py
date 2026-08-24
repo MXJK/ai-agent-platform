@@ -260,6 +260,26 @@ class AgentRunEvent:
 
 
 @dataclass(frozen=True)
+class AgentCheckpoint:
+    checkpoint_id: str
+    parent_checkpoint_id: Optional[str]
+    created_at: Optional[str]
+    step: int
+    source: str
+    next_nodes: list[str]
+    latest_node: Optional[str]
+    summary: str
+    interrupt: Optional[dict[str, Any]]
+    changed_files: list[str]
+    tool_call_count: int
+    can_restore: bool
+    is_current: bool
+    origin_run_id: Optional[str] = None
+    origin_checkpoint_id: Optional[str] = None
+    restore_mode: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class AgentToolExecution:
     run_id: str
     call_id: str
@@ -278,6 +298,19 @@ class AgentRunInvalidStateError(Exception):
         super().__init__(f"agent run {run_id} cannot be resumed from status {status}")
         self.run_id = run_id
         self.status = status
+
+
+class AgentCheckpointNotFoundError(Exception):
+    def __init__(self, run_id: str, checkpoint_id: str) -> None:
+        super().__init__(
+            f"checkpoint {checkpoint_id} does not belong to agent run {run_id}"
+        )
+        self.run_id = run_id
+        self.checkpoint_id = checkpoint_id
+
+
+class AgentCheckpointRestoreError(RuntimeError):
+    """Raised when a durable checkpoint cannot safely start a new path."""
 
 
 class AgentRunStore(Protocol):

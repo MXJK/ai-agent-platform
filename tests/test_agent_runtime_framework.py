@@ -306,6 +306,52 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertEqual(completed.answer, "Resumed and completed.")
         self.assertTrue(planner.observed_steering)
 
+    def test_historical_checkpoint_starts_an_independent_graph_thread(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            planner = InputPlanner()
+            runtime = CodingAgentRuntime(planner=planner)
+            source = runtime.run(
+                conversation_id="sess_checkpoint_source",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            checkpoints = runtime.list_checkpoints(source.run_id)
+            initial = next(item for item in checkpoints if item.step == -1)
+            self.assertTrue(initial.next_nodes)
+            self.assertTrue(initial.can_restore)
+            selected = next(
+                item for item in checkpoints if item.next_nodes == ["plan_tools"]
+            )
+            branch = runtime.prepare_checkpoint_branch(
+                source_run_id=source.run_id,
+                checkpoint_id=selected.checkpoint_id,
+                conversation_id=source.conversation_id,
+                mode="rollback",
+                message="take a different path",
+            )
+            runtime.restore_record(branch)
+            planner.decisions = 0
+            restored = runtime.run_from_checkpoint(branch.run_id)
+
+        self.assertEqual(source.status, "waiting_input")
+        self.assertNotEqual(branch.run_id, source.run_id)
+        self.assertEqual(branch.thread_id, branch.run_id)
+        self.assertEqual(restored.status, "waiting_input")
+        self.assertEqual(runtime.get_run(source.run_id).status, "waiting_input")
+        branch_history = runtime.list_checkpoints(branch.run_id)
+        self.assertTrue(
+            any(
+                item.origin_run_id == source.run_id
+                and item.origin_checkpoint_id == selected.checkpoint_id
+                and item.restore_mode == "rollback"
+                for item in branch_history
+            )
+        )
+
     def test_queued_steering_survives_worker_start_and_is_consumed(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

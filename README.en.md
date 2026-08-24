@@ -290,8 +290,12 @@ The browser workspace also includes:
   passes the allowed-root check. The macOS Finder picker remains a non-default
   local-development compatibility implementation;
 - approval, input, and pause checkpoints rendered inside the matching assistant
-  message, with inline approve, reject, feedback, continue, steer, pause, and cancel
-  actions; terminal messages include a changed-file ledger, line counts, expandable
+  message plus a persistent Run ribbon under the conversation header. Running
+  work can be paused or cancelled, suspended work can continue with a new direction,
+  and any finished Run exposes a Git-like checkpoint rail. Restoring a historical
+  boundary always creates a new Run: it can continue in the current conversation or
+  fork the prefix before the source Run into a new conversation, while preserving
+  the source Run and parent checkpoint. Terminal messages include a changed-file ledger, line counts, expandable
   Diff, validation state, and safe revert actions. Current `direct` Runs show the
   source location already written and require digest confirmation to revert;
   historical `patch_only` / `worktree` records retain their original presentation.
@@ -541,10 +545,17 @@ source location as an applied ChangeSet protected by baseline conflict checks, a
 mutation journal, the single-writer guard, and digest-bound safe revert. Historical
 `patch_only` and `worktree` Runs and ChangeSets remain readable.
 
-Running Agent status uses the product run store as its source of truth and adds
-the latest LangGraph checkpoint as a read-only progress overlay. The API can
-therefore expose already-completed trace nodes while a run is still executing
-without turning GET into a write. Once the product record reaches a terminal
+Running Agent status uses the product run store as its source of truth, while the
+LangGraph checkpointer retains ordered history. The read endpoint normalizes parent,
+timestamp, graph step, next nodes, interrupt metadata, and restore eligibility.
+Restore clones the selected boundary into a fresh `run_id`/`thread_id`, restores the
+frozen Run context and Effective Tool Pool, and invokes its next graph node.
+`rollback` advances the current conversation through a new auditable Run; `fork`
+creates a new conversation. Neither mode rewrites current workspace files—file
+reversal remains a ChangeSet revert operation. Every restored Run freezes an independent
+execution root; a cleaned `patch_only` copy is rebuilt from the currently registered
+source, so graph restoration never masquerades as an implicit historical file snapshot.
+Once the product record reaches a terminal
 state, a late running snapshot cannot overwrite it; resume failures also retain
 the original error and clean up the sandbox. Final metrics include elapsed time,
 node/tool counts, changed files, recovered errors, and provider-reported input,
@@ -882,6 +893,8 @@ GET  /api/v1/agent/runs/{run_id}
 GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
+GET  /api/v1/agent/runs/{run_id}/checkpoints?limit=100
+POST /api/v1/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore {"mode":"rollback|fork","message":"optional direction"}
 POST /api/v1/agent/runs/{run_id}/pause
 POST /api/v1/agent/runs/{run_id}/continue   {"message":"direction or answer"}
 POST /api/v1/agent/runs/{run_id}/steer      {"message":"new direction"}
@@ -898,8 +911,10 @@ state, and falls back to status polling if the stream fails or ends early.
 Final statuses are `completed`, `partial`, `blocked`, `cancelled`, and `failed`;
 suspended interaction states are `waiting_approval`, `waiting_input`, and
 `paused`. When a saved session is opened, the frontend uses the conversation-level
-latest-Run endpoint to restore the most recent run and reattach approval, input,
-or pause controls to its assistant message. Run observers capture both Run and
+latest-Run endpoint to restore the most recent run, reattach approval/input controls,
+and restore the persistent Run ribbon. Checkpoint history is actor-authorized per
+Run; terminal boundaries without a next node remain inspectable but are not
+restorable, and an active source Run must first reach a pause boundary. Run observers capture both Run and
 conversation IDs so late events from a previously viewed session cannot overwrite
 the active one.
 

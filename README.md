@@ -313,8 +313,11 @@ Token 时才作为后备。
   当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；当前 Compose
   禁用容器原生目录选择器，网页目录浏览器只展示挂载到 `/workspaces` 的内容，所有选中
   路径仍经过允许根校验；macOS Finder 选择器仅作为非默认本机开发兼容实现保留；
-- Agent 审批、追问和暂停检查点直接显示在对应的助手消息中，可就地确认、拒绝或补充
-  要求，运行中也可就地暂停、取消或发送转向；终态消息内显示修改文件、逐文件增删行、
+- Agent 审批、追问和暂停检查点直接显示在对应的助手消息中；会话标题下方另有常驻 Run
+  控制条，运行中可暂停/取消，暂停或等待输入时可补充方向并继续，任意终态也可打开
+  Git 风格 checkpoint 轨迹。历史可恢复节点会创建全新的 Run：可在当前会话“回到此处
+  继续”，也可复制该 Run 之前的会话前缀并分叉为新会话，原 Run 与父 checkpoint 不会
+  被改写或删除；终态消息内显示修改文件、逐文件增删行、
   可展开完整 Diff、ChangeSet 校验状态和安全回滚。当前产品的 `direct` Run 会显示已经
   写入的源码位置，回滚需二次确认摘要；历史 `patch_only` / `worktree` 记录仍按原语义显示。
   刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
@@ -523,9 +526,14 @@ setup_workspace
 检查、mutation journal、单写者锁和摘要绑定的安全回滚。底层仍可读取历史
 `patch_only` / `worktree` Run 和 ChangeSet。
 
-运行中的 Agent 状态以产品运行存储为事实源，并把最近的 LangGraph checkpoint 作为
-只读进度叠加，因此 API 可以在任务仍执行时暴露已经完成的 Trace 节点，GET 查询本身
-不会反写 Run。产品记录一旦进入终态便不可被迟到的 running 快照覆盖；恢复异常也会
+运行中的 Agent 状态以产品运行存储为事实源，LangGraph checkpointer 保存完整的有序
+checkpoint 历史。只读历史接口会规范化父节点、时间、图步骤、下一节点、中断信息和恢复
+资格；恢复接口把选中边界克隆到新的 `run_id`/`thread_id`，恢复冻结的 Run context 和
+Effective Tool Pool 后从其下一图节点执行。`rollback` 只改变当前会话的最新执行路径，
+`fork` 创建新会话；两者都不覆盖当前工作区文件，文件撤销仍必须走 ChangeSet 回滚。
+每个恢复 Run 都冻结独立执行根；已清理的 `patch_only` 临时副本会从当前登记的源码重新
+建立沙箱，因此恢复的是历史图状态而不是一份隐式的历史文件快照。
+产品记录一旦进入终态便不可被迟到的 running 快照覆盖；恢复异常也会
 保留原始错误并完成沙箱清理。最终指标包括耗时、节点和工具数量、修改文件、已恢复
 错误，以及 Provider 上报的输入、输出、思考和总 Token。
 
@@ -865,6 +873,8 @@ GET  /api/v1/agent/runs/{run_id}
 GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
+GET  /api/v1/agent/runs/{run_id}/checkpoints?limit=100
+POST /api/v1/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore {"mode":"rollback|fork","message":"可选的新方向"}
 POST /api/v1/agent/runs/{run_id}/pause
 POST /api/v1/agent/runs/{run_id}/continue   {"message":"补充方向或问题答案"}
 POST /api/v1/agent/runs/{run_id}/steer      {"message":"新的执行方向"}
@@ -881,7 +891,9 @@ SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接�
 轮询。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
 `waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
-一次运行，并把审批、追问或暂停控件重新挂回原助手消息；生命周期观察器绑定 Run 和
+一次运行，并把审批、追问或暂停控件重新挂回原助手消息，同时恢复常驻 Run 控制条。
+checkpoint 时间线按 Run 做所有权校验；没有下一节点的终态 checkpoint 仍可查看但不能
+恢复，运行中的源 Run 必须先到达暂停边界。生命周期观察器绑定 Run 和
 会话 ID，切换会话不会让旧 Run 的晚到事件覆盖当前页面。最终助手消息用持久化
 `source_run_id + role` 唯一键确保只写一次；Worker 重投可补写崩溃窗口内缺失的消息，已写入
 时则安全跳过。

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
@@ -17,6 +18,7 @@ from ai_agent_platform.agents.coding import (
     AgentRunResult,
     InMemoryAgentRunStore,
 )
+from ai_agent_platform.agents.coding.models import AgentCheckpoint
 from ai_agent_platform.api.routes.agent_runs import create_agent_runs_router
 from ai_agent_platform.core import Settings
 from ai_agent_platform.domain import (
@@ -132,6 +134,79 @@ class QueryContractTests(unittest.TestCase):
         self.assertEqual(service.params.entrypoint, "api")
         self.assertEqual(service.params.focus_files, ("app.py",))
         self.assertEqual(service.params.metadata_dict()["transport"], "http")
+
+    def test_checkpoint_history_and_restore_http_contract(self) -> None:
+        record = AgentRunRecord(
+            run_id="run_source",
+            thread_id="run_source",
+            conversation_id="sess_source",
+            workspace_id="workspace_main",
+            workspace_root="/workspace",
+            status="paused",
+            checkpoint_id="checkpoint_current",
+            latest_node="plan_tools",
+            next_nodes=["plan_tools"],
+            trace=[],
+        )
+        branch = replace(
+            record,
+            run_id="run_branch",
+            thread_id="run_branch",
+            conversation_id="sess_branch",
+            status="queued",
+            checkpoint_id="checkpoint_branch",
+        )
+        checkpoint = AgentCheckpoint(
+            checkpoint_id="checkpoint_history",
+            parent_checkpoint_id="checkpoint_parent",
+            created_at="2026-08-23T12:00:00+00:00",
+            step=7,
+            source="loop",
+            next_nodes=["plan_tools"],
+            latest_node="merge_evidence",
+            summary="Evidence merged.",
+            interrupt=None,
+            changed_files=[],
+            tool_call_count=3,
+            can_restore=True,
+            is_current=False,
+        )
+
+        class Stub:
+            def list_checkpoints_for_actor(self, run_id, actor, *, limit):
+                self.list_call = (run_id, actor, limit)
+                return record, [checkpoint]
+
+            def restore_checkpoint(self, **kwargs):
+                self.restore_call = kwargs
+                return branch, SimpleNamespace(id="sess_branch")
+
+        service = Stub()
+        app = FastAPI()
+        app.include_router(
+            create_agent_runs_router(service, Settings()),  # type: ignore[arg-type]
+            prefix="/api/v1",
+        )
+        with TestClient(app) as client:
+            history = client.get(
+                "/api/v1/agent/runs/run_source/checkpoints?limit=25"
+            )
+            restored = client.post(
+                "/api/v1/agent/runs/run_source/checkpoints/"
+                "checkpoint_history/restore",
+                json={"mode": "fork", "message": "try another approach"},
+            )
+
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(
+            history.json()["checkpoints"][0]["checkpoint_id"],
+            "checkpoint_history",
+        )
+        self.assertTrue(history.json()["checkpoints"][0]["can_restore"])
+        self.assertEqual(restored.status_code, 202)
+        self.assertEqual(restored.json()["run"]["run_id"], "run_branch")
+        self.assertEqual(restored.json()["forked_conversation_id"], "sess_branch")
+        self.assertEqual(service.restore_call["mode"], "fork")
 
 
 class QueryServiceTests(unittest.IsolatedAsyncioTestCase):

@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260823-thinking-process-v1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260824-checkpoint-time-travel-v2" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -25,6 +25,8 @@
       <symbol id="icon-gauge" viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0" /><path d="M12 18 16 10" /><path d="M4 18h16" /></symbol>
       <symbol id="icon-model" viewBox="0 0 24 24"><path d="M12 3 4.5 7.2 12 11.5l7.5-4.3L12 3Z" /><path d="m4.5 12 7.5 4.3 7.5-4.3M4.5 16.8 12 21l7.5-4.2" /></symbol>
       <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="6" rx="2" /><rect x="3" y="15" width="6" height="6" rx="2" /><rect x="15" y="15" width="6" height="6" rx="2" /><path d="M12 9v3M6 15v-3h12v3" /></symbol>
+      <symbol id="icon-branch" viewBox="0 0 24 24"><circle cx="7" cy="5" r="2" /><circle cx="17" cy="7" r="2" /><circle cx="7" cy="19" r="2" /><path d="M7 7v10M9 11h3a5 5 0 0 0 5-5" /></symbol>
+      <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" /></symbol>
       <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m9 12 6.8-6.8a3 3 0 0 1 4.2 4.2l-9.1 9.1a5 5 0 0 1-7.1-7.1l8.5-8.5M7 15l8.4-8.4" /></symbol>
       <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5" /></symbol>
       <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6.5 13.5 12 19l5.5-5.5" /></symbol>
@@ -178,6 +180,31 @@
               </button>
             </div>
           </header>
+
+          <section id="active-run-control" class="active-run-control" aria-label="当前 Agent 运行控制" hidden>
+            <div class="active-run-signal" aria-hidden="true"><span></span><i></i></div>
+            <div class="active-run-copy">
+              <span id="active-run-kicker">ACTIVE RUN</span>
+              <strong id="active-run-title">Agent 正在运行</strong>
+              <small id="active-run-detail">将在下一个安全边界响应控制操作</small>
+            </div>
+            <label id="active-run-message-field" class="active-run-message-field" hidden>
+              <span class="sr-only">继续运行时的补充方向</span>
+              <input id="active-run-message-input" maxlength="4000" placeholder="继续时可补充新的方向" />
+            </label>
+            <div class="active-run-actions">
+              <button id="active-run-checkpoints-btn" class="button ghost" type="button">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-branch"></use></svg>
+                检查点
+              </button>
+              <button id="active-run-pause-btn" class="button secondary" type="button">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
+                暂停
+              </button>
+              <button id="active-run-continue-btn" class="button primary" type="button" hidden>继续运行</button>
+              <button id="active-run-cancel-btn" class="button danger" type="button">取消</button>
+            </div>
+          </section>
 
           <div id="chat-output" class="conversation" aria-label="对话内容" tabindex="0">
             <div class="welcome-state">
@@ -1154,8 +1181,80 @@
       </form>
     </dialog>
 
+    <dialog id="checkpoint-history-dialog" class="settings-dialog checkpoint-history-dialog" aria-labelledby="checkpoint-history-title">
+      <section class="settings-shell checkpoint-history-shell">
+        <header class="dialog-header checkpoint-history-header">
+          <div>
+            <p class="eyebrow">Run time travel</p>
+            <h2 id="checkpoint-history-title">从检查点继续</h2>
+            <p>选择一个已完成的图节点，在当前会话回到此处，或分叉为一条新的执行路径。</p>
+          </div>
+          <button id="close-checkpoint-history-btn" class="icon-button" type="button" aria-label="关闭检查点历史">
+            <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+          </button>
+        </header>
+
+        <div class="checkpoint-history-body">
+          <aside class="checkpoint-rail-pane" aria-labelledby="checkpoint-rail-title">
+            <div class="checkpoint-rail-heading">
+              <div><span class="utility-label">Execution graph</span><h3 id="checkpoint-rail-title">Checkpoint 轨迹</h3></div>
+              <code id="checkpoint-run-label">—</code>
+            </div>
+            <div id="checkpoint-history-list" class="checkpoint-history-list" role="listbox" aria-label="选择历史检查点">
+              <div class="empty-state">正在读取 checkpoint…</div>
+            </div>
+          </aside>
+
+          <article class="checkpoint-detail-pane" aria-live="polite">
+            <div id="checkpoint-detail-empty" class="checkpoint-detail-empty">
+              <span class="checkpoint-detail-mark" aria-hidden="true">◇</span>
+              <strong>选择一个检查点</strong>
+              <p>每个节点都保留自己的状态、下一步与父级关系。</p>
+            </div>
+            <div id="checkpoint-detail" hidden>
+              <div class="checkpoint-detail-heading">
+                <div><span id="checkpoint-detail-step" class="utility-label">STEP —</span><h3 id="checkpoint-detail-title">检查点</h3></div>
+                <span id="checkpoint-detail-state" class="meta-badge">可恢复</span>
+              </div>
+              <p id="checkpoint-detail-summary" class="checkpoint-detail-summary"></p>
+              <dl class="checkpoint-detail-grid">
+                <div><dt>Checkpoint</dt><dd><code id="checkpoint-detail-id">—</code></dd></div>
+                <div><dt>下一节点</dt><dd id="checkpoint-detail-next">—</dd></div>
+                <div><dt>工具调用</dt><dd id="checkpoint-detail-tools">0</dd></div>
+                <div><dt>工作区变更</dt><dd id="checkpoint-detail-files">无</dd></div>
+              </dl>
+              <label class="checkpoint-direction-field" for="checkpoint-direction-input">
+                <span>恢复后的新方向 <small>可选，将在下一个规划边界生效</small></span>
+                <textarea id="checkpoint-direction-input" rows="3" maxlength="4000" placeholder="例如：从这里开始只补测试，不再改动实现"></textarea>
+              </label>
+              <div class="checkpoint-workspace-warning">
+                <svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                <p><strong>执行状态与文件状态分开。</strong>恢复 checkpoint 不会覆盖当前工作区文件；如需撤销文件修改，请先使用对应 Run 的 ChangeSet 回滚。</p>
+              </div>
+              <p id="checkpoint-action-error" class="inline-checkpoint-error" role="alert" hidden></p>
+              <div class="checkpoint-detail-actions">
+                <button id="checkpoint-fork-btn" class="button secondary" type="button">
+                  <svg class="app-icon" aria-hidden="true"><use href="#icon-branch"></use></svg>
+                  分叉为新会话
+                </button>
+                <button id="checkpoint-rollback-btn" class="button primary" type="button">
+                  回到此处继续
+                  <svg class="app-icon" aria-hidden="true"><use href="#icon-arrow-right"></use></svg>
+                </button>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <footer class="dialog-footer checkpoint-history-footer">
+          <p id="checkpoint-history-status">原 Run 与历史 checkpoint 会完整保留。</p>
+          <button class="button ghost" id="checkpoint-history-done-btn" type="button">关闭</button>
+        </footer>
+      </section>
+    </dialog>
+
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260823-thinking-process-v1" defer></script>
+    <script src="/static/app.js?v=20260824-checkpoint-time-travel-v2" defer></script>
   </body>
 </html>
