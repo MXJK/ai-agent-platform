@@ -633,8 +633,8 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
-工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
-`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按固定成本顺序收缩：先把较旧
+工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过统一 input allowance 扣除
+工具 Schema 份额后的消息预算时，按固定成本顺序收缩：先把较旧
 工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
 结果；仍超限才按完整 assistant/tool 组折叠旧观察；折叠后重新计量，必要时用共享预算原语
 成组丢弃并截断正文。所有阶段保留多 tool-call assistant 与全部 result 的原子配对。
@@ -654,7 +654,7 @@ Harness 只允许一次强制压缩和一次重试，第二次同类错误立即
 本阶段不暴露手动 `/compact`：CLI 的每次普通输入都会创建新 Run，只给新 Run 写一个
 “强制压缩”标记并不能收缩既有 Session 或旧 Run 的上下文。真正的手动压缩需要在统一预算、
 结构化快照与 Session 压缩 API 中同时定义 instruction、Token 前后值和可观测结果，延后到
-后续上下文预算阶段实现。
+后续结构化快照阶段实现。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
 root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
@@ -806,6 +806,34 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 把请求直接抛给 Provider 触发 `context_window_too_small`。装配结果通过 Chat SSE 的
 `context` 事件和 `/sessions/{id}/token-usage` 的 `context` 字段暴露：估算 Token、
 预算、是否含摘要、丢弃与截断条数、同步压缩次数。
+
+#### 统一上下文预算
+
+Agent Run 的模型输入额度只在 `setup_workspace` 解析和切分一次。先显式计量 system prompt
+与本 Run 可见工具 input/output Schema 的固定份额，再以
+`LLM_CONTEXT_EVIDENCE_RATIO`（默认 0.25）和
+`LLM_CONTEXT_HISTORY_RATIO`（默认 0.15）切分剩余额度；native 工具转录取得最后的余量。
+所有份额相加恰好等于 `LLM_CONTEXT_INPUT_TOKEN_RATIO` 所解析的 input allowance，并持久化到
+Run 状态及 `setup_workspace` trace。后续层只读取这些份额，不再各自从模型窗口推导比例。
+
+份额在 seed 组装时按字段生效：evidence 先整条丢弃排名较低的来源，最后一个来源只裁剪
+`text`；conversation history 在 Token 模式下使用完整规范化消息，从最新向前选择，只在
+字段边界裁剪最后一条装不下的 content，不再套用摘要 600 字符或每条 280 字符上限；RAG 的
+固定字符上限只在拿不到模型信息时兜底。system、用户本轮请求、checkpoint 恢复方向及全部
+steering 保持逐字。
+因此 seed 始终是合法 JSON，Layered ladder 不会在序列化字符串中间截断它；Provider 报
+`context_overflow` 时也会用缩小后的 evidence/history 份额重建 seed，再执行唯一一次强制
+回收与重试。
+
+若 system 与工具 Schema 固定开销已使 transcript 无可用份额，Run 会在 Provider 调用前以
+`blocked/context_budget_too_small` 结束。`AGENT_NATIVE_CONTEXT_MAX_CHARS`、
+`MAX_AGENT_HISTORY_CHARS`、`MAX_AGENT_HISTORY_MESSAGES` 与 RAG 字符上限仅是预算解析不可用
+或 legacy checkpoint 缺少份额时的兼容退路。
+
+生产入口仍是有界的：Session assembler 先按其消息 ceiling 与 Token 预算冻结
+`RunContextSnapshot.controlled_history`；Coding Runtime 不再对这份已受控输入重复套 12 条
+消息上限，而是完整写入 checkpoint state，再由 history share 决定本轮模型视图。这样既不会
+绕过提交边界的大小控制，也不会让旧消息数上限压过统一预算。
 
 Prompt 前缀按稳定性排序：用户画像等长期稳定内容在最前，滚动摘要与历史其次，
 每轮随查询变化的项目记忆紧贴当前用户消息，使 Provider 的前缀缓存可以命中。
@@ -1155,7 +1183,8 @@ CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW=true
 LLM_MAX_CONTEXT_MESSAGES=12
 LLM_MAX_CONTEXT_MESSAGES_CEILING=48
 LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
-AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
+LLM_CONTEXT_EVIDENCE_RATIO=0.25
+LLM_CONTEXT_HISTORY_RATIO=0.15
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
 AGENT_TOOL_RESULT_KEEP_RECENT=6
 AGENT_NATIVE_MAX_COMPACTIONS=3
@@ -1163,6 +1192,10 @@ AGENT_NATIVE_MAX_COMPACTIONS=3
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算
 允许时的上界；两者相等即固定为原有的定长窗口。
+
+`LLM_CONTEXT_INPUT_TOKEN_RATIO` 是唯一的窗口比例。evidence 和 history 比例都作用于扣除
+system/tool-schema 固定开销后的余额，二者之和必须小于 1；调小它们会把更多额度留给工具
+转录。旧 `AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 已移除。
 
 ## 独立知识库
 

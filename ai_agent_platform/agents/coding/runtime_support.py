@@ -24,6 +24,7 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_VALIDATION_TOOLS,
 )
 from ai_agent_platform.agents.coding.text import snippet
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 MAX_AGENT_HISTORY_MESSAGES = 6
 MAX_AGENT_HISTORY_CHARS = 1800
@@ -304,10 +305,13 @@ def recent_conversation_context(
     *,
     max_messages: int = MAX_AGENT_HISTORY_MESSAGES,
     max_chars: int = MAX_AGENT_HISTORY_CHARS,
+    max_tokens: int | None = None,
 ) -> str:
-    """Return a bounded, newest-first-selected conversation excerpt."""
+    """Return a newest-first excerpt using a model share or static fallback."""
 
     history = state.get("history", [])
+    if max_tokens is not None:
+        return _recent_conversation_context_tokens(history, max_tokens)
     summary_message = next(
         (
             message
@@ -352,6 +356,60 @@ def recent_conversation_context(
             break
     lines = ([summary_line] if summary_line else []) + list(reversed(selected))
     return "\n".join(lines)[:max_chars]
+
+
+def _recent_conversation_context_tokens(
+    history: list[dict[str, Any]],
+    max_tokens: int,
+) -> str:
+    """Select full normalized messages newest-first within an exact token share."""
+
+    from ai_agent_platform.services.context_budget import fit_text_to_tokens
+
+    if max_tokens <= 0:
+        return ""
+    selected: list[str] = []
+    for message in reversed(history):
+        role = str(message.get("role") or "").strip()
+        content = " ".join(str(message.get("content") or "").split())
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        line = f"{role}: {content}"
+        candidate = "\n".join([line, *selected])
+        if estimate_text_tokens(candidate) <= max_tokens:
+            selected.insert(0, line)
+            continue
+
+        best = ""
+        low = 0
+        high = estimate_text_tokens(content)
+        while low <= high:
+            allowed = (low + high) // 2
+            fitted = fit_text_to_tokens(
+                content,
+                allowed,
+                estimate_tokens=estimate_text_tokens,
+            )
+            fitted_line = f"{role}: {fitted}" if fitted else ""
+            fitted_candidate = (
+                "\n".join([fitted_line, *selected])
+                if fitted_line
+                else "\n".join(selected)
+            )
+            if fitted_line and estimate_text_tokens(fitted_candidate) <= max_tokens:
+                best = fitted_line
+                low = allowed + 1
+            else:
+                high = allowed - 1
+        if best:
+            selected.insert(0, best)
+        break
+    excerpt = "\n".join(selected)
+    if estimate_text_tokens(excerpt) > max_tokens:
+        raise AssertionError("history context exceeded its resolved token share")
+    return excerpt
+
+
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:
     return {
         "type": "tool_plan_review",

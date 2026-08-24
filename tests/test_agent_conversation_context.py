@@ -3,10 +3,12 @@ import unittest
 
 from ai_agent_platform.agents.coding.planner import native_tool_messages
 from ai_agent_platform.agents.coding.runtime_support import (
+    CONVERSATION_SUMMARY_PREFIX,
     MAX_AGENT_HISTORY_CHARS,
     build_workspace_query,
     recent_conversation_context,
 )
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 class AgentConversationContextTests(unittest.TestCase):
@@ -64,6 +66,63 @@ class AgentConversationContextTests(unittest.TestCase):
         self.assertNotIn("历史消息 1", context)
         self.assertLessEqual(len(context), MAX_AGENT_HISTORY_CHARS)
 
+
+class AgentConversationTokenShareTests(unittest.TestCase):
+    def test_long_ascii_message_uses_share_without_legacy_280_char_cap(self) -> None:
+        state = {
+            "history": [
+                {
+                    "role": "user",
+                    "content": "ascii-head " + "a" * 4_000 + " ascii-tail",
+                }
+            ]
+        }
+
+        context = recent_conversation_context(state, max_tokens=400)
+
+        self.assertLessEqual(estimate_text_tokens(context), 400)
+        self.assertGreater(len(context), 1_000)
+        self.assertTrue(context.startswith("user: ascii-head"))
+        self.assertTrue(context.endswith("ascii-tail"))
+
+    def test_long_chinese_message_uses_exact_share_without_legacy_cap(self) -> None:
+        state = {
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "中文开头" + "内容" * 500 + "中文结尾",
+                }
+            ]
+        }
+
+        context = recent_conversation_context(state, max_tokens=400)
+
+        self.assertLessEqual(estimate_text_tokens(context), 400)
+        self.assertGreater(len(context), 280)
+        self.assertTrue(context.startswith("assistant: 中文开头"))
+        self.assertTrue(context.endswith("中文结尾"))
+
+    def test_long_summary_uses_token_share_not_fixed_600_char_snippet(self) -> None:
+        state = {
+            "history": [
+                {
+                    "role": "system",
+                    "content": (
+                        CONVERSATION_SUMMARY_PREFIX
+                        + "summary-head "
+                        + "s" * 4_000
+                        + " summary-tail"
+                    ),
+                }
+            ]
+        }
+
+        context = recent_conversation_context(state, max_tokens=400)
+
+        self.assertLessEqual(estimate_text_tokens(context), 400)
+        self.assertGreater(len(context), 1_000)
+        self.assertTrue(context.startswith("system: " + CONVERSATION_SUMMARY_PREFIX))
+        self.assertTrue(context.endswith("summary-tail"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "PARALLEL-READ-TOOL-CALLS"
-next_action: "Monitor bounded parallel read batches on main and address feedback; no deployment is scheduled."
+status: "active"
+active_task: "UNIFIED-CONTEXT-BUDGET"
+next_action: "Resolve integration with parallel read calls, verify main, synchronize gitignored INTERVIEW_NOTES, and close the Unified Context Budget task."
 blockers: []
-last_verified_commit: "4e04b7808832cdc052b31b07b48842e952b10145"
-updated_at: "2026-08-24T14:19:07+08:00"
+last_verified_commit: "5ce0bf5d76829bbc10453ed8633d12a135e02755"
+updated_at: "2026-08-24T14:30:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

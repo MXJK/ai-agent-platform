@@ -34,10 +34,34 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_tool_result_max_tokens, 2000)
         self.assertEqual(settings.agent_tool_result_keep_recent, 6)
         self.assertEqual(settings.agent_native_max_compactions, 3)
+        self.assertEqual(settings.llm_context_evidence_ratio, 0.25)
+        self.assertEqual(settings.llm_context_history_ratio, 0.15)
+        self.assertFalse(hasattr(settings, "agent_native_context_token_ratio"))
         self.assertEqual(settings.agent_approval_policy, "on_request")
         self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
         self.assertEqual(settings.native_directory_picker_mode, "loopback")
+
+    def test_reads_unified_context_share_ratios_from_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CONTEXT_EVIDENCE_RATIO": "0.2",
+                "LLM_CONTEXT_HISTORY_RATIO": "0.1",
+                # The removed ratio is intentionally ignored during migration.
+                "AGENT_NATIVE_CONTEXT_TOKEN_RATIO": "0.9",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.llm_context_evidence_ratio, 0.2)
+        self.assertEqual(settings.llm_context_history_ratio, 0.1)
+        self.assertFalse(hasattr(settings, "agent_native_context_token_ratio"))
 
     def test_workspace_mode_environment_precedence_and_legacy_mapping(self) -> None:
         with patch.dict(
@@ -424,6 +448,13 @@ class SettingsTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             Settings(llm_circuit_error_rate_threshold=1.1)
+        with self.assertRaisesRegex(ValueError, "llm_context_evidence_ratio"):
+            Settings(llm_context_evidence_ratio=-0.1)
+        with self.assertRaisesRegex(ValueError, "leave room"):
+            Settings(
+                llm_context_evidence_ratio=0.6,
+                llm_context_history_ratio=0.4,
+            )
 
     def test_downgrade_budget_requires_a_fallback_model(self) -> None:
         with self.assertRaisesRegex(ValueError, "require a fallback"):

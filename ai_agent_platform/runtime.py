@@ -1113,9 +1113,8 @@ class ApplicationFactory:
             native_context_keep_messages=(
                 settings.agent_native_context_keep_messages
             ),
-            native_context_token_ratio=(
-                settings.agent_native_context_token_ratio
-            ),
+            context_evidence_ratio=settings.llm_context_evidence_ratio,
+            context_history_ratio=settings.llm_context_history_ratio,
             tool_result_keep_recent=settings.agent_tool_result_keep_recent,
             native_max_compactions=settings.agent_native_max_compactions,
             llm_client=llm_client,
@@ -1131,7 +1130,6 @@ class ApplicationFactory:
             tool_result_max_tokens=settings.agent_tool_result_max_tokens,
             graph_recursion_limit=settings.agent_graph_recursion_limit,
             approval_policy=settings.agent_approval_policy,
-            max_history_messages=settings.llm_max_context_messages,
             knowledge_context_provider=knowledge_base_service,
             project_memory_provider=project_memory_service,
             max_rag_context_chars=settings.rag_max_prompt_chars,

@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.models import CodingAgentState, ContextSour
 from ai_agent_platform.agents.coding.planner import (
     bounded_confidence,
     classify_context_source,
+    native_system_prompt,
 )
 from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
@@ -22,6 +23,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.text import extract_paths, unique
 from ai_agent_platform.integrations.permissions import ToolApproval
 from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 from ai_agent_platform.agents.coding.tool_access import (
     permission_approval_item as _permission_approval_item,
@@ -91,6 +93,9 @@ class ContextRetrievalNodes:
         self._knowledge_context_provider = runtime._knowledge_context_provider
         self._project_memory_provider = runtime._project_memory_provider
         self._max_rag_context_chars = runtime._max_rag_context_chars
+        self._llm_client = runtime._llm_client
+        self._context_evidence_ratio = runtime._context_evidence_ratio
+        self._context_history_ratio = runtime._context_history_ratio
         self._max_exploration_rounds = runtime._max_exploration_rounds
         self._max_read_tools_per_round = runtime._max_read_tools_per_round
         self._max_context_files = runtime._max_context_files
@@ -119,9 +124,11 @@ class ContextRetrievalNodes:
             raise ValueError("workspace_unavailable: execution root is inaccessible")
         for path in state.get("focus_files", []):
             _validate_relative_workspace_path(path, root)
+        shares = self._resolve_context_shares(state)
         return {
             "execution_root": str(root),
             "execution_workspace_mode": mode,
+            "context_shares": shares,
             "trace": _append_trace(
                 state,
                 node="setup_workspace",
@@ -131,9 +138,50 @@ class ContextRetrievalNodes:
                     "workspace_mode": mode,
                     "execution_root": str(root),
                     "focus_files": state.get("focus_files", []),
+                    "context_shares": shares,
                 },
             ),
         }
+
+    def _resolve_context_shares(self, state: CodingAgentState) -> dict[str, int]:
+        """Resolve and divide the serving model's input allowance exactly once."""
+
+        from ai_agent_platform.services.context_budget import (
+            divide_context_budget,
+            estimate_tool_schema_tokens,
+        )
+
+        resolve = getattr(self._llm_client, "resolve_context_budget", None)
+        if not callable(resolve):
+            return {}
+        try:
+            budget = resolve()
+            system_tokens = estimate_text_tokens(
+                json.dumps(
+                    [
+                        {
+                            "role": "system",
+                            "content": native_system_prompt(
+                                self._max_read_tools_per_round
+                            ),
+                        }
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+            shares = divide_context_budget(
+                budget.input_tokens,
+                system_tokens=system_tokens,
+                tool_schema_tokens=estimate_tool_schema_tokens(
+                    self._visible_tool_specs(state),
+                    estimate_tokens=estimate_text_tokens,
+                ),
+                evidence_ratio=self._context_evidence_ratio,
+                history_ratio=self._context_history_ratio,
+            )
+        except Exception:  # noqa: BLE001 - resolution failure uses static fallbacks
+            return {}
+        return shares.as_dict()
 
     def _load_project_instructions(
         self, state: CodingAgentState
@@ -363,24 +411,51 @@ class ContextRetrievalNodes:
                     )
 
         retrieved.sort(key=lambda item: float(item.score), reverse=True)
+        shares = state.get("context_shares") or {}
+        evidence_token_limit = (
+            max(0, int(shares.get("evidence_tokens", 0)))
+            if shares
+            else None
+        )
         seen: set[tuple[str, str, str]] = set()
         sources: list[ContextSource] = []
         used_chars = 0
+        used_tokens = 0
         truncated = False
         for item in retrieved:
             key = (item.knowledge_base_id, item.document_id, item.id)
             if key in seen:
                 continue
             seen.add(key)
-            remaining = self._max_rag_context_chars - used_chars
-            if remaining <= 0:
-                truncated = True
-                break
             text = str(item.text)
-            source_truncated = len(text) > remaining
-            if source_truncated:
-                text = text[:remaining]
-                truncated = True
+            if evidence_token_limit is not None:
+                remaining_tokens = evidence_token_limit - used_tokens
+                if remaining_tokens <= 0:
+                    truncated = True
+                    break
+                source_truncated = (
+                    estimate_text_tokens(text) > remaining_tokens
+                )
+                if source_truncated:
+                    from ai_agent_platform.services.context_budget import (
+                        fit_text_to_tokens,
+                    )
+
+                    text = fit_text_to_tokens(
+                        text,
+                        remaining_tokens,
+                        estimate_tokens=estimate_text_tokens,
+                    )
+                    truncated = True
+            else:
+                remaining_chars = self._max_rag_context_chars - used_chars
+                if remaining_chars <= 0:
+                    truncated = True
+                    break
+                source_truncated = len(text) > remaining_chars
+                if source_truncated:
+                    text = text[:remaining_chars]
+                    truncated = True
             sources.append(
                 ContextSource(
                     kind="knowledge_chunk",
@@ -402,6 +477,7 @@ class ContextRetrievalNodes:
                 )
             )
             used_chars += len(text)
+            used_tokens += estimate_text_tokens(text)
         if selected and not sources and not any(
             warning.startswith("knowledge retrieval failed") for warning in warnings
         ):
@@ -418,7 +494,17 @@ class ContextRetrievalNodes:
                     "hit_counts": hit_counts,
                     "source_count": len(sources),
                     "chars": used_chars,
-                    "limit": self._max_rag_context_chars,
+                    "estimated_tokens": used_tokens,
+                    "limit": (
+                        evidence_token_limit
+                        if evidence_token_limit is not None
+                        else self._max_rag_context_chars
+                    ),
+                    "limit_unit": (
+                        "tokens"
+                        if evidence_token_limit is not None
+                        else "chars_fallback"
+                    ),
                     "truncated": truncated,
                     "warnings": warnings,
                 },
