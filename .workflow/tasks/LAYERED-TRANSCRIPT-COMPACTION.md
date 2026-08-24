@@ -53,21 +53,21 @@ This is step 3 of 4 and depends on CONTEXT-BUDGET-PRIMITIVES.
 
 ## Acceptance criteria
 
-- [ ] Characterization tests lock today's `_compact_native_messages` behavior before any
+- [x] Characterization tests lock today's `_compact_native_messages` behavior before any
       change, following `tests/test_agent_loop_characterization.py`.
-- [ ] Reduction runs in order: tool-result eviction, then fold, then drop/truncate.
-- [ ] Microcompact never splits an assistant/tool pair and never leaves a `tool_calls`
+- [x] Reduction runs in order: tool-result eviction, then fold, then drop/truncate.
+- [x] Microcompact never splits an assistant/tool pair and never leaves a `tool_calls`
       entry without a matching result; assistant text and message structure survive.
-- [ ] Folding re-measures its own output; a still-over-budget transcript falls through
+- [x] Folding re-measures its own output; a still-over-budget transcript falls through
       instead of being returned as if it fit.
-- [ ] Exceeding the compaction limit terminates the run with the documented reason and a
+- [x] Exceeding the compaction limit terminates the run with the documented reason and a
       final answer that says where it stopped, instead of folding again.
-- [ ] A provider context-length error triggers exactly one forced compaction and one
+- [x] A provider context-length error triggers exactly one forced compaction and one
       retry — never a loop.
-- [ ] `/compact [instruction]` works in the CLI REPL.
-- [ ] `.venv/bin/python -m pytest -q` passes.
-- [ ] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
-- [ ] Documentation updated: new configuration keys, the new terminal reason, the CLI
+- [x] `/compact [instruction]` works in the CLI REPL.
+- [x] `.venv/bin/python -m pytest -q` passes.
+- [x] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
+- [x] Documentation updated: new configuration keys, the new terminal reason, the CLI
       command and the SSE stage field are user-visible. Run
       `.venv/bin/python INTERVIEW_NOTES/validate.py`.
 
@@ -83,7 +83,32 @@ This is step 3 of 4 and depends on CONTEXT-BUDGET-PRIMITIVES.
   and easier to diagnose than a slowly emptying context.
 - The reactive retry is capped at one attempt. Retrying a context error more than once
   without new information is a loop, not a recovery.
+- Initial user requests, checkpoint restore directions, and pause/resume steering are
+  verbatim/non-truncatable. If those immutable instructions cannot fit, the Run blocks
+  instead of silently continuing with a partial direction.
+- Restored transcripts validate assistant/tool call boundaries before any reduction.
+  Current multi-call turns require complete call IDs; the single positional pair written
+  by legacy checkpoints remains accepted when both sides omit IDs.
+- Checkpoint clones normalize missing compaction channels to `0`, `[]`, and `false`,
+  preserve channels that are present, clear the consumed `/compact` command metadata,
+  and mark inherited context-stage events as replayed with their source identity.
 
 ## Verification
 
+- Focused compaction/checkpoint/router/CLI/config suite:
+  `77 passed, 14 subtests passed`.
+- Full suite: `586 passed, 68 subtests passed`.
+- `.venv/bin/python -m compileall ai_agent_platform tests evals`: passed.
+- `git diff --check`: passed.
+- `INTERVIEW_NOTES/validate.py` was not applicable: the current `main` stopped tracking
+  the interview handbook in commit `ca71b1e6`; this task changed both `README.md` and
+  `README.en.md` instead.
+
 ## Result
+
+Implemented the ordered native-transcript reduction ladder, post-fold remeasurement,
+bounded fold breaker, provider `context_overflow` recovery, CLI `/compact`, stage metrics
+and SSE events, and environment configuration. Added checkpoint/time-travel compatibility
+for missing or consumed compaction state, verbatim steering under pressure, replay-labeled
+inherited events, and invalid assistant/tool boundary rejection. Documentation describes
+the user-visible terminal reason, event contract, settings, and manual command.

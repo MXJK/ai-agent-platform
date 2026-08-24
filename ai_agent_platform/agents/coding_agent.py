@@ -136,6 +136,8 @@ class CodingAgentRuntime:
         native_context_max_chars: int = 48000,
         native_context_keep_messages: int = 10,
         native_context_token_ratio: float = 0.5,
+        tool_result_keep_recent: int = 6,
+        native_max_compactions: int = 3,
         plan_max_output_tokens: int = 4096,
         mutation_max_output_tokens: int = 16384,
         final_max_output_tokens: int = 4096,
@@ -172,6 +174,12 @@ class CodingAgentRuntime:
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
         self._native_context_token_ratio = native_context_token_ratio
+        if tool_result_keep_recent <= 0:
+            raise ValueError("tool_result_keep_recent must be greater than 0")
+        if native_max_compactions <= 0:
+            raise ValueError("native_max_compactions must be greater than 0")
+        self._tool_result_keep_recent = tool_result_keep_recent
+        self._native_max_compactions = native_max_compactions
         self._llm_client = llm_client
         self._context_compressor = context_compressor
         self._plan_max_output_tokens = plan_max_output_tokens
@@ -383,6 +391,13 @@ class CodingAgentRuntime:
             "native_consecutive_failures": 0,
             "native_context_compactions": 0,
             "native_context_chars": 0,
+            "native_context_reduction_stages": [],
+            "native_context_force_compaction": bool(
+                run_context is not None
+                and run_context.metadata.entrypoint_metadata.get(
+                    "force_context_compaction"
+                )
+            ),
             "native_artifacts_collected": False,
             "terminal_status": "",
             "terminal_reason": "",
@@ -800,6 +815,23 @@ class CodingAgentRuntime:
                 "workspace_root": source.workspace_root,
                 "execution_root": execution_root,
                 "started_at": perf_counter(),
+                # Legacy checkpoints predate these channels. Normalize them on
+                # clone while preserving exact consumed/unconsumed state for
+                # checkpoints created by the layered compaction runtime.
+                "native_context_compactions": int(
+                    selected.values.get("native_context_compactions", 0)
+                ),
+                "native_context_reduction_stages": list(
+                    selected.values.get("native_context_reduction_stages", [])
+                ),
+                "native_context_force_compaction": bool(
+                    selected.values.get("native_context_force_compaction", False)
+                ),
+                "trace": _checkpoint_branch_trace(
+                    selected.values.get("trace", []),
+                    source_run_id=source.run_id,
+                    source_checkpoint_id=checkpoint_id,
+                ),
             }
             config = self._checkpoint_coordinator.clone_checkpoint(
                 selected,
@@ -1167,6 +1199,9 @@ def _clone_checkpoint_run_context(
     entrypoint_metadata = (
         dict(entrypoint_metadata) if isinstance(entrypoint_metadata, dict) else {}
     )
+    # A manual /compact flag is a one-shot command consumed by the source Run.
+    # Historical branches inherit the durable state flag, never stale metadata.
+    entrypoint_metadata.pop("force_context_compaction", None)
     entrypoint_metadata["checkpoint_restore"] = {
         "source_run_id": source_run_id,
         "source_checkpoint_id": source_checkpoint_id,
@@ -1180,6 +1215,42 @@ def _clone_checkpoint_run_context(
         if isinstance(execution, dict):
             execution["run_id"] = run_id
     return RunContextSnapshot.from_dict(payload)
+
+
+def _checkpoint_branch_trace(
+    trace: Any,
+    *,
+    source_run_id: str,
+    source_checkpoint_id: str,
+) -> list[dict[str, Any]]:
+    """Mark inherited compaction stages so branch SSE is not mistaken for new work."""
+
+    replayed: list[dict[str, Any]] = []
+    for value in trace if isinstance(trace, list) else []:
+        if not isinstance(value, dict):
+            continue
+        item = dict(value)
+        output = item.get("output")
+        if isinstance(output, dict):
+            copied_output = dict(output)
+            stages = copied_output.get("context_reduction_stages")
+            if isinstance(stages, list):
+                copied_stages: list[object] = []
+                for stage in stages:
+                    if not isinstance(stage, dict):
+                        copied_stages.append(stage)
+                        continue
+                    copied_stage = dict(stage)
+                    copied_stage["replayed"] = True
+                    copied_stage["replayed_from_run_id"] = source_run_id
+                    copied_stage["replayed_from_checkpoint_id"] = (
+                        source_checkpoint_id
+                    )
+                    copied_stages.append(copied_stage)
+                copied_output["context_reduction_stages"] = copied_stages
+            item["output"] = copied_output
+        replayed.append(item)
+    return replayed
 
 
 def _execution_path(source_root: str, execution_root: str, source_path: str) -> str:
