@@ -6,6 +6,7 @@ from threading import RLock
 from typing import Any
 
 from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_TOOL_NAME
 from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.permissions import (
     PermissionDecision,
@@ -46,6 +47,9 @@ class ToolAccessCoordinator:
             selected = snapshot.tools.enabled_tools
             if selected is None:
                 selected = tuple(spec.name for spec in self._tools.list_specs())
+            selected = tuple(
+                name for name in selected if name != RUN_ARTIFACT_TOOL_NAME
+            )
             try:
                 tools = self._tools.select(tuple(selected))
             except ValueError as exc:
@@ -121,9 +125,14 @@ class ToolAccessCoordinator:
         )
 
     def visible_tool_specs(self, state: CodingAgentState) -> list[Any]:
-        return self.tools_for_state(state).list_specs(
+        specs = self.tools_for_state(state).list_specs(
             context=self.tool_use_context(state)
         )
+        if not state.get("run_artifact_read_enabled", False):
+            specs = [
+                spec for spec in specs if spec.name != RUN_ARTIFACT_TOOL_NAME
+            ]
+        return specs
 
 
 def permission_approval_item(

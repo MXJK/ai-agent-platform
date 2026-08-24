@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from ai_agent_platform.agents.coding.run_artifacts import (
     ArtifactReadError,
@@ -9,7 +10,18 @@ from ai_agent_platform.agents.coding.run_artifacts import (
     canonical_tool_result,
     read_run_artifact,
 )
+from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
+from ai_agent_platform.agents.coding.tool_loop_nodes import (
+    ToolLoopNodes,
+    _native_artifact_read_message,
+    _native_reduction_artifact_candidates,
+    _serialize_tool_result,
+)
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
+from ai_agent_platform.core.metrics import MetricsRegistry
+from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 class RunArtifactPrimitiveTests(unittest.TestCase):
@@ -61,6 +73,9 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
             {**self.artifact, "runtime_created": False},
             {**self.artifact, "model_readable": False},
             {**self.artifact, "type": "mcp_output"},
+            {**self.artifact, "call_id": "different_call"},
+            {**self.artifact, "name": "different.tool"},
+            {**self.artifact, "estimated_tokens": -1},
         ):
             with self.assertRaises(ArtifactReadError) as caught:
                 read_run_artifact([changed], {"artifact_id": artifact_id})
@@ -105,6 +120,79 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
         self.assertEqual(first["content"], canonical[first["start_char"] : first["end_char"]])
         self.assertEqual(second["content"], canonical[second["start_char"] : second["end_char"]])
         self.assertLessEqual(first["end_char"], second["start_char"])
+
+
+class RunArtifactNodeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.full_result = {
+            "call_id": "source_call",
+            "name": "mcp.demo.lookup",
+            "ok": True,
+            "result": {"text": "payload-" * 2000},
+        }
+        self.artifact = build_run_tool_result_artifact(self.full_result)
+        self.nodes = object.__new__(ToolLoopNodes)
+        self.nodes._metrics = MetricsRegistry()
+        self.nodes._tool_result_max_tokens = 128
+
+    def test_checkpoint_state_reader_and_full_envelope_fit_harness_budget(self) -> None:
+        call = ToolCall(
+            call_id="read_call",
+            name=RUN_ARTIFACT_READ_TOOL,
+            arguments={
+                "artifact_id": self.artifact["id"],
+                "max_tokens": 800,
+            },
+        )
+        response = self.nodes._read_artifact(
+            {"artifacts": [self.artifact]},  # type: ignore[arg-type]
+            call,
+        )
+        message = _native_artifact_read_message(response, max_tokens=128)
+        self.assertTrue(response["ok"])
+        self.assertTrue(message["ephemeral"])
+        self.assertLessEqual(
+            estimate_text_tokens(_serialize_tool_result(message["content"])),
+            128,
+        )
+        self.assertEqual(
+            response["result"]["max_tokens"],
+            128,
+        )
+
+    def test_readback_result_is_never_a_recursive_artifact_candidate(self) -> None:
+        call = ToolCall(
+            call_id="read_call",
+            name=RUN_ARTIFACT_READ_TOOL,
+            arguments={"artifact_id": self.artifact["id"]},
+        )
+        response = self.nodes._read_artifact(
+            {"artifacts": [self.artifact]},  # type: ignore[arg-type]
+            call,
+        )
+        message = _native_artifact_read_message(response, max_tokens=128)
+        candidates = _native_reduction_artifact_candidates(
+            {"tool_results": [response]},  # type: ignore[arg-type]
+            [message],
+        )
+        self.assertEqual(candidates, {})
+
+    def test_legacy_checkpoint_without_capability_hides_runtime_tool(self) -> None:
+        coordinator = object.__new__(ToolAccessCoordinator)
+        pool = SimpleNamespace(
+            list_specs=lambda context=None: [
+                create_coding_tool_registry().get_spec(RUN_ARTIFACT_READ_TOOL)
+            ]
+        )
+        coordinator.tools_for_state = lambda state: pool  # type: ignore[method-assign]
+        coordinator.tool_use_context = lambda state: None  # type: ignore[method-assign]
+        legacy: CodingAgentState = {}
+        current: CodingAgentState = {"run_artifact_read_enabled": True}
+        self.assertEqual(coordinator.visible_tool_specs(legacy), [])
+        self.assertEqual(
+            [spec.name for spec in coordinator.visible_tool_specs(current)],
+            [RUN_ARTIFACT_READ_TOOL],
+        )
 
 
 if __name__ == "__main__":

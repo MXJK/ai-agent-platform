@@ -81,16 +81,6 @@ build_run_tool_result_artifact = build_tool_result_artifact
 def run_artifact_tool_spec() -> ToolSpec:
     """Return the runtime-owned model contract for bounded artifact reads."""
 
-    range_schema = {
-        "type": "object",
-        "properties": {
-            "start_char": {"type": "integer", "minimum": 0},
-            "end_char": {"type": "integer", "minimum": 0},
-            "content": {"type": "string"},
-        },
-        "required": ["start_char", "end_char", "content"],
-        "additionalProperties": False,
-    }
     return ToolSpec(
         name=RUN_ARTIFACT_TOOL_NAME,
         description=(
@@ -105,7 +95,11 @@ def run_artifact_tool_spec() -> ToolSpec:
                     "type": "string",
                     "pattern": TOOL_RESULT_ARTIFACT_ID_PATTERN,
                 },
-                "view": {"type": "string", "enum": ["page", "head_tail"]},
+                "view": {
+                    "type": "string",
+                    "enum": ["page", "head_tail"],
+                    "default": "page",
+                },
                 "offset_chars": {
                     "type": "integer",
                     "minimum": 0,
@@ -121,41 +115,7 @@ def run_artifact_tool_spec() -> ToolSpec:
             "required": ["artifact_id"],
             "additionalProperties": False,
         },
-        output_schema={
-            "type": "object",
-            "properties": {
-                "artifact_id": {"type": "string"},
-                "view": {"type": "string", "enum": ["page", "head_tail"]},
-                "offset_chars": {"type": "integer", "minimum": 0},
-                "max_tokens": {"type": "integer", "minimum": 0},
-                "total_chars": {"type": "integer", "minimum": 0},
-                "returned_chars": {"type": "integer", "minimum": 0},
-                "estimated_tokens": {"type": "integer", "minimum": 0},
-                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                "ranges": {"type": "array", "items": range_schema},
-                "next_offset_chars": {
-                    "oneOf": [
-                        {"type": "integer", "minimum": 0},
-                        {"type": "null"},
-                    ]
-                },
-                "complete": {"type": "boolean"},
-            },
-            "required": [
-                "artifact_id",
-                "view",
-                "offset_chars",
-                "max_tokens",
-                "total_chars",
-                "returned_chars",
-                "estimated_tokens",
-                "sha256",
-                "ranges",
-                "next_offset_chars",
-                "complete",
-            ],
-            "additionalProperties": False,
-        },
+        output_schema={"type": "object", "additionalProperties": True},
         provider="runtime",
         permission_level="read_only",
         requires_approval=False,
@@ -330,13 +290,23 @@ def _validated_artifact_content(
         or not isinstance(artifact.get("content_sha256"), str)
         or isinstance(artifact.get("content_chars"), bool)
         or not isinstance(artifact.get("content_chars"), int)
+        or isinstance(artifact.get("estimated_tokens"), bool)
+        or not isinstance(artifact.get("estimated_tokens"), int)
+        or int(artifact.get("estimated_tokens", -1)) < 0
     ):
         raise ArtifactReadError("artifact_not_found", "artifact is not available")
-    content = canonical_tool_result_json(dict(artifact["content"]))
+    content_value = dict(artifact["content"])
+    if (
+        artifact.get("call_id") != content_value.get("call_id")
+        or artifact.get("name") != content_value.get("name")
+    ):
+        raise ArtifactReadError("artifact_not_found", "artifact is not available")
+    content = canonical_tool_result_json(content_value)
     actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if (
         "sha256:" + actual_sha256 != artifact["content_sha256"]
         or len(content) != artifact["content_chars"]
+        or estimate_text_tokens(content) != artifact["estimated_tokens"]
         or artifact_id != TOOL_RESULT_ARTIFACT_PREFIX + actual_sha256[:20]
     ):
         raise ArtifactReadError("artifact_not_found", "artifact is not available")
