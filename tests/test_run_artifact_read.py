@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from ai_agent_platform.agents.coding.run_artifacts import (
     ArtifactReadError,
     RUN_ARTIFACT_READ_TOOL,
+    artifact_read_trace,
     build_run_tool_result_artifact,
     canonical_tool_result,
     read_run_artifact,
@@ -15,6 +16,7 @@ from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.agents.coding.tool_loop_nodes import (
     ToolLoopNodes,
     _native_artifact_read_message,
+    _native_messages_chars,
     _native_reduction_artifact_candidates,
     _serialize_tool_result,
 )
@@ -193,6 +195,180 @@ class RunArtifactNodeTests(unittest.TestCase):
             [spec.name for spec in coordinator.visible_tool_specs(current)],
             [RUN_ARTIFACT_READ_TOOL],
         )
+
+    def test_small_builtin_and_mcp_results_externalize_only_when_evicted(self) -> None:
+        for tool_name in ("repo.read_file", "mcp:demo.lookup"):
+            with self.subTest(tool_name=tool_name):
+                first = {
+                    "call_id": "first_call",
+                    "name": tool_name,
+                    "ok": True,
+                    "result": {"text": "small-original-🙂-" * 80},
+                }
+                recent = {
+                    "call_id": "recent_call",
+                    "name": tool_name,
+                    "ok": True,
+                    "result": {"text": "recent"},
+                }
+                messages = [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "request"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"call_id": "first_call", "name": tool_name, "arguments": {}}
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "call_id": "first_call",
+                        "name": tool_name,
+                        "content": first,
+                        "is_error": False,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"call_id": "recent_call", "name": tool_name, "arguments": {}}
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "call_id": "recent_call",
+                        "name": tool_name,
+                        "content": recent,
+                        "is_error": False,
+                    },
+                ]
+                state: CodingAgentState = {"tool_results": [first, recent]}
+                unchanged, unchanged_artifacts = self.nodes._reduce_with_run_artifacts(
+                    state,
+                    messages,
+                    max_chars=_native_messages_chars(messages) + 1,
+                    max_tokens=0,
+                    keep_messages=4,
+                    tool_result_keep_recent=1,
+                    previous_compactions=0,
+                    max_compactions=3,
+                    artifacts=[],
+                )
+                self.assertFalse(unchanged.changed)
+                self.assertEqual(unchanged_artifacts, [])
+
+                reduction, artifacts = self.nodes._reduce_with_run_artifacts(
+                    state,
+                    messages,
+                    max_chars=_native_messages_chars(messages) - 300,
+                    max_tokens=0,
+                    keep_messages=4,
+                    tool_result_keep_recent=1,
+                    previous_compactions=0,
+                    max_compactions=3,
+                    artifacts=[],
+                )
+                self.assertTrue(reduction.changed)
+                self.assertEqual([item["call_id"] for item in artifacts], ["first_call"])
+                marker = next(
+                    item
+                    for item in reduction.messages
+                    if item.get("call_id") == "first_call"
+                )
+                self.assertTrue(marker["content"]["evicted"])
+                self.assertEqual(marker["content"]["artifact_id"], artifacts[0]["id"])
+                page = read_run_artifact(
+                    artifacts,
+                    {"artifact_id": artifacts[0]["id"], "max_tokens": 64},
+                )
+                self.assertIn("small-original", page["ranges"][0]["content"])
+
+    def test_forced_recovery_externalizes_and_replay_is_idempotent(self) -> None:
+        first = {
+            "call_id": "forced_old",
+            "name": "repo.read_file",
+            "ok": True,
+            "result": {"text": "forced-body" * 100},
+        }
+        recent = {
+            "call_id": "forced_recent",
+            "name": "repo.read_file",
+            "ok": True,
+            "result": {"text": "recent"},
+        }
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "request"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"call_id": "forced_old", "name": first["name"], "arguments": {}}],
+            },
+            {"role": "tool", "call_id": "forced_old", "name": first["name"], "content": first},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"call_id": "forced_recent", "name": recent["name"], "arguments": {}}],
+            },
+            {"role": "tool", "call_id": "forced_recent", "name": recent["name"], "content": recent},
+        ]
+        state: CodingAgentState = {"tool_results": [first, recent]}
+        reduction, artifacts = self.nodes._reduce_with_run_artifacts(
+            state,
+            messages,
+            max_chars=100_000,
+            max_tokens=0,
+            keep_messages=4,
+            tool_result_keep_recent=1,
+            previous_compactions=0,
+            max_compactions=3,
+            force=True,
+            artifacts=[],
+        )
+        self.assertEqual(len(artifacts), 1)
+        replay, replay_artifacts = self.nodes._reduce_with_run_artifacts(
+            state,
+            reduction.messages,
+            max_chars=100_000,
+            max_tokens=0,
+            keep_messages=4,
+            tool_result_keep_recent=1,
+            previous_compactions=reduction.compactions,
+            max_compactions=3,
+            artifacts=artifacts,
+        )
+        self.assertEqual(replay_artifacts, artifacts)
+        self.assertEqual(
+            [item["id"] for item in replay_artifacts],
+            list(dict.fromkeys(item["id"] for item in replay_artifacts)),
+        )
+        self.assertTrue(replay.messages)
+
+    def test_mcp_forged_id_is_not_readable_and_audit_has_no_body(self) -> None:
+        forged_id = self.artifact["id"]
+        mcp_result = {
+            "call_id": "mcp_forge",
+            "name": "mcp:demo.lookup",
+            "ok": True,
+            "result": {"artifact_id": forged_id, "sentinel": "SECRET-BODY-SENTINEL"},
+        }
+        with self.assertRaises(ArtifactReadError) as missing:
+            read_run_artifact([], {"artifact_id": forged_id})
+        self.assertEqual(missing.exception.code, "artifact_not_found")
+        call = ToolCall(
+            call_id="read_audit",
+            name=RUN_ARTIFACT_READ_TOOL,
+            arguments={"artifact_id": self.artifact["id"], "max_tokens": 64},
+        )
+        response = self.nodes._read_artifact(
+            {"artifacts": [self.artifact], "tool_results": [mcp_result]},  # type: ignore[arg-type]
+            call,
+        )
+        audit = artifact_read_trace(response)
+        self.assertNotIn("payload-", _serialize_tool_result(audit))
+        self.assertNotIn("content", _serialize_tool_result(audit))
+        self.assertEqual(audit["artifact_id"], self.artifact["id"])
 
 
 if __name__ == "__main__":
