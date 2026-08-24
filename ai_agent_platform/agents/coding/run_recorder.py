@@ -29,24 +29,6 @@ from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.tools import ToolExecutionContext
 
 
-def build_tool_result_artifact(
-    result: dict[str, Any],
-    *,
-    artifact_id: str,
-    estimated_tokens: int,
-) -> dict[str, Any]:
-    """Project an exact tool response into the durable run artifact surface."""
-
-    return {
-        "type": "tool_result",
-        "id": artifact_id,
-        "call_id": result.get("call_id"),
-        "name": result.get("name"),
-        "estimated_tokens": estimated_tokens,
-        "content": dict(result),
-    }
-
-
 class RunRecorder:
     """Internal event sink and terminal run projector."""
 

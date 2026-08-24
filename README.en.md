@@ -671,6 +671,14 @@ oversized result becomes a head/tail placeholder with its original token
 estimate and `artifact_id`; the exact result remains available as a
 `tool_result` Run artifact. Existing per-tool character caps remain a second
 line of defense, and `agent_tool_results_truncated_total` counts these events.
+“Exact” means the canonical JSON of the complete `ToolResult` that reached the
+Agent Harness; it does not promise to recover Provider payload bytes already
+truncated before the Harness. Small results below the per-result limit are not
+externalized eagerly. `plan_tools` creates a content-addressed Artifact only when
+eviction, fold, drop/truncate, or the single forced Provider-overflow recovery is
+actually about to transform that body, and persists the Artifact additions and
+reduced messages in the same LangGraph state update. No database migration is
+required.
 Above `AGENT_NATIVE_CONTEXT_MAX_CHARS` or the unified input allowance minus the
 tool-schema share,
 the harness reduces the transcript in a fixed order. It first replaces older tool
@@ -681,6 +689,21 @@ drops whole groups or truncates bodies through the shared budget primitives.
 Multi-call assistant turns remain atomic with all matching results. Initial user
 requests, checkpoint restore directions, and pause/resume steering are verbatim and
 non-truncatable; a Run blocks explicitly when those instructions cannot fit.
+
+The model may read those bodies through the read-only, idempotent
+`run.read_artifact` tool. Its only arguments are `artifact_id`,
+`view=page|head_tail`, `offset_chars`, and `max_tokens` (default `800`, range
+`64..2000`); it cannot supply a Run, conversation, Workspace, or actor identity.
+The runtime searches only runtime-created, model-readable Artifacts inherited by
+the selected checkpoint state. It performs no global hash lookup and never asks
+the Run Store, so missing, cross-Run, wrong-type, or hash-corrupt values all fail
+as `artifact_not_found`; an invalid offset returns
+`artifact_offset_out_of_range`. An ID forged inside MCP output grants no access,
+and legacy v1/v2 `RunContextSnapshot` values do not gain the new tool implicitly.
+Read pages are ephemeral and can never become nested Artifacts. Trace/SSE/metric
+metadata records only IDs, call/tool, ranges, character and token counts, hashes,
+and error codes—never body text. Pause/resume, rollback, and fork therefore expose
+exactly the Artifact state inherited from the selected checkpoint.
 
 Folding is capped by `AGENT_NATIVE_MAX_COMPACTIONS` (default `3`). A transcript
 that still cannot converge terminates as

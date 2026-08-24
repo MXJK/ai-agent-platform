@@ -634,6 +634,12 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
+这里的“完整”指进入 Agent Harness 的完整 `ToolResult` canonical JSON；若 Provider 或
+`ToolRegistry` 在此之前已经按自身输出边界截断，Artifact 不承诺恢复更早的原始 payload。
+未超过单结果上限的小结果不会预先创建 Artifact；只有正文确实即将被 eviction、fold、
+drop/truncate 或 Provider overflow 的一次强制恢复改变时，`plan_tools` 才按内容哈希惰性外置，
+并把 Artifact additions 与缩减后的 messages 放进同一个 LangGraph state update。该过程不需要
+数据库 migration。
 工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过统一 input allowance 扣除
 工具 Schema 份额后的消息预算时，按固定成本顺序收缩：先把较旧
 工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
@@ -642,6 +648,16 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 初始请求、checkpoint 恢复方向以及 pause/resume steering 不会被截断；若这些逐字指令自身
 已无法放入预算，Run 会明确阻断而不是带着残缺指令继续请求模型。被折叠的转录继续交给
 会话压缩器，模型不可用时回退到确定性摘要。
+
+当前 Run 的模型可通过只读、幂等工具 `run.read_artifact` 分页回读这些正文。模型只能传
+`artifact_id`、`view=page|head_tail`、`offset_chars` 和 `max_tokens`（默认 800，范围
+64..2000），不能传 `run_id`、conversation、Workspace 或 actor。Runtime 只检查所选
+checkpoint state 实际继承、由自身创建且标为 model-readable 的 Artifact，不做全局哈希查询，
+也不访问 Run Store，因此缺失、跨 Run、类型/哈希损坏统一为 `artifact_not_found`；越界 offset
+返回 `artifact_offset_out_of_range`。MCP 输出里伪造的 ID 不会成为能力，legacy v1/v2
+`RunContextSnapshot` 也不会自动获得新工具。分页结果是 ephemeral，不能再次外置形成 Artifact
+套 Artifact；trace/SSE/metrics 只记录 ID、call/tool、字符范围、字符/Token 数、哈希与错误码，
+不记录正文。pause/resume、rollback 和 fork 始终以被选择 checkpoint 的 Artifact state 为准。
 
 折叠最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次。压缩后仍无法收敛，或已没有
 可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束，并直接说明停止阶段，

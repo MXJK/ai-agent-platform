@@ -386,6 +386,12 @@ class CodingAgentRuntime:
             "trace": [],
             "errors": [],
             "artifacts": [],
+            # Missing means disabled when restoring a checkpoint written before
+            # this capability existed. Legacy v1/v2 RunContextSnapshots never
+            # inherit a newly registered runtime tool implicitly.
+            "run_artifact_read_enabled": (
+                run_context is None or run_context.metadata.schema_version >= 3
+            ),
             "tool_calls": [],
             "tool_results": [],
             "native_tool_messages": [],

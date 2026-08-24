@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from ai_agent_platform.agents.coding.run_artifacts import register_run_artifact_tool
 from ai_agent_platform.integrations.mcp import (
     MCPToolProvider,
     register_mcp_tools,
@@ -42,6 +43,7 @@ def create_coding_tool_registry(
     )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
+    register_run_artifact_tool(registry)
     registry.register(
         "agent.request_user_input",
         request_user_input_tool,

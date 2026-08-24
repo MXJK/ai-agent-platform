@@ -103,6 +103,7 @@ class CodingAgentState(TypedDict, total=False):
     llm_output_tokens: int
     llm_thoughts_tokens: int
     artifacts: list[dict[str, Any]]
+    run_artifact_read_enabled: bool
     changed_files: list[str]
     change_status: str
     change_iteration: int

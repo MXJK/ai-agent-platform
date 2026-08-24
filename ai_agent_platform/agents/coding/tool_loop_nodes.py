@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-import hashlib
 import inspect
 from typing import Any
 
@@ -19,7 +18,13 @@ from ai_agent_platform.agents.coding.change_loop import (
 )
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
 from ai_agent_platform.agents.coding.policies import native_assistant_message
-from ai_agent_platform.agents.coding.run_recorder import build_tool_result_artifact
+from ai_agent_platform.agents.coding.run_artifacts import (
+    RUN_ARTIFACT_TOOL_NAME,
+    ArtifactReadError,
+    artifact_read_trace,
+    build_tool_result_artifact,
+    read_run_artifact,
+)
 from ai_agent_platform.agents.coding.tool_access import (
     permission_approval_item as _permission_approval_item,
 )
@@ -235,7 +240,8 @@ class ToolLoopNodes:
 
         max_tokens = self._native_context_budget_tokens(state)
         max_chars = self._native_context_max_chars if max_tokens <= 0 else 0
-        reduction = _reduce_native_messages(
+        reduction, artifacts = self._reduce_with_run_artifacts(
+            state,
             native_messages,
             max_chars=max_chars,
             max_tokens=max_tokens,
@@ -244,6 +250,7 @@ class ToolLoopNodes:
             previous_compactions=state.get("native_context_compactions", 0),
             max_compactions=self._native_max_compactions,
             compressor=self._context_compressor,
+            artifacts=state.get("artifacts", []),
         )
         self._record_context_reduction(reduction)
         native_messages = reduction.messages
@@ -262,10 +269,11 @@ class ToolLoopNodes:
                 context_stages=context_stages,
             )
             terminal["context_warnings"] = warnings
+            terminal["artifacts"] = artifacts
             return terminal
 
         if _native_artifacts_needed(state):
-            return self._native_empty_plan(
+            empty = self._native_empty_plan(
                 state,
                 native_messages=native_messages,
                 stop_reason="artifact_checkpoint",
@@ -274,6 +282,8 @@ class ToolLoopNodes:
                 summary="先汇总当前 Sandbox 状态、Diff 与验证产物，再继续推理。",
                 context_stages=context_stages,
             )
+            empty["artifacts"] = artifacts
+            return empty
 
         budget_reason, budget_status = self._budget_policy.stop(state)
         if budget_reason:
@@ -298,6 +308,7 @@ class ToolLoopNodes:
             )
             terminal["errors"] = _append_errors(state, final_errors)
             terminal["context_warnings"] = warnings
+            terminal["artifacts"] = artifacts
             return terminal
 
         soft_warned = state.get("native_soft_limit_warned", False)
@@ -337,7 +348,8 @@ class ToolLoopNodes:
             )
             if seed_stage is not None:
                 context_stages.append(seed_stage)
-            recovery = _reduce_native_messages(
+            recovery, artifacts = self._reduce_with_run_artifacts(
+                state,
                 native_messages,
                 max_chars=max_chars,
                 max_tokens=max_tokens,
@@ -348,6 +360,7 @@ class ToolLoopNodes:
                 compressor=self._context_compressor,
                 force=True,
                 require_progress=seed_stage is None,
+                artifacts=artifacts,
             )
             self._record_context_reduction(recovery)
             native_messages = recovery.messages
@@ -367,6 +380,7 @@ class ToolLoopNodes:
                     context_stages=context_stages,
                 )
                 terminal["context_warnings"] = warnings
+                terminal["artifacts"] = artifacts
                 return terminal
             try:
                 decision = decide(native_messages, tool_specs, **decide_kwargs)
@@ -398,6 +412,7 @@ class ToolLoopNodes:
                     context_stages=context_stages,
                 )
                 terminal["context_warnings"] = warnings
+                terminal["artifacts"] = artifacts
                 return terminal
         native_round = state.get("native_tool_round", 0) + 1
         stop_reason = decision.stop_reason
@@ -433,7 +448,7 @@ class ToolLoopNodes:
                 and spec.permission_level == "read_only"
                 and not spec.requires_approval
                 and spec.idempotent
-                and call.name != "agent.request_user_input"
+                and call.name not in {"agent.request_user_input", RUN_ARTIFACT_TOOL_NAME}
                 and permission.effect == "allow"
             )
 
@@ -589,6 +604,7 @@ class ToolLoopNodes:
             "repair_approval_tool_calls": [],
             "approval_required_tools": approval_tools,
             "native_tool_messages": native_messages,
+            "artifacts": artifacts,
             "native_tool_round": native_round,
             "native_tool_call_count": native_call_count,
             "native_tool_signatures": native_signatures,
@@ -635,6 +651,58 @@ class ToolLoopNodes:
                 },
             ),
         }
+
+    def _reduce_with_run_artifacts(
+        self,
+        state: CodingAgentState,
+        messages: list[dict[str, Any]],
+        *,
+        max_chars: int,
+        keep_messages: int,
+        tool_result_keep_recent: int,
+        previous_compactions: int,
+        max_compactions: int,
+        max_tokens: int = 0,
+        compressor: Any = None,
+        force: bool = False,
+        require_progress: bool = False,
+        artifacts: Sequence[dict[str, Any]],
+    ) -> tuple["NativeContextReduction", list[dict[str, Any]]]:
+        """Externalize only complete ToolResults the pure reducer transforms."""
+
+        candidates = _native_reduction_artifact_candidates(state, messages)
+        artifact_ids = _artifact_ids_by_call_id(artifacts)
+        for call_id in _ambiguous_native_tool_result_call_ids(state, messages):
+            artifact_ids.pop(call_id, None)
+        artifact_ids.update(
+            {
+                call_id: str(artifact["id"])
+                for call_id, artifact in candidates.items()
+            }
+        )
+        reduction = _reduce_native_messages(
+            messages,
+            max_chars=max_chars,
+            max_tokens=max_tokens,
+            keep_messages=keep_messages,
+            tool_result_keep_recent=tool_result_keep_recent,
+            previous_compactions=previous_compactions,
+            max_compactions=max_compactions,
+            compressor=compressor,
+            force=force,
+            require_progress=require_progress,
+            artifact_ids_by_call_id=artifact_ids,
+        )
+        additions = [
+            artifact
+            for call_id, artifact in candidates.items()
+            if _tool_result_was_reduced(
+                call_id,
+                expected_content=artifact["content"],
+                messages=reduction.messages,
+            )
+        ]
+        return reduction, _merge_artifacts(list(artifacts), additions)
 
     def _record_context_reduction(
         self,
@@ -946,6 +1014,8 @@ class ToolLoopNodes:
                                 "cached": False,
                             }
                         )
+                    elif call.name == RUN_ARTIFACT_TOOL_NAME:
+                        results.append(self._read_artifact(state, call))
                     else:
                         results.extend(
                             self._change_loop.execute_tool_calls(state, [call])
@@ -1028,6 +1098,11 @@ class ToolLoopNodes:
                         "parallel_read_batch": parallel_read_batch,
                         "consecutive_failures": consecutive_failures,
                         "no_progress_rounds": no_progress,
+                        "artifact_reads": [
+                            artifact_read_trace(result)
+                            for result in results
+                            if result.get("name") == RUN_ARTIFACT_TOOL_NAME
+                        ],
                     },
                 ),
             }
@@ -1104,6 +1179,14 @@ class ToolLoopNodes:
         messages: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
         for result in results:
+            if result.get("name") == RUN_ARTIFACT_TOOL_NAME:
+                messages.append(
+                    _native_artifact_read_message(
+                        result,
+                        max_tokens=self._tool_result_max_tokens,
+                    )
+                )
+                continue
             message, artifact = _native_tool_result_message(
                 result,
                 max_tokens=self._tool_result_max_tokens,
@@ -1113,6 +1196,73 @@ class ToolLoopNodes:
                 artifacts.append(artifact)
                 self._metrics.increment("agent_tool_results_truncated_total")
         return messages, artifacts
+
+    def _read_artifact(
+        self,
+        state: CodingAgentState,
+        call: ToolCall,
+    ) -> dict[str, Any]:
+        read_visible = bool(
+            state.get("run_artifact_read_enabled", False)
+            and any(
+                spec.name == RUN_ARTIFACT_TOOL_NAME
+                for spec in self._visible_tool_specs(state)
+            )
+        )
+        if not read_visible:
+            self._metrics.increment("agent_run_artifact_read_errors_total")
+            return {
+                "call_id": call.call_id,
+                "name": RUN_ARTIFACT_TOOL_NAME,
+                "ok": False,
+                "error": "artifact is not available",
+                "error_code": "artifact_not_found",
+                "provider": "runtime",
+                "permission_level": "read_only",
+                "requires_approval": False,
+                "duration_ms": 0,
+                "cached": False,
+                "artifact_id": call.arguments.get("artifact_id"),
+            }
+        arguments = dict(call.arguments)
+        requested_tokens = arguments.get("max_tokens", 800)
+        if (
+            isinstance(requested_tokens, int)
+            and not isinstance(requested_tokens, bool)
+        ):
+            arguments["max_tokens"] = min(
+                requested_tokens,
+                self._tool_result_max_tokens,
+            )
+        try:
+            payload = read_run_artifact(state.get("artifacts", []), arguments)
+        except ArtifactReadError as exc:
+            self._metrics.increment("agent_run_artifact_read_errors_total")
+            return {
+                "call_id": call.call_id,
+                "name": RUN_ARTIFACT_TOOL_NAME,
+                "ok": False,
+                "error": str(exc),
+                "error_code": exc.code,
+                "provider": "runtime",
+                "permission_level": "read_only",
+                "requires_approval": False,
+                "duration_ms": 0,
+                "cached": False,
+                "artifact_id": call.arguments.get("artifact_id"),
+            }
+        self._metrics.increment("agent_run_artifact_reads_total")
+        return {
+            "call_id": call.call_id,
+            "name": RUN_ARTIFACT_TOOL_NAME,
+            "ok": True,
+            "result": payload,
+            "provider": "runtime",
+            "permission_level": "read_only",
+            "requires_approval": False,
+            "duration_ms": 0,
+            "cached": False,
+        }
 
     def _compose_answer(self, state: CodingAgentState) -> CodingAgentState:
         return self._completion_policy.compose_answer(state)
@@ -1182,19 +1332,16 @@ def _native_tool_result_message(
     content: dict[str, Any] = result
     artifact: dict[str, Any] | None = None
     if original_tokens > max_tokens:
-        artifact_id = "tool_result_" + hashlib.sha256(
-            serialized.encode("utf-8")
-        ).hexdigest()[:20]
+        artifact = build_tool_result_artifact(
+            result,
+            estimated_tokens=original_tokens,
+        )
+        artifact_id = str(artifact["id"])
         content = _tool_result_placeholder(
             serialized,
             artifact_id=artifact_id,
             original_tokens=original_tokens,
             max_tokens=max_tokens,
-        )
-        artifact = build_tool_result_artifact(
-            result,
-            artifact_id=artifact_id,
-            estimated_tokens=original_tokens,
         )
     return {
         "role": "tool",
@@ -1203,6 +1350,96 @@ def _native_tool_result_message(
         "content": content,
         "is_error": not bool(result.get("ok")),
     }, artifact
+
+
+def _native_artifact_read_message(
+    result: dict[str, Any],
+    *,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Fit the complete ephemeral read envelope to the Harness result budget."""
+
+    payload = result.get("result")
+    payload = payload if isinstance(payload, dict) else {}
+    effective = min(
+        max_tokens,
+        int(payload.get("max_tokens") or max_tokens),
+    )
+
+    def envelope(body: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {
+            "call_id": result.get("call_id"),
+            "name": RUN_ARTIFACT_TOOL_NAME,
+            "ok": bool(result.get("ok")),
+        }
+        if result.get("ok"):
+            compact["result"] = body
+        else:
+            compact["error"] = result.get("error")
+            compact["error_code"] = result.get("error_code")
+        return compact
+
+    ranges = [
+        dict(item)
+        for item in payload.get("ranges", [])
+        if isinstance(item, dict) and isinstance(item.get("content"), str)
+    ]
+    if result.get("ok") and ranges:
+        total_source_chars = sum(len(str(item["content"])) for item in ranges)
+
+        def candidate(keep_chars: int) -> dict[str, Any]:
+            if payload.get("view") == "head_tail" and len(ranges) > 1:
+                head_keep = (keep_chars + 1) // 2
+                tail_keep = keep_chars // 2
+                head = str(ranges[0]["content"])[:head_keep]
+                tail = str(ranges[-1]["content"])[-tail_keep:] if tail_keep else ""
+                return {
+                    "head": head,
+                    "tail": tail,
+                    "ranges": [
+                        [int(ranges[0]["start_char"]), int(ranges[0]["start_char"]) + len(head)],
+                        [int(ranges[-1]["end_char"]) - len(tail), int(ranges[-1]["end_char"])],
+                    ],
+                }
+            content = str(ranges[0]["content"])[:keep_chars]
+            start = int(ranges[0]["start_char"])
+            end = start + len(content)
+            return {
+                "content": content,
+                "start_char": start,
+                "end_char": end,
+                "next_offset_chars": (
+                    end if end < int(payload.get("total_chars") or end) else None
+                ),
+            }
+
+        low, high = 0, total_source_chars
+        best = candidate(0)
+        while low <= high:
+            keep = (low + high) // 2
+            current = candidate(keep)
+            if estimate_text_tokens(_serialize_tool_result(envelope(current))) <= effective:
+                best = current
+                low = keep + 1
+            else:
+                high = keep - 1
+        compact_result = envelope(best)
+    else:
+        compact_result = envelope({})
+    if estimate_text_tokens(_serialize_tool_result(compact_result)) > effective:
+        compact_result = {
+            "ok": False,
+            "error": "artifact read response cannot fit the tool-result budget",
+            "error_code": "artifact_read_budget_too_small",
+        }
+    return {
+        "role": "tool",
+        "call_id": result.get("call_id"),
+        "name": RUN_ARTIFACT_TOOL_NAME,
+        "content": compact_result,
+        "is_error": not bool(compact_result.get("ok")),
+        "ephemeral": True,
+    }
 
 
 def _serialize_tool_result(value: Any) -> str:
@@ -1265,6 +1502,102 @@ def _merge_artifacts(
         if artifact_id is not None:
             known_ids.add(str(artifact_id))
     return merged
+
+
+def _artifact_ids_by_call_id(
+    artifacts: Sequence[dict[str, Any]],
+) -> dict[str, str]:
+    return {
+        str(artifact.get("call_id")): str(artifact.get("id"))
+        for artifact in artifacts
+        if artifact.get("type") == "tool_result"
+        and artifact.get("runtime_created") is True
+        and artifact.get("model_readable") is True
+        and artifact.get("call_id")
+        and artifact.get("id")
+    }
+
+
+def _native_reduction_artifact_candidates(
+    state: CodingAgentState,
+    messages: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Build in-memory candidates only for complete, non-ephemeral results."""
+
+    ambiguous_call_ids = _ambiguous_native_tool_result_call_ids(state, messages)
+    full_messages = {
+        str(message.get("call_id")): message.get("content")
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("name") != RUN_ARTIFACT_TOOL_NAME
+        and message.get("ephemeral") is not True
+        and message.get("call_id")
+        and isinstance(message.get("content"), dict)
+        and not message["content"].get("truncated")
+        and not message["content"].get("evicted")
+    }
+    candidates: dict[str, dict[str, Any]] = {}
+    for result in state.get("tool_results", []):
+        call_id = str(result.get("call_id") or "")
+        if (
+            not call_id
+            or call_id in ambiguous_call_ids
+            or call_id in candidates
+            or result.get("name") == RUN_ARTIFACT_TOOL_NAME
+            or call_id not in full_messages
+        ):
+            continue
+        if _serialize_tool_result(full_messages[call_id]) != _serialize_tool_result(result):
+            continue
+        candidates[call_id] = build_tool_result_artifact(result)
+    return candidates
+
+
+def _ambiguous_native_tool_result_call_ids(
+    state: CodingAgentState,
+    messages: Sequence[dict[str, Any]],
+) -> set[str]:
+    """Return reused identities that cannot safely address a single Artifact."""
+
+    def duplicates(call_ids: Sequence[str]) -> set[str]:
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for call_id in call_ids:
+            if call_id in seen:
+                repeated.add(call_id)
+            seen.add(call_id)
+        return repeated
+
+    message_call_ids = [
+        str(message.get("call_id"))
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("name") != RUN_ARTIFACT_TOOL_NAME
+        and message.get("ephemeral") is not True
+        and message.get("call_id")
+    ]
+    result_call_ids = [
+        str(result.get("call_id"))
+        for result in state.get("tool_results", [])
+        if result.get("name") != RUN_ARTIFACT_TOOL_NAME
+        and result.get("call_id")
+    ]
+    return duplicates(message_call_ids) | duplicates(result_call_ids)
+
+
+def _tool_result_was_reduced(
+    call_id: str,
+    *,
+    expected_content: Any,
+    messages: Sequence[dict[str, Any]],
+) -> bool:
+    expected = _serialize_tool_result(expected_content)
+    return not any(
+        message.get("role") == "tool"
+        and str(message.get("call_id") or "") == call_id
+        and _serialize_tool_result(message.get("content")) == expected
+        for message in messages
+    )
 
 
 def _native_artifacts_needed(state: CodingAgentState) -> bool:
@@ -1370,6 +1703,8 @@ class _NativeMessageGroup:
 
 @dataclass(frozen=True)
 class _NativeContextBudgetPolicy:
+    artifact_ids_by_call_id: Mapping[str, str] | None = None
+
     def cost(self, item: _NativeMessageGroup) -> int:
         return _native_messages_tokens(item.messages)
 
@@ -1421,6 +1756,10 @@ class _NativeContextBudgetPolicy:
                 )
                 if isinstance(content, dict) and content.get(key) is not None
             }
+            call_id = str(message.get("call_id") or "")
+            artifact_id = (self.artifact_ids_by_call_id or {}).get(call_id)
+            if message.get("role") == "tool" and artifact_id:
+                metadata["artifact_id"] = artifact_id
 
             def replace_content(fitted: str) -> dict[str, Any]:
                 if message.get("role") == "tool" and isinstance(content, dict):
@@ -1518,6 +1857,7 @@ def _reduce_native_messages(
     compressor: Any = None,
     force: bool = False,
     require_progress: bool = False,
+    artifact_ids_by_call_id: Mapping[str, str] | None = None,
 ) -> NativeContextReduction:
     """Spend native-transcript reductions in deterministic cheapest-first order."""
 
@@ -1554,6 +1894,7 @@ def _reduce_native_messages(
     current, evicted = _evict_old_tool_results(
         current,
         keep_recent=tool_result_keep_recent,
+        artifact_ids_by_call_id=artifact_ids_by_call_id,
     )
     changed = evicted > 0
     stages.append(
@@ -1590,6 +1931,7 @@ def _reduce_native_messages(
             previous_compactions=compactions,
             compressor=compressor,
             force=force and not initially_over_budget,
+            artifact_ids_by_call_id=artifact_ids_by_call_id,
         )
         folded = folded_compactions > compactions
         current = folded_messages
@@ -1624,6 +1966,7 @@ def _reduce_native_messages(
         max_chars=max_chars,
         max_tokens=max_tokens,
         force=force and not initially_over_budget and not changed,
+        artifact_ids_by_call_id=artifact_ids_by_call_id,
     )
     changed = changed or dropped > 0 or truncated > 0
     stages.append(
@@ -1706,6 +2049,7 @@ def _evict_old_tool_results(
     messages: list[dict[str, Any]],
     *,
     keep_recent: int,
+    artifact_ids_by_call_id: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     complete_tool_indexes = [
         index
@@ -1733,6 +2077,11 @@ def _evict_old_tool_results(
         for key in ("ok", "error", "error_code", "artifact_id"):
             if content_dict.get(key) is not None:
                 marker[key] = content_dict[key]
+        artifact_id = (artifact_ids_by_call_id or {}).get(
+            str(message.get("call_id") or "")
+        )
+        if artifact_id:
+            marker["artifact_id"] = artifact_id
         evicted_messages.append({**message, "content": marker})
     return evicted_messages, len(evict_indexes)
 
@@ -1743,11 +2092,12 @@ def _drop_and_truncate_native_groups(
     max_chars: int,
     max_tokens: int,
     force: bool,
+    artifact_ids_by_call_id: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     from ai_agent_platform.services.context_budget import fit_context_to_budget
 
     groups = _native_message_groups(messages)
-    policy = _NativeContextBudgetPolicy()
+    policy = _NativeContextBudgetPolicy(artifact_ids_by_call_id)
     dropped = 0
     truncated = 0
     for _attempt in range(4):
@@ -1950,6 +2300,7 @@ def _fold_native_messages(
     max_tokens: int = 0,
     compressor: Any = None,
     force: bool = False,
+    artifact_ids_by_call_id: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Apply the legacy lossy fold to complete assistant/tool groups."""
 
@@ -1989,7 +2340,11 @@ def _fold_native_messages(
         if any(message.get("role") == "user" for message in group):
             if pending:
                 compacted_prefix.append(
-                    _folded_native_summary(pending, compressor=compressor)
+                    _folded_native_summary(
+                        pending,
+                        compressor=compressor,
+                        artifact_ids_by_call_id=artifact_ids_by_call_id,
+                    )
                 )
                 pending = []
             compacted_prefix.extend(group)
@@ -1997,7 +2352,11 @@ def _fold_native_messages(
             pending.extend(group)
     if pending:
         compacted_prefix.append(
-            _folded_native_summary(pending, compressor=compressor)
+            _folded_native_summary(
+                pending,
+                compressor=compressor,
+                artifact_ids_by_call_id=artifact_ids_by_call_id,
+            )
         )
     compacted = (
         seed
@@ -2015,6 +2374,7 @@ def _folded_native_summary(
     messages: Sequence[dict[str, Any]],
     *,
     compressor: Any = None,
+    artifact_ids_by_call_id: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Summarize one contiguous non-user segment without crossing steering."""
 
@@ -2036,9 +2396,16 @@ def _folded_native_summary(
             content = content if isinstance(content, dict) else {}
             output = content.get("result")
             preview = json.dumps(output, ensure_ascii=False, default=str)[:500]
+            artifact_id = content.get("artifact_id") or (
+                artifact_ids_by_call_id or {}
+            ).get(str(message.get("call_id") or ""))
+            artifact_detail = (
+                f" artifact_id={artifact_id}" if artifact_id else ""
+            )
             summary_items.append(
                 f"tool {message.get('name')} ok={content.get('ok')} "
-                f"error={content.get('error') or '-'} result={preview}"
+                f"error={content.get('error') or '-'}{artifact_detail} "
+                f"result={preview}"
             )
         else:
             summary_items.append(
