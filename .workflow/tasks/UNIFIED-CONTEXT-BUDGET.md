@@ -69,7 +69,7 @@ On the agent path, conversation history passes four gates, each with its own uni
       this task is what makes seed overflow reachable.
 - [x] `.venv/bin/python -m pytest -q` passes.
 - [x] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
-- [ ] `README.md`, `INTERVIEW_NOTES.md`, the affected `INTERVIEW_NOTES/*.md` Parts and
+- [x] `README.md`, `INTERVIEW_NOTES.md`, the affected `INTERVIEW_NOTES/*.md` Parts and
       `INTERVIEW_NOTES/facts.json` updated; `.venv/bin/python INTERVIEW_NOTES/validate.py`
       passes. Stale claims about the old per-layer character caps are removed, not left
       alongside the new behavior.
@@ -139,10 +139,18 @@ Run from `/private/tmp/aap-unified-wave2` using the root checkout interpreter:
   branches and verifies the complete persisted share map after completion: PASS.
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`: PASS.
 - `git diff --check`: PASS.
-- `README.md`, `README.en.md` and `.env.example` are synchronized. The gitignored
-  `INTERVIEW_NOTES/` tree is absent from worktrees; its affected Parts, facts and
-  validator remain a post-merge root-checkout action, so the combined documentation
-  acceptance item intentionally remains unchecked.
+- Merge integration on `main` preserved the independently delivered bounded parallel
+  read feature by deriving both the reserved system-prompt cost and actual Provider
+  message from the same dynamic `native_system_prompt(max_parallel_read_calls)` helper.
+  Overflow seed rebuild uses the same bound. Combined focused suite:
+  `121 passed, 23 subtests passed`.
+- Final `main` suite at merge commit `33910b0d`: `619 passed, 79 subtests passed in
+  43.73s`; compileall and `git diff --check` pass.
+- `README.md`, `README.en.md` and `.env.example` are synchronized. In the root checkout,
+  the gitignored `INTERVIEW_NOTES.md`, affected Parts and `facts.json` were updated;
+  `.venv/bin/python INTERVIEW_NOTES/validate.py` validated 24 Markdown files and 43
+  capabilities. Evidence-review notices are warnings for other capabilities, not
+  validation failures.
 
 ## Result
 
@@ -183,3 +191,8 @@ also intentionally absent: the later Artifact wave should externalize eviction c
 at the stateful `_plan_tools` boundary before invoking `_reduce_native_messages`, while
 `_reduce_native_messages` and `_evict_old_tool_results` remain side-effect-free budget
 primitives.
+
+The confirmed merge also integrated main's bounded parallel-read change without creating
+a second prompt-budget authority: the exact dynamic prompt is constructed once by a
+shared helper for both budget reservation and native message assembly. This combined
+behavior is covered by the post-merge focused and full suites above.
