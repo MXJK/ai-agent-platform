@@ -51,10 +51,10 @@ the bilingual README and the interview handbook's native tool-calling contract.
 
 ## Verification
 
-- `tests/test_native_tool_calling.py`: 31 passed.
-- Agent runtime, loop characterization, workspace, model registry, tool
-  execution, and permission regression set: 73 passed, 12 subtests passed.
-- `.venv/bin/python -m pytest -q`: 571 passed, 60 subtests passed.
+- After rebasing onto the layered-compaction `main`, the native tool-calling,
+  layered compaction, compaction characterization, Agent runtime, and context
+  pipeline regression set passed: 66 passed, 8 subtests passed.
+- `.venv/bin/python -m pytest -q`: 591 passed, 68 subtests passed.
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`: passed.
 - `.venv/bin/python INTERVIEW_NOTES/validate.py`: validated 24 Markdown files
   and 43 capabilities; existing evidence-review warnings remain informational.
