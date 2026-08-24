@@ -882,6 +882,36 @@ class PostgresAgentRunRepository:
             ).fetchone()
         return _agent_run_from_row(row) if row is not None else None
 
+    def list_recent(self, *, limit: int = 50) -> list[AgentRunRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    thread_id,
+                    conversation_id,
+                    workspace_id,
+                    workspace_root,
+                    status,
+                    checkpoint_id,
+                    latest_node,
+                    next_nodes,
+                    trace,
+                    result,
+                    error,
+                    pending_approval,
+                    errors,
+                    control_action,
+                    steering_messages,
+                    run_context_snapshot
+                FROM agent_runs
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [_agent_run_from_row(row) for row in rows]
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         with self._connect() as conn:
             rows = conn.execute(

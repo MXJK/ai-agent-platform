@@ -210,6 +210,84 @@ class QueryContractTests(unittest.TestCase):
 
 
 class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recent_runs_are_ordered_and_filtered_by_actor(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            alice_record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="alice run",
+                    workspace_id="workspace_main",
+                )
+            )
+            bob_session = kernel["session_service"].create_session("bob")
+            bob_record = replace(
+                alice_record,
+                run_id="run_bob_recent",
+                thread_id="run_bob_recent",
+                conversation_id=bob_session.id,
+            )
+            kernel["run_store"].save(bob_record)
+
+            self.assertEqual(
+                [record.run_id for record in service.list_runs_for_actor(None, limit=2)],
+                ["run_bob_recent", alice_record.run_id],
+            )
+            self.assertEqual(
+                [record.run_id for record in service.list_runs_for_actor("alice", limit=10)],
+                [alice_record.run_id],
+            )
+
+    async def test_approval_decision_is_appended_before_resume(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="request a write",
+                    workspace_id="workspace_main",
+                )
+            )
+            waiting = replace(
+                record,
+                status="waiting_approval",
+                latest_node="review_tool_plan",
+                next_nodes=["review_tool_plan"],
+                pending_approval={
+                    "type": "tool_plan_review",
+                    "tool_calls": [
+                        {
+                            "call_id": "call_write",
+                            "name": "sandbox.write_file",
+                            "arguments": {"path": "app.py"},
+                        }
+                    ],
+                },
+            )
+            kernel["run_store"].save(waiting)
+
+            service.resume_run(
+                run_id=record.run_id,
+                approved=False,
+                feedback="不要修改这个文件",
+            )
+            _, events = service.events_for_actor(record.run_id, None)
+
+            types = [event.type for event in events]
+            self.assertLess(
+                types.index("approval_decided"),
+                types.index("run_resume_requested"),
+            )
+            decision = next(event for event in events if event.type == "approval_decided")
+            self.assertFalse(decision.output_dict()["approved"])
+            self.assertEqual(decision.output_dict()["feedback"], "不要修改这个文件")
+            self.assertEqual(
+                decision.output_dict()["request"]["tool_calls"][0]["call_id"],
+                "call_write",
+            )
+
     async def test_eval_flag_skips_user_and_project_memory_side_effects(self) -> None:
         class UserMemorySpy:
             enabled = True

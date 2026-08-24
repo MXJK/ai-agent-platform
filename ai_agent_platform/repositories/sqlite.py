@@ -692,6 +692,15 @@ class SQLiteAgentRunRepository:
             ).fetchone()
         return _run_from_row(row) if row is not None else None
 
+    def list_recent(self, *, limit: int = 50) -> list[AgentRunRecord]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_runs "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_run_from_row(row) for row in rows]
+
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         self.get(run_id)
         with self.database.connect() as conn:

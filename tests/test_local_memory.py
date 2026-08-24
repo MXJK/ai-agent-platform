@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import stat
@@ -476,6 +477,37 @@ def test_sqlite_query_start_rolls_back_run_when_message_fails() -> None:
             )
         with pytest.raises(KeyError):
             runs.get(record.run_id)
+
+
+def test_sqlite_agent_runs_list_recent_in_reverse_creation_order() -> None:
+    with TemporaryDirectory() as root:
+        runs = SQLiteAgentRunRepository(database=_database(root))
+        old = AgentRunRecord(
+            run_id="run_old",
+            thread_id="run_old",
+            conversation_id="session_1",
+            workspace_id="workspace",
+            workspace_root=root,
+            status="queued",
+            checkpoint_id=None,
+            latest_node=None,
+            next_nodes=["setup_workspace"],
+            trace=[],
+        )
+        runs.save(old)
+        runs.save(
+            replace(
+                old,
+                run_id="run_new",
+                thread_id="run_new",
+                conversation_id="session_2",
+            )
+        )
+
+        assert [record.run_id for record in runs.list_recent(limit=2)] == [
+            "run_new",
+            "run_old",
+        ]
 
 
 def test_local_memory_api_and_state_survive_restart() -> None:

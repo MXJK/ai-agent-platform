@@ -283,6 +283,12 @@ The browser workspace also includes:
   confidence, optimistic edits, confirm/reject/forget, and index repair;
 - local workspace folder management constrained by `WORKSPACE_ALLOWED_ROOTS`,
   including current/default selection, invalid-path relinking, and safe removal;
+- a dedicated `Trace Audit` page (`/#trace-audit`) that lists the current actor's
+  recent Agent Runs and presents a filterable, read-only event timeline for
+  state transitions, nodes, exact tool selections and arguments, complete
+  results or errors, approval requests, and approval decisions. Active and
+  suspended Runs refresh automatically, while the existing in-conversation
+  Trace and approval controls remain the live interaction surface;
   the shared composer omits a duplicate code-context strip, while the sidebar
   and settings manage the current workspace; there is no separate Code Agent page;
   current Compose disables the container-native picker, and the web directory
@@ -978,6 +984,7 @@ The Run lifecycle APIs are:
 
 ```text
 GET  /api/v1/agent/runs/{run_id}
+GET  /api/v1/agent/runs?limit=50
 GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
@@ -996,6 +1003,12 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 The event stream uses resumable cursors. The browser workbench builds the trace
 incrementally from SSE events, fetches one complete Run snapshot at a terminal
 state, and falls back to status polling if the stream fails or ends early.
+Terminal results project every call into a `tool_selected` event with exact
+arguments followed by its complete `tool_result` or `tool_error`. Approval
+resume appends an `approval_decided` event, including the actor and original
+request, before the Run is queued again. The audit page can therefore replay
+facts by sequence without relying on transient frontend state. Recent-Run
+listing is filtered by conversation ownership in `QueryService`.
 Final statuses are `completed`, `partial`, `blocked`, `cancelled`, and `failed`;
 suspended interaction states are `waiting_approval`, `waiting_input`, and
 `paused`. When a saved session is opened, the frontend uses the conversation-level

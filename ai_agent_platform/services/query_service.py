@@ -674,6 +674,34 @@ class QueryService:
         if callable(resolve_execution_config):
             resolve_execution_config(session_id=record.conversation_id)
         selection = self._selection_for_record(record)
+        try:
+            self._event_store.append(
+                run_id,
+                AgentRunEvent(
+                    sequence=0,
+                    type="approval_decided",
+                    status=record.status,
+                    node=record.latest_node,
+                    summary=(
+                        "Agent tool plan approved."
+                        if approved
+                        else "Agent tool plan rejected."
+                    ),
+                    output={
+                        "approved": approved,
+                        "feedback": (feedback or "").strip(),
+                        "actor_user_id": actor_user_id,
+                        "request": record.pending_approval or {},
+                    },
+                ),
+            )
+        except RuntimeError as exc:
+            if str(exc) != "Agent runtime EventStore is not writable":
+                raise
+            logger.info(
+                "agent approval audit event store unavailable",
+                extra={"run_id": run_id},
+            )
         mark_resume_queued = getattr(self._runtime, "mark_resume_queued", None)
         queued_record = (
             mark_resume_queued(run_id) if callable(mark_resume_queued) else record
@@ -708,6 +736,29 @@ class QueryService:
         record = self.get_run(run_id)
         self._assert_actor(record, actor_user_id)
         return record
+
+    def list_runs_for_actor(
+        self,
+        actor_user_id: str | None,
+        *,
+        limit: int = 50,
+    ) -> list[AgentRunRecord]:
+        list_recent = getattr(self._runtime, "list_recent_runs", None)
+        if not callable(list_recent):
+            return []
+        records = list_recent(limit=max(limit, 100 if actor_user_id else limit))
+        if actor_user_id is None:
+            return records[:limit]
+        authorized: list[AgentRunRecord] = []
+        for record in records:
+            try:
+                self._assert_actor(record, actor_user_id)
+            except PermissionError:
+                continue
+            authorized.append(record)
+            if len(authorized) >= limit:
+                break
+        return authorized
 
     def list_checkpoints_for_actor(
         self,
