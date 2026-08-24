@@ -41,6 +41,7 @@ from ai_agent_platform.model_registry import (
     ModelSelection,
     model_selection_scope,
 )
+from ai_agent_platform.repositories import SessionNotFoundError
 from ai_agent_platform.services.session_service import SessionService
 from ai_agent_platform.services.workspace_service import WorkspaceService
 from ai_agent_platform.services.execution_context import ExecutionContextFactory
@@ -753,7 +754,7 @@ class QueryService:
         for record in records:
             try:
                 self._assert_actor(record, actor_user_id)
-            except PermissionError:
+            except (PermissionError, SessionNotFoundError):
                 continue
             authorized.append(record)
             if len(authorized) >= limit:
