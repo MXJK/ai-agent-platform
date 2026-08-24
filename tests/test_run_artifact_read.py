@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ai_agent_platform.agents.coding.run_artifacts import (
+    ArtifactReadError,
     RUN_ARTIFACT_READ_TOOL,
     build_run_tool_result_artifact,
     canonical_tool_result,
@@ -37,7 +38,7 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
         offset = 0
         pages: list[str] = []
         while True:
-            response = read_run_artifact(
+            page = read_run_artifact(
                 [self.artifact],
                 {
                     "artifact_id": self.artifact["id"],
@@ -45,9 +46,7 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
                     "max_tokens": 64,
                 },
             )
-            self.assertTrue(response["ok"])
-            page = response["result"]
-            pages.append(page["content"])
+            pages.append("".join(item["content"] for item in page["ranges"]))
             next_offset = page["next_offset_chars"]
             if next_offset is None:
                 break
@@ -63,38 +62,36 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
             {**self.artifact, "model_readable": False},
             {**self.artifact, "type": "mcp_output"},
         ):
-            response = read_run_artifact(
-                [changed],
-                {"artifact_id": artifact_id},
-            )
-            self.assertFalse(response["ok"])
-            self.assertEqual(response["error_code"], "artifact_not_found")
+            with self.assertRaises(ArtifactReadError) as caught:
+                read_run_artifact([changed], {"artifact_id": artifact_id})
+            self.assertEqual(caught.exception.code, "artifact_not_found")
 
     def test_strict_arguments_and_offsets_have_non_oracle_errors(self) -> None:
         artifact_id = self.artifact["id"]
-        invalid = read_run_artifact(
-            [self.artifact],
-            {"artifact_id": artifact_id, "run_id": "another"},
-        )
-        self.assertEqual(invalid["error_code"], "artifact_not_found")
-        missing = read_run_artifact(
-            [self.artifact],
-            {"artifact_id": "tool_result_" + "0" * 20},
-        )
-        self.assertEqual(missing["error_code"], "artifact_not_found")
-        offset = read_run_artifact(
-            [self.artifact],
-            {
-                "artifact_id": artifact_id,
-                "offset_chars": self.artifact["content_chars"],
-            },
-        )
-        self.assertEqual(
-            offset["error_code"], "artifact_offset_out_of_range"
-        )
+        with self.assertRaises(ArtifactReadError) as invalid:
+            read_run_artifact(
+                [self.artifact],
+                {"artifact_id": artifact_id, "run_id": "another"},
+            )
+        self.assertEqual(invalid.exception.code, "artifact_not_found")
+        with self.assertRaises(ArtifactReadError) as missing:
+            read_run_artifact(
+                [self.artifact],
+                {"artifact_id": "tool_result_" + "0" * 20},
+            )
+        self.assertEqual(missing.exception.code, "artifact_not_found")
+        with self.assertRaises(ArtifactReadError) as offset:
+            read_run_artifact(
+                [self.artifact],
+                {
+                    "artifact_id": artifact_id,
+                    "offset_chars": self.artifact["content_chars"],
+                },
+            )
+        self.assertEqual(offset.exception.code, "artifact_offset_out_of_range")
 
     def test_head_tail_reports_exact_non_overlapping_ranges(self) -> None:
-        response = read_run_artifact(
+        result = read_run_artifact(
             [self.artifact],
             {
                 "artifact_id": self.artifact["id"],
@@ -103,12 +100,10 @@ class RunArtifactPrimitiveTests(unittest.TestCase):
                 "max_tokens": 64,
             },
         )
-        self.assertTrue(response["ok"])
-        result = response["result"]
         canonical = canonical_tool_result(self.result)
         first, second = result["ranges"]
-        self.assertEqual(result["head"], canonical[first["start_char"] : first["end_char"]])
-        self.assertEqual(result["tail"], canonical[second["start_char"] : second["end_char"]])
+        self.assertEqual(first["content"], canonical[first["start_char"] : first["end_char"]])
+        self.assertEqual(second["content"], canonical[second["start_char"] : second["end_char"]])
         self.assertLessEqual(first["end_char"], second["start_char"])
 
 

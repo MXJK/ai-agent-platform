@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from ai_agent_platform.agents.coding.run_artifacts import register_run_artifact_tool
 from ai_agent_platform.integrations.mcp import (
     MCPToolProvider,
     register_mcp_tools,
@@ -13,7 +14,6 @@ from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.integrations.execution_workspace import ExecutionWorkspaceRuntime
 from ai_agent_platform.tools import register_repository_tools, register_sandbox_tools
 from ai_agent_platform.skills import SkillLoaderTool
-from ai_agent_platform.agents.coding.run_artifacts import register_run_artifact_tool
 
 
 def create_coding_tool_registry(
