@@ -630,13 +630,28 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
-工具会话超过
-`AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
-`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按完整
-assistant/tool 组压缩旧观察，避免拆断 call/result 对。被折叠的转录交给与会话压缩
-同一个压缩器做语义摘要，保留已读文件、已执行命令、已应用修改和失败原因；模型不可用
-时回退到确定性的规则式摘要。图的独立保险由
+工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过由当前模型上下文窗口乘以
+`AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 得到的 Token 预算时，按固定成本顺序收缩：先把较旧
+工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
+结果；仍超限才按完整 assistant/tool 组折叠旧观察；折叠后重新计量，必要时用共享预算原语
+成组丢弃并截断正文。所有阶段保留多 tool-call assistant 与全部 result 的原子配对。
+初始请求、checkpoint 恢复方向以及 pause/resume steering 不会被截断；若这些逐字指令自身
+已无法放入预算，Run 会明确阻断而不是带着残缺指令继续请求模型。被折叠的转录继续交给
+会话压缩器，模型不可用时回退到确定性摘要。
+
+折叠最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次。压缩后仍无法收敛，或已没有
+可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束，并直接说明停止阶段，
+不再重复消耗模型调用。Provider 返回“上下文长度超限”时统一映射为 `context_overflow`：
+Harness 只允许一次强制压缩和一次重试，第二次同类错误立即阻断。每个 native 压缩阶段都
+产生 `AgentEvent(type="context")`，其 output 含 `stage`、压缩计数、预算、当前估算和
+`fits`；checkpoint 分支继承的历史阶段额外标记 `replayed` 及来源 Run/checkpoint，避免被
+误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。图的独立保险仍由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
+
+本阶段不暴露手动 `/compact`：CLI 的每次普通输入都会创建新 Run，只给新 Run 写一个
+“强制压缩”标记并不能收缩既有 Session 或旧 Run 的上下文。真正的手动压缩需要在统一预算、
+结构化快照与 Session 压缩 API 中同时定义 instruction、Token 前后值和可观测结果，延后到
+后续上下文预算阶段实现。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
 root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
@@ -1139,6 +1154,8 @@ LLM_MAX_CONTEXT_MESSAGES_CEILING=48
 LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
 AGENT_NATIVE_CONTEXT_TOKEN_RATIO=0.5
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
+AGENT_TOOL_RESULT_KEEP_RECENT=6
+AGENT_NATIVE_MAX_COMPACTIONS=3
 ```
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算

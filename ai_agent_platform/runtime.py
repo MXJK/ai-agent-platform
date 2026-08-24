@@ -1116,6 +1116,8 @@ class ApplicationFactory:
             native_context_token_ratio=(
                 settings.agent_native_context_token_ratio
             ),
+            tool_result_keep_recent=settings.agent_tool_result_keep_recent,
+            native_max_compactions=settings.agent_native_max_compactions,
             llm_client=llm_client,
             context_compressor=create_conversation_compressor(
                 llm_provider=settings.llm_provider,

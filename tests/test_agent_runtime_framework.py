@@ -1,9 +1,12 @@
+from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
 from unittest.mock import patch
+
+from langgraph.checkpoint.base import create_checkpoint
 
 from ai_agent_platform.agents.coding.change_loop import ChangeLoopExecutor
 from ai_agent_platform.agents.coding.models import AgentRunRecord, CodingAgentState
@@ -55,6 +58,7 @@ class PausingPlanner(SteeringPlanner):
     def __init__(self) -> None:
         super().__init__()
         self.decisions = 0
+        self.observed_steering_content = ""
 
     def decide_tool_calls(self, messages, tool_specs):
         del tool_specs
@@ -77,6 +81,14 @@ class PausingPlanner(SteeringPlanner):
             "resume direction" in str(message.get("content") or "")
             for message in messages
         )
+        self.observed_steering_content = next(
+            (
+                str(message.get("content") or "")
+                for message in messages
+                if "resume direction" in str(message.get("content") or "")
+            ),
+            "",
+        )
         return LLMToolDecision(
             text="Resumed and completed.",
             tool_calls=[],
@@ -91,10 +103,19 @@ class InputPlanner(SteeringPlanner):
         super().__init__()
         self.decisions = 0
         self.answer = ""
+        self.observed_branch_direction = ""
 
     def decide_tool_calls(self, messages, tool_specs):
         del tool_specs
         self.decisions += 1
+        self.observed_branch_direction = next(
+            (
+                str(message.get("content") or "")
+                for message in messages
+                if "checkpoint-direction" in str(message.get("content") or "")
+            ),
+            "",
+        )
         if self.decisions == 1:
             return LLMToolDecision(
                 text="",
@@ -246,7 +267,7 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         def wait_tool():
             tool_started.set()
             release_tool.wait(timeout=5)
-            return {"released": True}
+            return {"released": True, "payload": "x" * 6000}
 
         registry = ToolRegistry()
         registry.register(
@@ -259,13 +280,20 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             },
             output_schema={
                 "type": "object",
-                "properties": {"released": {"type": "boolean"}},
-                "required": ["released"],
+                "properties": {
+                    "released": {"type": "boolean"},
+                    "payload": {"type": "string"},
+                },
+                "required": ["released", "payload"],
                 "additionalProperties": False,
             },
         )
         planner = PausingPlanner()
-        runtime = CodingAgentRuntime(tool_registry=registry, planner=planner)
+        runtime = CodingAgentRuntime(
+            tool_registry=registry,
+            planner=planner,
+            native_context_max_chars=3500,
+        )
         result_holder = []
 
         with TemporaryDirectory() as temp_dir:
@@ -296,15 +324,21 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
 
             self.assertFalse(worker.is_alive())
             self.assertEqual(result_holder[0].status, "paused")
+            feedback = "resume direction " + "逐字保留" * 80
             completed = runtime.resume(
                 run_id=queued.run_id,
                 approved=True,
-                feedback="resume direction",
+                feedback=feedback,
             )
 
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.answer, "Resumed and completed.")
         self.assertTrue(planner.observed_steering)
+        self.assertEqual(
+            planner.observed_steering_content,
+            "User steering for the active run: " + feedback,
+        )
+        self.assertEqual(runtime.get_run(queued.run_id).steering_messages, [])
 
     def test_historical_checkpoint_starts_an_independent_graph_thread(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -351,6 +385,212 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 for item in branch_history
             )
         )
+
+    def test_rollback_and_fork_deliver_checkpoint_direction_verbatim(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            planner = InputPlanner()
+            runtime = CodingAgentRuntime(planner=planner)
+            source = runtime.run(
+                conversation_id="sess_checkpoint_verbatim",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            selected = next(
+                item
+                for item in runtime.list_checkpoints(source.run_id)
+                if item.next_nodes == ["plan_tools"]
+            )
+            for mode in ("rollback", "fork"):
+                with self.subTest(mode=mode):
+                    direction = f"checkpoint-direction-{mode}-" + "逐字" * 80
+                    branch = runtime.prepare_checkpoint_branch(
+                        source_run_id=source.run_id,
+                        checkpoint_id=selected.checkpoint_id,
+                        conversation_id=(
+                            source.conversation_id
+                            if mode == "rollback"
+                            else f"{source.conversation_id}_fork"
+                        ),
+                        mode=mode,
+                        message=direction,
+                    )
+                    runtime.restore_record(branch)
+                    planner.decisions = 0
+                    planner.observed_branch_direction = ""
+                    restored = runtime.run_from_checkpoint(branch.run_id)
+
+                    self.assertEqual(restored.status, "waiting_input")
+                    self.assertEqual(
+                        planner.observed_branch_direction,
+                        "User steering for the active run: " + direction,
+                    )
+
+    def test_legacy_checkpoint_without_compaction_channels_restores_defaults(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(planner=InputPlanner())
+            source = runtime.run(
+                conversation_id="sess_legacy_checkpoint",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            source_record = runtime.get_run(source.run_id)
+            selected_info = next(
+                item
+                for item in runtime.list_checkpoints(source.run_id)
+                if item.next_nodes == ["plan_tools"]
+            )
+            selected = runtime._checkpoint_coordinator.snapshot_by_id(
+                source.thread_id,
+                selected_info.checkpoint_id,
+            )
+            stored = runtime._checkpointer.get_tuple(selected.config)
+            self.assertIsNotNone(stored)
+            checkpoint = create_checkpoint(stored.checkpoint, None, 0)
+            for channel in (
+                "native_context_compactions",
+                "native_context_reduction_stages",
+            ):
+                checkpoint["channel_values"].pop(channel, None)
+            legacy_thread = "run_legacy_checkpoint"
+            checkpoint_ns = str(
+                selected.config.get("configurable", {}).get("checkpoint_ns") or ""
+            )
+            legacy_config = runtime._checkpointer.put(
+                {
+                    "configurable": {
+                        "thread_id": legacy_thread,
+                        "checkpoint_ns": checkpoint_ns,
+                    }
+                },
+                checkpoint,
+                dict(stored.metadata or {}),
+                dict(checkpoint["channel_versions"]),
+            )
+            writes_by_task = defaultdict(list)
+            for task_id, channel, value in stored.pending_writes or []:
+                if channel in {
+                    "native_context_compactions",
+                    "native_context_reduction_stages",
+                }:
+                    continue
+                writes_by_task[str(task_id)].append((str(channel), value))
+            for task_id, writes in writes_by_task.items():
+                runtime._checkpointer.put_writes(legacy_config, writes, task_id)
+            legacy_snapshot = runtime._checkpoint_coordinator.snapshot_for(
+                legacy_config
+            )
+            self.assertIsNotNone(legacy_snapshot)
+            self.assertNotIn(
+                "native_context_compactions", legacy_snapshot.values
+            )
+            legacy_checkpoint_id = str(
+                legacy_snapshot.config["configurable"]["checkpoint_id"]
+            )
+            legacy_record = replace(
+                source_record,
+                run_id=legacy_thread,
+                thread_id=legacy_thread,
+                checkpoint_id=legacy_checkpoint_id,
+                next_nodes=list(legacy_snapshot.next),
+                trace=list(legacy_snapshot.values.get("trace", [])),
+            )
+            runtime.restore_record(legacy_record)
+            branch = runtime.prepare_checkpoint_branch(
+                source_run_id=legacy_record.run_id,
+                checkpoint_id=legacy_checkpoint_id,
+                conversation_id=legacy_record.conversation_id,
+                mode="rollback",
+                message="legacy checkpoint direction",
+            )
+            branch_snapshot = runtime._checkpoint_coordinator.snapshot_by_id(
+                branch.thread_id,
+                branch.checkpoint_id,
+            )
+
+        self.assertEqual(branch_snapshot.values["native_context_compactions"], 0)
+        self.assertEqual(branch_snapshot.values["native_context_reduction_stages"], [])
+
+    def test_checkpoint_clone_preserves_compaction_count_and_stages(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            runtime = CodingAgentRuntime(planner=InputPlanner())
+            source = runtime.run(
+                conversation_id="sess_compaction_checkpoint",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            selected_info = next(
+                item
+                for item in runtime.list_checkpoints(source.run_id)
+                if item.next_nodes == ["plan_tools"]
+            )
+            selected = runtime._checkpoint_coordinator.snapshot_by_id(
+                source.thread_id,
+                selected_info.checkpoint_id,
+            )
+            for label, count in (("before", 0), ("after", 1)):
+                with self.subTest(label=label):
+                    config = runtime._graph.update_state(
+                        selected.config,
+                        {
+                            "native_context_compactions": count,
+                            "native_context_reduction_stages": [
+                                {"stage": "fold", "compacted": count}
+                            ],
+                        },
+                    )
+                    snapshot = runtime._checkpoint_coordinator.snapshot_for(config)
+                    self.assertTrue(snapshot.next)
+                    checkpoint_id = str(
+                        snapshot.config["configurable"]["checkpoint_id"]
+                    )
+                    branch = runtime.prepare_checkpoint_branch(
+                        source_run_id=source.run_id,
+                        checkpoint_id=checkpoint_id,
+                        conversation_id=source.conversation_id,
+                        mode="rollback",
+                        message=f"{label} compaction",
+                    )
+                    cloned = runtime._checkpoint_coordinator.snapshot_by_id(
+                        branch.thread_id,
+                        branch.checkpoint_id,
+                    )
+
+                    self.assertEqual(
+                        cloned.values["native_context_compactions"], count
+                    )
+                    self.assertEqual(
+                        cloned.values["native_context_reduction_stages"],
+                        [{"stage": "fold", "compacted": count}],
+                    )
+                    if label == "after":
+                        runtime.restore_record(branch)
+                        runtime._planner.decisions = 0
+                        runtime.run_from_checkpoint(branch.run_id)
+                        completed_record = runtime.get_run(branch.run_id)
+                        completed_snapshot = (
+                            runtime._checkpoint_coordinator.snapshot_by_id(
+                                branch.thread_id,
+                                completed_record.checkpoint_id,
+                            )
+                        )
+                        self.assertEqual(
+                            completed_snapshot.values[
+                                "native_context_compactions"
+                            ],
+                            1,
+                        )
 
     def test_queued_steering_survives_worker_start_and_is_consumed(self) -> None:
         with TemporaryDirectory() as temp_dir:

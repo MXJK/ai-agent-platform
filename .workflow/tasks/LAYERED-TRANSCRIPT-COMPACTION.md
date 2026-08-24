@@ -42,7 +42,6 @@ This is step 3 of 4 and depends on CONTEXT-BUDGET-PRIMITIVES.
   run with `terminal_status="blocked"` and `terminal_reason="context_compaction_exhausted"`.
 - A `context_overflow` error code for provider context-length errors, and exactly one
   forced compaction plus retry on it.
-- CLI `/compact [instruction]`.
 - Stage reporting through metrics and the existing SSE `context` event.
 
 ## Out of scope
@@ -50,25 +49,29 @@ This is step 3 of 4 and depends on CONTEXT-BUDGET-PRIMITIVES.
 - Budget derivation and allocation (UNIFIED-CONTEXT-BUDGET).
 - Chat-layer compaction behavior.
 - The tool-result entry cap (TOOL-RESULT-BUDGET), which should already be in place.
+- Manual `/compact`. A CLI command starts a fresh Run and cannot truthfully compact an
+  existing Session or older Run transcript without a Session API, instruction contract,
+  before/after Token evidence, and the structured snapshot planned for wave 2.
 
 ## Acceptance criteria
 
-- [ ] Characterization tests lock today's `_compact_native_messages` behavior before any
+- [x] Characterization tests lock today's `_compact_native_messages` behavior before any
       change, following `tests/test_agent_loop_characterization.py`.
-- [ ] Reduction runs in order: tool-result eviction, then fold, then drop/truncate.
-- [ ] Microcompact never splits an assistant/tool pair and never leaves a `tool_calls`
+- [x] Reduction runs in order: tool-result eviction, then fold, then drop/truncate.
+- [x] Microcompact never splits an assistant/tool pair and never leaves a `tool_calls`
       entry without a matching result; assistant text and message structure survive.
-- [ ] Folding re-measures its own output; a still-over-budget transcript falls through
+- [x] Folding re-measures its own output; a still-over-budget transcript falls through
       instead of being returned as if it fit.
-- [ ] Exceeding the compaction limit terminates the run with the documented reason and a
+- [x] Exceeding the compaction limit terminates the run with the documented reason and a
       final answer that says where it stopped, instead of folding again.
-- [ ] A provider context-length error triggers exactly one forced compaction and one
+- [x] A provider context-length error triggers exactly one forced compaction and one
       retry — never a loop.
-- [ ] `/compact [instruction]` works in the CLI REPL.
-- [ ] `.venv/bin/python -m pytest -q` passes.
-- [ ] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
-- [ ] Documentation updated: new configuration keys, the new terminal reason, the CLI
-      command and the SSE stage field are user-visible. Run
+- [x] No manual `/compact` command is exposed as an empty metadata-only operation;
+      real manual compaction is explicitly deferred to the unified-budget/snapshot phase.
+- [x] `.venv/bin/python -m pytest -q` passes.
+- [x] `.venv/bin/python -m compileall ai_agent_platform tests evals` passes.
+- [x] Documentation updated: new configuration keys, the new terminal reason, the SSE
+      stage field, and the manual-command deferral are user-visible. Run
       `.venv/bin/python INTERVIEW_NOTES/validate.py`.
 
 ## Decisions
@@ -83,7 +86,39 @@ This is step 3 of 4 and depends on CONTEXT-BUDGET-PRIMITIVES.
   and easier to diagnose than a slowly emptying context.
 - The reactive retry is capped at one attempt. Retrying a context error more than once
   without new information is a loop, not a recovery.
+- Initial user requests, checkpoint restore directions, and pause/resume steering are
+  verbatim/non-truncatable. If those immutable instructions cannot fit, the Run blocks
+  instead of silently continuing with a partial direction.
+- Restored transcripts validate assistant/tool call boundaries before any reduction.
+  Current multi-call turns require complete call IDs; the single positional pair written
+  by legacy checkpoints remains accepted when both sides omit IDs.
+- Checkpoint clones normalize missing compaction channels to `0` and `[]`,
+  preserve channels that are present,
+  and mark inherited context-stage events as replayed with their source identity.
+- Every user steering group is both non-droppable and non-truncatable. If several queued
+  directions cannot fit together, the Run blocks with all originals intact instead of
+  silently dropping an earlier direction.
+- A metadata-only CLI `/compact` was rejected during review: fresh Runs start with only
+  a system/user seed, so that prototype released no tokens from an existing Session or
+  Run. Manual compaction moves to wave 2 with a real Session/snapshot contract.
 
 ## Verification
 
+- Post-review focused compaction/checkpoint/context/CLI suite:
+  `42 passed, 10 subtests passed`.
+- Full suite: `586 passed, 68 subtests passed`.
+- `.venv/bin/python -m compileall ai_agent_platform tests evals`: passed.
+- `git diff --check`: passed.
+- `INTERVIEW_NOTES/validate.py` was not applicable: the current `main` stopped tracking
+  the interview handbook in commit `ca71b1e6`; this task changed both `README.md` and
+  `README.en.md` instead.
+
 ## Result
+
+Implemented the ordered native-transcript reduction ladder, post-fold remeasurement,
+bounded fold breaker, provider `context_overflow` recovery, stage metrics
+and SSE events, and environment configuration. Added checkpoint/time-travel compatibility
+for missing compaction state, verbatim steering under pressure, replay-labeled
+inherited events, and invalid assistant/tool boundary rejection. Documentation describes
+the user-visible terminal reason, event contract, settings, and explicit manual-command
+deferral.

@@ -90,6 +90,7 @@ class CodingAgentState(TypedDict, total=False):
     native_consecutive_failures: int
     native_context_compactions: int
     native_context_chars: int
+    native_context_reduction_stages: list[dict[str, Any]]
     native_artifacts_collected: bool
     terminal_status: str
     terminal_reason: str
