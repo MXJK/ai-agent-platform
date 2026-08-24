@@ -5,7 +5,10 @@ import unittest
 from ai_agent_platform.services.context_budget import (
     ContextShares,
     divide_context_budget,
+    estimate_tool_schema_tokens,
 )
+from ai_agent_platform.integrations.tools import ToolSpec
+from ai_agent_platform.token_counting import estimate_text_tokens
 
 
 class DivideContextBudgetTests(unittest.TestCase):
@@ -118,6 +121,42 @@ class DivideContextBudgetTests(unittest.TestCase):
                 evidence_ratio=0.1,
                 history_ratio=1.0,
             )
+
+
+class ToolSchemaBudgetTests(unittest.TestCase):
+    def test_large_output_schema_increases_fixed_overhead_estimate(self) -> None:
+        def spec(output_schema: dict[str, object]) -> ToolSpec:
+            return ToolSpec(
+                name="mcp.lookup",
+                description="lookup structured data",
+                input_schema={"type": "object"},
+                output_schema=output_schema,
+                provider="mcp",
+            )
+
+        small = estimate_tool_schema_tokens(
+            [spec({"type": "object"})],
+            estimate_tokens=estimate_text_tokens,
+        )
+        large = estimate_tool_schema_tokens(
+            [
+                spec(
+                    {
+                        "type": "object",
+                        "properties": {
+                            f"field_{index}": {
+                                "type": "string",
+                                "description": "structured response field " + "x" * 80,
+                            }
+                            for index in range(100)
+                        },
+                    }
+                )
+            ],
+            estimate_tokens=estimate_text_tokens,
+        )
+
+        self.assertGreater(large, small * 10)
 
 
 if __name__ == "__main__":  # pragma: no cover

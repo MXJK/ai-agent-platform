@@ -114,6 +114,7 @@ def estimate_tool_schema_tokens(
             "name": getattr(spec, "name", ""),
             "description": getattr(spec, "description", ""),
             "input_schema": getattr(spec, "input_schema", None),
+            "output_schema": getattr(spec, "output_schema", None),
         }
         for spec in tool_specs
     ]
@@ -236,7 +237,8 @@ def fit_text_to_tokens(
     if estimate_tokens(text) <= max_tokens:
         return text
     low, high = 0, len(text)
-    best = marker.strip()
+    marker_only = marker.strip()
+    best = marker_only if estimate_tokens(marker_only) <= max_tokens else ""
     while low <= high:
         keep = (low + high) // 2
         candidate = head_tail(text, keep, marker=marker)

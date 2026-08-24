@@ -300,19 +300,6 @@ def build_workspace_query(state: CodingAgentState) -> str:
     return "\n".join(parts)
 
 
-def _history_chars_for_tokens(
-    history: list[dict[str, Any]],
-    max_tokens: int,
-) -> int:
-    """Convert a token share using this conversation's measured text density."""
-
-    text = "".join(str(message.get("content") or "") for message in history)
-    tokens = estimate_text_tokens(text)
-    if tokens <= 0:
-        return max(1, max_tokens * 4)
-    return max(1, (len(text) * max_tokens) // tokens)
-
-
 def recent_conversation_context(
     state: CodingAgentState,
     *,
@@ -324,10 +311,7 @@ def recent_conversation_context(
 
     history = state.get("history", [])
     if max_tokens is not None:
-        if max_tokens <= 0:
-            return ""
-        max_chars = _history_chars_for_tokens(history, max_tokens)
-        max_messages = max(max_messages, len(history))
+        return _recent_conversation_context_tokens(history, max_tokens)
     summary_message = next(
         (
             message
@@ -371,16 +355,59 @@ def recent_conversation_context(
         if remaining_chars <= 0:
             break
     lines = ([summary_line] if summary_line else []) + list(reversed(selected))
-    excerpt = "\n".join(lines)[:max_chars]
-    if max_tokens is None or estimate_text_tokens(excerpt) <= max_tokens:
-        return excerpt
+    return "\n".join(lines)[:max_chars]
+
+
+def _recent_conversation_context_tokens(
+    history: list[dict[str, Any]],
+    max_tokens: int,
+) -> str:
+    """Select full normalized messages newest-first within an exact token share."""
+
     from ai_agent_platform.services.context_budget import fit_text_to_tokens
 
-    return fit_text_to_tokens(
-        excerpt,
-        max_tokens,
-        estimate_tokens=estimate_text_tokens,
-    )
+    if max_tokens <= 0:
+        return ""
+    selected: list[str] = []
+    for message in reversed(history):
+        role = str(message.get("role") or "").strip()
+        content = " ".join(str(message.get("content") or "").split())
+        if role not in {"system", "user", "assistant"} or not content:
+            continue
+        line = f"{role}: {content}"
+        candidate = "\n".join([line, *selected])
+        if estimate_text_tokens(candidate) <= max_tokens:
+            selected.insert(0, line)
+            continue
+
+        best = ""
+        low = 0
+        high = estimate_text_tokens(content)
+        while low <= high:
+            allowed = (low + high) // 2
+            fitted = fit_text_to_tokens(
+                content,
+                allowed,
+                estimate_tokens=estimate_text_tokens,
+            )
+            fitted_line = f"{role}: {fitted}" if fitted else ""
+            fitted_candidate = (
+                "\n".join([fitted_line, *selected])
+                if fitted_line
+                else "\n".join(selected)
+            )
+            if fitted_line and estimate_text_tokens(fitted_candidate) <= max_tokens:
+                best = fitted_line
+                low = allowed + 1
+            else:
+                high = allowed - 1
+        if best:
+            selected.insert(0, best)
+        break
+    excerpt = "\n".join(selected)
+    if estimate_text_tokens(excerpt) > max_tokens:
+        raise AssertionError("history context exceeded its resolved token share")
+    return excerpt
 
 
 def build_tool_plan_approval_request(state: CodingAgentState) -> dict[str, Any]:

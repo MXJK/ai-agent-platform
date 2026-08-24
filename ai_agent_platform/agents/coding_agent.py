@@ -173,6 +173,13 @@ class CodingAgentRuntime:
         self._max_consecutive_failures = max_consecutive_failures
         self._native_context_max_chars = native_context_max_chars
         self._native_context_keep_messages = native_context_keep_messages
+        from ai_agent_platform.services.context_budget import divide_context_budget
+
+        divide_context_budget(
+            1,
+            evidence_ratio=context_evidence_ratio,
+            history_ratio=context_history_ratio,
+        )
         self._context_evidence_ratio = context_evidence_ratio
         self._context_history_ratio = context_history_ratio
         if tool_result_keep_recent <= 0:

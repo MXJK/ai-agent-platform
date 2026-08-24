@@ -807,14 +807,17 @@ README/项目清单，其他任务仍只读取搜索或文件发现选中的路�
 #### 统一上下文预算
 
 Agent Run 的模型输入额度只在 `setup_workspace` 解析和切分一次。先显式计量 system prompt
-与本 Run 可见工具 Schema 的固定份额，再以 `LLM_CONTEXT_EVIDENCE_RATIO`（默认 0.25）和
+与本 Run 可见工具 input/output Schema 的固定份额，再以
+`LLM_CONTEXT_EVIDENCE_RATIO`（默认 0.25）和
 `LLM_CONTEXT_HISTORY_RATIO`（默认 0.15）切分剩余额度；native 工具转录取得最后的余量。
 所有份额相加恰好等于 `LLM_CONTEXT_INPUT_TOKEN_RATIO` 所解析的 input allowance，并持久化到
 Run 状态及 `setup_workspace` trace。后续层只读取这些份额，不再各自从模型窗口推导比例。
 
 份额在 seed 组装时按字段生效：evidence 先整条丢弃排名较低的来源，最后一个来源只裁剪
-`text`；conversation history 按 Token 份额选择最新消息；RAG 的固定字符上限只在拿不到
-模型信息时兜底。system、用户本轮请求、checkpoint 恢复方向及全部 steering 保持逐字。
+`text`；conversation history 在 Token 模式下使用完整规范化消息，从最新向前选择，只在
+字段边界裁剪最后一条装不下的 content，不再套用摘要 600 字符或每条 280 字符上限；RAG 的
+固定字符上限只在拿不到模型信息时兜底。system、用户本轮请求、checkpoint 恢复方向及全部
+steering 保持逐字。
 因此 seed 始终是合法 JSON，Layered ladder 不会在序列化字符串中间截断它；Provider 报
 `context_overflow` 时也会用缩小后的 evidence/history 份额重建 seed，再执行唯一一次强制
 回收与重试。

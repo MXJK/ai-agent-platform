@@ -692,8 +692,8 @@ before/after token evidence, and observable outcome together; it is deferred to 
 structured-snapshot phase.
 
 One authority resolves and divides the model input allowance in `setup_workspace`.
-It first measures explicit fixed shares for the system prompt and visible tool
-schemas, then assigns `LLM_CONTEXT_EVIDENCE_RATIO` (default `0.25`) and
+It first measures explicit fixed shares for the system prompt and visible tool input
+and output schemas, then assigns `LLM_CONTEXT_EVIDENCE_RATIO` (default `0.25`) and
 `LLM_CONTEXT_HISTORY_RATIO` (default `0.15`) from what remains; the native tool
 transcript receives the exact remainder. The named shares add back up to the one
 allowance derived through `LLM_CONTEXT_INPUT_TOKEN_RATIO`, persist in run state and
@@ -701,12 +701,14 @@ the setup trace, and are read by every later layer without another window ratio.
 
 Evidence and history are fitted field by field while the seed is assembled. Lower
 ranked evidence sources are dropped before the final source's `text` is trimmed,
-history keeps the newest messages within its token share, and the RAG character cap
-is only a fallback when model information is unavailable. The system prompt, current
-request, checkpoint directions, and all steering stay verbatim, so seed JSON remains
-parseable. Provider overflow recovery rebuilds optional seed fields at smaller shares
-before the one forced reduction and retry. A window whose fixed overhead leaves no
-transcript capacity blocks before the provider as `context_budget_too_small`.
+history token mode selects full normalized messages newest-first and truncates only the
+last content field that cannot fit—without the static 600-character summary or
+280-character per-message snippets. The RAG character cap is only a fallback when model
+information is unavailable. The system prompt, current request, checkpoint directions,
+and all steering stay verbatim, so seed JSON remains parseable. Provider overflow
+recovery rebuilds optional seed fields at smaller shares before the one forced reduction
+and retry. A window whose fixed overhead leaves no transcript capacity blocks before the
+provider as `context_budget_too_small`.
 
 The production boundary stays finite: Session assembly first freezes
 `RunContextSnapshot.controlled_history` under its message ceiling and token budget.

@@ -176,6 +176,18 @@ class LayeredSeedProtectionTests(unittest.TestCase):
 
 
 class ContextBudgetTooSmallTests(unittest.TestCase):
+    def test_direct_runtime_rejects_invalid_context_share_ratios(self) -> None:
+        for kwargs in (
+            {"context_evidence_ratio": -0.1},
+            {"context_history_ratio": 1.0},
+            {
+                "context_evidence_ratio": 0.6,
+                "context_history_ratio": 0.4,
+            },
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                CodingAgentRuntime(**kwargs)
+
     def _seed_for_window(self, window_tokens: int) -> str:
         planner = _ScriptedPlanner()
         with TemporaryDirectory() as temp_dir:
@@ -239,8 +251,20 @@ class ContextBudgetTooSmallTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         payload = json.loads(str(planner.last_messages[1]["content"]))
-        self.assertIn("history item 0", payload["conversation_context"])
-        self.assertIn("history item 19", payload["conversation_context"])
+        context = payload["conversation_context"]
+        shares = next(
+            item["output"]["context_shares"]
+            for item in result.trace
+            if item["node"] == "setup_workspace"
+        )
+        self.assertIn("history item 0", context)
+        self.assertIn("history item 19", context)
+        self.assertEqual(context.count("history item "), 20)
+        self.assertIn("h" * 200, context)
+        self.assertLessEqual(
+            estimate_text_tokens(context),
+            shares["history_tokens"],
+        )
 
     def test_tiny_window_blocks_before_provider_call(self) -> None:
         planner = _ScriptedPlanner()

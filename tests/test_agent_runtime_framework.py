@@ -567,46 +567,54 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                     checkpoint_id = str(
                         snapshot.config["configurable"]["checkpoint_id"]
                     )
-                    branch = runtime.prepare_checkpoint_branch(
-                        source_run_id=source.run_id,
-                        checkpoint_id=checkpoint_id,
-                        conversation_id=source.conversation_id,
-                        mode="rollback",
-                        message=f"{label} compaction",
-                    )
-                    cloned = runtime._checkpoint_coordinator.snapshot_by_id(
-                        branch.thread_id,
-                        branch.checkpoint_id,
-                    )
-
-                    self.assertEqual(
-                        cloned.values["native_context_compactions"], count
-                    )
-                    self.assertEqual(
-                        cloned.values["native_context_reduction_stages"],
-                        [{"stage": "fold", "compacted": count}],
-                    )
-                    self.assertEqual(
-                        cloned.values["context_shares"]["transcript_tokens"],
-                        5_400,
-                    )
-                    if label == "after":
-                        runtime.restore_record(branch)
-                        runtime._planner.decisions = 0
-                        runtime.run_from_checkpoint(branch.run_id)
-                        completed_record = runtime.get_run(branch.run_id)
-                        completed_snapshot = (
-                            runtime._checkpoint_coordinator.snapshot_by_id(
-                                branch.thread_id,
-                                completed_record.checkpoint_id,
+                    for mode in ("rollback", "fork"):
+                        with self.subTest(label=label, mode=mode):
+                            conversation_id = (
+                                source.conversation_id
+                                if mode == "rollback"
+                                else f"{source.conversation_id}_fork_{label}"
                             )
-                        )
-                        self.assertEqual(
-                            completed_snapshot.values[
-                                "native_context_compactions"
-                            ],
-                            1,
-                        )
+                            branch = runtime.prepare_checkpoint_branch(
+                                source_run_id=source.run_id,
+                                checkpoint_id=checkpoint_id,
+                                conversation_id=conversation_id,
+                                mode=mode,
+                                message=f"{label} compaction {mode}",
+                            )
+                            cloned = runtime._checkpoint_coordinator.snapshot_by_id(
+                                branch.thread_id,
+                                branch.checkpoint_id,
+                            )
+
+                            self.assertEqual(
+                                cloned.values["native_context_compactions"], count
+                            )
+                            self.assertEqual(
+                                cloned.values["native_context_reduction_stages"],
+                                [{"stage": "fold", "compacted": count}],
+                            )
+                            self.assertEqual(
+                                cloned.values["context_shares"]["transcript_tokens"],
+                                5_400,
+                            )
+                            if label != "after" or mode != "rollback":
+                                continue
+                            runtime.restore_record(branch)
+                            runtime._planner.decisions = 0
+                            runtime.run_from_checkpoint(branch.run_id)
+                            completed_record = runtime.get_run(branch.run_id)
+                            completed_snapshot = (
+                                runtime._checkpoint_coordinator.snapshot_by_id(
+                                    branch.thread_id,
+                                    completed_record.checkpoint_id,
+                                )
+                            )
+                            self.assertEqual(
+                                completed_snapshot.values[
+                                    "native_context_compactions"
+                                ],
+                                1,
+                            )
 
     def test_queued_steering_survives_worker_start_and_is_consumed(self) -> None:
         with TemporaryDirectory() as temp_dir:

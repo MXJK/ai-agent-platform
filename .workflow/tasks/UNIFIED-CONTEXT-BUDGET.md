@@ -109,6 +109,19 @@ On the agent path, conversation history passes four gates, each with its own uni
   budget. Coding Runtime persists that already-controlled list without a second 12-item
   slice, then history share controls the native model projection. A legacy checkpoint or
   unavailable model budget uses the static message/character fallbacks.
+- Token-mode history is a separate exact-budget path: it normalizes full messages,
+  selects newest-first, and only head/tail-truncates the content field of the oldest
+  selected message that cannot fit. The legacy 600-character summary and 280-character
+  per-message snippets are used only in the no-share fallback.
+- Tool-schema overhead includes both input and output JSON schemas. This is conservative
+  across Providers such as Google that send an output response schema and prevents large
+  MCP result contracts from bypassing the fixed-overhead share.
+- `fit_text_to_tokens` returns an empty string when the truncation marker itself cannot
+  fit. Returning the marker over budget would violate the primitive's hard invariant and
+  propagate undercount into every caller.
+- `CodingAgentRuntime` validates share ratios directly as well as through `Settings`.
+  Tests and SDK callers construct it without `ApplicationFactory`, so relying on startup
+  configuration validation alone would silently turn invalid ratios into static fallback.
 
 ## Verification
 
@@ -117,10 +130,11 @@ Run from `/private/tmp/aap-unified-wave2` using the root checkout interpreter:
 - Characterization before implementation: existing context/layered/checkpoint suite
   passed with `53 passed, 12 subtests passed`; the newly added unified-share tests then
   failed at collection because `ContextShares` did not exist.
-- Focused final regression suite covering unified shares, configuration migration,
-  Layered fold/overflow behavior, checkpoint cloning and legacy restore:
-  `88 passed, 12 subtests passed`.
-- Full suite: `607 passed, 68 subtests passed in 46.60s`.
+- Focused final review-blocker suite covering token primitive boundaries, ASCII/CJK and
+  summary history fitting, output schemas, direct Runtime validation, Layered behavior,
+  and checkpoint rollback/fork persistence: `68 passed, 19 subtests passed`.
+- Full suite after all independent-review fixes:
+  `614 passed, 79 subtests passed in 66.38s`.
 - `.venv/bin/python -m compileall ai_agent_platform tests evals`: PASS.
 - `git diff --check`: PASS.
 - `README.md`, `README.en.md` and `.env.example` are synchronized. The gitignored
@@ -140,6 +154,10 @@ gate are removed.
 Seed assembly is field-aware and JSON-safe. Evidence drops low-ranked sources before
 trimming one source's `text`; history uses its token share and may retain more than the
 legacy fixed message/character caps; a zero share removes optional evidence/history.
+Token-mode history now uses full normalized messages and an exact token check for every
+candidate, including long ASCII, Chinese and rolling-summary content. Static summary and
+message snippets are never consulted in this path. The shared text-fitting primitive is
+also exact for zero, sub-marker, marker and Unicode boundary budgets.
 RAG and transcript character limits are active only when no model shares exist. The
 current request, initial seed, every user steering message and checkpoint direction stay
 verbatim. Provider overflow may rebuild optional seed fields at half shares, then still
@@ -154,8 +172,9 @@ fix is a merge blocker for the Unified branch.
 Small windows stop before a Provider call as `blocked/context_budget_too_small`, with
 separate system/tool-schema evidence in the message. Legacy checkpoints normalize a
 missing `context_shares` channel to `{}` and keep static fallback behavior; new rollback
-and fork branches preserve the resolved shares and the existing replayed compaction-stage
-semantics.
+and fork branches both execute with the persisted resolved shares and preserve the
+existing replayed compaction-stage semantics. Fixed tool overhead now includes output
+schemas, and direct Runtime construction rejects invalid share ratios before graph setup.
 
 No manual or metadata-only `/compact` path was added. Artifact persistence/readback is
 also intentionally absent: the later Artifact wave should externalize eviction candidates
