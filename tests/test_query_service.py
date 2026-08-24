@@ -239,6 +239,50 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 [alice_record.run_id],
             )
 
+    async def test_recent_runs_skip_orphans_with_deleted_sessions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            alice_record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="visible run",
+                    workspace_id="workspace_main",
+                )
+            )
+            orphan = replace(
+                alice_record,
+                run_id="run_orphan_recent",
+                thread_id="run_orphan_recent",
+                conversation_id="sess_deleted",
+            )
+            kernel["run_store"].save(orphan)
+
+            self.assertEqual(
+                [
+                    record.run_id
+                    for record in service.list_runs_for_actor("alice", limit=10)
+                ],
+                [alice_record.run_id],
+            )
+
+            app = FastAPI()
+            app.include_router(
+                create_agent_runs_router(
+                    service,
+                    Settings(auth_mode="single_user", single_user_id="alice"),
+                ),
+                prefix="/api/v1",
+            )
+            with TestClient(app) as client:
+                response = client.get("/api/v1/agent/runs?limit=10")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                [record["run_id"] for record in response.json()["runs"]],
+                [alice_record.run_id],
+            )
+
     async def test_approval_decision_is_appended_before_resume(self) -> None:
         with TemporaryDirectory() as temp_dir:
             kernel = _kernel(Path(temp_dir))

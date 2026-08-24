@@ -963,6 +963,7 @@ SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接�
 追加含操作者与原始请求的 `approval_decided`。因此审计页不需要依赖瞬时前端状态，也能
 按 sequence 复盘执行事实。
 最近 Run 列表在 QueryService 中按会话归属过滤，不会跨身份暴露记录。终态包括 `completed`、
+已删除会话遗留的孤儿 Run 按不可见处理，不会使集合查询失败。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
 `waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
 一次运行，并把审批、追问或暂停控件重新挂回原助手消息，同时恢复常驻 Run 控制条。

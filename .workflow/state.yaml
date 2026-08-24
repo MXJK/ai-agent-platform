@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AUDITABLE-TRACE-PAGE"
-next_action: "Create the structured-compaction-snapshot-wave2 worktree and launch separated implementation, review, and test-design agents."
+active_task: "TRACE-RUN-LIST-ORPHANS"
+next_action: "Merge the verified fix into local main; do not push or restart Docker."
 blockers: []
-last_verified_commit: "f8346fe9f271d0cf6428bbdc46a214b06d650089"
-updated_at: "2026-08-24T16:55:04+08:00"
+last_verified_commit: "69991a2dc8e1301e86ccc713b9cc94d393f89bc4"
+updated_at: "2026-08-24T17:10:55+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

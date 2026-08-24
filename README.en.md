@@ -1012,7 +1012,9 @@ preserving artifact and integrity metadata without leaking page content.
 Approval resume appends an `approval_decided` event, including the actor and original
 request, before the Run is queued again. The audit page can therefore replay
 facts by sequence without relying on transient frontend state. Recent-Run
-listing is filtered by conversation ownership in `QueryService`.
+listing is filtered by conversation ownership in `QueryService`. Orphan Runs
+whose conversations were deleted are treated as invisible instead of failing
+the collection query.
 Final statuses are `completed`, `partial`, `blocked`, `cancelled`, and `failed`;
 suspended interaction states are `waiting_approval`, `waiting_input`, and
 `paused`. When a saved session is opened, the frontend uses the conversation-level
