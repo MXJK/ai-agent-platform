@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "UNIFIED-CONTEXT-BUDGET"
-next_action: "Start a new coordinated task for Artifact readback, then structured snapshots, with separate codex worktrees and pre-merge confirmation gates."
+status: "review"
+active_task: "ARTIFACT-READBACK"
+next_action: "Complete independent review and final full verification for codex/artifact-readback-wave2, then report the branch and wait for explicit merge confirmation."
 blockers: []
 last_verified_commit: "e00b1210c53a563f48390dfc03d99b7275eb5727"
-updated_at: "2026-08-24T14:42:11+08:00"
+updated_at: "2026-08-24T15:53:13+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
