@@ -327,10 +327,14 @@ function formatTokenCount(value) {
 }
 
 function formatTokenPercentage(value) {
+  const normalized = Number.isFinite(value) ? Math.max(0, value) : 0;
+  if (normalized > 0 && normalized < 0.0001) {
+    return "<0.01%";
+  }
   return new Intl.NumberFormat("zh-CN", {
     style: "percent",
-    maximumFractionDigits: 1,
-  }).format(Number.isFinite(value) ? value : 0);
+    maximumFractionDigits: 2,
+  }).format(normalized);
 }
 
 function humanizeAgentNode(value) {

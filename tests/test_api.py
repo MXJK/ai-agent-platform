@@ -840,6 +840,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-context-kicker"', response.text)
         self.assertIn("累计 Token", response.text)
         self.assertIn("function formatTokenPercentage(value)", script_response.text)
+        self.assertIn('return "<0.01%"', script_response.text)
+        self.assertIn("maximumFractionDigits: 2", script_response.text)
         self.assertIn(
             "上下文上限 ${formatTokenCount(budget)} · ${percentage}",
             script_response.text,

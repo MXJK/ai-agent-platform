@@ -1,7 +1,7 @@
 project_id: "ai-agent-platform"
-status: "done"
+status: "active"
 active_task: "TOKEN-BUDGET-PERCENTAGE"
-next_action: "Monitor the cumulative Token percentage wording with real multi-turn sessions."
+next_action: "Verify non-zero percentage precision in the live composer."
 blockers: []
 last_verified_commit: "d4e0f4b343a506819fd63ded810c25dbdf2758a0"
 updated_at: "2026-08-25T11:08:26+08:00"
