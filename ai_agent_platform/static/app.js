@@ -326,6 +326,13 @@ function formatTokenCount(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
 }
 
+function formatTokenPercentage(value) {
+  return new Intl.NumberFormat("zh-CN", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(Number.isFinite(value) ? value : 0);
+}
+
 function humanizeAgentNode(value) {
   const labels = {
     setup_workspace: "准备工作区",
@@ -1407,27 +1414,26 @@ function updateComposerScopeSummary() {
   const usage = state.conversationId
     ? state.sessionTokenUsage[state.conversationId]
     : null;
-  const total = Number(usage?.total_tokens || 0);
-  const estimated = Number(usage?.context?.estimated_tokens || 0);
+  const total = Math.max(0, Number(usage?.total_tokens || 0));
   const budget = Number(usage?.context?.budget_tokens || 0);
-  const ratio = budget ? Math.min(1, estimated / budget) : 0;
+  const ratio = budget > 0 ? total / budget : 0;
+  const percentage = formatTokenPercentage(ratio);
   const contextNode = $("composer-context-budget");
-  contextNode.classList.toggle("warning", ratio >= 0.72 && ratio < 0.9);
-  contextNode.classList.toggle("error", ratio >= 0.9);
+  contextNode.classList.remove("warning", "error");
   $("composer-context-kicker").textContent = usage
     ? `累计 ${formatTokenCount(total)} tokens`
-    : "Token usage";
+    : "累计 Token";
   $("composer-context-label").textContent = usage
-    ? estimated
-      ? `历史 ≈ ${formatTokenCount(estimated)}${budget ? ` / ${formatTokenCount(budget)}` : ""}`
-      : "历史尚未形成"
+    ? budget > 0
+      ? `上下文上限 ${formatTokenCount(budget)} · ${percentage}`
+      : "上下文上限未知"
     : "等待首轮请求";
-  $("composer-context-meter-fill").style.width = `${Math.round(ratio * 100)}%`;
+  $("composer-context-meter-fill").style.width = `${Math.round(Math.min(1, ratio) * 100)}%`;
   contextNode.title = usage
-    ? `累计实际消耗 ${formatTokenCount(total)} tokens。当前会话历史估算 ${formatTokenCount(estimated)}${
-        budget ? ` / ${formatTokenCount(budget)}` : ""
-      } tokens；历史估算只包含保留的会话消息和摘要，不等同于完整最终 Prompt。`
-    : "发起请求后显示累计实际消耗和当前会话历史估算";
+    ? budget > 0
+      ? `累计实际消耗 ${formatTokenCount(total)} tokens / 单次请求上下文上限 ${formatTokenCount(budget)} tokens（${percentage}）。累计消耗会跨多次请求增长，超过 100% 不代表当前请求超出上下文窗口。`
+      : `累计实际消耗 ${formatTokenCount(total)} tokens；当前模型未提供上下文上限。`
+    : "发起请求后显示累计实际消耗、上下文上限和两者比例";
 }
 
 function updateContextSummary() {

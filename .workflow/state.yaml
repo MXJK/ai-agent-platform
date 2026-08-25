@@ -1,7 +1,7 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "AGENT-SSE-LIVE-EVENTS"
-next_action: "Monitor live Agent event delivery and tune answer-delta batching from production observations."
+status: "in_progress"
+active_task: "TOKEN-BUDGET-PERCENTAGE"
+next_action: "Implement and verify the composer cumulative Token percentage display."
 blockers: []
 last_verified_commit: "778f4faa50260c8d3d21262a9a300270758adbca"
 updated_at: "2026-08-25T10:53:38+08:00"
