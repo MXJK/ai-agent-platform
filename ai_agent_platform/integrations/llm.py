@@ -1032,7 +1032,24 @@ class LLMClient:
         raise last_error
 
     def complete(self, prompt: str) -> LLMResponse:
+        return self.complete_stream(prompt)
+
+    def complete_stream(
+        self,
+        prompt: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+        delta_batch_chars: int = 128,
+        delta_batch_seconds: float = 0.1,
+    ) -> LLMResponse:
+        if delta_batch_chars <= 0:
+            raise ValueError("delta_batch_chars must be positive")
+        if delta_batch_seconds < 0:
+            raise ValueError("delta_batch_seconds must not be negative")
         text_parts: list[str] = []
+        pending_delta: list[str] = []
+        pending_chars = 0
+        last_delta_at = time.monotonic()
         latest_usage: LLMUsage | None = None
         selected_provider = self._settings.llm_provider
         selected_model = self._settings.llm_model
@@ -1040,6 +1057,18 @@ class LLMClient:
         messages = [{"role": "user", "content": prompt}]
         plan = self.prepare_chat_request(messages)
         selection = current_model_selection()
+
+        def flush_delta() -> None:
+            nonlocal pending_chars, last_delta_at
+            if not pending_delta:
+                return
+            text = "".join(pending_delta)
+            pending_delta.clear()
+            pending_chars = 0
+            last_delta_at = time.monotonic()
+            if on_delta is not None:
+                on_delta(text)
+
         for event in self.stream_chat(
             messages,
             thinking_level=(selection.thinking_level if selection else None),
@@ -1051,8 +1080,16 @@ class LLMClient:
                 route_trace = event.route_trace
             elif event.type == "delta":
                 text_parts.append(event.text)
+                pending_delta.append(event.text)
+                pending_chars += len(event.text)
+                if (
+                    pending_chars >= delta_batch_chars
+                    or time.monotonic() - last_delta_at >= delta_batch_seconds
+                ):
+                    flush_delta()
             elif event.type == "usage" and event.usage is not None:
                 latest_usage = event.usage
+        flush_delta()
         return LLMResponse(
             text="".join(text_parts),
             model=selected_model,

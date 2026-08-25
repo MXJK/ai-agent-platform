@@ -1021,6 +1021,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("await onProgress", script_response.text)
         self.assertIn("agentProgressBodyFromEvents", script_response.text)
         self.assertIn("renderStreamedAgentProgress", script_response.text)
+        self.assertIn("executionActivityEvents", script_response.text)
+        self.assertIn('event.type === "answer_delta"', script_response.text)
+        self.assertIn("streamed_answer", script_response.text)
+        self.assertIn("publishProgress(progressBody)", script_response.text)
         self.assertIn("return polledBody || latestBody", script_response.text)
         self.assertNotIn("const latestBody = await refreshRun();", script_response.text)
         self.assertIn(

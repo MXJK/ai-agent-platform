@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "LITELLM-GATEWAY-RELIABILITY"
-next_action: "Monitor model-route retry traces and tune the production retry policy from observed failures."
+status: "active"
+active_task: "AGENT-SSE-LIVE-EVENTS"
+next_action: "Verify the merged SSE live-event implementation, sync the ignored interview handbook, and run root browser verification when the Docker stack is available."
 blockers: []
 last_verified_commit: "7bbc7a2c5c335747e8b389acb1d786e8ec0f08ab"
-updated_at: "2026-08-25T10:46:40+08:00"
+updated_at: "2026-08-25T10:50:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

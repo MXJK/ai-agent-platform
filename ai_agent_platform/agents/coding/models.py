@@ -339,6 +339,14 @@ class AgentRunStore(Protocol):
     def append_event(self, run_id: str, event: AgentRunEvent) -> AgentRunEvent:
         ...
 
+    def append_event_once(
+        self,
+        run_id: str,
+        event_key: str,
+        event: AgentRunEvent,
+    ) -> AgentRunEvent:
+        ...
+
     def get_tool_execution(
         self, run_id: str, call_id: str
     ) -> Optional[AgentToolExecution]:

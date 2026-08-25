@@ -279,9 +279,11 @@ Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；�
 时间为主，展开的连续工作轨区分已完成、当前、等待、失败与取消；进入终态后自动收敛
 为一行工作摘要，仍可展开复盘真实阶段与工具，不暴露模型私有 chain-of-thought。
 Chat 使用模型提供方的 SSE 用量；Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
-输入、输出、思考和总 Token。Agent cursor SSE 会直接驱动实时 LangGraph Trace，只在
-终态读取一次完整 Run 快照；断流时才回退轮询。因此即使任务很快完成，前端也能用
-有界的短暂回放按顺序展示已完成阶段，并稳定保留最终答案和终态。
+输入、输出、思考和总 Token。Agent 在执行源头实时追加 `node_started`、
+`node_completed`、`reasoning_summary`、工具生命周期和 `answer_delta` 事件；cursor SSE
+直接驱动当前阶段、工具结果和回答正文，只在终态读取一次完整 Run 快照，断流时才回退
+轮询。`reasoning_summary` 是面向用户的结构化进度摘要，不包含 Provider 私有
+chain-of-thought。快速任务仍使用有界短暂回放保持阶段顺序。
 
 所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
 Ask 和嵌入调用都会记录：
@@ -981,13 +983,16 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 ```
 
 轮询、SSE 与 QueryService 的异步迭代器都读取同一个 append-only EventStore，并通过同一
-`AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。浏览器工作台直接从
-SSE 事件增量构造轨迹，在终态读取一次完整 Run 快照，连接失败或提前结束时回退到状态
-轮询。终态结果会把每个调用投影为带完整参数的 `tool_selected`，再记录完整
-`tool_result` 或 `tool_error`；其中 `run.read_artifact` 复用无正文的 observability
+`AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。图节点包装器在进入和
+完成边界分别追加 `node_started` / `node_completed`，并把节点的安全摘要记录为
+`reasoning_summary`。工具执行按 call ID 实时追加 `tool_selected`、`tool_started`、
+`tool_result` 或 `tool_error`；最终回答以有界小批次写入 `answer_delta`，并以
+`answer_completed` 收尾。稳定 event key 让 Worker 重投与终态投影不会重复同一工具事实。
+浏览器按事件类型归约当前节点、实时活动和回答正文，在终态读取一次完整 Run 快照；连接
+失败或提前结束时回退到状态轮询。`run.read_artifact` 继续复用无正文的 observability
 投影，保留 artifact 身份、读取范围与完整性元数据而不泄漏正文。审批恢复在重新入队前
-追加含操作者与原始请求的 `approval_decided`。因此审计页不需要依赖瞬时前端状态，也能
-按 sequence 复盘执行事实。
+追加含操作者与原始请求的 `approval_decided`。因此审计页不依赖瞬时前端状态，也能按
+sequence 复盘执行事实；Provider 私有 chain-of-thought 不进入事件协议。
 最近 Run 列表在 QueryService 中按会话归属过滤，不会跨身份暴露记录。终态包括 `completed`、
 已删除会话遗留的孤儿 Run 按不可见处理，不会使集合查询失败。终态包括 `completed`、
 `partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、

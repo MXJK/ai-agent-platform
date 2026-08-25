@@ -965,6 +965,43 @@ class PostgresAgentRunRepository:
             output=event.output,
         )
 
+    def append_event_once(
+        self,
+        run_id: str,
+        event_key: str,
+        event: AgentRunEvent,
+    ) -> AgentRunEvent:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO agent_run_events (
+                    run_id, event_key, type, status, node, summary, output
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, event_key) DO UPDATE
+                SET event_key = EXCLUDED.event_key
+                RETURNING id, type, status, node, summary, output
+                """,
+                (
+                    run_id,
+                    event_key,
+                    event.type,
+                    event.status,
+                    event.node,
+                    event.summary,
+                    Jsonb(event.output),
+                ),
+            ).fetchone()
+        return AgentRunEvent(
+            sequence=int(row[0]),
+            type=str(row[1]),
+            status=str(row[2]),
+            node=str(row[3]) if row[3] is not None else None,
+            summary=str(row[4]),
+            output=dict(row[5] or {}),
+        )
+
     def get_tool_execution(
         self, run_id: str, call_id: str
     ) -> AgentToolExecution | None:

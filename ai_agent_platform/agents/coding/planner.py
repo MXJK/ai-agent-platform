@@ -258,9 +258,34 @@ class LLMStructuredAgentPlanner:
         fallback = getattr(self._fallback, "plan_repair_tool_calls", None)
         return fallback(state, tool_specs) if callable(fallback) else []
 
-    def compose_answer(self, state: CodingAgentState) -> str:
+    def compose_answer(
+        self,
+        state: CodingAgentState,
+        *,
+        on_delta=None,
+    ) -> str:
+        emitted_delta = False
+
+        def forward_delta(text: str) -> None:
+            nonlocal emitted_delta
+            emitted_delta = emitted_delta or bool(text)
+            if on_delta is not None:
+                on_delta(text)
+
         try:
-            response = self._llm_client.complete(answer_prompt(state))
+            complete_stream = getattr(self._llm_client, "complete_stream", None)
+            response = (
+                complete_stream(
+                    answer_prompt(state),
+                    on_delta=(
+                        None
+                        if state.get("evaluation_isolated", False)
+                        else forward_delta
+                    ),
+                )
+                if callable(complete_stream)
+                else self._llm_client.complete(answer_prompt(state))
+            )
             # The local fake transport echoes its entire prompt, including
             # search-only source paths. Use the deterministic grounded renderer
             # so the zero-cost Eval fixture does not manufacture citations.
@@ -274,6 +299,8 @@ class LLMStructuredAgentPlanner:
                 raise ValueError("LLM returned an empty answer")
             return text
         except Exception:
+            if emitted_delta:
+                raise
             return self._fallback.compose_answer(state)
 
 

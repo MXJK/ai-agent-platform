@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import replace
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 from ai_agent_platform.agents.coding.formatting import format_error_answer
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
@@ -15,6 +15,9 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
     error_from_exception as _error_from_exception,
 )
+
+
+ANSWER_EVENT_CHUNK_CHARS = 512
 
 
 class ControlPolicy:
@@ -128,6 +131,10 @@ class CompletionPolicy:
         self._planner = planner
         self._visible_tool_specs = visible_tool_specs
         self._final_max_output_tokens = final_max_output_tokens
+        self._event_sink: Callable[..., Any] | None = None
+
+    def set_event_sink(self, event_sink: Callable[..., Any]) -> None:
+        self._event_sink = event_sink
 
     def finalize_native_session(
         self,
@@ -197,17 +204,42 @@ class CompletionPolicy:
             )
 
     def compose_answer(self, state: CodingAgentState) -> CodingAgentState:
+        run_id = str(state.get("run_id") or "")
+        delta_index = 0
+
+        def emit_delta(text: str) -> None:
+            nonlocal delta_index
+            if not text or not run_id or self._event_sink is None:
+                return
+            for offset in range(0, len(text), ANSWER_EVENT_CHUNK_CHARS):
+                chunk = text[offset : offset + ANSWER_EVENT_CHUNK_CHARS]
+                delta_index += 1
+                self._event_sink(
+                    run_id=run_id,
+                    event_type="answer_delta",
+                    node="compose_answer",
+                    summary="Agent generated answer text.",
+                    output={"text": chunk, "index": delta_index},
+                    event_key=f"answer-delta:{delta_index}",
+                )
+
         try:
             compose = getattr(self._planner, "compose_answer", None)
             native_answer = str(state.get("native_tool_answer") or "").strip()
             if native_answer:
                 answer = native_answer
+                emit_delta(answer)
             else:
-                answer = (
-                    compose(state)
-                    if callable(compose)
-                    else RuleBasedAgentPlanner().compose_answer(state)
-                )
+                if callable(compose) and "on_delta" in inspect.signature(compose).parameters:
+                    answer = compose(state, on_delta=emit_delta)
+                else:
+                    answer = (
+                        compose(state)
+                        if callable(compose)
+                        else RuleBasedAgentPlanner().compose_answer(state)
+                    )
+                if answer and delta_index == 0:
+                    emit_delta(str(answer))
             errors: list[dict[str, Any]] = []
         except Exception as exc:
             answer = ""
@@ -219,6 +251,15 @@ class CompletionPolicy:
                     max_attempts=1,
                 )
             ]
+        if answer and run_id and self._event_sink is not None:
+            self._event_sink(
+                run_id=run_id,
+                event_type="answer_completed",
+                node="compose_answer",
+                summary="Agent answer generation completed.",
+                output={"answer_chars": len(answer), "delta_count": delta_index},
+                event_key="answer-completed",
+            )
         return {
             "answer": answer,
             "errors": _append_errors(state, errors),

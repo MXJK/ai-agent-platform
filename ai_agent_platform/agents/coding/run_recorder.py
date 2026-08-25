@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Optional
 
 from ai_agent_platform.agents.coding.change_loop import is_validation_success
@@ -25,6 +26,10 @@ from ai_agent_platform.agents.coding.runtime_support import (
     pending_approval as _pending_approval,
     waiting_node as _waiting_node,
 )
+from ai_agent_platform.agents.coding.run_artifacts import (
+    RUN_ARTIFACT_READ_TOOL,
+    artifact_read_trace,
+)
 from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.tools import ToolExecutionContext
 
@@ -42,10 +47,149 @@ class RunRecorder:
     def _snapshot_for(self, config: dict[str, Any]):
         return self._runtime._checkpoint_coordinator.snapshot_for(config)
 
-    def append_event(self, run_id: str, event: AgentRunEvent) -> None:
+    def append_event(
+        self,
+        run_id: str,
+        event: AgentRunEvent,
+        *,
+        event_key: str | None = None,
+    ) -> None:
+        if event_key:
+            append_once = getattr(self._run_store, "append_event_once", None)
+            if callable(append_once):
+                append_once(run_id, event_key, event)
+                return
         append_event = getattr(self._run_store, "append_event", None)
         if callable(append_event):
             append_event(run_id, event)
+
+    def emit_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        node: str | None,
+        summary: str,
+        output: dict[str, Any] | None = None,
+        event_key: str | None = None,
+        status: str = "running",
+    ) -> None:
+        self.append_event(
+            run_id,
+            AgentRunEvent(
+                sequence=0,
+                type=event_type,
+                status=status,
+                node=node,
+                summary=summary,
+                output=output or {},
+            ),
+            event_key=event_key,
+        )
+
+    def record_node_started(
+        self,
+        *,
+        run_id: str,
+        node: str,
+        state: CodingAgentState,
+    ) -> None:
+        step = len(state.get("trace", [])) + 1
+        self.emit_event(
+            run_id=run_id,
+            event_type="node_started",
+            node=node,
+            summary=f"Agent started graph node {node}.",
+            output={"step": step},
+            event_key=f"node-started:{step}:{node}",
+        )
+
+    def record_node_completed(
+        self,
+        *,
+        run_id: str,
+        node: str,
+        state: CodingAgentState,
+        update: CodingAgentState,
+    ) -> None:
+        trace = list(update.get("trace") or state.get("trace", []))
+        if not trace or len(trace) <= len(state.get("trace", [])):
+            return
+        latest = trace[-1]
+        step = int(latest.get("step", len(trace)))
+        try:
+            existing = self._run_store.get(run_id)
+        except KeyError:
+            return
+        if existing.status not in {"queued", "running"}:
+            return
+        self._run_store.save(
+            replace(
+                existing,
+                status="running",
+                latest_node=str(latest.get("node") or node),
+                trace=trace,
+            )
+        )
+        previous_call_ids = {
+            call.call_id for call in state.get("tool_calls", [])
+        }
+        for call in update.get("tool_calls", []):
+            if call.call_id in previous_call_ids:
+                continue
+            self.emit_event(
+                run_id=run_id,
+                event_type="tool_selected",
+                node=node,
+                summary=f"Tool selected: {call.name}.",
+                output={
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "source": call.source,
+                },
+                event_key=f"tool-call:{call.call_id}",
+            )
+        previous_result_ids = {
+            str(result.get("call_id") or "")
+            for result in state.get("tool_results", [])
+        }
+        for result in update.get("tool_results", []):
+            call_id = str(result.get("call_id") or "")
+            if not call_id or call_id in previous_result_ids:
+                continue
+            tool_name = str(result.get("name") or "unknown")
+            self.emit_event(
+                run_id=run_id,
+                event_type="tool_started",
+                node=node,
+                summary=f"Tool started: {tool_name}.",
+                output={"call_id": call_id, "name": tool_name},
+                event_key=f"tool-started:{call_id}",
+            )
+            event_output = dict(result)
+            if tool_name == RUN_ARTIFACT_READ_TOOL:
+                event_output["result"] = artifact_read_trace(result)
+            self.emit_event(
+                run_id=run_id,
+                event_type="tool_result" if result.get("ok") else "tool_error",
+                node=node,
+                summary=(
+                    f"Tool completed: {tool_name}."
+                    if result.get("ok")
+                    else f"Tool failed: {tool_name}."
+                ),
+                output=event_output,
+                event_key=f"tool-result:{call_id}",
+            )
+        self.emit_event(
+            run_id=run_id,
+            event_type="reasoning_summary",
+            node=str(latest.get("node") or node),
+            summary=str(latest.get("summary") or "Agent completed a reasoning step."),
+            output={"step": step},
+            event_key=f"reasoning:{step}",
+        )
 
     def record_change_set_event(
         self,

@@ -250,11 +250,13 @@ The shared composer offers:
 Both response modes render an in-message execution process and response
 metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
 usage across structured planning and answer generation. The UI shows input,
-output, thinking, and total tokens per response. Agent cursor SSE events drive
-the live LangGraph trace directly, with one full Run snapshot fetched at a
-terminal state and polling used only after a disconnect. Fast runs use a
-bounded short replay to preserve stage order without losing the final answer or
-terminal presentation.
+output, thinking, and total tokens per response. Agent execution emits
+`node_started`, `node_completed`, `reasoning_summary`, tool lifecycle, and
+`answer_delta` events at their source. Cursor SSE drives the current stage,
+tool results, and answer text directly, with one full Run snapshot fetched at a
+terminal state and polling used only after a disconnect. A
+`reasoning_summary` is a user-facing structured progress summary, never the
+provider's private chain-of-thought. Fast runs retain a bounded short replay.
 
 All model use is persisted in one ledger. Chat, Agent model turns, semantic
 conversation compression, RAG Ask, and embedding calls carry an `operation`,
@@ -1036,13 +1038,18 @@ POST /api/v1/agent/runs/{run_id}/changes/reject {"change_set_id":"chg_xxx"}
 POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patch_sha256":"<64 hex>"}
 ```
 
-The event stream uses resumable cursors. The browser workbench builds the trace
-incrementally from SSE events, fetches one complete Run snapshot at a terminal
-state, and falls back to status polling if the stream fails or ends early.
-Terminal results project every call into a `tool_selected` event with exact
-arguments followed by its complete `tool_result` or `tool_error`. Artifact-read
-result events reuse the body-free observability projection for `run.read_artifact`,
-preserving artifact and integrity metadata without leaking page content.
+The event stream uses resumable cursors. Graph-node wrappers append
+`node_started` and `node_completed` at execution boundaries and persist a safe
+`reasoning_summary`. Tool calls append idempotent `tool_selected`, `tool_started`,
+and `tool_result` or `tool_error` events by call ID. Final answer text is stored
+in bounded `answer_delta` batches followed by `answer_completed`. Stable event
+keys prevent worker replay and terminal projection from duplicating tool facts.
+The browser reduces each event type into the current stage, live activity list,
+and answer body, fetches one complete Run snapshot at a terminal state, and
+falls back to status polling if the stream fails or ends early. Provider-private
+chain-of-thought never enters the event protocol. Artifact-read result events
+reuse the body-free observability projection for `run.read_artifact`, preserving
+artifact and integrity metadata without leaking page content.
 Approval resume appends an `approval_decided` event, including the actor and original
 request, before the Run is queued again. The audit page can therefore replay
 facts by sequence without relying on transient frontend state. Recent-Run

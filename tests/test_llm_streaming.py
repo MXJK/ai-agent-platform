@@ -237,6 +237,21 @@ class GoogleStreamingTests(unittest.TestCase):
             usage.input_tokens + usage.output_tokens + usage.thoughts_tokens,
         )
 
+    def test_complete_stream_reports_answer_deltas_before_returning(self) -> None:
+        client = LLMClient(
+            Settings(llm_provider="fake", llm_model="fake-agent-model")
+        )
+        deltas: list[str] = []
+
+        response = client.complete_stream(
+            "stream this answer",
+            on_delta=deltas.append,
+            delta_batch_chars=1,
+        )
+
+        self.assertTrue(deltas)
+        self.assertEqual("".join(deltas), response.text)
+
 
 class OpenAIStreamingTests(unittest.TestCase):
     def test_stream_payload_passes_configured_max_output_tokens(self) -> None:
