@@ -37,8 +37,7 @@
 
 ## Verification
 
-- `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m pytest -q`：
-  658 passed，91 subtests passed。
+- 合并后的本地 `main` 执行 `.venv/bin/python -m pytest -q`：663 passed，107 subtests passed。
 - 聚焦前端契约 `tests/test_api.py -q`：36 passed。
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - `node --check ai_agent_platform/static/app.js`、`git diff --check`：通过。
@@ -50,6 +49,8 @@
   模块，因此不把结果声明为完整静态审计。
 - `INTERVIEW_NOTES/validate.py`：24 个 Markdown、43 项 capability 通过；仅有既有
   evidence-review warnings。
+- 与后续进入 `main` 的 Token 百分比功能发生 4 处文本冲突；解决时保留累计 Token /
+  上下文上限展示与本任务布局，并在合并结果上重新通过完整验证。
 
 ## Result
 
