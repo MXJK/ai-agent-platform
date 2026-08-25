@@ -50,6 +50,10 @@
   `AGENT-SSE-LIVE-EVENTS.md` 证据复核提示。
 - Impeccable detector：本次改动无新增问题；仅报告 `index.html` 既有的全页破折号
   密度 advisory，HTML parser 依赖缺失时使用 regex 降级扫描。
+- 本地浏览器桌面验收：`32 / 72,704` 显示为 `0.04%`，Token 卡片无横向溢出，
+  tooltip 完整说明跨请求累计口径。
+- 本地浏览器 390×844 验收：上限与百分比完整显示，DOM 测量
+  `labelScrollWidth == labelClientWidth == 122`，未触发省略。
 
 ## Result
 
