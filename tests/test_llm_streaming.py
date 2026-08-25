@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import ssl
 import sys
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -207,9 +209,33 @@ class GoogleStreamingTests(unittest.TestCase):
             with self.assertRaises(LLMProviderError) as raised:
                 next(iter(iterator))
 
-        self.assertEqual(raised.exception.code, "llm_timeout")
+        self.assertEqual(raised.exception.code, "llm_read_timeout")
         self.assertTrue(raised.exception.retryable)
         self.assertTrue(_FakeClient.instances[0].closed)
+
+    def test_google_wrapped_httpx_error_keeps_specific_classification(self) -> None:
+        request = httpx.Request("POST", "https://provider.example/v1/messages")
+        connect_error = httpx.ConnectError(
+            "sensitive dns host",
+            request=request,
+        )
+        connect_error.__cause__ = socket.gaierror(-2, "sensitive dns host")
+        wrapped_error = RuntimeError("provider sdk request failed")
+        wrapped_error.__cause__ = connect_error
+        _FakeClient.error = wrapped_error
+
+        with patch.dict(sys.modules, _fake_google_modules()):
+            iterator = self.client()._stream_google(
+                [{"role": "user", "content": "hello"}],
+                "gemini-3.5-flash",
+                max_output_tokens=4096,
+            )
+            with self.assertRaises(LLMProviderError) as raised:
+                next(iter(iterator))
+
+        self.assertEqual(raised.exception.code, "llm_dns_error")
+        self.assertEqual(str(raised.exception), "llm provider DNS resolution failed")
+        self.assertNotIn("sensitive", str(raised.exception))
 
     def test_complete_reports_and_collects_provider_usage(self) -> None:
         client = LLMClient(
@@ -332,6 +358,241 @@ class OpenAIStreamingTests(unittest.TestCase):
 
 
 class RetryAfterTests(unittest.TestCase):
+    @staticmethod
+    def _with_cause(
+        error: httpx.RequestError,
+        cause: BaseException,
+    ) -> httpx.RequestError:
+        error.__cause__ = cause
+        return error
+
+    @staticmethod
+    def _raising_client(error: httpx.RequestError):
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            @staticmethod
+            def post(url, *, headers, json):
+                del url, headers, json
+                raise error
+
+            @staticmethod
+            def stream(method, url, *, headers, json):
+                del method, url, headers, json
+                raise error
+
+        return FakeClient()
+
+    def test_httpx_failures_have_stable_safe_error_classifications(self) -> None:
+        request = httpx.Request("POST", "https://provider.example/v1/messages")
+        cases = [
+            (
+                httpx.ConnectTimeout("sensitive connect timeout", request=request),
+                "llm_connect_timeout",
+                "llm provider connection timed out",
+                True,
+            ),
+            (
+                httpx.ReadTimeout("sensitive read timeout", request=request),
+                "llm_read_timeout",
+                "llm provider response read timed out",
+                True,
+            ),
+            (
+                httpx.WriteTimeout("sensitive write timeout", request=request),
+                "llm_write_timeout",
+                "llm provider request write timed out",
+                True,
+            ),
+            (
+                httpx.PoolTimeout("sensitive pool timeout", request=request),
+                "llm_pool_timeout",
+                "llm provider connection pool wait timed out",
+                True,
+            ),
+            (
+                self._with_cause(
+                    httpx.ConnectError("sensitive dns host", request=request),
+                    socket.gaierror(-2, "sensitive dns host"),
+                ),
+                "llm_dns_error",
+                "llm provider DNS resolution failed",
+                True,
+            ),
+            (
+                self._with_cause(
+                    httpx.ConnectError("sensitive certificate", request=request),
+                    ssl.SSLCertVerificationError(1, "sensitive certificate"),
+                ),
+                "llm_tls_certificate_error",
+                "llm provider TLS certificate verification failed",
+                False,
+            ),
+            (
+                self._with_cause(
+                    httpx.ConnectError("sensitive TLS", request=request),
+                    ssl.SSLError(1, "sensitive TLS"),
+                ),
+                "llm_tls_error",
+                "llm provider TLS connection failed",
+                True,
+            ),
+            (
+                httpx.ConnectError("sensitive address", request=request),
+                "llm_connection_error",
+                "llm provider connection failed",
+                True,
+            ),
+            (
+                httpx.ProxyError("sensitive proxy", request=request),
+                "llm_proxy_error",
+                "llm provider proxy connection failed",
+                True,
+            ),
+            (
+                httpx.ReadError("sensitive response", request=request),
+                "llm_read_error",
+                "llm provider response read failed",
+                True,
+            ),
+            (
+                httpx.WriteError("sensitive request", request=request),
+                "llm_write_error",
+                "llm provider request write failed",
+                True,
+            ),
+            (
+                httpx.CloseError("sensitive close", request=request),
+                "llm_close_error",
+                "llm provider connection close failed",
+                True,
+            ),
+            (
+                httpx.RemoteProtocolError("sensitive remote", request=request),
+                "llm_remote_protocol_error",
+                "llm provider remote protocol error",
+                True,
+            ),
+            (
+                httpx.LocalProtocolError("sensitive local", request=request),
+                "llm_local_protocol_error",
+                "llm provider local protocol error",
+                False,
+            ),
+            (
+                httpx.DecodingError("sensitive encoding", request=request),
+                "llm_decoding_error",
+                "llm provider response decoding failed",
+                True,
+            ),
+            (
+                httpx.TransportError("sensitive transport", request=request),
+                "llm_transport_error",
+                "llm provider transport failed",
+                True,
+            ),
+        ]
+
+        client = LLMClient(Settings())
+        for transport_error, code, message, retryable in cases:
+            with self.subTest(code=code):
+                with (
+                    patch(
+                        "ai_agent_platform.integrations.llm.httpx.Client",
+                        return_value=self._raising_client(transport_error),
+                    ),
+                    self.assertRaises(LLMProviderError) as raised,
+                ):
+                    client._post_json(
+                        "https://provider.example/v1/messages",
+                        headers={},
+                        payload={"messages": []},
+                    )
+
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(str(raised.exception), message)
+                self.assertEqual(raised.exception.retryable, retryable)
+                self.assertNotIn("sensitive", str(raised.exception))
+
+    def test_json_and_sse_requests_share_transport_classification(self) -> None:
+        request = httpx.Request("POST", "https://provider.example/v1/messages")
+        transport_error = httpx.RemoteProtocolError(
+            "sensitive upstream disconnect",
+            request=request,
+        )
+        client = LLMClient(Settings())
+
+        with (
+            patch(
+                "ai_agent_platform.integrations.llm.httpx.Client",
+                return_value=self._raising_client(transport_error),
+            ),
+            self.assertRaises(LLMProviderError) as json_error,
+        ):
+            client._post_json(
+                "https://provider.example/v1/messages",
+                headers={},
+                payload={"messages": []},
+            )
+
+        with (
+            patch(
+                "ai_agent_platform.integrations.llm.httpx.Client",
+                return_value=self._raising_client(transport_error),
+            ),
+            self.assertRaises(LLMProviderError) as stream_error,
+        ):
+            next(
+                iter(
+                    client._stream_http_sse(
+                        "https://provider.example/v1/messages",
+                        headers={},
+                        payload={"messages": []},
+                        parser=lambda *_args: (),
+                    )
+                )
+            )
+
+        self.assertEqual(json_error.exception.code, "llm_remote_protocol_error")
+        self.assertEqual(stream_error.exception.code, json_error.exception.code)
+        self.assertEqual(str(stream_error.exception), str(json_error.exception))
+
+    def test_specific_network_retry_policy_falls_back_to_legacy_groups(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_max_retries=9,
+                llm_retry_policy_json=(
+                    '{"llm_connection_error":1,"llm_transport_error":3,'
+                    '"llm_timeout":2,"default":7}'
+                ),
+            )
+        )
+
+        self.assertEqual(
+            client._retry_limit(
+                LLMProviderError("connection", code="llm_connection_error")
+            ),
+            1,
+        )
+        self.assertEqual(
+            client._retry_limit(LLMProviderError("dns", code="llm_dns_error")),
+            3,
+        )
+        self.assertEqual(
+            client._retry_limit(
+                LLMProviderError("read timeout", code="llm_read_timeout")
+            ),
+            2,
+        )
+        self.assertEqual(
+            client._retry_limit(LLMProviderError("other", code="other_error")),
+            7,
+        )
+
     def test_parses_delta_seconds_and_http_date(self) -> None:
         now = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
         retry_at = now + timedelta(seconds=12)

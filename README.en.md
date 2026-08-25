@@ -472,11 +472,26 @@ LLM_RETRY_AFTER_MAX_SECONDS=60
 LLM_RETRY_JITTER_SECONDS=0.1
 ```
 
-Supported override keys include `rate_limit`, `llm_timeout`,
-`llm_transport_error`, `llm_server_error`, `token_count_failed`, the three
-tool-output correction errors, `llm_provider_error`, and `default`. Unknown
-keys, negative values, and non-integers fail during startup. Both normal HTTP and
-SSE 429/5xx responses accept delta-seconds or HTTP-date `Retry-After` values.
+Low-level network failures are persisted with safe messages and stable granular
+codes without exposing hosts, certificates, proxies, or request content. Connect,
+read, write, and pool-wait timeouts use `llm_connect_timeout`, `llm_read_timeout`,
+`llm_write_timeout`, and `llm_pool_timeout`. DNS, TLS, certificate verification,
+connection, and proxy failures use `llm_dns_error`, `llm_tls_error`,
+`llm_tls_certificate_error`, `llm_connection_error`, and `llm_proxy_error`.
+Post-connect read, write, close, remote/local protocol, and response decoding
+failures use `llm_read_error`, `llm_write_error`, `llm_close_error`,
+`llm_remote_protocol_error`, `llm_local_protocol_error`, and
+`llm_decoding_error`. Certificate verification and local protocol errors are not
+retryable; the other errors above are retryable by default.
+
+Each granular code is accepted as an exact `LLM_RETRY_POLICY_JSON` override. For
+backward compatibility, granular timeout codes fall back to `llm_timeout`, while
+the other network codes fall back to `llm_transport_error`, before `default` /
+`LLM_MAX_RETRIES`. The map also supports `rate_limit`, `llm_server_error`,
+`token_count_failed`, the three tool-output correction errors, and
+`llm_provider_error`. Unknown keys, negative values, and non-integers fail during
+startup. Both normal HTTP and SSE 429/5xx responses accept delta-seconds or
+HTTP-date `Retry-After` values.
 A positive value at or below `LLM_RETRY_AFTER_MAX_SECONDS` takes precedence;
 otherwise the gateway uses bounded exponential backoff. Jitter is bounded as
 well, so an unsafe upstream header cannot hold a worker indefinitely. Route

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AGENT-SSE-LIVE-EVENTS"
-next_action: "Monitor live Agent event delivery and tune answer-delta batching from production observations."
+active_task: "LLM-NETWORK-ERROR-CLASSIFICATION"
+next_action: "Review the verified worktree and merge codex/llm-network-error-classification when approved."
 blockers: []
 last_verified_commit: "778f4faa50260c8d3d21262a9a300270758adbca"
-updated_at: "2026-08-25T10:53:38+08:00"
+updated_at: "2026-08-25T11:14:16+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
