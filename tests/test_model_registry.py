@@ -370,6 +370,53 @@ class ModelRegistryServiceTests(unittest.TestCase):
 
 
 class ModelRegistryApiTests(unittest.TestCase):
+    def test_session_token_usage_budget_uses_manual_model_preference(self) -> None:
+        settings = Settings(
+            llm_provider="fake",
+            llm_model="demo-stream-model",
+            llm_context_input_token_ratio=0.5,
+            llm_max_output_tokens=2_000,
+            embedding_provider="local",
+            model_secret_backend="memory",
+        )
+        with TestClient(
+            create_app(settings=settings),
+            client=("127.0.0.1", 50000),
+        ) as client:
+            session_id = client.post(
+                "/api/v1/sessions",
+                json={"user_id": "local"},
+            ).json()["id"]
+            client.put(
+                "/api/v1/model-registry/connections/anthropic",
+                json={
+                    "display_name": "Anthropic",
+                    "api_key": "sk-never-return-this",
+                    "enabled": True,
+                },
+            ).raise_for_status()
+            payload = _registered_payload(provider="anthropic")
+            model = client.post(
+                "/api/v1/model-registry/models",
+                json=payload,
+            ).json()
+            client.put(
+                f"/api/v1/sessions/{session_id}/model-preference",
+                json={
+                    "mode": "manual",
+                    "routing_policy": "smart",
+                    "preferred_model_id": model["id"],
+                    "fallback_enabled": False,
+                },
+            ).raise_for_status()
+
+            usage = client.get(
+                f"/api/v1/sessions/{session_id}/token-usage"
+            )
+
+        self.assertEqual(usage.status_code, 200)
+        self.assertEqual(usage.json()["context"]["budget_tokens"], 98_000)
+
     @patch(
         "ai_agent_platform.model_registry.discovery.ProviderModelDiscovery.discover",
         side_effect=ModelDiscoveryError("provider rate-limited model discovery"),
