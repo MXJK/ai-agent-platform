@@ -28,6 +28,12 @@ class ExtractionResult:
     candidates: list[MemoryCandidate]
     input_tokens: int = 0
     output_tokens: int = 0
+    error: str | None = None
+
+
+def _extraction_error(exc: Exception) -> str:
+    """Format an extraction failure for logging and job records."""
+    return f"{type(exc).__name__}: {str(exc)}"[:1000]
 
 
 class MemoryExtractor(Protocol):
@@ -95,8 +101,8 @@ class LLMMemoryExtractor:
                 input_tokens=usage.input_tokens if usage else 0,
                 output_tokens=usage.output_tokens if usage else 0,
             )
-        except Exception:
-            return deterministic
+        except Exception as exc:
+            return replace(deterministic, error=_extraction_error(exc))
 
 
 class RuleBasedMemoryExtractor:

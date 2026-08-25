@@ -307,6 +307,122 @@ class ProjectMemoryServiceTests(unittest.TestCase):
         self.assertEqual(result.candidates[0].authority, "assistant_inference")
         self.assertEqual(result.candidates[0].confidence, 0.7)
 
+    def test_llm_extractor_surfaces_call_failure_instead_of_swallowing(self) -> None:
+        class RaisingLLM:
+            def complete(self, _: str):
+                raise RuntimeError("model down")
+
+        result = LLMMemoryExtractor(RaisingLLM()).extract(  # type: ignore[arg-type]
+            user_message="What backend should we use?",
+            assistant_message="Perhaps an unverified backend.",
+            source_type="chat",
+            verified=False,
+        )
+        self.assertEqual(result.candidates, [])
+        self.assertIsNotNone(result.error)
+        self.assertIn("RuntimeError", result.error or "")
+        self.assertIn("model down", result.error or "")
+
+    def test_llm_extractor_surfaces_invalid_output_as_error(self) -> None:
+        class GarbageLLM:
+            def complete(self, _: str) -> LLMResponse:
+                return LLMResponse(text="fake model reply to: prompt", model="fake")
+
+        result = LLMMemoryExtractor(GarbageLLM()).extract(  # type: ignore[arg-type]
+            user_message="What backend should we use?",
+            assistant_message="Perhaps an unverified backend.",
+            source_type="chat",
+            verified=False,
+        )
+        self.assertEqual(result.candidates, [])
+        self.assertIsNotNone(result.error)
+
+    def test_extraction_model_error_marks_job_failed_when_nothing_stored(self) -> None:
+        class FailingExtractor:
+            def extract(self, **_: object) -> ExtractionResult:
+                return ExtractionResult(
+                    candidates=[],
+                    error="LLMProviderError: no eligible model",
+                )
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service, _, _ = self._service(root, extractor=FailingExtractor())
+            service._workspace_service.register(  # noqa: SLF001
+                workspace_id="project",
+                root_path=str(workspace),
+            )
+            service.ensure_workspace_admin(
+                workspace_id="project",
+                actor_user_id="alice",
+            )
+            service.update_settings(
+                workspace_id="project",
+                actor_user_id="alice",
+                mode="auto",
+            )
+            job = service.extract_and_store(
+                workspace_id="project",
+                actor_user_id="alice",
+                source_type="agent_run",
+                source_id="run_error",
+                user_message="Fix the build",
+                assistant_message="Done.",
+                verified=True,
+            )
+            assert job is not None
+            self.assertEqual(job.status, "failed")
+            self.assertIn("no eligible model", job.error or "")
+
+    def test_extraction_model_error_keeps_deterministic_fallback(self) -> None:
+        class FailingExtractor:
+            def extract(self, **_: object) -> ExtractionResult:
+                return ExtractionResult(
+                    candidates=[
+                        candidate(
+                            title="请记住：先跑 pytest",
+                            content="请记住：先跑 pytest",
+                            confidence=1.0,
+                            authority="explicit_user",
+                        )
+                    ],
+                    error="LLMProviderError: no eligible model",
+                )
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service, _, _ = self._service(root, extractor=FailingExtractor())
+            service._workspace_service.register(  # noqa: SLF001
+                workspace_id="project",
+                root_path=str(workspace),
+            )
+            service.ensure_workspace_admin(
+                workspace_id="project",
+                actor_user_id="alice",
+            )
+            service.update_settings(
+                workspace_id="project",
+                actor_user_id="alice",
+                mode="auto",
+            )
+            job = service.extract_and_store(
+                workspace_id="project",
+                actor_user_id="alice",
+                source_type="chat",
+                source_id="run_fallback",
+                user_message="请记住：先跑 pytest",
+                assistant_message="好的",
+                verified=False,
+            )
+            assert job is not None
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.candidate_count, 1)
+            self.assertIn("no eligible model", job.error or "")
+
     def test_dense_failure_falls_back_to_lexical_retrieval(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

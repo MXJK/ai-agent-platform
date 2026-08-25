@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
+import logging
 from pathlib import Path
 import re
 from time import perf_counter
@@ -32,6 +33,9 @@ from ai_agent_platform.project_memory.vector import (
     embed_memory,
 )
 from ai_agent_platform.usage_ledger import model_usage_scope
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceProvider(Protocol):
@@ -759,6 +763,20 @@ class ProjectMemoryService:
                 source_type=source_type,
                 verified=verified,
             )
+            if result.error:
+                self._metrics.increment(
+                    "project_memory_extraction_model_error_total"
+                )
+                logger.warning(
+                    "project-memory extraction model error; "
+                    "deterministic fallback applied",
+                    extra={
+                        "workspace_id": workspace_id,
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "error": result.error,
+                    },
+                )
             stored: list[ProjectMemory] = []
             for candidate in result.candidates:
                 try:
@@ -783,9 +801,11 @@ class ProjectMemoryService:
                     continue
                 if memory is not None:
                     stored.append(memory)
+            status = "failed" if (result.error and not stored) else "completed"
             completed = replace(
                 extracting,
-                status="completed",
+                status=status,
+                error=result.error,
                 candidate_count=len(stored),
                 active_count=sum(item.status == "active" for item in stored),
                 input_tokens=result.input_tokens,
@@ -797,7 +817,10 @@ class ProjectMemoryService:
             self._schedule_index_outbox(completed.id)
             if stored:
                 self._schedule_layered_memory(workspace_id, actor_user_id)
-            self._metrics.increment("project_memory_extractions_completed_total")
+            if status == "completed":
+                self._metrics.increment("project_memory_extractions_completed_total")
+            else:
+                self._metrics.increment("project_memory_extractions_failed_total")
             self._metrics.increment(
                 "project_memory_candidates_total", len(stored)
             )
