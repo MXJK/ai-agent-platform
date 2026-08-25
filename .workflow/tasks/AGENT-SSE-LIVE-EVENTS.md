@@ -51,7 +51,10 @@
 - `node --check ai_agent_platform/static/app.js`：通过。
 - `git diff --check`：通过。
 - 模块化面试手册基线校验：24 个 Markdown、43 项能力通过；facts evidence review
-  仍提示自上次记录提交以来存在多项待同步证据。
+  在同步后通过，且相对 `778f4faa` 没有待复核的 tracked evidence。
+- 根 Docker 栈浏览器验收：桌面端加载最新脚本且无 console warning/error；390×844
+  移动视口无横向溢出，单一 polite live announcer 正常挂载，并可恢复现有 Agent Run
+  的当前阶段。未重启服务、未创建测试 Run。
 - Impeccable detector：仅报告既存 CSS 侧边色条和 width transition，本次新增实时活动
   样式没有新增检测告警。
 
@@ -61,8 +64,8 @@ Agent Run 现在在执行源头持久化节点开始/完成、安全推理摘要
 增量；稳定 event key 使 Worker 重投和终态反投影不会重复同一工具事实。前端对每种事件
 实时归约，显示当前阶段、工具结果和回答正文，并在终态保留实时活动。
 
-文档影响：中英文 README 已更新。模块化 `INTERVIEW_NOTES` 为 gitignored，需在 merge
-commit 后于根 checkout 同步 Part 04、Part 07 与 `facts.json`，再运行手册校验。
+文档影响：中英文 README 已更新。gitignored 的模块化 `INTERVIEW_NOTES` 已在根 checkout
+同步 Part 04、Part 07 与 `facts.json`，手册校验通过。
 
-实现已提交为 `f3964ab4`，并在最新 `main` 的 merge candidate 上通过完整自动化验证。
-未重启 Docker，也未执行部署或生产数据变更。
+实现提交为 `f3964ab4`，合并提交为 `778f4faa`；最新 `main` 已通过完整自动化、手册和
+桌面/移动浏览器验证。未重启 Docker，也未执行部署或生产数据变更。

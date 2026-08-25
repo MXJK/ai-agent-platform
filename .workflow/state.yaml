@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "AGENT-SSE-LIVE-EVENTS"
-next_action: "Verify the merged SSE live-event implementation, sync the ignored interview handbook, and run root browser verification when the Docker stack is available."
+next_action: "Monitor live Agent event delivery and tune answer-delta batching from production observations."
 blockers: []
-last_verified_commit: "7bbc7a2c5c335747e8b389acb1d786e8ec0f08ab"
-updated_at: "2026-08-25T10:50:00+08:00"
+last_verified_commit: "778f4faa50260c8d3d21262a9a300270758adbca"
+updated_at: "2026-08-25T10:53:38+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
