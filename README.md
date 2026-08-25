@@ -461,9 +461,20 @@ LLM_RETRY_AFTER_MAX_SECONDS=60
 LLM_RETRY_JITTER_SECONDS=0.1
 ```
 
-支持的覆盖键包括 `rate_limit`、`llm_timeout`、`llm_transport_error`、
-`llm_server_error`、`token_count_failed`、三种工具输出纠错错误、
-`llm_provider_error` 和 `default`；未知键、负数或非整数会在启动时失败。
+底层网络错误会以安全文案和稳定细分类持久化，不暴露主机、证书、代理或请求内容：
+连接、读取、写入和连接池等待超时分别使用 `llm_connect_timeout`、
+`llm_read_timeout`、`llm_write_timeout`、`llm_pool_timeout`；DNS、TLS、证书校验、
+普通连接和代理分别使用 `llm_dns_error`、`llm_tls_error`、
+`llm_tls_certificate_error`、`llm_connection_error`、`llm_proxy_error`；连接后的读、写、
+关闭、远端/本地协议和响应解码分别使用 `llm_read_error`、`llm_write_error`、
+`llm_close_error`、`llm_remote_protocol_error`、`llm_local_protocol_error` 和
+`llm_decoding_error`。证书校验和本地协议错误不可重试，其余上述错误默认可重试。
+
+这些细分类都可作为 `LLM_RETRY_POLICY_JSON` 的精确覆盖键。为保持兼容，未配置精确键时，
+四种超时先回退到 `llm_timeout`，其他网络错误先回退到 `llm_transport_error`，再回退到
+`default` / `LLM_MAX_RETRIES`。此外仍支持 `rate_limit`、`llm_server_error`、
+`token_count_failed`、三种工具输出纠错错误和 `llm_provider_error`；未知键、负数或非整数
+会在启动时失败。
 普通 HTTP 与 SSE 的 429/5xx 响应都会读取 delta-seconds 或 HTTP-date 形式的
 `Retry-After`。建议值为正且不超过 `LLM_RETRY_AFTER_MAX_SECONDS` 时优先采用；
 否则回落到有上限的指数退避。抖动同样受上限约束，避免错误 Header 长时间占用工作线程。

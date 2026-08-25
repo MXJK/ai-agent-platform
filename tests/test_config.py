@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from pathlib import Path
@@ -488,6 +489,7 @@ class SettingsTests(unittest.TestCase):
                 f"{field_name} must be finite",
             ):
                 Settings(**{field_name: value})
+
         with self.assertRaisesRegex(
             ValueError,
             "llm_retry_backoff_max_seconds",
@@ -503,6 +505,31 @@ class SettingsTests(unittest.TestCase):
                 llm_context_evidence_ratio=0.6,
                 llm_context_history_ratio=0.4,
             )
+
+    def test_accepts_granular_llm_network_retry_policy_keys(self) -> None:
+        keys = (
+            "llm_close_error",
+            "llm_connect_timeout",
+            "llm_connection_error",
+            "llm_decoding_error",
+            "llm_dns_error",
+            "llm_local_protocol_error",
+            "llm_pool_timeout",
+            "llm_proxy_error",
+            "llm_read_error",
+            "llm_read_timeout",
+            "llm_remote_protocol_error",
+            "llm_tls_certificate_error",
+            "llm_tls_error",
+            "llm_write_error",
+            "llm_write_timeout",
+        )
+
+        settings = Settings(
+            llm_retry_policy_json=json.dumps({key: 1 for key in keys})
+        )
+
+        self.assertIsNotNone(settings.llm_retry_policy_json)
 
     def test_downgrade_budget_requires_a_fallback_model(self) -> None:
         with self.assertRaisesRegex(ValueError, "require a fallback"):

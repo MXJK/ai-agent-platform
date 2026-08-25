@@ -10,6 +10,8 @@ import json
 import math
 import random
 import re
+import socket
+import ssl
 import time
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Protocol, cast
 from uuid import uuid4
@@ -37,6 +39,30 @@ from ai_agent_platform.usage_ledger import (
 
 
 LLMEventType = Literal["route", "delta", "usage", "done"]
+
+_LLM_TIMEOUT_ERROR_CODES = frozenset(
+    {
+        "llm_connect_timeout",
+        "llm_pool_timeout",
+        "llm_read_timeout",
+        "llm_write_timeout",
+    }
+)
+_LLM_TRANSPORT_ERROR_CODES = frozenset(
+    {
+        "llm_close_error",
+        "llm_connection_error",
+        "llm_decoding_error",
+        "llm_dns_error",
+        "llm_local_protocol_error",
+        "llm_proxy_error",
+        "llm_read_error",
+        "llm_remote_protocol_error",
+        "llm_tls_certificate_error",
+        "llm_tls_error",
+        "llm_write_error",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -286,13 +312,16 @@ class LLMClient:
         self._usage_ledger = usage_ledger
 
     def _retry_limit(self, error: LLMProviderError) -> int:
-        return self._retry_policy.get(
-            error.code,
-            self._retry_policy.get(
-                "default",
-                self._settings.llm_max_retries,
-            ),
-        )
+        keys = [error.code]
+        if error.code in _LLM_TIMEOUT_ERROR_CODES:
+            keys.append("llm_timeout")
+        elif error.code in _LLM_TRANSPORT_ERROR_CODES:
+            keys.append("llm_transport_error")
+        keys.append("default")
+        for key in keys:
+            if key in self._retry_policy:
+                return self._retry_policy[key]
+        return self._settings.llm_max_retries
 
     def _retry_delay(
         self,
@@ -1518,12 +1547,9 @@ class LLMClient:
                 config=types.GenerateContentConfig(**config_kwargs),
             )
         except Exception as exc:
-            if _is_timeout_exception(exc):
-                raise LLMProviderError(
-                    "llm provider request timed out",
-                    retryable=True,
-                    code="llm_timeout",
-                ) from exc
+            request_error = _classify_wrapped_request_error(exc)
+            if request_error is not None:
+                raise request_error from exc
             raise LLMProviderError(str(exc), retryable=True) from exc
         finally:
             close = getattr(client, "close", None)
@@ -2087,6 +2113,9 @@ class LLMClient:
                     config=types.CountTokensConfig(),
                 )
             except Exception as exc:
+                request_error = _classify_wrapped_request_error(exc)
+                if request_error is not None:
+                    raise request_error from exc
                 raise LLMProviderError(
                     f"Gemini token count failed: {exc}",
                     retryable=True,
@@ -2247,6 +2276,9 @@ class LLMClient:
                     config=config,
                 )
             except Exception as exc:
+                request_error = _classify_wrapped_request_error(exc)
+                if request_error is not None:
+                    raise request_error from exc
                 raise LLMProviderError(
                     f"Gemini token count failed: {exc}",
                     retryable=True,
@@ -2370,18 +2402,8 @@ class LLMClient:
                         ),
                     )
                 body = response.json()
-        except httpx.TimeoutException as exc:
-            raise LLMProviderError(
-                "llm provider request timed out",
-                retryable=True,
-                code="llm_timeout",
-            ) from exc
-        except httpx.TransportError as exc:
-            raise LLMProviderError(
-                "llm provider network request failed",
-                retryable=True,
-                code="llm_transport_error",
-            ) from exc
+        except httpx.RequestError as exc:
+            raise _classify_httpx_request_error(exc) from exc
         except (json.JSONDecodeError, ValueError) as exc:
             raise LLMProviderError(
                 "llm provider returned invalid JSON",
@@ -2622,12 +2644,9 @@ class LLMClient:
                 if chunk_finish_reason is not None:
                     finish_reason = chunk_finish_reason
         except Exception as exc:
-            if _is_timeout_exception(exc):
-                raise LLMProviderError(
-                    "llm provider request timed out",
-                    retryable=True,
-                    code="llm_timeout",
-                ) from exc
+            request_error = _classify_wrapped_request_error(exc)
+            if request_error is not None:
+                raise request_error from exc
             raise LLMProviderError(str(exc), retryable=True) from exc
         finally:
             close = getattr(client, "close", None)
@@ -2711,18 +2730,124 @@ class LLMClient:
                             event_name = line.removeprefix("event:").strip()
                         elif line.startswith("data:"):
                             data_lines.append(line.removeprefix("data:").strip())
-        except httpx.TimeoutException as exc:
-            raise LLMProviderError(
-                "llm provider request timed out",
+        except httpx.RequestError as exc:
+            raise _classify_httpx_request_error(exc) from exc
+
+
+def _classify_httpx_request_error(exc: httpx.RequestError) -> LLMProviderError:
+    """Map HTTPX failures to stable, safe provider error contracts."""
+
+    if isinstance(exc, httpx.ConnectTimeout):
+        return LLMProviderError(
+            "llm provider connection timed out",
+            retryable=True,
+            code="llm_connect_timeout",
+        )
+    if isinstance(exc, httpx.ReadTimeout):
+        return LLMProviderError(
+            "llm provider response read timed out",
+            retryable=True,
+            code="llm_read_timeout",
+        )
+    if isinstance(exc, httpx.WriteTimeout):
+        return LLMProviderError(
+            "llm provider request write timed out",
+            retryable=True,
+            code="llm_write_timeout",
+        )
+    if isinstance(exc, httpx.PoolTimeout):
+        return LLMProviderError(
+            "llm provider connection pool wait timed out",
+            retryable=True,
+            code="llm_pool_timeout",
+        )
+    if isinstance(exc, httpx.ConnectError):
+        chain = tuple(_exception_chain(exc))
+        if any(isinstance(item, socket.gaierror) for item in chain):
+            return LLMProviderError(
+                "llm provider DNS resolution failed",
                 retryable=True,
-                code="llm_timeout",
-            ) from exc
-        except httpx.TransportError as exc:
-            raise LLMProviderError(
-                "llm provider network request failed",
+                code="llm_dns_error",
+            )
+        if any(isinstance(item, ssl.SSLCertVerificationError) for item in chain):
+            return LLMProviderError(
+                "llm provider TLS certificate verification failed",
+                retryable=False,
+                code="llm_tls_certificate_error",
+            )
+        if any(isinstance(item, ssl.SSLError) for item in chain):
+            return LLMProviderError(
+                "llm provider TLS connection failed",
                 retryable=True,
-                code="llm_transport_error",
-            ) from exc
+                code="llm_tls_error",
+            )
+        return LLMProviderError(
+            "llm provider connection failed",
+            retryable=True,
+            code="llm_connection_error",
+        )
+    if isinstance(exc, httpx.ProxyError):
+        return LLMProviderError(
+            "llm provider proxy connection failed",
+            retryable=True,
+            code="llm_proxy_error",
+        )
+    if isinstance(exc, httpx.ReadError):
+        return LLMProviderError(
+            "llm provider response read failed",
+            retryable=True,
+            code="llm_read_error",
+        )
+    if isinstance(exc, httpx.WriteError):
+        return LLMProviderError(
+            "llm provider request write failed",
+            retryable=True,
+            code="llm_write_error",
+        )
+    if isinstance(exc, httpx.CloseError):
+        return LLMProviderError(
+            "llm provider connection close failed",
+            retryable=True,
+            code="llm_close_error",
+        )
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return LLMProviderError(
+            "llm provider remote protocol error",
+            retryable=True,
+            code="llm_remote_protocol_error",
+        )
+    if isinstance(exc, httpx.LocalProtocolError):
+        return LLMProviderError(
+            "llm provider local protocol error",
+            retryable=False,
+            code="llm_local_protocol_error",
+        )
+    if isinstance(exc, httpx.DecodingError):
+        return LLMProviderError(
+            "llm provider response decoding failed",
+            retryable=True,
+            code="llm_decoding_error",
+        )
+    return LLMProviderError(
+        "llm provider transport failed",
+        retryable=True,
+        code="llm_transport_error",
+    )
+
+
+def _classify_wrapped_request_error(
+    exc: BaseException,
+) -> LLMProviderError | None:
+    for item in _exception_chain(exc):
+        if isinstance(item, httpx.RequestError):
+            return _classify_httpx_request_error(item)
+    if _is_timeout_exception(exc):
+        return LLMProviderError(
+            "llm provider request timed out",
+            retryable=True,
+            code="llm_timeout",
+        )
+    return None
 
 
 def _http_error_code(status_code: int, *, detail: str = "") -> str:
@@ -2958,16 +3083,21 @@ def _google_finish_reason(chunk: object) -> str | None:
 
 
 def _is_timeout_exception(exc: BaseException) -> bool:
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    for current in _exception_chain(exc):
         if isinstance(current, (TimeoutError, httpx.TimeoutException)):
             return True
         if "timed out" in str(current).lower() or "timeout" in str(current).lower():
             return True
-        current = current.__cause__ or current.__context__
     return False
+
+
+def _exception_chain(exc: BaseException) -> Iterable[BaseException]:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
 def _usage_event(input_tokens: object, output_tokens: object) -> LLMStreamEvent:
