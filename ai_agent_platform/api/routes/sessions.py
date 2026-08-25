@@ -5,7 +5,11 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
 from ai_agent_platform.integrations import LLMClient
-from ai_agent_platform.model_registry import ModelRegistryService
+from ai_agent_platform.model_registry import (
+    ModelRegistryService,
+    ModelSelection,
+    model_selection_scope,
+)
 from ai_agent_platform.project_memory import (
     MemoryAccessDeniedError,
     ProjectMemoryService,
@@ -40,12 +44,16 @@ from ai_agent_platform.services import (
 )
 
 
-def _context_budget_tokens(llm_client: LLMClient | None) -> int:
+def _context_budget_tokens(
+    llm_client: LLMClient | None,
+    model_selection: ModelSelection | None = None,
+) -> int:
     """Resolve the model-derived input budget, or 0 when unavailable."""
     resolve = getattr(llm_client, "resolve_context_budget", None)
     if not callable(resolve):
         return 0
-    return int(resolve().input_tokens)
+    with model_selection_scope(model_selection):
+        return int(resolve().input_tokens)
 
 
 def create_sessions_router(
@@ -266,10 +274,18 @@ def create_sessions_router(
         for record in records:
             workspace_records[record.workspace_id].append(record)
             operation_records[record.operation].append(record)
+        model_selection = (
+            model_registry.selection_for_session(session_id)
+            if model_registry is not None
+            else None
+        )
         context = session_service.get_context_token_usage(
             session_id=session_id,
             max_context_messages=settings.llm_max_context_messages,
-            max_context_tokens=_context_budget_tokens(llm_client),
+            max_context_tokens=_context_budget_tokens(
+                llm_client,
+                model_selection,
+            ),
             max_context_messages_ceiling=(
                 settings.llm_max_context_messages_ceiling
             ),

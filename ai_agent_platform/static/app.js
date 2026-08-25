@@ -1337,19 +1337,27 @@ function updateComposerScopeSummary() {
   const usage = state.conversationId
     ? state.sessionTokenUsage[state.conversationId]
     : null;
+  const total = Number(usage?.total_tokens || 0);
   const estimated = Number(usage?.context?.estimated_tokens || 0);
   const budget = Number(usage?.context?.budget_tokens || 0);
   const ratio = budget ? Math.min(1, estimated / budget) : 0;
   const contextNode = $("composer-context-budget");
   contextNode.classList.toggle("warning", ratio >= 0.72 && ratio < 0.9);
   contextNode.classList.toggle("error", ratio >= 0.9);
-  $("composer-context-label").textContent = estimated
-    ? `≈ ${formatTokenCount(estimated)}${budget ? ` / ${formatTokenCount(budget)}` : ""} tokens`
+  $("composer-context-kicker").textContent = usage
+    ? `累计 ${formatTokenCount(total)} tokens`
+    : "Token usage";
+  $("composer-context-label").textContent = usage
+    ? estimated
+      ? `历史 ≈ ${formatTokenCount(estimated)}${budget ? ` / ${formatTokenCount(budget)}` : ""}`
+      : "历史尚未形成"
     : "等待首轮请求";
   $("composer-context-meter-fill").style.width = `${Math.round(ratio * 100)}%`;
-  contextNode.title = budget
-    ? `当前上下文估算 ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} tokens`
-    : "发起请求后显示当前会话的上下文估算";
+  contextNode.title = usage
+    ? `累计实际消耗 ${formatTokenCount(total)} tokens。当前会话历史估算 ${formatTokenCount(estimated)}${
+        budget ? ` / ${formatTokenCount(budget)}` : ""
+      } tokens；历史估算只包含保留的会话消息和摘要，不等同于完整最终 Prompt。`
+    : "发起请求后显示累计实际消耗和当前会话历史估算";
 }
 
 function updateContextSummary() {
@@ -3202,6 +3210,7 @@ async function saveModelPreference() {
     state.currentSession.model = selected?.model || null;
   }
   renderSessionModelControls();
+  await loadSessionTokenUsage([conversationId]);
   showToast(automatic ? "已启用自动选模" : `首选模型已切换为 ${selected?.display_name || "手动模型"}`);
 }
 

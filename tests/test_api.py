@@ -804,7 +804,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260824-auditable-trace-v4',
+            '/static/app.js?v=20260825-token-budget-display-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -837,6 +837,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-scope-strip"', response.text)
         self.assertIn('id="composer-workspace-btn"', response.text)
         self.assertIn('id="composer-context-budget"', response.text)
+        self.assertIn('id="composer-context-kicker"', response.text)
         self.assertNotIn('id="composer-workspace-select"', response.text)
         self.assertNotIn('id="workspace-catalog-list"', response.text)
         self.assertIn('id="workspace-manager-list"', response.text)
@@ -1013,6 +1014,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("repeat(5, minmax(0, 1fr))", stylesheet_response.text)
         self.assertIn("loadSessionTokenUsage", script_response.text)
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
+        self.assertIn("累计实际消耗", script_response.text)
+        self.assertIn("历史估算只包含保留的会话消息和摘要", script_response.text)
+        self.assertIn("await loadSessionTokenUsage([conversationId]);", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)
         self.assertIn("await onProgress", script_response.text)
         self.assertIn("agentProgressBodyFromEvents", script_response.text)
