@@ -61,6 +61,7 @@ class ScriptedFakeProvider:
         self.stream_calls: list[str] = []
         self.tool_calls: list[str] = []
         self.tool_error: LLMProviderError | None = None
+        self.tool_errors: deque[LLMProviderError] = deque()
 
     def stream_chat(self, messages, *, model, thinking_level):
         self.stream_calls.append(model)
@@ -72,6 +73,8 @@ class ScriptedFakeProvider:
 
     def decide_tools(self, messages, tools, *, model):
         self.tool_calls.append(model)
+        if self.tool_errors:
+            raise self.tool_errors.popleft()
         if self.tool_error is not None:
             raise self.tool_error
         return LLMToolDecision(
@@ -109,6 +112,14 @@ def _success_script(model: str = "model") -> _StreamScript:
             LLMStreamEvent(type="done"),
         ]
     )
+
+
+def _ignore_sleep(_seconds: float) -> None:
+    return None
+
+
+def _zero_random() -> float:
+    return 0.0
 
 
 class ModelPolicyTests(unittest.TestCase):
@@ -221,16 +232,20 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         self,
         primary: ScriptedFakeProvider,
         backup: ScriptedFakeProvider,
+        *,
+        settings: Settings | None = None,
+        sleep=_ignore_sleep,
+        random_value=_zero_random,
     ) -> LLMClient:
         return LLMClient(
-            Settings(
-                llm_max_retries=0,
-            ),
+            settings or Settings(llm_max_retries=0),
             model_router=self.router,
             provider_adapters={
                 "primary_fake": primary,
                 "backup_fake": backup,
             },
+            sleep=sleep,
+            random_value=random_value,
         )
 
     def test_rate_limit_before_first_delta_falls_back_across_provider(self) -> None:
@@ -269,6 +284,191 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
             [call.kwargs["provider"] for call in count_tokens.call_args_list],
             ["primary_fake", "backup_fake"],
         )
+
+    def test_error_policy_can_skip_rate_limit_retries_and_fallback_immediately(
+        self,
+    ) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[],
+                    error_after=LLMProviderError(
+                        "rate limited",
+                        retryable=True,
+                        code="rate_limit",
+                        retry_after_seconds=15.0,
+                    ),
+                )
+            ]
+        )
+        backup = ScriptedFakeProvider([_success_script("backup-model")])
+        sleeps: list[float] = []
+        client = self.client(
+            primary,
+            backup,
+            settings=Settings(
+                llm_max_retries=3,
+                llm_retry_policy_json='{"rate_limit": 0}',
+            ),
+            sleep=sleeps.append,
+        )
+
+        events = list(client.stream_chat(_messages()))
+
+        self.assertEqual(events[0].provider, "backup_fake")
+        self.assertEqual(primary.stream_calls, ["primary-model"])
+        self.assertEqual(backup.stream_calls, ["backup-model"])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(events[0].route_trace["retries"], [])
+
+    def test_retry_after_wait_and_effective_budget_are_recorded_in_trace(
+        self,
+    ) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[],
+                    error_after=LLMProviderError(
+                        "rate limited",
+                        retryable=True,
+                        code="rate_limit",
+                        retry_after_seconds=1.25,
+                    ),
+                ),
+                _success_script("primary-model"),
+            ]
+        )
+        sleeps: list[float] = []
+        client = self.client(
+            primary,
+            ScriptedFakeProvider(),
+            settings=Settings(
+                llm_max_retries=0,
+                llm_retry_policy_json='{"rate_limit": 1}',
+                llm_retry_jitter_seconds=0.5,
+            ),
+            sleep=sleeps.append,
+            random_value=lambda: 0.5,
+        )
+
+        events = list(client.stream_chat(_messages()))
+
+        self.assertEqual(primary.stream_calls, ["primary-model", "primary-model"])
+        self.assertEqual(sleeps, [1.5])
+        retry = events[0].route_trace["retries"][0]
+        self.assertEqual(retry["code"], "rate_limit")
+        self.assertEqual(retry["retry_number"], 1)
+        self.assertEqual(retry["max_retries"], 1)
+        self.assertEqual(retry["delay_seconds"], 1.5)
+        self.assertEqual(retry["wait_source"], "retry_after")
+        self.assertEqual(retry["retry_after_seconds"], 1.25)
+
+    def test_unconfigured_policy_preserves_global_retry_budget(self) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[],
+                    error_after=LLMProviderError(
+                        "transport failed",
+                        retryable=True,
+                        code="llm_transport_error",
+                    ),
+                ),
+                _success_script("primary-model"),
+            ]
+        )
+        sleeps: list[float] = []
+        client = self.client(
+            primary,
+            ScriptedFakeProvider(),
+            settings=Settings(
+                llm_max_retries=1,
+                llm_retry_jitter_seconds=0.0,
+            ),
+            sleep=sleeps.append,
+        )
+
+        events = list(client.stream_chat(_messages()))
+
+        self.assertEqual(primary.stream_calls, ["primary-model", "primary-model"])
+        self.assertEqual(sleeps, [0.2])
+        self.assertEqual(
+            events[0].route_trace["retries"][0]["max_retries"],
+            1,
+        )
+
+    def test_excessive_retry_after_falls_back_to_bounded_local_backoff(
+        self,
+    ) -> None:
+        primary = ScriptedFakeProvider(
+            [
+                _StreamScript(
+                    events=[],
+                    error_after=LLMProviderError(
+                        "rate limited",
+                        retryable=True,
+                        code="rate_limit",
+                        retry_after_seconds=120.0,
+                    ),
+                ),
+                _success_script("primary-model"),
+            ]
+        )
+        sleeps: list[float] = []
+        client = self.client(
+            primary,
+            ScriptedFakeProvider(),
+            settings=Settings(
+                llm_retry_policy_json='{"rate_limit": 1}',
+                llm_retry_base_delay_seconds=0.2,
+                llm_retry_backoff_max_seconds=1.0,
+                llm_retry_after_max_seconds=30.0,
+                llm_retry_jitter_seconds=0.0,
+            ),
+            sleep=sleeps.append,
+        )
+
+        events = list(client.stream_chat(_messages()))
+
+        self.assertEqual(sleeps, [0.2])
+        retry = events[0].route_trace["retries"][0]
+        self.assertEqual(retry["wait_source"], "exponential_backoff")
+        self.assertEqual(retry["retry_after_seconds"], 120.0)
+
+    def test_tool_retry_uses_shared_error_policy_and_exponential_backoff(
+        self,
+    ) -> None:
+        primary = ScriptedFakeProvider()
+        primary.tool_errors.append(
+            LLMProviderError(
+                "malformed arguments",
+                retryable=True,
+                code="invalid_tool_arguments",
+            )
+        )
+        sleeps: list[float] = []
+        client = self.client(
+            primary,
+            ScriptedFakeProvider(),
+            settings=Settings(
+                llm_max_retries=0,
+                llm_retry_policy_json='{"invalid_tool_arguments": 1}',
+                llm_retry_base_delay_seconds=0.3,
+                llm_retry_backoff_max_seconds=1.0,
+                llm_retry_jitter_seconds=0.0,
+            ),
+            sleep=sleeps.append,
+        )
+
+        decision = client.decide_tools(_messages(), [])
+
+        self.assertEqual(primary.tool_calls, ["primary-model", "primary-model"])
+        self.assertEqual(sleeps, [0.3])
+        assert decision.route_trace is not None
+        retry = decision.route_trace["retries"][0]
+        self.assertEqual(retry["code"], "invalid_tool_arguments")
+        self.assertEqual(retry["wait_source"], "exponential_backoff")
+        self.assertEqual(retry["delay_seconds"], 0.3)
 
     def test_runtime_unavailable_catalog_model_is_filtered_before_provider_call(self) -> None:
         primary = ScriptedFakeProvider([_success_script("primary-model")])

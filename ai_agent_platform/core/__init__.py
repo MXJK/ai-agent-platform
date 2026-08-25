@@ -1,4 +1,9 @@
-from .config import RUNTIME_PROFILE_DEFAULTS, Settings, runtime_profile_defaults
+from .config import (
+    RUNTIME_PROFILE_DEFAULTS,
+    Settings,
+    parse_llm_retry_policy_json,
+    runtime_profile_defaults,
+)
 from .config_resolver import (
     ConfigError,
     ConfigFieldSource,
@@ -59,5 +64,6 @@ __all__ = [
     "TaskQueueFullError",
     "configure_logging",
     "log_context",
+    "parse_llm_retry_policy_json",
     "runtime_profile_defaults",
 ]

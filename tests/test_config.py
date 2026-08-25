@@ -177,6 +177,14 @@ class SettingsTests(unittest.TestCase):
                 ),
                 "LLM_MODEL_CONTEXT_WINDOW_TOKENS": "96000",
                 "LLM_ROUTING_POLICY": "cost",
+                "LLM_MAX_RETRIES": "5",
+                "LLM_RETRY_POLICY_JSON": (
+                    '{"rate_limit":0,"llm_timeout":3,"default":1}'
+                ),
+                "LLM_RETRY_BASE_DELAY_SECONDS": "0.25",
+                "LLM_RETRY_BACKOFF_MAX_SECONDS": "3.0",
+                "LLM_RETRY_AFTER_MAX_SECONDS": "30.0",
+                "LLM_RETRY_JITTER_SECONDS": "0.05",
                 "LLM_CIRCUIT_FAILURE_THRESHOLD": "4",
                 "LLM_CIRCUIT_RECOVERY_TIMEOUT_SECONDS": "45",
                 "LLM_CIRCUIT_ERROR_WINDOW_SIZE": "12",
@@ -285,6 +293,15 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("fast-fake", settings.llm_model_catalog_json or "")
         self.assertEqual(settings.llm_model_context_window_tokens, 96000)
         self.assertEqual(settings.llm_routing_policy, "cost")
+        self.assertEqual(settings.llm_max_retries, 5)
+        self.assertEqual(
+            settings.llm_retry_policy_json,
+            '{"rate_limit":0,"llm_timeout":3,"default":1}',
+        )
+        self.assertEqual(settings.llm_retry_base_delay_seconds, 0.25)
+        self.assertEqual(settings.llm_retry_backoff_max_seconds, 3.0)
+        self.assertEqual(settings.llm_retry_after_max_seconds, 30.0)
+        self.assertEqual(settings.llm_retry_jitter_seconds, 0.05)
         self.assertEqual(settings.llm_circuit_failure_threshold, 4)
         self.assertEqual(settings.llm_circuit_recovery_timeout_seconds, 45)
         self.assertEqual(settings.llm_circuit_error_window_size, 12)
@@ -448,6 +465,37 @@ class SettingsTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "between 0 and 1"):
             Settings(llm_circuit_error_rate_threshold=1.1)
+        with self.assertRaisesRegex(ValueError, "valid JSON"):
+            Settings(llm_retry_policy_json="not-json")
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            Settings(llm_retry_policy_json="[]")
+        with self.assertRaisesRegex(ValueError, "unsupported keys"):
+            Settings(llm_retry_policy_json='{"typo": 1}')
+        for value in ('{"rate_limit": -1}', '{"rate_limit": true}'):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "non-negative integers",
+            ):
+                Settings(llm_retry_policy_json=value)
+        with self.assertRaisesRegex(ValueError, "llm_retry_jitter_seconds"):
+            Settings(llm_retry_jitter_seconds=-0.1)
+        for field_name, value in (
+            ("llm_retry_base_delay_seconds", float("nan")),
+            ("llm_retry_after_max_seconds", float("inf")),
+        ):
+            with self.subTest(field_name=field_name), self.assertRaisesRegex(
+                ValueError,
+                f"{field_name} must be finite",
+            ):
+                Settings(**{field_name: value})
+        with self.assertRaisesRegex(
+            ValueError,
+            "llm_retry_backoff_max_seconds",
+        ):
+            Settings(
+                llm_retry_base_delay_seconds=1.0,
+                llm_retry_backoff_max_seconds=0.5,
+            )
         with self.assertRaisesRegex(ValueError, "llm_context_evidence_ratio"):
             Settings(llm_context_evidence_ratio=-0.1)
         with self.assertRaisesRegex(ValueError, "leave room"):
