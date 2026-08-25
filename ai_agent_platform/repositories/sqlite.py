@@ -741,6 +741,44 @@ class SQLiteAgentRunRepository:
             sequence = int(cursor.lastrowid)
         return replace(event, sequence=sequence)
 
+    def append_event_once(
+        self,
+        run_id: str,
+        event_key: str,
+        event: AgentRunEvent,
+    ) -> AgentRunEvent:
+        with self.database.transaction(immediate=True) as conn:
+            if conn.execute("SELECT 1 FROM agent_runs WHERE id = ?", (run_id,)).fetchone() is None:
+                raise KeyError(run_id)
+            conn.execute(
+                "INSERT OR IGNORE INTO agent_run_events "
+                "(run_id, event_key, type, status, node, summary, output_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    event_key,
+                    event.type,
+                    event.status,
+                    event.node,
+                    event.summary,
+                    _json(event.output),
+                ),
+            )
+            row = conn.execute(
+                "SELECT id, type, status, node, summary, output_json "
+                "FROM agent_run_events WHERE run_id = ? AND event_key = ?",
+                (run_id, event_key),
+            ).fetchone()
+        assert row is not None
+        return AgentRunEvent(
+            sequence=int(row["id"]),
+            type=str(row["type"]),
+            status=str(row["status"]),
+            node=str(row["node"]) if row["node"] is not None else None,
+            summary=str(row["summary"]),
+            output=_json_load(row["output_json"], {}),
+        )
+
     def get_tool_execution(self, run_id: str, call_id: str) -> AgentToolExecution | None:
         with self.database.connect() as conn:
             row = conn.execute(

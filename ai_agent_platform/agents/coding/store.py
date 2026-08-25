@@ -20,6 +20,7 @@ class InMemoryAgentRunStore:
         self._runs: dict[str, AgentRunRecord] = {}
         self._events: dict[str, list[AgentRunEvent]] = {}
         self._event_keys: dict[str, set[str]] = {}
+        self._events_by_key: dict[tuple[str, str], AgentRunEvent] = {}
         self._tool_executions: dict[tuple[str, str], AgentToolExecution] = {}
         self._lock = RLock()
 
@@ -38,16 +39,16 @@ class InMemoryAgentRunStore:
                 if key in keys:
                     continue
                 keys.add(key)
-                events.append(
-                    AgentRunEvent(
-                        sequence=len(events) + 1,
-                        type=event.type,
-                        status=event.status,
-                        node=event.node,
-                        summary=event.summary,
-                        output=event.output,
-                    )
+                stored = AgentRunEvent(
+                    sequence=len(events) + 1,
+                    type=event.type,
+                    status=event.status,
+                    node=event.node,
+                    summary=event.summary,
+                    output=event.output,
                 )
+                events.append(stored)
+                self._events_by_key[(record.run_id, key)] = stored
 
     def get(self, run_id: str) -> AgentRunRecord:
         with self._lock:
@@ -95,6 +96,32 @@ class InMemoryAgentRunStore:
                 output=event.output,
             )
             events.append(stored)
+            return stored
+
+    def append_event_once(
+        self,
+        run_id: str,
+        event_key: str,
+        event: AgentRunEvent,
+    ) -> AgentRunEvent:
+        with self._lock:
+            if run_id not in self._runs:
+                raise KeyError(run_id)
+            existing = self._events_by_key.get((run_id, event_key))
+            if existing is not None:
+                return existing
+            events = self._events.setdefault(run_id, [])
+            stored = AgentRunEvent(
+                sequence=len(events) + 1,
+                type=event.type,
+                status=event.status,
+                node=event.node,
+                summary=event.summary,
+                output=event.output,
+            )
+            events.append(stored)
+            self._event_keys.setdefault(run_id, set()).add(event_key)
+            self._events_by_key[(run_id, event_key)] = stored
             return stored
 
     def get_tool_execution(
@@ -214,7 +241,7 @@ def events_for_record(
             succeeded = bool(result.get("ok"))
             candidates.append(
                 (
-                    f"tool-result:{call_id}:{result_index}",
+                    f"tool-result:{call_id}",
                     AgentRunEvent(
                         sequence=0,
                         type="tool_result" if succeeded else "tool_error",

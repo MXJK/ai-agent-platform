@@ -3146,6 +3146,67 @@ body.inspector-hidden .app-shell {
   border-top: 1px solid rgba(141, 158, 175, 0.12);
 }
 
+.execution-live-events {
+  margin: 0.85rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(141, 158, 175, 0.12);
+}
+
+.execution-live-events-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.execution-live-events ol {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.execution-live-events li {
+  display: grid;
+  grid-template-columns: 0.55rem minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+}
+
+.execution-live-marker {
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-top: 0.3rem;
+  border-radius: 999px;
+  background: var(--signal, #62d6c2);
+  box-shadow: 0 0 0 0.2rem color-mix(in srgb, var(--signal, #62d6c2) 14%, transparent);
+}
+
+.execution-live-events li.error .execution-live-marker {
+  background: var(--red);
+}
+
+.execution-live-events strong,
+.execution-live-events p {
+  margin: 0;
+}
+
+.execution-live-events strong {
+  font-size: 0.82rem;
+}
+
+.execution-live-events p {
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 .execution-tools-label {
   display: inline-flex;
   align-items: center;

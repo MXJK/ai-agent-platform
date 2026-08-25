@@ -61,6 +61,36 @@ class ChangeLoopExecutor:
         self._context_provider = (
             context_provider or fallback_access.tool_use_context
         )
+        self._event_sink: Callable[..., Any] | None = None
+
+    def set_event_sink(self, event_sink: Callable[..., Any]) -> None:
+        self._event_sink = event_sink
+
+    def _emit_tool_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        tool_call: ToolCall,
+        output: dict[str, Any],
+        event_key: str,
+    ) -> None:
+        if not run_id or self._event_sink is None:
+            return
+        self._event_sink(
+            run_id=run_id,
+            event_type=event_type,
+            node=None,
+            summary=(
+                f"Tool started: {tool_call.name}."
+                if event_type == "tool_started"
+                else f"Tool completed: {tool_call.name}."
+                if event_type == "tool_result"
+                else f"Tool failed: {tool_call.name}."
+            ),
+            output=output,
+            event_key=event_key,
+        )
 
     def execute_changes(self, state: CodingAgentState) -> CodingAgentState:
         iteration = state.get("change_iteration", 0)
@@ -376,6 +406,29 @@ class ChangeLoopExecutor:
         tools: Any,
     ) -> dict[str, Any]:
         run_id = context.run_id
+        self._emit_tool_event(
+            run_id=run_id,
+            event_type="tool_started",
+            tool_call=tool_call,
+            output={
+                "call_id": tool_call.call_id,
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+                "source": tool_call.source,
+            },
+            event_key=f"tool-started:{tool_call.call_id}",
+        )
+
+        def finish(response: dict[str, Any]) -> dict[str, Any]:
+            self._emit_tool_event(
+                run_id=run_id,
+                event_type="tool_result" if response.get("ok") else "tool_error",
+                tool_call=tool_call,
+                output=response,
+                event_key=f"tool-result:{tool_call.call_id}",
+            )
+            return response
+
         arguments_hash = hashlib.sha256(
             json.dumps(
                 tool_call.arguments,
@@ -394,34 +447,35 @@ class ChangeLoopExecutor:
                     previous.name != tool_call.name
                     or previous.arguments_hash != arguments_hash
                 ):
-                    return {
+                    return finish({
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
                         "ok": False,
                         "error": "call_id was reused with different arguments",
                         "error_code": "tool_call_identity_conflict",
                         "cached": True,
-                    }
+                    })
                 if previous.status == "completed" and previous.response is not None:
                     cached = dict(previous.response)
                     cached["cached"] = True
                     cached["durable_replay"] = True
-                    return cached
-                return {
+                    return finish(cached)
+                return finish({
                     "call_id": tool_call.call_id,
                     "name": tool_call.name,
                     "ok": False,
                     "error": "tool call has an unfinished durable execution record",
                     "error_code": "tool_execution_in_progress",
                     "cached": True,
-                }
+                })
         permission = tools.resolve_permission(
             tool_call,
             context,
             phase="execute",
         )
         if permission.effect != "allow":
-            return tools.execute(tool_call, context=context).to_response()
+            response = tools.execute(tool_call, context=context).to_response()
+            return finish(response)
         if run_id and callable(save_execution):
             save_execution(
                 AgentToolExecution(
@@ -444,7 +498,7 @@ class ChangeLoopExecutor:
                     response=response,
                 )
             )
-        return response
+        return finish(response)
 
 
 def partition_tool_calls(

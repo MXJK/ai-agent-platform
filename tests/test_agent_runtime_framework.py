@@ -151,7 +151,76 @@ class InputPlanner(SteeringPlanner):
         )
 
 
+class BlockingClassificationPlanner(SteeringPlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.classification_started = Event()
+        self.release_classification = Event()
+
+    def classify_intent(self, user_input: str):
+        self.classification_started.set()
+        self.release_classification.wait(timeout=5)
+        return super().classify_intent(user_input)
+
+
 class AgentRuntimeFrameworkTests(unittest.TestCase):
+    def test_node_progress_events_are_persisted_before_run_completion(self) -> None:
+        planner = BlockingClassificationPlanner()
+        store = InMemoryAgentRunStore()
+        runtime = CodingAgentRuntime(planner=planner, run_store=store)
+        results = []
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            queued = runtime.create_queued_run(
+                conversation_id="sess_live_nodes",
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            worker = Thread(
+                target=lambda: results.append(
+                    runtime.run(
+                        run_id=queued.run_id,
+                        conversation_id=queued.conversation_id,
+                        user_input="explain the repository",
+                        history=[],
+                        workspace_id=queued.workspace_id,
+                        workspace_root=queued.workspace_root,
+                    )
+                )
+            )
+            worker.start()
+            self.assertTrue(planner.classification_started.wait(timeout=5))
+
+            active_events = store.list_events(queued.run_id)
+            active_types = [event.type for event in active_events]
+            active_cursor = active_events[-1].sequence
+            active_status = store.get(queued.run_id).status
+            planner.release_classification.set()
+            worker.join(timeout=5)
+
+            self.assertIn("node_started", active_types)
+            self.assertIn("node_completed", active_types)
+            self.assertIn("reasoning_summary", active_types)
+            self.assertNotIn("run_completed", active_types)
+            self.assertEqual(active_status, "running")
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0].status, "completed")
+        final_events = store.list_events(queued.run_id)
+        final_types = [event.type for event in final_events]
+        self.assertIn("answer_delta", final_types)
+        self.assertIn("answer_completed", final_types)
+        self.assertEqual(final_types[-1], "run_completed")
+        resumed_events = store.list_events(queued.run_id, after=active_cursor)
+        self.assertTrue(resumed_events)
+        self.assertTrue(all(event.sequence > active_cursor for event in resumed_events))
+        self.assertEqual(
+            len({event.sequence for event in resumed_events}),
+            len(resumed_events),
+        )
+
     def test_in_memory_store_loads_latest_run_for_conversation(self) -> None:
         store = InMemoryAgentRunStore()
         base = AgentRunRecord(
@@ -409,9 +478,11 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             },
         )
         planner = PausingPlanner()
+        store = InMemoryAgentRunStore()
         runtime = CodingAgentRuntime(
             tool_registry=registry,
             planner=planner,
+            run_store=store,
             native_context_max_chars=3500,
         )
         result_holder = []
@@ -438,10 +509,16 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             )
             worker.start()
             self.assertTrue(tool_started.wait(timeout=5))
+            active_tool_events = store.list_events(queued.run_id)
+            active_tool_types = [event.type for event in active_tool_events]
             runtime.request_control(run_id=queued.run_id, action="pause")
             release_tool.set()
             worker.join(timeout=5)
 
+            self.assertIn("tool_selected", active_tool_types)
+            self.assertIn("tool_started", active_tool_types)
+            self.assertNotIn("tool_result", active_tool_types)
+            self.assertNotIn("run_completed", active_tool_types)
             self.assertFalse(worker.is_alive())
             self.assertEqual(result_holder[0].status, "paused")
             feedback = "resume direction " + "逐字保留" * 80
@@ -459,6 +536,15 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             "User steering for the active run: " + feedback,
         )
         self.assertEqual(runtime.get_run(queued.run_id).steering_messages, [])
+        tool_events = [
+            event
+            for event in store.list_events(queued.run_id)
+            if event.output.get("call_id") == "wait_call"
+        ]
+        self.assertEqual(
+            [event.type for event in tool_events],
+            ["tool_selected", "tool_started", "tool_result"],
+        )
 
     def test_historical_checkpoint_starts_an_independent_graph_thread(self) -> None:
         with TemporaryDirectory() as temp_dir:

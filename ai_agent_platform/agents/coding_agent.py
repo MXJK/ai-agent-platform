@@ -87,32 +87,74 @@ class _RuntimeGraphNodes:
     """Internal adapter from the compatibility facade to graph node callables."""
 
     def __init__(self, runtime: "CodingAgentRuntime") -> None:
+        instrument = runtime._instrument_node
         context = runtime._context_nodes
-        self.setup_workspace = context._setup_workspace
-        self.load_project_instructions = context._load_project_instructions
-        self.classify_request = context._classify_request
-        self.decide_context_source = context._decide_context_source
-        self.retrieve_project_memory = context._retrieve_project_memory
-        self.retrieve_knowledge = context._retrieve_knowledge
-        self.plan_exploration = context._plan_exploration
-        self.execute_exploration = context._execute_exploration
-        self.assess_context = context._assess_context
+        self.setup_workspace = instrument("setup_workspace", context._setup_workspace)
+        self.load_project_instructions = instrument(
+            "load_project_instructions", context._load_project_instructions
+        )
+        self.classify_request = instrument("classify_request", context._classify_request)
+        self.decide_context_source = instrument(
+            "decide_context_source", context._decide_context_source
+        )
+        self.retrieve_project_memory = instrument(
+            "retrieve_project_memory", context._retrieve_project_memory
+        )
+        self.retrieve_knowledge = instrument(
+            "retrieve_knowledge", context._retrieve_knowledge
+        )
+        self.plan_exploration = instrument(
+            "plan_exploration", context._plan_exploration
+        )
+        self.execute_exploration = instrument(
+            "execute_exploration", context._execute_exploration
+        )
+        self.assess_context = instrument("assess_context", context._assess_context)
         self.route_after_context = context._route_after_context
-        self.merge_evidence = context._merge_evidence
+        self.merge_evidence = instrument("merge_evidence", context._merge_evidence)
         tool_loop = runtime._tool_loop_nodes
-        self.plan_tools = tool_loop._plan_tools
-        self.review_tool_plan = tool_loop._review_tool_plan
-        self.inspect_repository = tool_loop._inspect_repository
-        self.execute_changes = runtime._change_loop.execute_changes
-        self.validate_changes = runtime._change_loop.validate_changes
-        self.review_repair_plan = runtime._change_loop.review_repair_plan
-        self.collect_artifacts = tool_loop._collect_artifacts
-        self.compose_answer = tool_loop._compose_answer
-        self.compose_error_answer = tool_loop._compose_error_answer
+        self.plan_tools = instrument("plan_tools", tool_loop._plan_tools)
+        self.review_tool_plan = instrument("review_tool_plan", tool_loop._review_tool_plan)
+        self.inspect_repository = instrument("inspect_repository", tool_loop._inspect_repository)
+        self.execute_changes = instrument(
+            "execute_changes", runtime._change_loop.execute_changes
+        )
+        self.validate_changes = instrument(
+            "validate_changes", runtime._change_loop.validate_changes
+        )
+        self.review_repair_plan = instrument(
+            "review_repair_plan", runtime._change_loop.review_repair_plan
+        )
+        self.collect_artifacts = instrument("collect_artifacts", tool_loop._collect_artifacts)
+        self.compose_answer = instrument("compose_answer", tool_loop._compose_answer)
+        self.compose_error_answer = instrument(
+            "compose_error_answer", tool_loop._compose_error_answer
+        )
 
 
 class CodingAgentRuntime:
     """Task-driven coding agent that reads live workspace files on demand."""
+
+    def _instrument_node(self, name: str, node: Any):
+        def instrumented(state: CodingAgentState) -> CodingAgentState:
+            run_id = str(state.get("run_id") or "")
+            if run_id:
+                self._recorder.record_node_started(
+                    run_id=run_id,
+                    node=name,
+                    state=state,
+                )
+            update = node(state)
+            if run_id:
+                self._recorder.record_node_completed(
+                    run_id=run_id,
+                    node=name,
+                    state=state,
+                    update=update,
+                )
+            return update
+
+        return instrumented
 
     def __init__(
         self,
@@ -238,6 +280,8 @@ class CodingAgentRuntime:
             checkpointer=self._checkpointer,
         )
         self._recorder = RunRecorder(self)
+        self._change_loop.set_event_sink(self._recorder.emit_event)
+        self._policies.completion.set_event_sink(self._recorder.emit_event)
 
     def run(
         self,

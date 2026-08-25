@@ -354,7 +354,7 @@ function humanizeAgentNode(value) {
   return labels[value] || value || "准备执行";
 }
 
-function traceToolNames(trace) {
+function traceToolNames(trace, events = []) {
   const names = [];
   for (const step of trace || []) {
     const output = step.output || {};
@@ -373,7 +373,50 @@ function traceToolNames(trace) {
       }
     }
   }
+  for (const event of events || []) {
+    if (!["tool_selected", "tool_started", "tool_result", "tool_error"].includes(event.type)) {
+      continue;
+    }
+    const name = event.output?.name;
+    if (name && !names.includes(name)) names.push(name);
+  }
   return names;
+}
+
+function executionActivityEvents(events) {
+  return (events || [])
+    .filter((event) => [
+      "node_started",
+      "reasoning_summary",
+      "tool_started",
+      "tool_result",
+      "tool_error",
+      "answer_completed",
+    ].includes(event.type))
+    .slice(-16);
+}
+
+function executionActivityTitle(event) {
+  const output = event.output || {};
+  if (event.type === "node_started") return `正在${humanizeAgentNode(event.node)}`;
+  if (event.type === "reasoning_summary") return "阶段思路";
+  if (event.type === "tool_started") return `调用工具 · ${output.name || "未知工具"}`;
+  if (event.type === "tool_result") return `工具完成 · ${output.name || "未知工具"}`;
+  if (event.type === "tool_error") return `工具失败 · ${output.name || "未知工具"}`;
+  if (event.type === "answer_completed") return "回答生成完成";
+  return event.type || "实时活动";
+}
+
+function executionActivitySummary(event) {
+  const output = event.output || {};
+  if (["tool_result", "tool_error"].includes(event.type)) {
+    const result = output.result ?? output.error ?? event.summary ?? "";
+    const rendered = typeof result === "string" ? result : JSON.stringify(result);
+    const preview = rendered.length > 280 ? `${rendered.slice(0, 280)}…` : rendered;
+    const duration = output.duration_ms !== undefined ? `${output.duration_ms} ms` : "";
+    return [duration, preview].filter(Boolean).join(" · ") || event.summary || "工具已返回结果";
+  }
+  return event.summary || humanizeAgentNode(event.node);
 }
 
 function executionProcessPresentation(status) {
@@ -432,6 +475,11 @@ function ensureExecutionProcess(contentNode) {
       </summary>
       <div class="execution-body">
         <ol class="execution-steps"></ol>
+        <section class="execution-live-events" hidden>
+          <span class="execution-live-events-label">实时活动</span>
+          <ol></ol>
+        </section>
+        <p class="execution-live-announcer sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
         <div class="execution-tools" hidden></div>
       </div>
     `;
@@ -448,13 +496,15 @@ function renderExecutionProcess(
     elapsedMs = 0,
     fallbackNode = "",
     fallbackSummary = "",
+    events = [],
   } = {},
 ) {
   const details = ensureExecutionProcess(contentNode);
   const terminal = TERMINAL_RUN_STATUSES.has(status) || status === "done";
   const wasTerminal = details.dataset.terminal === "true";
   const presentation = executionProcessPresentation(status);
-  const tools = traceToolNames(trace);
+  const tools = traceToolNames(trace, events);
+  const activities = executionActivityEvents(events);
   const steps = trace.length
     ? trace
     : terminal
@@ -518,6 +568,26 @@ function renderExecutionProcess(
   if (!steps.length) {
     details.querySelector(".execution-steps").innerHTML =
       '<li class="execution-step-empty">本次运行没有返回可解释的阶段详情。</li>';
+  }
+  const activityList = details.querySelector(".execution-live-events");
+  activityList.hidden = activities.length === 0;
+  activityList.querySelector("ol").innerHTML = activities.map((event) => `
+    <li class="${escapeHtml(event.type === "tool_error" ? "error" : "")}">
+      <span class="execution-live-marker" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHtml(executionActivityTitle(event))}</strong>
+        <p>${escapeHtml(executionActivitySummary(event))}</p>
+      </div>
+    </li>
+  `).join("");
+  const latestActivity = activities.at(-1);
+  const announcer = details.querySelector(".execution-live-announcer");
+  const activitySequence = String(latestActivity?.sequence || "");
+  if (announcer.dataset.sequence !== activitySequence) {
+    announcer.dataset.sequence = activitySequence;
+    announcer.textContent = latestActivity
+      ? `${executionActivityTitle(latestActivity)}：${executionActivitySummary(latestActivity)}`
+      : "";
   }
   const toolList = details.querySelector(".execution-tools");
   toolList.hidden = tools.length === 0;
@@ -1627,12 +1697,17 @@ function auditEventTitle(event) {
     run_cancelled: "Run 已取消",
     run_failed: "Run 执行失败",
     input_required: "等待用户输入",
+    node_started: `开始阶段 · ${humanizeAgentNode(event.node)}`,
     node_completed: humanizeAgentNode(event.node),
+    reasoning_summary: "阶段思路摘要",
     approval_required: "请求工具审批",
     approval_decided: output.approved ? "审批已通过" : "审批已拒绝",
     tool_selected: `选择工具 · ${output.name || "未知工具"}`,
+    tool_started: `开始工具 · ${output.name || "未知工具"}`,
     tool_result: `工具完成 · ${output.name || "未知工具"}`,
     tool_error: `工具失败 · ${output.name || "未知工具"}`,
+    answer_delta: "回答增量",
+    answer_completed: "回答生成完成",
   };
   return labels[event.type] || event.summary || event.type || "审计事件";
 }
@@ -4854,6 +4929,8 @@ function renderAgentChatResponse(
   const actualStatus = body?.status || result.status || "running";
   const status = holdAnswer ? "running" : actualStatus;
   const trace = visibleTrace || body?.trace || result.trace || [];
+  const streamEvents = body?.stream_events || [];
+  const streamedAnswer = String(body?.streamed_answer || "");
   const elapsedMs = result.metrics?.elapsed_ms ?? Math.round(performance.now() - startedAt);
   renderExecutionProcess(contentNode, {
     trace,
@@ -4863,6 +4940,7 @@ function renderAgentChatResponse(
     fallbackSummary: actualStatus === "queued"
       ? "Agent 任务已进入执行队列。"
       : "Agent 正在运行 LangGraph 工作流。",
+    events: streamEvents,
   });
 
   if (!holdAnswer && actualStatus === "cancelled") {
@@ -4881,6 +4959,8 @@ function renderAgentChatResponse(
       code: body.error_code || "agent_run_failed",
       requestId: body.request_id || "",
     });
+  } else if (streamedAnswer) {
+    contentNode.innerHTML = renderMarkdown(streamedAnswer);
   } else {
     contentNode.innerHTML = "";
   }
@@ -4922,6 +5002,11 @@ function createAgentProgressPresenter(
       pending = pending.then(async () => {
         const result = body?.result || {};
         const fullTrace = body?.trace || result.trace || [];
+        if (body?.stream_events) {
+          visibleTrace.splice(0, visibleTrace.length, ...fullTrace);
+          renderAgentChatResponse(contentNode, body, startedAt, { visibleTrace });
+          return;
+        }
         const newSteps = fullTrace.slice(visibleTrace.length);
         const revealDelayMs = prefersReducedMotion()
           ? 0
@@ -5740,12 +5825,36 @@ function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
       summary: event.summary || "",
       output: event.output || {},
     }));
+  const lastCompletedSequence = Math.max(
+    0,
+    ...events
+      .filter((event) => event.type === "node_completed")
+      .map((event) => Number(event.sequence) || 0),
+  );
+  const activeNode = [...events].reverse().find(
+    (event) => event.type === "node_started"
+      && (Number(event.sequence) || 0) > lastCompletedSequence,
+  );
+  if (activeNode) {
+    trace.push({
+      step: trace.length + 1,
+      node: activeNode.node || "step",
+      summary: activeNode.summary || "Agent 正在执行当前阶段。",
+      output: activeNode.output || {},
+      live: true,
+    });
+  }
   const latestEvent = events.at(-1) || {};
   return {
     run_id: runId,
     status: latestEvent.status || state.latestRunStatus || "running",
     latest_node: latestEvent.node || trace.at(-1)?.node || null,
     trace,
+    stream_events: events,
+    streamed_answer: events
+      .filter((event) => event.type === "answer_delta")
+      .map((event) => String(event.output?.text || ""))
+      .join(""),
   };
 }
 
@@ -5805,17 +5914,21 @@ async function watchRunUntilTerminal(options = {}) {
       const chunks = buffer.split("\n\n");
       buffer = chunks.pop() || "";
       for (const chunk of chunks) {
-        const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
-        if (!dataLine) continue;
-        const event = JSON.parse(dataLine.slice(6));
-        cursor = Math.max(cursor, Number(event.sequence) || 0);
+        const parsed = parseSseBlock(chunk);
+        if (!parsed) continue;
+        const event = parsed.data;
+        const sequence = Number(event.sequence) || 0;
+        if (sequence && sequence <= cursor) continue;
+        cursor = Math.max(cursor, sequence);
         streamedEvents.push(event);
         const progressBody = renderStreamedAgentProgress(streamedEvents, runId);
-        if (event.type === "node_completed") {
-          publishProgress(progressBody);
-        }
+        publishProgress(progressBody);
         if (TERMINAL_RUN_STATUSES.has(progressBody.status)) {
-          latestBody = await refreshRun(runId, { conversationId });
+          latestBody = {
+            ...await refreshRun(runId, { conversationId }),
+            stream_events: [...streamedEvents],
+            streamed_answer: progressBody.streamed_answer,
+          };
           publishProgress(latestBody);
           stopped = true;
           break;
