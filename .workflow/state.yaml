@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "CLARIFY-MEMORY-WORKBENCH"
-next_action: "Monitor memory workbench feedback and adjust terminology only from observed usage."
+active_task: "POLISH-CHAT-MESSAGE-UI"
+next_action: "Verify the merged chat message UI on main, then record the verified merge commit."
 blockers: []
 last_verified_commit: "e61e149b702fa59219fdfeb05b227fab31365c29"
-updated_at: "2026-08-25T11:46:09+08:00"
+updated_at: "2026-08-25T11:48:27+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
