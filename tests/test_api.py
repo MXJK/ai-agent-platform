@@ -1019,7 +1019,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".chat-workbench.has-conversation", stylesheet_response.text)
         self.assertIn(".composer-scope-strip", stylesheet_response.text)
         self.assertIn(
-            "minmax(0, 0.85fr) minmax(0, 0.9fr) minmax(0, 1.35fr)",
+            "minmax(0, 0.82fr) minmax(0, 0.88fr) minmax(0, 1.4fr)",
             stylesheet_response.text,
         )
         self.assertIn(".response-error-card", stylesheet_response.text)
