@@ -57,7 +57,11 @@
   `655 passed, 91 subtests passed in 42.30s`。
 - 专项运行 `tests/test_config.py tests/test_llm_streaming.py tests/test_model_router.py
   tests/test_native_tool_calling.py`：`87 passed, 8 subtests passed in 3.12s`。
+- 合并到最新本地 `main` 后在根 checkout 再次运行全量测试：
+  `656 passed, 91 subtests passed in 43.82s`；新增的 1 项来自此前已合入的 Token
+  预算显示回归测试，组合树无失败。
 - 使用同一解释器运行 `-m compileall ai_agent_platform tests evals`：通过。
+- `node --check ai_agent_platform/static/app.js`：通过。
 - `git diff --check`：通过。
 - 差异审查：无数据库迁移、无生成物、无凭据值、无依赖变更；只包含配置、模型网关、
   路由 Trace、对应测试、中英文 README、环境示例和工作流记录。
@@ -86,4 +90,6 @@
 剩余边界：熔断状态仍为单进程；同步 Provider 调用期间的等待仍占用当前执行线程；
 合理的 `Retry-After` 最长可等待运维设置的上限。多副本共享冷却和异步调度不在本任务
 范围内。变更位于 `codex/litellm-gateway-reliability` worktree；用户已明确授权
-提交、推送和合并，但未授权部署、发布或数据库迁移。
+提交、推送和合并，但未授权部署、发布或数据库迁移。功能提交为 `0816fa5f`，任务分支
+验证记录提交为 `30aee4a5`，两者已推送；最新本地 `main` 的合并提交为 `7bbc7a2c`，并已
+通过上述组合验证。本工作流收尾提交将随 `main` 一并推送。
