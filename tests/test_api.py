@@ -800,7 +800,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260824-auditable-trace-v4',
+            '/static/styles.css?v=20260825-token-budget-percentage-v5',
             response.text,
         )
         self.assertIn(
@@ -1018,6 +1018,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("--z-overlay: 80", stylesheet_response.text)
         self.assertIn(".chat-workbench.has-conversation", stylesheet_response.text)
         self.assertIn(".composer-scope-strip", stylesheet_response.text)
+        self.assertIn(
+            "minmax(0, 0.85fr) minmax(0, 0.9fr) minmax(0, 1.35fr)",
+            stylesheet_response.text,
+        )
         self.assertIn(".response-error-card", stylesheet_response.text)
         self.assertIn(".inspector-backdrop:not([hidden])", stylesheet_response.text)
         self.assertIn("body.mobile-more-open", stylesheet_response.text)
