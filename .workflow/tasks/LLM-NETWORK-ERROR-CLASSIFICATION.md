@@ -42,7 +42,9 @@
   被配置校验拒绝，共 18 个预期失败。
 - LLM/原生工具/配置/路由聚焦套件：`93 passed, 24 subtests passed`。
 - `.env` / Compose 聚焦套件：`5 passed`。
-- 完整测试：`663 passed, 107 subtests passed`。
+- 功能分支完整测试：`663 passed, 107 subtests passed`。
+- 合并后的最新 `main`（包含并行 Token 百分比任务）完整测试：
+  `663 passed, 107 subtests passed`。
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - `INTERVIEW_NOTES/validate.py`：24 个 Markdown、43 项能力通过；唯一 warning 是既有
   `AGENT-SSE-LIVE-EVENTS.md` 相对事实基线的 evidence review，与本任务无关。
@@ -57,5 +59,5 @@ transport；只持久化安全文案，不回显底层异常原文。证书校�
 
 重试策略先匹配新错误码，再兼容回退到 `llm_timeout` / `llm_transport_error`，最后使用
 `default` / `LLM_MAX_RETRIES`。双语 README、dotenv 示例和本地面试手册 Part 02/
-`facts.json` 已同步。实现位于未提交的独立 worktree 分支
-`codex/llm-network-error-classification`；未部署、未迁移、未调用真实付费模型。
+`facts.json` 已同步。功能提交为 `3cb07d72`，合并提交为 `9cac81d2`；二者都已包含在
+最新 `main` 并通过完整自动化验证。未部署、未迁移、未调用真实付费模型。
