@@ -38,8 +38,9 @@
 
 ## Verification
 
+- 合并提交 `ba756d1961da2c7d14c6d3bc0c2620d1cde91b7a` 在本地 `main` 上完成以下最终验证。
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m pytest -q`：
-  663 passed，107 subtests passed（最终测试契约修改后重跑）。
+  663 passed，107 subtests passed（42.42s）。
 - `/Users/mxjk/programming/vs code project/ai-agent-platform/.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - `node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs`：7 passed；
   覆盖 Run 创建前乐观呈现、创建失败回调、delivery state 和既有模型配置键盘交互。
@@ -72,5 +73,6 @@
   回答改为无整块卡片边框的开放正文，身份、时间和操作进一步降噪；移动端、长 Markdown、
   执行轨迹、审批、错误和 ChangeSet 保持现有能力。
 - README 中英文与本地模块化面试手册已同步。没有 API/schema、迁移、依赖、Provider
-  调用、部署、提交或合并影响。实现位于 `codex/chat-message-ui` worktree，等待人工确认
-  后再提交/合并到 `main`。
+  调用或部署影响。功能提交 `78192f3cfb6f0b6a12e9edf06ff7fcb0cf8b4317` 已在人工确认后
+  通过合并提交 `ba756d1961da2c7d14c6d3bc0c2620d1cde91b7a` 合入本地 `main`；未推送、
+  部署或重启 Docker 服务。
