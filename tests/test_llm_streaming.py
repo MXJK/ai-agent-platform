@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from threading import Event
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -14,6 +16,7 @@ from ai_agent_platform.integrations.llm import (
     LLMClient,
     LLMProviderError,
     LLMStreamEvent,
+    _retry_after_seconds_from_headers,
     collect_llm_usage,
 )
 
@@ -311,6 +314,142 @@ class OpenAIStreamingTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "llm_provider_not_allowed")
+
+
+class RetryAfterTests(unittest.TestCase):
+    def test_parses_delta_seconds_and_http_date(self) -> None:
+        now = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
+        retry_at = now + timedelta(seconds=12)
+
+        self.assertEqual(
+            _retry_after_seconds_from_headers({"retry-after": "1.5"}),
+            1.5,
+        )
+        self.assertEqual(
+            _retry_after_seconds_from_headers(
+                {"Retry-After": format_datetime(retry_at, usegmt=True)},
+                now_seconds=now.timestamp(),
+            ),
+            12.0,
+        )
+        self.assertIsNone(
+            _retry_after_seconds_from_headers({"retry-after": "invalid"})
+        )
+        self.assertIsNone(
+            _retry_after_seconds_from_headers({"retry-after": "-1"})
+        )
+
+    def test_large_retry_number_stays_at_local_backoff_bound(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_retry_backoff_max_seconds=2.0,
+                llm_retry_jitter_seconds=0.0,
+            )
+        )
+
+        delay, source = client._retry_delay(
+            LLMProviderError(
+                "transport failed",
+                retryable=True,
+                code="llm_transport_error",
+            ),
+            retry_number=10_000,
+        )
+
+        self.assertEqual(delay, 2.0)
+        self.assertEqual(source, "exponential_backoff")
+
+    def test_http_server_error_carries_retry_after_to_gateway_policy(self) -> None:
+        class FakeResponse:
+            status_code = 503
+            headers = {"Retry-After": "2"}
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "temporarily unavailable"}}
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            @staticmethod
+            def post(url, *, headers, json):
+                del url, headers, json
+                return FakeResponse()
+
+        client = LLMClient(Settings())
+        with (
+            patch(
+                "ai_agent_platform.integrations.llm.httpx.Client",
+                return_value=FakeClient(),
+            ),
+            self.assertRaises(LLMProviderError) as raised,
+        ):
+            client._post_json(
+                "https://provider.example/v1/messages",
+                headers={},
+                payload={"messages": []},
+            )
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.code, "llm_server_error")
+        self.assertEqual(raised.exception.retry_after_seconds, 2.0)
+
+    def test_sse_rate_limit_carries_retry_after_to_gateway_policy(self) -> None:
+        class FakeResponse:
+            status_code = 429
+            headers = {"retry-after": "3"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            @staticmethod
+            def read():
+                return b""
+
+            @staticmethod
+            def json():
+                return {"error": {"message": "rate limited"}}
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            @staticmethod
+            def stream(method, url, *, headers, json):
+                del method, url, headers, json
+                return FakeResponse()
+
+        client = LLMClient(Settings())
+        with (
+            patch(
+                "ai_agent_platform.integrations.llm.httpx.Client",
+                return_value=FakeClient(),
+            ),
+            self.assertRaises(LLMProviderError) as raised,
+        ):
+            next(
+                iter(
+                    client._stream_http_sse(
+                        "https://provider.example/v1/messages",
+                        headers={},
+                        payload={"messages": []},
+                        parser=lambda *_args: (),
+                    )
+                )
+            )
+
+        self.assertEqual(raised.exception.code, "rate_limit")
+        self.assertEqual(raised.exception.retry_after_seconds, 3.0)
 
 
 class HeartbeatTests(unittest.TestCase):

@@ -425,7 +425,8 @@ session auto policy or manually preferred model
 → smart / quality / cost / latency ranking
 → provider health and circuit-breaker filter
 → selected model + route trace
-→ provider call; pre-delta failure may try the next cross-provider candidate
+→ error-code retry policy and bounded backoff
+→ provider call; an exhausted pre-delta failure may try the next cross-provider candidate
 ```
 
 The persistent registry is the runtime model table and updates the router without a
@@ -453,6 +454,33 @@ health snapshot, selection reason, failures, and final model. Events before the
 first non-empty text `delta` are buffered, so a 429, timeout, or transport failure
 can safely fall back across providers. After the first text delta, failures are
 returned with `partial_response=true` and never replayed on another model.
+
+The reliability policy follows LiteLLM Router's separation of error
+classification, retries, cooldown, and fallback while retaining this project's
+lightweight `LLMClient`; LiteLLM is not added as a runtime dependency. By
+default every retryable error keeps using `LLM_MAX_RETRIES`. A strict JSON map
+can override stable gateway error codes:
+
+```dotenv
+LLM_MAX_RETRIES=2
+LLM_RETRY_POLICY_JSON={"rate_limit":0,"llm_timeout":2,"llm_transport_error":2,"llm_server_error":1,"default":2}
+LLM_RETRY_BASE_DELAY_SECONDS=0.2
+LLM_RETRY_BACKOFF_MAX_SECONDS=2
+LLM_RETRY_AFTER_MAX_SECONDS=60
+LLM_RETRY_JITTER_SECONDS=0.1
+```
+
+Supported override keys include `rate_limit`, `llm_timeout`,
+`llm_transport_error`, `llm_server_error`, `token_count_failed`, the three
+tool-output correction errors, `llm_provider_error`, and `default`. Unknown
+keys, negative values, and non-integers fail during startup. Both normal HTTP and
+SSE 429/5xx responses accept delta-seconds or HTTP-date `Retry-After` values.
+A positive value at or below `LLM_RETRY_AFTER_MAX_SECONDS` takes precedence;
+otherwise the gateway uses bounded exponential backoff. Jitter is bounded as
+well, so an unsafe upstream header cannot hold a worker indefinitely. Route
+Trace exposes a `retries` array with candidate, error code, retry number,
+effective budget, delay, and `retry_after` / `exponential_backoff` source.
+No wait or replay is introduced after the first non-empty delta.
 
 The Compose stack uses `MODEL_REGISTRY_STORE=postgres` for restart-safe model
 catalog state and `MODEL_SECRET_BACKEND=encrypted_file` for Provider API keys entered

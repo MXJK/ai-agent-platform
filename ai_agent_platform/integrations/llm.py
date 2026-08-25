@@ -3,8 +3,12 @@ from __future__ import annotations
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import math
+import random
 import re
 import time
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Protocol, cast
@@ -12,7 +16,7 @@ from uuid import uuid4
 
 import httpx
 
-from ai_agent_platform.core import Settings
+from ai_agent_platform.core import Settings, parse_llm_retry_policy_json
 from ai_agent_platform.integrations.model_router import (
     ModelCapabilities,
     ModelConfig,
@@ -161,6 +165,7 @@ class LLMProviderError(Exception):
         usage: LLMUsage | None = None,
         tool_argument_chars: int | None = None,
         json_error_position: int | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.retryable = retryable
@@ -170,6 +175,7 @@ class LLMProviderError(Exception):
         self.usage = usage
         self.tool_argument_chars = tool_argument_chars
         self.json_error_position = json_error_position
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMProviderAdapter(Protocol):
@@ -205,6 +211,8 @@ class LLMClient:
         credential_resolver: Callable[[str], str | None] | None = None,
         model_access_resolver: Callable[[str, str], bool] | None = None,
         model_observer: Any = None,
+        sleep: Callable[[float], None] = time.sleep,
+        random_value: Callable[[], float] = random.random,
     ) -> None:
         self._settings = settings
         self._usage_ledger = usage_ledger
@@ -212,6 +220,11 @@ class LLMClient:
         self._credential_resolver = credential_resolver
         self._model_access_resolver = model_access_resolver
         self._model_observer = model_observer
+        self._sleep = sleep
+        self._random_value = random_value
+        self._retry_policy = parse_llm_retry_policy_json(
+            settings.llm_retry_policy_json
+        )
         catalog = list(
             load_model_catalog(
                 settings.llm_model_catalog_json,
@@ -271,6 +284,77 @@ class LLMClient:
 
     def set_usage_ledger(self, usage_ledger) -> None:
         self._usage_ledger = usage_ledger
+
+    def _retry_limit(self, error: LLMProviderError) -> int:
+        return self._retry_policy.get(
+            error.code,
+            self._retry_policy.get(
+                "default",
+                self._settings.llm_max_retries,
+            ),
+        )
+
+    def _retry_delay(
+        self,
+        error: LLMProviderError,
+        *,
+        retry_number: int,
+    ) -> tuple[float, Literal["exponential_backoff", "retry_after"]]:
+        retry_after = error.retry_after_seconds
+        use_retry_after = (
+            retry_after is not None
+            and math.isfinite(retry_after)
+            and 0 < retry_after <= self._settings.llm_retry_after_max_seconds
+        )
+        jitter_ratio = min(1.0, max(0.0, self._random_value()))
+        jitter = self._settings.llm_retry_jitter_seconds * jitter_ratio
+        if use_retry_after:
+            return (
+                min(
+                    retry_after + jitter,
+                    self._settings.llm_retry_after_max_seconds,
+                ),
+                "retry_after",
+            )
+        try:
+            exponential = math.ldexp(
+                self._settings.llm_retry_base_delay_seconds,
+                max(0, retry_number - 1),
+            )
+        except OverflowError:
+            exponential = self._settings.llm_retry_backoff_max_seconds
+        return (
+            min(
+                exponential + jitter,
+                self._settings.llm_retry_backoff_max_seconds,
+            ),
+            "exponential_backoff",
+        )
+
+    def _wait_before_retry(
+        self,
+        error: LLMProviderError,
+        *,
+        trace: ModelRouteTrace,
+        candidate: ModelConfig,
+        retry_number: int,
+        max_retries: int,
+    ) -> None:
+        delay, source = self._retry_delay(
+            error,
+            retry_number=retry_number,
+        )
+        self._model_router.record_retry(
+            trace,
+            candidate,
+            code=error.code,
+            retry_number=retry_number,
+            max_retries=max_retries,
+            delay_seconds=delay,
+            wait_source=source,
+            retry_after_seconds=error.retry_after_seconds,
+        )
+        self._sleep(delay)
 
     def set_model_registry(self, registry: Any) -> None:
         self._credential_resolver = registry.credential_for_provider
@@ -405,7 +489,8 @@ class LLMClient:
             candidate = request_plan.candidate or routed_candidate
             candidate_error: LLMProviderError | None = None
             attempt_messages = list(messages)
-            for attempt in range(self._settings.llm_max_retries + 1):
+            attempt = 0
+            while True:
                 attempt_started = time.perf_counter()
                 try:
                     if attempt > 0:
@@ -464,17 +549,23 @@ class LLMClient:
                     candidate_error = exc
                     if exc.code == "context_overflow":
                         break
-                    if (
-                        not exc.retryable
-                        or attempt >= self._settings.llm_max_retries
-                    ):
+                    retry_limit = self._retry_limit(exc)
+                    if not exc.retryable or attempt >= retry_limit:
                         break
+                    retry_number = attempt + 1
                     attempt_messages = _tool_retry_messages(
                         messages,
                         exc,
-                        attempt=attempt + 2,
+                        attempt=retry_number + 1,
                     )
-                    time.sleep(min(0.2 * (2**attempt), 2.0))
+                    self._wait_before_retry(
+                        exc,
+                        trace=trace,
+                        candidate=candidate,
+                        retry_number=retry_number,
+                        max_retries=retry_limit,
+                    )
+                    attempt += 1
             assert candidate_error is not None
             last_error = candidate_error
             self._model_router.record_failure(
@@ -545,7 +636,8 @@ class LLMClient:
         fallback_candidates = list(plan.fallback_candidates)
         while True:
             candidate_error: LLMProviderError | None = None
-            for attempt in range(self._settings.llm_max_retries + 1):
+            attempt = 0
+            while True:
                 pending_events: list[LLMStreamEvent] = []
                 stream_started = False
                 attempt_started = time.perf_counter()
@@ -673,12 +765,18 @@ class LLMClient:
                         accumulator = _LLM_USAGE_ACCUMULATOR.get()
                         if accumulator is not None:
                             accumulator.add(latest_usage)
-                    if (
-                        not exc.retryable
-                        or attempt >= self._settings.llm_max_retries
-                    ):
+                    retry_limit = self._retry_limit(exc)
+                    if not exc.retryable or attempt >= retry_limit:
                         break
-                    time.sleep(min(0.2 * (2**attempt), 2.0))
+                    retry_number = attempt + 1
+                    self._wait_before_retry(
+                        exc,
+                        trace=trace,
+                        candidate=candidate,
+                        retry_number=retry_number,
+                        max_retries=retry_limit,
+                    )
+                    attempt += 1
                     try:
                         plan = self._prepare_chat_candidate(
                             messages,
@@ -2230,6 +2328,9 @@ class LLMClient:
                             response.status_code,
                             detail=detail,
                         ),
+                        retry_after_seconds=_retry_after_seconds_from_headers(
+                            getattr(response, "headers", None)
+                        ),
                     )
                 body = response.json()
         except httpx.TimeoutException as exc:
@@ -2551,6 +2652,9 @@ class LLMClient:
                                 response.status_code,
                                 detail=detail,
                             ),
+                            retry_after_seconds=_retry_after_seconds_from_headers(
+                                getattr(response, "headers", None)
+                            ),
                         )
 
                     event_name = ""
@@ -2593,7 +2697,43 @@ def _http_error_code(status_code: int, *, detail: str = "") -> str:
         return "llm_quota_exhausted"
     if status_code == 429:
         return "rate_limit"
+    if status_code >= 500:
+        return "llm_server_error"
     return "llm_http_error"
+
+
+def _retry_after_seconds_from_headers(
+    headers: Mapping[str, str] | None,
+    *,
+    now_seconds: float | None = None,
+) -> float | None:
+    """Parse RFC Retry-After delta-seconds or HTTP-date without trusting it yet."""
+
+    if headers is None:
+        return None
+    raw = headers.get("retry-after")
+    if raw is None:
+        raw = headers.get("Retry-After")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        delay = float(raw.strip())
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        now = (
+            now_seconds
+            if now_seconds is not None
+            else datetime.now(timezone.utc).timestamp()
+        )
+        delay = retry_at.timestamp() - now
+    if not math.isfinite(delay) or delay <= 0:
+        return None
+    return delay
 
 
 def _is_context_overflow_detail(detail: str) -> bool:

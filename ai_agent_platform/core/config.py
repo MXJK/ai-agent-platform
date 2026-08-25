@@ -49,6 +49,21 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     },
 }
 
+LLM_RETRY_POLICY_KEYS = frozenset(
+    {
+        "default",
+        "invalid_tool_arguments",
+        "llm_provider_error",
+        "llm_server_error",
+        "llm_timeout",
+        "llm_transport_error",
+        "rate_limit",
+        "token_count_failed",
+        "tool_arguments_truncated",
+        "tool_output_truncated",
+    }
+)
+
 _RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
     profile: {
         name: value
@@ -115,6 +130,11 @@ class Settings:
     langgraph_checkpointer: str = "memory"
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 2
+    llm_retry_policy_json: str | None = None
+    llm_retry_base_delay_seconds: float = 0.2
+    llm_retry_backoff_max_seconds: float = 2.0
+    llm_retry_after_max_seconds: float = 60.0
+    llm_retry_jitter_seconds: float = 0.1
     llm_max_input_chars: int = 8000
     llm_max_context_messages: int = 12
     llm_max_context_messages_ceiling: int = 48
@@ -313,6 +333,8 @@ class Settings:
         )
         if self.llm_model_catalog_json:
             _validate_model_catalog_json(self.llm_model_catalog_json)
+        if self.llm_retry_policy_json:
+            parse_llm_retry_policy_json(self.llm_retry_policy_json)
         _require_choice(
             "token_budget_action",
             self.token_budget_action,
@@ -501,6 +523,18 @@ class Settings:
         _require_choice("eval_store", self.eval_store, {"memory", "postgres"})
         for name, value in (
             ("llm_timeout_seconds", self.llm_timeout_seconds),
+            (
+                "llm_retry_base_delay_seconds",
+                self.llm_retry_base_delay_seconds,
+            ),
+            (
+                "llm_retry_backoff_max_seconds",
+                self.llm_retry_backoff_max_seconds,
+            ),
+            (
+                "llm_retry_after_max_seconds",
+                self.llm_retry_after_max_seconds,
+            ),
             ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
@@ -667,6 +701,35 @@ class Settings:
             )
         if self.llm_max_retries < 0:
             raise ValueError("llm_max_retries must be greater than or equal to 0")
+        for name, value in (
+            (
+                "llm_retry_base_delay_seconds",
+                self.llm_retry_base_delay_seconds,
+            ),
+            (
+                "llm_retry_backoff_max_seconds",
+                self.llm_retry_backoff_max_seconds,
+            ),
+            (
+                "llm_retry_after_max_seconds",
+                self.llm_retry_after_max_seconds,
+            ),
+            ("llm_retry_jitter_seconds", self.llm_retry_jitter_seconds),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+        if self.llm_retry_jitter_seconds < 0:
+            raise ValueError(
+                "llm_retry_jitter_seconds must be greater than or equal to 0"
+            )
+        if (
+            self.llm_retry_backoff_max_seconds
+            < self.llm_retry_base_delay_seconds
+        ):
+            raise ValueError(
+                "llm_retry_backoff_max_seconds must not be smaller than "
+                "llm_retry_base_delay_seconds"
+            )
         if (
             self.llm_circuit_error_rate_min_requests
             > self.llm_circuit_error_window_size
@@ -956,6 +1019,29 @@ class Settings:
                 "LLM_TIMEOUT_SECONDS", cls.llm_timeout_seconds, dotenv
             ),
             llm_max_retries=_int_env("LLM_MAX_RETRIES", cls.llm_max_retries, dotenv),
+            llm_retry_policy_json=(
+                _env("LLM_RETRY_POLICY_JSON", None, dotenv) or None
+            ),
+            llm_retry_base_delay_seconds=_float_env(
+                "LLM_RETRY_BASE_DELAY_SECONDS",
+                cls.llm_retry_base_delay_seconds,
+                dotenv,
+            ),
+            llm_retry_backoff_max_seconds=_float_env(
+                "LLM_RETRY_BACKOFF_MAX_SECONDS",
+                cls.llm_retry_backoff_max_seconds,
+                dotenv,
+            ),
+            llm_retry_after_max_seconds=_float_env(
+                "LLM_RETRY_AFTER_MAX_SECONDS",
+                cls.llm_retry_after_max_seconds,
+                dotenv,
+            ),
+            llm_retry_jitter_seconds=_float_env(
+                "LLM_RETRY_JITTER_SECONDS",
+                cls.llm_retry_jitter_seconds,
+                dotenv,
+            ),
             llm_max_input_chars=_int_env(
                 "LLM_MAX_INPUT_CHARS", cls.llm_max_input_chars, dotenv
             ),
@@ -1490,6 +1576,38 @@ def _validate_model_catalog_json(value: str) -> None:
         )
     if not all(isinstance(item, dict) for item in parsed):
         raise ValueError("each model catalog entry must be an object")
+
+
+def parse_llm_retry_policy_json(value: str | None) -> dict[str, int]:
+    """Parse the strict error-code retry override map used by the model gateway."""
+
+    if value is None or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("llm_retry_policy_json must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("llm_retry_policy_json must be a JSON object")
+    unknown = set(parsed).difference(LLM_RETRY_POLICY_KEYS)
+    if unknown:
+        raise ValueError(
+            "llm_retry_policy_json contains unsupported keys: "
+            + ", ".join(sorted(str(item) for item in unknown))
+        )
+    invalid = [
+        key
+        for key, retries in parsed.items()
+        if not isinstance(retries, int)
+        or isinstance(retries, bool)
+        or retries < 0
+    ]
+    if invalid:
+        raise ValueError(
+            "llm_retry_policy_json values must be non-negative integers: "
+            + ", ".join(sorted(invalid))
+        )
+    return {str(key): int(retries) for key, retries in parsed.items()}
 
 
 def _env(name: str, default: str | None, dotenv: dict[str, str]) -> str | None:

@@ -419,7 +419,8 @@ Provider 暂时没有输出时，SSE 会发送心跳；思考 Token 会单独统
 → smart / quality / cost / latency 排序
 → Provider 健康度和熔断器筛选
 → 选中模型与路由 Trace
-→ 调用 Provider；首个 delta 前失败时可尝试下一个跨 Provider 候选
+→ 按错误代码执行重试策略和有界退避
+→ 调用 Provider；重试耗尽且首个 delta 前失败时可尝试下一个跨 Provider 候选
 ```
 
 持久化注册中心是运行时模型表，更新后无需重启即可影响路由器。PostgreSQL 产品运行时
@@ -443,6 +444,29 @@ Provider 健康状态只在当前进程中维护。系统根据有界的近期�
 首个非空文本 `delta` 之前的事件会被缓冲，所以 429、超时或传输失败可以安全地跨
 Provider 回退。已经发出首个文本 delta 后，失败会以 `partial_response=true` 返回，
 不会在其他模型上重放。
+
+网关的可靠性策略借鉴 LiteLLM Router 的“错误分类、重试、冷却和 fallback 分离”设计，
+但继续使用项目现有的轻量 `LLMClient`，不新增 LiteLLM 运行时依赖。默认情况下，
+所有 `retryable` 错误仍使用 `LLM_MAX_RETRIES`；可用严格 JSON 映射按稳定错误代码
+覆盖，例如：
+
+```dotenv
+LLM_MAX_RETRIES=2
+LLM_RETRY_POLICY_JSON={"rate_limit":0,"llm_timeout":2,"llm_transport_error":2,"llm_server_error":1,"default":2}
+LLM_RETRY_BASE_DELAY_SECONDS=0.2
+LLM_RETRY_BACKOFF_MAX_SECONDS=2
+LLM_RETRY_AFTER_MAX_SECONDS=60
+LLM_RETRY_JITTER_SECONDS=0.1
+```
+
+支持的覆盖键包括 `rate_limit`、`llm_timeout`、`llm_transport_error`、
+`llm_server_error`、`token_count_failed`、三种工具输出纠错错误、
+`llm_provider_error` 和 `default`；未知键、负数或非整数会在启动时失败。
+普通 HTTP 与 SSE 的 429/5xx 响应都会读取 delta-seconds 或 HTTP-date 形式的
+`Retry-After`。建议值为正且不超过 `LLM_RETRY_AFTER_MAX_SECONDS` 时优先采用；
+否则回落到有上限的指数退避。抖动同样受上限约束，避免错误 Header 长时间占用工作线程。
+Route Trace 的 `retries` 数组记录候选模型、错误代码、重试序号、有效预算、等待秒数和
+`retry_after` / `exponential_backoff` 来源。首个非空 delta 之后仍不会等待或重放。
 
 当前 Compose 使用 `MODEL_REGISTRY_STORE=postgres` 持久化模型目录，并以
 `MODEL_SECRET_BACKEND=encrypted_file` 将页面录入的 Provider API Key 加密写入私有

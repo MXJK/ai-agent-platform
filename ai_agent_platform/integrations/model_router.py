@@ -13,6 +13,7 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 RoutingPolicy = Literal["smart", "quality", "cost", "latency"]
 CircuitState = Literal["closed", "open", "half_open"]
 TaskComplexity = Literal["low", "medium", "high"]
+RetryWaitSource = Literal["exponential_backoff", "retry_after"]
 
 
 @dataclass(frozen=True)
@@ -349,6 +350,34 @@ class RouteFailureTrace:
 
 
 @dataclass
+class RouteRetryTrace:
+    provider: str
+    model: str
+    code: str
+    retry_number: int
+    max_retries: int
+    delay_seconds: float
+    wait_source: RetryWaitSource
+    retry_after_seconds: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "code": self.code,
+            "retry_number": self.retry_number,
+            "max_retries": self.max_retries,
+            "delay_seconds": round(self.delay_seconds, 3),
+            "wait_source": self.wait_source,
+            "retry_after_seconds": (
+                round(self.retry_after_seconds, 3)
+                if self.retry_after_seconds is not None
+                else None
+            ),
+        }
+
+
+@dataclass
 class ModelRouteTrace:
     policy: RoutingPolicy
     requirements: RoutingRequirements
@@ -356,6 +385,7 @@ class ModelRouteTrace:
     selection_reason: str | None
     requested_provider: str | None = None
     requested_model: str | None = None
+    retries: list[RouteRetryTrace] = field(default_factory=list)
     failures: list[RouteFailureTrace] = field(default_factory=list)
     final_provider: str | None = None
     final_model: str | None = None
@@ -386,6 +416,7 @@ class ModelRouteTrace:
                 "actual_provider": self.budget_actual_provider,
                 "actual_model": self.budget_actual_model,
             },
+            "retries": [retry.to_dict() for retry in self.retries],
             "failures": [failure.to_dict() for failure in self.failures],
             "final_model": (
                 {
@@ -569,6 +600,31 @@ class ModelRouter:
         if after_stream_start:
             trace.final_provider = candidate.provider
             trace.final_model = candidate.model
+
+    @staticmethod
+    def record_retry(
+        trace: ModelRouteTrace,
+        candidate: ModelConfig,
+        *,
+        code: str,
+        retry_number: int,
+        max_retries: int,
+        delay_seconds: float,
+        wait_source: RetryWaitSource,
+        retry_after_seconds: float | None,
+    ) -> None:
+        trace.retries.append(
+            RouteRetryTrace(
+                provider=candidate.provider,
+                model=candidate.model,
+                code=code,
+                retry_number=retry_number,
+                max_retries=max_retries,
+                delay_seconds=delay_seconds,
+                wait_source=wait_source,
+                retry_after_seconds=retry_after_seconds,
+            )
+        )
 
     def record_success(
         self,
