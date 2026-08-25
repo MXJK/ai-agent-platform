@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260825-chat-layout-token-budget-v1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260825-memory-workbench-v1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -123,7 +123,7 @@
           </button>
           <button class="nav-item mobile-overflow-nav" type="button" data-view="memory">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-history"></use></svg></span>
-            <span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span>
+            <span><strong>记忆工作台</strong><small>项目、个人与对话记忆</small></span>
           </button>
           <button class="nav-item mobile-overflow-nav" type="button" data-view="models">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-model"></use></svg></span>
@@ -158,7 +158,7 @@
         <button id="mobile-nav-backdrop" class="mobile-nav-backdrop" type="button" aria-label="关闭更多导航" hidden></button>
         <div id="mobile-more-menu" class="mobile-more-menu" role="dialog" aria-label="更多工作台" hidden>
           <div class="mobile-more-heading"><strong>更多工作台</strong><span>选择一个工作区</span></div>
-          <button type="button" data-view="memory"><svg class="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span><strong>记忆工作台</strong><small>项目、画像与对话搜索</small></span></button>
+          <button type="button" data-view="memory"><svg class="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span><strong>记忆工作台</strong><small>项目、个人与对话记忆</small></span></button>
           <button type="button" data-view="models"><svg class="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg><span><strong>模型管理</strong><small>Provider、模型与连接状态</small></span></button>
           <button type="button" data-view="tools"><svg class="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span><strong>工具</strong><small>Skill 与 MCP 管理</small></span></button>
           <button type="button" data-view="evals"><svg class="app-icon" aria-hidden="true"><use href="#icon-gauge"></use></svg><span><strong>评测</strong><small>轨迹约束、指标与预警</small></span></button>
@@ -539,17 +539,16 @@
           </header>
 
           <div class="knowledge-tabs memory-scope-tabs" role="tablist" aria-label="记忆范围">
-            <button id="memory-project-tab" class="knowledge-tab active" type="button" role="tab" aria-selected="true" aria-controls="memory-project-panel" data-memory-tab="project"><span class="memory-tab-code">L1</span><span>项目记忆</span><small>当前 Workspace</small></button>
-            <button id="memory-profile-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-profile-panel" data-memory-tab="profile"><span class="memory-tab-code">L3</span><span>我的画像</span><small>跨项目偏好</small></button>
-            <button id="memory-conversations-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-conversations-panel" data-memory-tab="conversations"><span class="memory-tab-code">L0</span><span>对话搜索</span><small>仅按需读取</small></button>
+            <button id="memory-project-tab" class="knowledge-tab active" type="button" role="tab" aria-selected="true" aria-controls="memory-project-panel" data-memory-tab="project"><span>项目记忆</span><small>当前工作区</small></button>
+            <button id="memory-profile-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-profile-panel" data-memory-tab="profile"><span>个人记忆</span><small>跨项目生效</small></button>
+            <button id="memory-conversations-tab" class="knowledge-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-conversations-panel" data-memory-tab="conversations"><span>对话记录</span><small>按需搜索</small></button>
           </div>
 
           <section id="memory-project-panel" role="tabpanel" aria-labelledby="memory-project-tab" data-memory-tab-panel="project">
-            <div class="memory-layer-rail" aria-label="本地分层记忆边界">
-              <div class="memory-layer-node l0"><span>L0</span><strong>对话原文</strong><small>保存消息；跨会话只按需搜索</small></div>
-              <div class="memory-layer-node l1"><span>L1</span><strong>项目原子记忆</strong><small><b id="memory-project-active-count">0</b> 已生效 · <b id="memory-project-candidate-count">0</b> 待审核</small></div>
-              <div class="memory-layer-node l2"><span>L2</span><strong>项目场景</strong><small>L1 变更后自动聚合，可追溯到原子记忆</small></div>
-              <div class="memory-layer-node l3"><span>L3</span><strong>个人画像</strong><small>由个人事实与 L2 场景自动重建</small></div>
+            <div class="memory-layer-rail" aria-label="可查看和治理的记忆范围">
+              <div class="memory-layer-node conversations"><strong>对话记录</strong><small>保存完整消息；跨会话时只在搜索后读取</small></div>
+              <div class="memory-layer-node project"><strong>项目记忆</strong><small><b id="memory-project-active-count">0</b> 已生效 · <b id="memory-project-candidate-count">0</b> 待审核</small></div>
+              <div class="memory-layer-node personal"><strong>个人记忆</strong><small>个人事实与已生效的项目记忆自动整理为个人摘要</small></div>
             </div>
 
             <div class="memory-split-layout">
@@ -598,26 +597,21 @@
 
           <section id="memory-profile-panel" role="tabpanel" aria-labelledby="memory-profile-tab" data-memory-tab-panel="profile" hidden>
             <article class="surface memory-command-bar">
-              <div class="memory-command-copy"><span class="step-kicker">L2 → L3</span><h2>项目场景与个人画像</h2><p>active L1 自动聚合为 L2 场景，再与个人事实一起生成可解释、可重建的 L3 画像。</p></div>
+              <div class="memory-command-copy"><h2>个人记忆如何生效</h2><p>已生效的项目记忆与个人事实会自动生成可解释、可重建的个人摘要。</p></div>
               <div class="memory-command-controls">
                 <label class="memory-mode-control" for="user-memory-mode-input">个人记忆模式<select id="user-memory-mode-input"><option value="off">off · 关闭</option><option value="review">review · 候选需确认</option><option value="auto">auto · 自动生效</option></select></label>
                 <button id="save-user-memory-mode-btn" class="button secondary" type="button">保存模式</button>
-                <button id="rebuild-profile-btn" class="button ghost" type="button">重建画像</button>
+                <button id="rebuild-profile-btn" class="button ghost" type="button">重新生成摘要</button>
                 <button id="refresh-user-memory-btn" class="button ghost" type="button">刷新</button>
               </div>
             </article>
 
             <article class="surface memory-profile-snapshot">
-              <div class="memory-pane-heading"><div><span class="step-kicker">L2 PROJECT SCENES</span><h2>自动聚合的项目场景</h2><p>每个 Workspace 一条场景，来源是当前 revision 的 active L1。</p></div><span id="user-memory-scene-count" class="memory-pane-count">0</span></div>
-              <div id="user-memory-scenes" class="memory-asset-list"><div class="memory-empty"><strong>暂无项目场景</strong><p>创建或自动提炼一条 L1 后会自动生成。</p></div></div>
-            </article>
-
-            <article class="surface memory-profile-snapshot">
               <div class="memory-pane-heading">
-                <div><span class="step-kicker">INJECTED SNAPSHOT</span><h2>模型实际看到的画像</h2><p>固定字符预算，只包含已确认事实，并以“不可信历史偏好”注入。</p></div>
+                <div><h2>模型会参考的个人摘要</h2><p>固定字符预算，只包含已确认事实，并以“不可信历史偏好”注入。</p></div>
                 <div class="memory-profile-stats"><span><b id="user-memory-active-count">0</b> 已生效</span><span><b id="user-memory-candidate-count">0</b> 待审核</span></div>
               </div>
-              <div id="user-profile-preview" class="memory-profile-preview"><div class="memory-empty"><strong>暂无已确认画像</strong><p>确认一条个人事实后，这里会显示模型可见的确定性快照。</p></div></div>
+              <div id="user-profile-preview" class="memory-profile-preview"><div class="memory-empty"><strong>暂无个人摘要</strong><p>确认一条个人事实后，这里会显示模型可参考的内容。</p></div></div>
             </article>
 
             <div class="memory-split-layout">
@@ -648,7 +642,7 @@
 
           <section id="memory-conversations-panel" role="tabpanel" aria-labelledby="memory-conversations-tab" data-memory-tab-panel="conversations" hidden>
             <article class="surface memory-command-bar memory-search-command">
-              <div class="memory-command-copy"><span class="step-kicker">L0 · ON-DEMAND SEARCH</span><h2>搜索自己的历史对话</h2><p>结果按当前用户隔离，不会自动跨会话注入，也不会获得更高指令优先级。</p></div>
+              <div class="memory-command-copy"><h2>搜索自己的历史对话</h2><p>结果按当前用户隔离，不会自动跨会话注入，也不会获得更高指令优先级。</p></div>
               <div class="memory-search-controls">
                 <label for="conversation-memory-query">关键词<input id="conversation-memory-query" maxlength="500" placeholder="例如：SQLite 迁移" /></label>
                 <label for="conversation-memory-session">会话 ID（可选）<input id="conversation-memory-session" maxlength="64" placeholder="sess_..." /></label>
@@ -1332,6 +1326,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260825-chat-layout-token-budget-v1" defer></script>
+    <script src="/static/app.js?v=20260825-memory-workbench-v1" defer></script>
   </body>
 </html>

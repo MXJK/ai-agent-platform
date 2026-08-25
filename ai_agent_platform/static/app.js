@@ -114,7 +114,6 @@ const state = {
   selectedMemoryId: "",
   projectMemoryRequestGeneration: 0,
   userMemories: [],
-  userMemoryScenes: [],
   selectedUserMemoryId: "",
   userMemoryRequestGeneration: 0,
   conversationMemoryHits: [],
@@ -7009,6 +7008,16 @@ const USER_MEMORY_KIND_LABELS = {
   personal_constraint: "个人约束",
 };
 
+const USER_PROFILE_HEADING_LABELS = {
+  "Standing constraints": "长期约束",
+  "Communication preferences": "沟通偏好",
+  "Workflow preferences": "工作流偏好",
+  "Tooling preferences": "工具偏好",
+  "Standing goals": "长期目标",
+  "Profile facts": "个人事实",
+  "Project scenes": "项目记忆摘要",
+};
+
 function memoryStatusMeta(status) {
   return MEMORY_STATUS_META[status] || {
     label: status || "未知状态",
@@ -7237,7 +7246,7 @@ async function refreshProjectMemory() {
   }
   try {
     await listProjectMemories();
-    setMemoryRuntimeStatus("L1 自动提炼已连接");
+    setMemoryRuntimeStatus("项目记忆已连接");
   } catch (error) {
     $("memory-list").setAttribute("aria-busy", "false");
     $("memory-list").innerHTML = '<div class="memory-empty error"><strong>项目记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
@@ -7458,23 +7467,13 @@ function syncUserMemoryActions() {
 }
 
 function renderUserProfile(profile) {
+  const displayContent = String(profile.content || "").replace(
+    /^## ([^\n]+)$/gm,
+    (heading, label) => `## ${USER_PROFILE_HEADING_LABELS[label] || label}`,
+  );
   $("user-profile-preview").innerHTML = profile.content
-    ? `<div class="memory-profile-meta"><span>画像 v${escapeHtml(profile.version)}</span><span>${escapeHtml(profile.source_memory_ids.length)} 个 L1/L2 来源</span><span>${escapeHtml(formatDate(profile.updated_at))}</span></div><div class="markdown-body">${renderMarkdown(profile.content)}</div>`
-    : '<div class="memory-empty"><strong>暂无已确认画像</strong><p>确认一条个人事实后，这里会显示模型可见的确定性快照。</p></div>';
-}
-
-function renderUserMemoryScenes(scenes) {
-  state.userMemoryScenes = scenes;
-  $("user-memory-scene-count").textContent = scenes.length;
-  $("user-memory-scenes").innerHTML = scenes.length
-    ? scenes.map((scene) => `
-      <article class="memory-asset-row">
-        <span class="memory-asset-row-head"><strong>${escapeHtml(scene.title)}</strong><span class="memory-status-pill active">L2 · v${escapeHtml(scene.version)}</span></span>
-        <span class="memory-asset-row-body">${escapeHtml(truncate(scene.content, 220))}</span>
-        <span class="memory-asset-row-meta"><span>${escapeHtml(scene.workspace_id)}</span><span>${escapeHtml(scene.source_memory_ids.length)} 条 L1 来源</span><span>${escapeHtml(formatDate(scene.updated_at))}</span></span>
-      </article>
-    `).join("")
-    : '<div class="memory-empty"><strong>暂无项目场景</strong><p>创建或自动提炼一条 L1 后会自动生成。</p></div>';
+    ? `<div class="memory-profile-meta"><span>摘要 v${escapeHtml(profile.version)}</span><span>${escapeHtml(profile.source_memory_ids.length)} 条记忆来源</span><span>${escapeHtml(formatDate(profile.updated_at))}</span></div><div class="markdown-body">${renderMarkdown(displayContent)}</div>`
+    : '<div class="memory-empty"><strong>暂无个人摘要</strong><p>确认一条个人事实后，这里会显示模型可参考的内容。</p></div>';
 }
 
 async function listUserMemories() {
@@ -7499,16 +7498,14 @@ async function listUserMemories() {
 
 async function refreshUserMemory() {
   try {
-    const [settings, profile, scenes] = await Promise.all([
+    const [settings, profile] = await Promise.all([
       fetchJson("/users/me/memory-settings"),
       fetchJson("/users/me/profile"),
-      fetchJson("/users/me/memory-scenes"),
       listUserMemories(),
     ]);
     $("user-memory-mode-input").value = settings.mode;
-    setMemoryRuntimeStatus(`L3 已连接 · ${settings.mode}`);
+    setMemoryRuntimeStatus(`个人记忆已连接 · ${settings.mode}`);
     renderUserProfile(profile);
-    renderUserMemoryScenes(scenes.scenes || []);
   } catch (error) {
     $("user-memory-list").setAttribute("aria-busy", "false");
     $("user-memory-list").innerHTML = '<div class="memory-empty error"><strong>个人记忆加载失败</strong><p>检查本地 SQLite 配置后重新刷新。</p></div>';
@@ -7523,7 +7520,7 @@ async function saveUserMemoryMode() {
       method: "PATCH",
       body: JSON.stringify({ mode: $("user-memory-mode-input").value }),
     });
-    setMemoryRuntimeStatus(`L3 已连接 · ${settings.mode}`);
+    setMemoryRuntimeStatus(`个人记忆已连接 · ${settings.mode}`);
     await refreshUserMemory();
     showToast("个人记忆模式已更新");
   } catch (error) {
@@ -7625,7 +7622,7 @@ function renderConversationMemoryDetail(hit) {
   detail.innerHTML = `
     <div class="memory-detail-header conversation-detail-header">
       <div><span class="step-kicker">UNTRUSTED HISTORY</span><h2>${escapeHtml(roleLabel)}消息</h2><p>${escapeHtml(formatDate(hit.created_at))}</p></div>
-      <span class="memory-status-pill neutral">L0 原文</span>
+      <span class="memory-status-pill neutral">原始消息</span>
     </div>
     <dl class="memory-conversation-meta">
       <div><dt>会话</dt><dd>${escapeHtml(hit.session_id)}</dd></div>
@@ -7696,12 +7693,12 @@ async function searchConversationMemory() {
     $("conversation-memory-results").setAttribute("aria-busy", "false");
     state.selectedConversationMemoryHit = -1;
     renderConversationMemoryHits(body.hits || []);
-    setMemoryRuntimeStatus(`L0 ${query ? "搜索完成" : "最近消息"} · ${(body.hits || []).length} 条`);
+    setMemoryRuntimeStatus(`${query ? "对话搜索完成" : "最近消息"} · ${(body.hits || []).length} 条`);
   } catch (error) {
     if (generation !== state.conversationMemoryRequestGeneration) return;
     $("conversation-memory-results").setAttribute("aria-busy", "false");
     $("conversation-memory-results").innerHTML = '<div class="memory-empty error"><strong>对话搜索失败</strong><p>检查关键词和本地 SQLite 状态后重试。</p></div>';
-    setMemoryRuntimeStatus("L0 搜索失败", "error");
+    setMemoryRuntimeStatus("对话搜索失败", "error");
     showToast(humanizeError(error), "error");
   }
 }

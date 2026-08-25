@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260825-chat-layout-token-budget-v1',
+            '/static/styles.css?v=20260825-memory-workbench-v1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260825-chat-layout-token-budget-v1',
+            '/static/app.js?v=20260825-memory-workbench-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -815,6 +815,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn('data-memory-tab="profile"', response.text)
         self.assertIn('data-memory-tab="conversations"', response.text)
         self.assertIn('class="memory-layer-rail"', response.text)
+        self.assertIn("项目记忆", response.text)
+        self.assertIn("个人记忆", response.text)
+        self.assertIn("对话记录", response.text)
+        self.assertNotIn('class="memory-tab-code"', response.text)
         self.assertIn('id="new-project-memory-btn"', response.text)
         self.assertNotIn('id="memory-mode-input"', response.text)
         self.assertNotIn('id="save-memory-mode-btn"', response.text)
@@ -823,7 +827,8 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("CURRENT WORKSPACE", response.text)
         self.assertIn('id="new-user-memory-btn"', response.text)
         self.assertIn('id="conversation-memory-detail"', response.text)
-        self.assertIn("L2 PROJECT SCENES", response.text)
+        self.assertNotIn('id="user-memory-scenes"', response.text)
+        self.assertNotIn('fetchJson("/users/me/memory-scenes")', script_response.text)
         self.assertIn('id="slash-command-options"', response.text)
         self.assertIn('id="jump-to-latest-btn"', response.text)
         self.assertIn('aria-autocomplete="list"', response.text)
