@@ -1,5 +1,5 @@
 project_id: "ai-agent-platform"
-status: "in_progress"
+status: "active"
 active_task: "TOKEN-BUDGET-PERCENTAGE"
 next_action: "Implement and verify the composer cumulative Token percentage display."
 blockers: []
