@@ -1,4 +1,5 @@
 from .models import (
+    ModelProbeStats,
     REAL_PROVIDERS,
     SUPPORTED_PROVIDERS,
     ModelRuntimeStats,
@@ -44,6 +45,7 @@ __all__ = [
     "InMemorySecretStore",
     "KeyringSecretStore",
     "ModelConnectionTestError",
+    "ModelProbeStats",
     "ModelDiscovery",
     "ModelDiscoveryError",
     "ModelRegistrationProfile",

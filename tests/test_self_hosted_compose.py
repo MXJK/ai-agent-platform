@@ -35,6 +35,9 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["LANGGRAPH_CHECKPOINTER"] == "postgres"
     assert environment["MODEL_REGISTRY_STORE"] == "postgres"
     assert environment["MODEL_SECRET_BACKEND"] == "encrypted_file"
+    assert environment["MODEL_PROBE_INTERVAL_SECONDS"] == (
+        "${MODEL_PROBE_INTERVAL_SECONDS:-0}"
+    )
     assert environment["RAG_VECTOR_STORE"] == "qdrant"
     assert environment["PROJECT_MEMORY_STORE"] == "postgres"
     assert environment["PROJECT_MEMORY_VECTOR_STORE"] == "qdrant"
@@ -93,3 +96,4 @@ def test_provider_api_keys_are_not_dotenv_configuration() -> None:
         "GEMINI_API_KEY",
     ):
         assert name not in example
+    assert "MODEL_PROBE_INTERVAL_SECONDS=0" in example

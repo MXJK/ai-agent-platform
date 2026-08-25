@@ -3593,6 +3593,7 @@ textarea:focus {
 }
 
 .registered-model-card .button-row {
+  flex-wrap: wrap;
   justify-content: flex-end;
   margin-top: 10px;
 }

@@ -27,6 +27,7 @@ from ai_agent_platform.model_registry import (
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
     ModelDiscoveryError,
+    ModelProbeStats,
     ModelRegistryService,
     ModelSelection,
     PostgresModelRegistryRepository,
@@ -614,10 +615,15 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertIn('id="discovered-model-select"', frontend)
         self.assertIn('id="manual-model-id-input"', frontend)
         self.assertIn('id="registered-model-output-limit-input"', frontend)
+        self.assertIn('id="model-probe-policy-note"', frontend)
         self.assertNotIn('id="registered-model-quality-input"', frontend)
         self.assertNotIn('id="registered-model-latency-input"', frontend)
         self.assertIn("available-models", frontend_js)
         self.assertIn("save-output-limit", frontend_js)
+        self.assertIn("test-latency", frontend_js)
+        self.assertIn("/test`,", frontend_js)
+        self.assertIn("60_000", frontend_js)
+        self.assertIn("visibilitychange", frontend_js)
         self.assertIn("if (milliseconds <= 1000)", frontend_js)
         self.assertIn("if (milliseconds <= 3000)", frontend_js)
         self.assertIn("manual-model-mode", frontend_js)
@@ -771,6 +777,51 @@ class ModelRegistryApiTests(unittest.TestCase):
 
 
 class PostgresModelRegistryTests(unittest.TestCase):
+    def test_probe_stats_round_trip_through_postgres_mapping(self) -> None:
+        now = datetime.now(timezone.utc)
+        stats = ModelProbeStats(
+            model_id="mdl_openai",
+            sample_count=3,
+            success_count=2,
+            failure_count=1,
+            latency_samples_ms=(310, 420),
+            last_latency_ms=420,
+            last_success_at=now,
+            last_failure_at=now,
+            last_error=None,
+            updated_at=now,
+        )
+        row = (
+            stats.model_id,
+            stats.sample_count,
+            stats.success_count,
+            stats.failure_count,
+            list(stats.latency_samples_ms),
+            stats.last_latency_ms,
+            stats.last_success_at,
+            stats.last_failure_at,
+            stats.last_error,
+            stats.updated_at,
+        )
+        connection = _FakeConnection([row])
+        with patch(
+            "ai_agent_platform.model_registry.repository._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.model_registry.repository._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresModelRegistryRepository(
+                database_url="postgresql://test"
+            )
+            repository._connect = lambda: connection
+            restored = repository.upsert_probe_stats(stats)
+
+        self.assertEqual(restored, stats)
+        insert_sql, insert_params = connection.calls[0]
+        self.assertIn("model_probe_stats", insert_sql)
+        self.assertEqual(insert_params[4], [310, 420])
+
     def test_model_output_limit_round_trips_through_postgres_mapping(self) -> None:
         now = datetime.now(timezone.utc)
         model = RegisteredModel(

@@ -77,3 +77,25 @@ class ModelRuntimeStats:
         if self.sample_count <= 0:
             return None
         return self.success_count / self.sample_count
+
+
+@dataclass(frozen=True)
+class ModelProbeStats:
+    """Synthetic fixed-prompt measurements kept separate from live traffic."""
+
+    model_id: str
+    sample_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    latency_samples_ms: tuple[int, ...] = field(default_factory=tuple)
+    last_latency_ms: int | None = None
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error: str | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def success_rate(self) -> float | None:
+        if self.sample_count <= 0:
+            return None
+        return self.success_count / self.sample_count

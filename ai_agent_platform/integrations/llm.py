@@ -146,6 +146,10 @@ _LLM_USAGE_ACCUMULATOR: ContextVar[LLMUsageAccumulator | None] = ContextVar(
     "llm_usage_accumulator",
     default=None,
 )
+_SUPPRESS_MODEL_TELEMETRY: ContextVar[bool] = ContextVar(
+    "suppress_model_telemetry",
+    default=False,
+)
 _PROVIDER_ERROR_DETAIL_MAX_CHARS = 400
 _PROVIDER_ERROR_SECRET = re.compile(
     r"(?i)\b(api[_-]?key|authorization|token|password|secret)\b"
@@ -395,13 +399,17 @@ class LLMClient:
 
     def test_connection(self, provider: str, model: str) -> dict[str, Any]:
         started_at = time.perf_counter()
-        events = list(
-            self.stream_chat(
-                [{"role": "user", "content": "Reply with OK only."}],
-                provider=provider,
-                model=model,
+        token = _SUPPRESS_MODEL_TELEMETRY.set(True)
+        try:
+            events = list(
+                self.stream_chat(
+                    [{"role": "user", "content": "Reply with OK only."}],
+                    provider=provider,
+                    model=model,
+                )
             )
-        )
+        finally:
+            _SUPPRESS_MODEL_TELEMETRY.reset(token)
         selected = next((event for event in events if event.type == "route"), None)
         return {
             "provider": selected.provider if selected else provider,
@@ -2345,7 +2353,7 @@ class LLMClient:
         started_at: float,
         ttft_ms: int | None,
     ) -> None:
-        if self._model_observer is None:
+        if self._model_observer is None or _SUPPRESS_MODEL_TELEMETRY.get():
             return
         with suppress(Exception):
             self._model_observer.record_success(
@@ -2362,7 +2370,7 @@ class LLMClient:
         started_at: float,
         error: str,
     ) -> None:
-        if self._model_observer is None:
+        if self._model_observer is None or _SUPPRESS_MODEL_TELEMETRY.get():
             return
         with suppress(Exception):
             self._model_observer.record_failure(

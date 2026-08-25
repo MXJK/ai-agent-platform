@@ -42,6 +42,28 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_workspace_default_mode, "patch_only")
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
         self.assertEqual(settings.native_directory_picker_mode, "loopback")
+        self.assertEqual(settings.model_probe_interval_seconds, 0)
+
+    def test_model_probe_interval_is_opt_in_and_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "MODEL_PROBE_INTERVAL_SECONDS": "900",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.model_probe_interval_seconds, 900)
+        self.assertEqual(Settings(model_probe_interval_seconds=60).model_probe_interval_seconds, 60)
+        with self.assertRaisesRegex(ValueError, "0 or at least 60"):
+            Settings(model_probe_interval_seconds=30)
+        with self.assertRaisesRegex(ValueError, "greater than or equal to 0"):
+            Settings(model_probe_interval_seconds=-1)
 
     def test_reads_unified_context_share_ratios_from_environment(self) -> None:
         with patch.dict(

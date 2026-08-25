@@ -151,6 +151,23 @@ def create_model_registry_router(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RegisteredModelResponse.model_validate(value)
 
+    @router.post(
+        "/model-registry/models/{model_id}/test",
+        response_model=ModelConnectionTestResponse,
+    )
+    def test_model_connection(
+        model_id: str,
+        request: Request,
+    ) -> ModelConnectionTestResponse:
+        _require_local_admin(request, settings)
+        try:
+            value = model_registry.test_model_connection(model_id)
+        except ModelRegistryNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="model not found") from exc
+        except ModelConnectionTestError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return ModelConnectionTestResponse.model_validate(value)
+
     @router.delete(
         "/model-registry/models/{model_id}",
         status_code=status.HTTP_204_NO_CONTENT,

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
+import logging
 import math
-from threading import Lock
-from typing import Any, Callable, Iterable
+from threading import Event, Lock, Thread, current_thread
+from time import perf_counter
+from typing import Any, Callable, Iterable, NoReturn
 
 from ai_agent_platform.integrations.model_router import (
     ModelCapabilities,
@@ -18,6 +20,7 @@ from ai_agent_platform.integrations.model_router import (
 from .models import (
     REAL_PROVIDERS,
     SUPPORTED_PROVIDERS,
+    ModelProbeStats,
     ModelRuntimeStats,
     ProviderConnection,
     RegisteredModel,
@@ -47,10 +50,14 @@ class ModelConnectionTestError(RuntimeError):
     pass
 
 
+logger = logging.getLogger(__name__)
+
+
 class ModelRegistryService:
     """Keeps persistent registration and the in-process router in sync."""
 
     _MAX_LATENCY_SAMPLES = 100
+    _MAX_PROBE_SAMPLES = 20
 
     def __init__(
         self,
@@ -68,6 +75,11 @@ class ModelRegistryService:
         self._model_discovery = model_discovery or ProviderModelDiscovery()
         self._discovered_models: dict[str, dict[str, DiscoveredModel]] = {}
         self._stats_lock = Lock()
+        self._probe_lock = Lock()
+        self._active_probes: set[str] = set()
+        self._probe_stop = Event()
+        self._probe_thread: Thread | None = None
+        self._probe_interval_seconds = 0.0
         self._bootstrap(tuple(initial_models))
 
     def bind_runtime(
@@ -101,6 +113,14 @@ class ModelRegistryService:
             "connections": self.list_connections(),
             "models": self.list_models(),
             "routing_policies": ["smart", "quality", "cost", "latency"],
+            "probe_policy": {
+                "periodic_enabled": self.periodic_probes_running,
+                "interval_seconds": (
+                    self._probe_interval_seconds
+                    if self._probe_interval_seconds > 0
+                    else None
+                ),
+            },
         }
 
     def upsert_connection(
@@ -512,6 +532,60 @@ class ModelRegistryService:
                 )
             )
 
+    def test_model_connection(self, model_id: str) -> dict[str, Any]:
+        model = self._repository.get_model(model_id)
+        if model is None:
+            raise ModelRegistryNotFoundError(model_id)
+        self._begin_probe(model_id)
+        started_at = perf_counter()
+        try:
+            connection = self._repository.get_connection(model.provider)
+            if not model.enabled:
+                self._fail_probe(model, started_at, "model is disabled")
+            if connection is None:
+                self._fail_probe(model, started_at, "provider connection not found")
+            if not connection.enabled:
+                self._fail_probe(model, started_at, "provider connection is disabled")
+            if model.provider in REAL_PROVIDERS:
+                try:
+                    credential = self.credential_for_provider(model.provider)
+                except SecretStoreError as exc:
+                    self._fail_probe(model, started_at, str(exc))
+                if not credential:
+                    self._fail_probe(model, started_at, "API key is not configured")
+            if self._test_connection is None:
+                self._fail_probe(model, started_at, "model runtime is not attached")
+            try:
+                result = self._test_connection(model.provider, model.model)
+            except Exception as exc:
+                self._fail_probe(model, started_at, str(exc))
+            if (
+                result.get("provider", model.provider) != model.provider
+                or result.get("model", model.model) != model.model
+            ):
+                self._fail_probe(
+                    model,
+                    started_at,
+                    "model runtime returned a different model during latency test",
+                )
+            elapsed_ms = max(
+                0,
+                int(
+                    result.get("elapsed_ms")
+                    or ((perf_counter() - started_at) * 1000)
+                ),
+            )
+            checked_at = self._record_probe_success(model.id, elapsed_ms)
+            return {
+                "provider": model.provider,
+                "model": model.model,
+                "status": "available",
+                "elapsed_ms": elapsed_ms,
+                "checked_at": checked_at,
+            }
+        finally:
+            self._end_probe(model_id)
+
     def test_provider_connection(self, provider: str) -> dict[str, Any]:
         connection = self._repository.get_connection(provider)
         if connection is None:
@@ -530,12 +604,143 @@ class ModelRegistryService:
         )
         if model is None:
             raise ModelConnectionTestError("register an enabled model before testing")
-        if self._test_connection is None:
-            raise ModelConnectionTestError("model runtime is not attached")
-        try:
-            return self._test_connection(provider, model.model)
-        except Exception as exc:
-            raise ModelConnectionTestError(str(exc)) from exc
+        return self.test_model_connection(model.id)
+
+    def run_due_model_probes(self, *, stale_after_seconds: float) -> list[dict[str, Any]]:
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        cutoff = _now() - timedelta(seconds=stale_after_seconds)
+        connections = {
+            item.provider: item for item in self._repository.list_connections()
+        }
+        outcomes: list[dict[str, Any]] = []
+        for model in self._repository.list_models():
+            connection = connections.get(model.provider)
+            if not model.enabled or connection is None or not connection.enabled:
+                continue
+            configured, _ = self._credential_status(connection)
+            if not configured or self._has_recent_runtime_traffic(model.id, cutoff):
+                continue
+            try:
+                result = self.test_model_connection(model.id)
+                outcomes.append({"model_id": model.id, "ok": True, **result})
+            except ModelConnectionTestError as exc:
+                outcomes.append(
+                    {"model_id": model.id, "ok": False, "error": str(exc)}
+                )
+        return outcomes
+
+    def start_periodic_probes(self, *, interval_seconds: float) -> None:
+        if interval_seconds < 60:
+            raise ValueError("model probe interval must be at least 60 seconds")
+        with self._probe_lock:
+            if self._probe_thread is not None and self._probe_thread.is_alive():
+                return
+            self._probe_stop.clear()
+            self._probe_interval_seconds = float(interval_seconds)
+            self._probe_thread = Thread(
+                target=self._periodic_probe_loop,
+                args=(float(interval_seconds),),
+                name="model-latency-probes",
+                daemon=True,
+            )
+            self._probe_thread.start()
+
+    @property
+    def periodic_probes_running(self) -> bool:
+        with self._probe_lock:
+            return bool(self._probe_thread and self._probe_thread.is_alive())
+
+    def close(self) -> None:
+        self._probe_stop.set()
+        with self._probe_lock:
+            thread = self._probe_thread
+        if thread is not None and thread is not current_thread():
+            thread.join(timeout=1.0)
+
+    def _periodic_probe_loop(self, interval_seconds: float) -> None:
+        while not self._probe_stop.wait(interval_seconds):
+            try:
+                self.run_due_model_probes(stale_after_seconds=interval_seconds)
+            except Exception:  # pragma: no cover - defensive background boundary
+                logger.exception("periodic model latency probe failed")
+
+    def _has_recent_runtime_traffic(self, model_id: str, cutoff: datetime) -> bool:
+        stats = self._repository.get_runtime_stats(model_id)
+        if stats is None:
+            return False
+        latest = _latest_datetime(stats.last_success_at, stats.last_failure_at)
+        return bool(latest and latest >= cutoff)
+
+    def _begin_probe(self, model_id: str) -> None:
+        with self._probe_lock:
+            if model_id in self._active_probes:
+                raise ModelConnectionTestError(
+                    "a latency test is already running for this model"
+                )
+            self._active_probes.add(model_id)
+
+    def _end_probe(self, model_id: str) -> None:
+        with self._probe_lock:
+            self._active_probes.discard(model_id)
+
+    def _fail_probe(
+        self,
+        model: RegisteredModel,
+        started_at: float,
+        error: str,
+    ) -> NoReturn:
+        error = error.strip() or "model latency test failed"
+        elapsed_ms = max(0, int((perf_counter() - started_at) * 1000))
+        self._record_probe_failure(model.id, elapsed_ms, error)
+        raise ModelConnectionTestError(error)
+
+    def _record_probe_success(self, model_id: str, latency_ms: int) -> datetime:
+        with self._stats_lock:
+            current = self._repository.get_probe_stats(model_id) or ModelProbeStats(
+                model_id=model_id
+            )
+            latencies = [*current.latency_samples_ms, max(0, int(latency_ms))]
+            now = _now()
+            self._repository.upsert_probe_stats(
+                replace(
+                    current,
+                    sample_count=current.sample_count + 1,
+                    success_count=current.success_count + 1,
+                    latency_samples_ms=tuple(
+                        latencies[-self._MAX_PROBE_SAMPLES :]
+                    ),
+                    last_latency_ms=max(0, int(latency_ms)),
+                    last_success_at=now,
+                    last_error=None,
+                    updated_at=now,
+                )
+            )
+        return now
+
+    def _record_probe_failure(
+        self,
+        model_id: str,
+        latency_ms: int,
+        error: str,
+    ) -> datetime:
+        with self._stats_lock:
+            current = self._repository.get_probe_stats(model_id) or ModelProbeStats(
+                model_id=model_id
+            )
+            now = _now()
+            self._repository.upsert_probe_stats(
+                replace(
+                    current,
+                    sample_count=current.sample_count + 1,
+                    failure_count=current.failure_count + 1,
+                    last_latency_ms=max(0, int(latency_ms)),
+                    last_failure_at=now,
+                    last_error=error[:500],
+                    updated_at=now,
+                )
+            )
+        return now
 
     def _bootstrap(self, initial_models: tuple[ModelConfig, ...]) -> None:
         now = _now()
@@ -604,17 +809,27 @@ class ModelRegistryService:
             self._repository.get_runtime_stats(model.id)
             for model in models
         ]
+        probe_stats = [
+            self._repository.get_probe_stats(model.id)
+            for model in models
+        ]
         samples = sum(item.sample_count for item in stats if item is not None)
         failures = sum(item.failure_count for item in stats if item is not None)
+        probe_samples = sum(
+            item.sample_count for item in probe_stats if item is not None
+        )
+        probe_failures = sum(
+            item.failure_count for item in probe_stats if item is not None
+        )
         if not connection.enabled:
             status = "disabled"
         elif not credential_configured:
             status = "unavailable"
         elif health is not None and not health.available:
             status = "unavailable"
-        elif samples == 0:
+        elif samples + probe_samples == 0:
             status = "unknown"
-        elif failures / samples >= 0.5:
+        elif (failures + probe_failures) / (samples + probe_samples) >= 0.5:
             status = "degraded"
         else:
             status = "available"
@@ -633,6 +848,9 @@ class ModelRegistryService:
 
     def _model_view(self, model: RegisteredModel) -> dict[str, Any]:
         stats = self._repository.get_runtime_stats(model.id) or ModelRuntimeStats(
+            model_id=model.id
+        )
+        probe = self._repository.get_probe_stats(model.id) or ModelProbeStats(
             model_id=model.id
         )
         health = (
@@ -657,7 +875,12 @@ class ModelRegistryService:
         elif health is not None and not health.available:
             status = "unavailable"
         elif stats.sample_count == 0:
-            status = "unknown"
+            if probe.sample_count == 0:
+                status = "unknown"
+            elif _latest_probe_failed(probe):
+                status = "degraded"
+            else:
+                status = "available"
         elif stats.success_rate is not None and stats.success_rate < 0.5:
             status = "degraded"
         else:
@@ -711,6 +934,28 @@ class ModelRegistryService:
                 "last_success_at": stats.last_success_at,
                 "last_failure_at": stats.last_failure_at,
                 "last_error": stats.last_error,
+                "updated_at": stats.updated_at,
+                "probe": {
+                    "sample_count": probe.sample_count,
+                    "success_count": probe.success_count,
+                    "failure_count": probe.failure_count,
+                    "success_rate": (
+                        round(probe.success_rate, 6)
+                        if probe.success_rate is not None
+                        else None
+                    ),
+                    "latency_p50_ms": _percentile(
+                        probe.latency_samples_ms, 0.50
+                    ),
+                    "latency_p95_ms": _percentile(
+                        probe.latency_samples_ms, 0.95
+                    ),
+                    "last_latency_ms": probe.last_latency_ms,
+                    "last_success_at": probe.last_success_at,
+                    "last_failure_at": probe.last_failure_at,
+                    "last_error": probe.last_error,
+                    "updated_at": probe.updated_at,
+                },
             },
             "created_at": model.created_at,
             "updated_at": model.updated_at,
@@ -838,6 +1083,21 @@ def _percentile(values: tuple[int, ...], percentile: float) -> int | None:
     ordered = sorted(values)
     rank = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
     return int(ordered[rank])
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    present = [value for value in values if value is not None]
+    return max(present) if present else None
+
+
+def _latest_probe_failed(stats: ModelProbeStats) -> bool:
+    return bool(
+        stats.last_failure_at
+        and (
+            stats.last_success_at is None
+            or stats.last_failure_at > stats.last_success_at
+        )
+    )
 
 
 def _now() -> datetime:
