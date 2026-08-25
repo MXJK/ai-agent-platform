@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "LLM-NETWORK-ERROR-CLASSIFICATION"
-next_action: "Review the verified worktree and merge codex/llm-network-error-classification when approved."
+active_task: "TOKEN-BUDGET-PERCENTAGE"
+next_action: "Monitor the cumulative Token percentage wording with real multi-turn sessions."
 blockers: []
-last_verified_commit: "778f4faa50260c8d3d21262a9a300270758adbca"
-updated_at: "2026-08-25T11:14:16+08:00"
+last_verified_commit: "9c2263a5029f1129e7076fbf52764097636afad4"
+updated_at: "2026-08-25T11:16:14+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

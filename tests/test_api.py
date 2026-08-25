@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260824-auditable-trace-v4',
+            '/static/styles.css?v=20260825-token-budget-percentage-v5',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260825-token-budget-display-v1',
+            '/static/app.js?v=20260825-token-budget-percentage-v2',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -838,6 +838,17 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-workspace-btn"', response.text)
         self.assertIn('id="composer-context-budget"', response.text)
         self.assertIn('id="composer-context-kicker"', response.text)
+        self.assertIn("累计 Token", response.text)
+        self.assertIn("function formatTokenPercentage(value)", script_response.text)
+        self.assertIn('return "<0.01%"', script_response.text)
+        self.assertIn("maximumFractionDigits: 2", script_response.text)
+        self.assertIn(
+            "上下文上限 ${formatTokenCount(budget)} · ${percentage}",
+            script_response.text,
+        )
+        self.assertIn("Math.min(1, ratio)", script_response.text)
+        self.assertIn("上下文上限未知", script_response.text)
+        self.assertNotIn("历史尚未形成", script_response.text)
         self.assertNotIn('id="composer-workspace-select"', response.text)
         self.assertNotIn('id="workspace-catalog-list"', response.text)
         self.assertIn('id="workspace-manager-list"', response.text)
@@ -1007,6 +1018,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("--z-overlay: 80", stylesheet_response.text)
         self.assertIn(".chat-workbench.has-conversation", stylesheet_response.text)
         self.assertIn(".composer-scope-strip", stylesheet_response.text)
+        self.assertIn(
+            "minmax(0, 0.82fr) minmax(0, 0.88fr) minmax(0, 1.4fr)",
+            stylesheet_response.text,
+        )
         self.assertIn(".response-error-card", stylesheet_response.text)
         self.assertIn(".inspector-backdrop:not([hidden])", stylesheet_response.text)
         self.assertIn("body.mobile-more-open", stylesheet_response.text)
@@ -1015,7 +1030,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn("loadSessionTokenUsage", script_response.text)
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("累计实际消耗", script_response.text)
-        self.assertIn("历史估算只包含保留的会话消息和摘要", script_response.text)
+        self.assertIn(
+            "const ratio = budget > 0 ? total / budget : 0;",
+            script_response.text,
+        )
+        self.assertIn('contextNode.classList.remove("warning", "error")', script_response.text)
+        self.assertIn("超过 100% 不代表当前请求超出上下文窗口", script_response.text)
         self.assertIn("await loadSessionTokenUsage([conversationId]);", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)
         self.assertIn("await onProgress", script_response.text)
