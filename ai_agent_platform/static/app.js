@@ -4248,12 +4248,14 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
   item.className = `chat-message ${role}`;
   item.dataset.messageContent = content;
   const roleLabel = role === "user" ? "你" : "AI 助手";
-  const avatar = role === "user" ? "你" : "A";
+  const timestamp = escapeHtml(createdAt ? formatDate(createdAt) : "刚刚");
+  item.setAttribute("aria-label", `${roleLabel}的消息，${createdAt ? formatDate(createdAt) : "刚刚"}`);
   item.innerHTML = `
-    <div class="chat-avatar" aria-hidden="true">${avatar}</div>
+    <div class="chat-avatar" aria-hidden="true">${role === "user" ? "你" : iconMarkup("agent")}</div>
     <div class="chat-bubble">
-      <div class="message-label"><strong>${roleLabel}</strong><span>${escapeHtml(createdAt ? formatDate(createdAt) : "刚刚")}</span></div>
+      <div class="message-label"><strong>${roleLabel}</strong><time>${timestamp}</time></div>
       <div class="message-content rich-output">${content ? renderMarkdown(content) : '<span class="typing-indicator" aria-label="正在生成"><span></span><span></span><span></span></span>'}</div>
+      <span class="message-delivery-state" role="status" aria-live="polite" hidden></span>
       <div class="message-actions" aria-label="消息操作">
         <button class="message-action" type="button" data-message-action="copy" aria-label="复制这条消息" title="复制">
           ${iconMarkup("copy")}
@@ -4275,6 +4277,17 @@ function appendChatMessage(role, content = "", createdAt = null, { runId = "" } 
   }
   scheduleConversationFollow();
   return item.querySelector(".message-content");
+}
+
+function setMessageDeliveryState(message, status = "", label = "") {
+  if (!message) return;
+  const statusNode = message.querySelector(".message-delivery-state");
+  message.classList.toggle("is-submitting", status === "submitting");
+  message.classList.toggle("is-submit-failed", status === "failed");
+  message.dataset.deliveryState = status;
+  if (!statusNode) return;
+  statusNode.textContent = label;
+  statusNode.hidden = !label;
 }
 
 function failureTitle(detail, code = "") {
@@ -5131,10 +5144,11 @@ async function runAgentFromComposer() {
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
-  clearComposerInput();
   let submitted = false;
+  let optimisticUserMessage = null;
   let assistantContent = null;
   let progressPresenter = null;
+  let submissionError = null;
   const startedAt = performance.now();
   setChatStatus("正在提交给 Agent", "running");
   try {
@@ -5144,17 +5158,30 @@ async function runAgentFromComposer() {
       skillName: submission.skillName,
       skillArguments: submission.skillArguments,
       preferredToolName: submission.preferredToolName,
+      onReady: () => {
+        const userContent = appendChatMessage("user", submission.message);
+        optimisticUserMessage = userContent.closest(".chat-message");
+        setMessageDeliveryState(optimisticUserMessage, "submitting", "正在提交…");
+        assistantContent = appendChatMessage("assistant");
+        assistantContent.closest(".chat-message")?.classList.add("is-thinking");
+        clearComposerInput();
+      },
       onSubmitted: (body) => {
         submitted = true;
-        appendChatMessage("user", submission.message);
-        assistantContent = appendChatMessage("assistant", "", null, {
-          runId: agentRunId(body),
-        });
+        setMessageDeliveryState(optimisticUserMessage);
+        const assistantMessage = assistantContent?.closest(".chat-message");
+        if (assistantMessage) {
+          assistantMessage.dataset.agentRunId = agentRunId(body);
+          assistantMessage.classList.remove("is-thinking");
+        }
         progressPresenter = createAgentProgressPresenter(assistantContent, startedAt);
         progressPresenter.update(body);
         startResponseTimer(assistantContent, startedAt);
         setChatStatus("Agent 运行中", "running");
         showToast("任务已交给 Agent；运行、审批和代码变更会显示在当前对话中");
+      },
+      onSubmissionError: (error) => {
+        submissionError = error;
       },
       onProgress: async (body) => {
         if (progressPresenter) {
@@ -5169,6 +5196,16 @@ async function runAgentFromComposer() {
     if (!run && !submitted) {
       if (!input.value.trim()) {
         setComposerValue(submission.message);
+      }
+      setMessageDeliveryState(optimisticUserMessage, "failed", "未提交");
+      if (assistantContent) {
+        const detail = submissionError
+          ? humanizeError(submissionError)
+          : "Agent 任务未能创建，请检查工作区和连接后重试。";
+        assistantContent.closest(".chat-message")?.classList.remove("is-thinking");
+        assistantContent.innerHTML = failureRecoveryMarkup(detail, {
+          code: submissionError?.code || "agent_submission_failed",
+        });
       }
       setChatStatus("Agent 提交失败", "failed");
       return;
@@ -5550,7 +5587,9 @@ async function runAgent({
   skillName = null,
   skillArguments = [],
   preferredToolName = null,
+  onReady = null,
   onSubmitted = null,
+  onSubmissionError = null,
   onProgress = null,
 } = {}) {
   const normalizedMessage = message.trim();
@@ -5583,6 +5622,9 @@ async function runAgent({
       } : {}),
       ...(preferredToolName ? { preferred_tool_name: preferredToolName } : {}),
     };
+    if (onReady) {
+      onReady(conversationId);
+    }
     const body = await fetchJson("/agent/runs", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -5605,6 +5647,9 @@ async function runAgent({
     ]);
     return finalBody || body;
   } catch (error) {
+    if (onSubmissionError) {
+      onSubmissionError(error);
+    }
     if (!conversationId || conversationId === state.conversationId) {
       showToast(humanizeError(error), "error");
     }

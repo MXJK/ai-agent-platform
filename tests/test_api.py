@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260825-chat-layout-token-budget-v1',
+            '/static/styles.css?v=20260825-chat-message-ui-v1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260825-chat-layout-token-budget-v1',
+            '/static/app.js?v=20260825-chat-message-ui-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -1012,7 +1012,31 @@ class ApiTests(unittest.TestCase):
             stylesheet_response.text,
         )
         self.assertNotIn('switchView("agent");', script_response.text)
+        self.assertIn("setMessageDeliveryState", script_response.text)
+        self.assertIn('onReady: () => {', script_response.text)
         self.assertIn("onSubmitted", script_response.text)
+        self.assertIn("onSubmissionError", script_response.text)
+        run_agent_source = script_response.text.split(
+            "async function runAgent({", 1
+        )[1].split("function activeRunPresentation", 1)[0]
+        self.assertLess(
+            run_agent_source.index("onReady(conversationId)"),
+            run_agent_source.index('fetchJson("/agent/runs"'),
+        )
+        composer_source = script_response.text.split(
+            "async function runAgentFromComposer()", 1
+        )[1].split("async function streamChat()", 1)[0]
+        self.assertLess(
+            composer_source.index('appendChatMessage("user", submission.message)'),
+            composer_source.index("onSubmitted: (body)"),
+        )
+        self.assertIn('class="message-delivery-state"', script_response.text)
+        self.assertIn(".chat-message.user .message-label", stylesheet_response.text)
+        self.assertIn(".chat-message.assistant .message-content", stylesheet_response.text)
+        self.assertIn(".chat-message.is-submit-failed", stylesheet_response.text)
+        self.assertIn("max-width: min(100%, 68ch)", stylesheet_response.text)
+        self.assertIn("overflow-wrap: anywhere", stylesheet_response.text)
+        self.assertIn("padding-left: 30px", stylesheet_response.text)
         self.assertIn("renderExecutionProcess", script_response.text)
         self.assertIn("traceToolNames", script_response.text)
         self.assertIn("executionProcessPresentation", script_response.text)

@@ -240,6 +240,10 @@ The shared composer offers:
 - `快速对话` for direct SSE model responses;
 - `代码 Agent` for task-driven workspace exploration with progress, approvals,
   changed files, Diff, and ChangeSet actions rendered in the same assistant message;
+- optimistic Agent submission that renders the user prompt and assistant waiting
+  state before the Run-creation request starts. If creation fails, the prompt stays
+  visible, the composer text is restored, and retry, model-selection, and Trace
+  recovery remain in the conversation instead of leaving an empty message gap;
 - `/chat`, `/agent`, `/new`, and `/mcp` built-ins plus effective Skill/MCP choices
   from the same composer; selecting Skill or MCP switches to code Agent;
 - a common conversation history with persistent rolling summaries, so a
@@ -322,6 +326,9 @@ The browser workspace also includes:
 - an auto-growing conversation input with per-session unsent drafts, availability
   that reflects empty/busy/archived/workspace states, and follow-near-bottom
   scrolling with an explicit jump-to-latest action when the user reads history;
+- Codex-inspired message hierarchy that keeps user prompts in restrained,
+  right-aligned bubbles while assistant responses use an open reading layout with
+  compact identity, copy, execution, approval, and ChangeSet controls;
 - compact top/session/composer chrome that gives the message stream more room,
   plus independently collapsible and resizable desktop rails whose visibility
   and widths are stored as device UI preferences;
