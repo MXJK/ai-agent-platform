@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
 active_task: "FIX-TOKEN-BUDGET-DISPLAY"
-next_action: "Merge codex/fix-token-budget-display into main and rerun verification in the root checkout."
+next_action: "Restart the Docker app and verify the Token usage composer display in a browser only when explicitly authorized."
 blockers: []
-last_verified_commit: "f5283afbe7ca582659cd5c5c60804b1d246335f9"
-updated_at: "2026-08-25T10:41:44+08:00"
+last_verified_commit: "d0a99bbe2868dce49b9a86a2dc2a59f7e5b8d770"
+updated_at: "2026-08-25T10:43:59+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
