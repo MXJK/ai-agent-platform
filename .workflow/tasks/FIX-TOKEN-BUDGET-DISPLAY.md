@@ -43,6 +43,8 @@
   解释器并把 pycache 定向到 `/tmp`。
 - `node --check ai_agent_platform/static/app.js`：通过。
 - `git diff --check`：通过。
+- 合并提交 `2ded8f24` 后在根 checkout 的 `main` 重跑完整 pytest：
+  `647 passed, 87 subtests passed`；compileall、JavaScript 语法和 diff 检查通过。
 - `.venv/bin/python INTERVIEW_NOTES/validate.py`：通过，验证 24 份 Markdown 和 43 项
   能力；evidence review warnings 为既有证据变化提醒。
 - 差异审查未发现凭据、生成文件、数据库迁移、部署或任务外修改。
@@ -57,6 +59,7 @@
 选择不同窗口模型时不再沿用默认模型预算。Usage Ledger 的累计、拒绝/降级语义、历史
 记录和数据库 schema 均未改变。
 
-文档影响已同步中英文 README、模块化面试手册相关 Part 与 facts 映射。实现位于独立
-worktree 分支，用户已授权提交并合并；本任务不推送远端、不重启 Docker 或部署。按仓库
-规则，真实前端浏览器验收需在合并后从根 checkout 进行。
+文档影响已同步中英文 README、模块化面试手册相关 Part 与 facts 映射。实现提交为
+`f5283afb`，工作流验证记录为 `1e46a3c0`，已按用户授权通过 `2ded8f24` 合并到 `main`。
+本任务不推送远端、不重启 Docker 或部署；按仓库规则，真实前端浏览器验收需在根
+checkout 重启服务后进行。
