@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260825-token-budget-percentage-v5',
+            '/static/styles.css?v=20260825-chat-layout-token-budget-v1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260825-token-budget-percentage-v2',
+            '/static/app.js?v=20260825-chat-layout-token-budget-v1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -858,7 +858,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="workspace-token-list"', response.text)
         self.assertIn('id="recent-sessions-list"', response.text)
         self.assertIn('class="inspector-recent"', response.text)
-        self.assertIn('aria-label="会话与运行详情"', response.text)
+        self.assertIn('aria-label="最近会话侧栏"', response.text)
+        self.assertIn('id="toggle-sidebar-btn"', response.text)
+        self.assertIn('id="sidebar-resizer"', response.text)
+        self.assertIn('id="inspector-resizer"', response.text)
+        self.assertNotIn('id="active-session-inspector-btn"', response.text)
+        self.assertNotIn('class="inspector-detail"', response.text)
+        self.assertNotIn('id="trace-tab"', response.text)
+        self.assertNotIn('id="raw-tab"', response.text)
         self.assertLess(
             response.text.index('id="inspector-panel"'),
             response.text.index('id="recent-sessions-list"'),
@@ -937,7 +944,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn("await reader.cancel()", script_response.text)
         self.assertIn("空会话不参与启动恢复", script_response.text)
         self.assertIn("session.message_count > 0", script_response.text)
-        self.assertIn("隐藏会话与运行详情", script_response.text)
+        self.assertIn("隐藏最近会话", script_response.text)
+        self.assertIn("setSidebarVisible", script_response.text)
+        self.assertIn("bindPanelResizer", script_response.text)
+        self.assertIn("sidebarWidth", script_response.text)
+        self.assertIn('data-response-action="show-trace"', script_response.text)
         self.assertIn("setRagRequestBusy", script_response.text)
         self.assertIn("listKnowledgeDocuments", script_response.text)
         self.assertIn("bulkDeleteKnowledgeDocuments", script_response.text)
@@ -992,11 +1003,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("output.scrollTo", script_response.text)
         self.assertIn("event.isComposing", script_response.text)
         self.assertIn(".inspector-recent", stylesheet_response.text)
-        self.assertIn("height: clamp(148px, 32vh, 260px)", stylesheet_response.text)
-        self.assertIn(
-            "grid-template-rows: auto auto minmax(0, 1fr) auto",
-            stylesheet_response.text,
-        )
+        self.assertIn("body.sidebar-hidden .app-shell", stylesheet_response.text)
+        self.assertIn(".panel-resizer", stylesheet_response.text)
+        self.assertIn("--topbar-height: 58px", stylesheet_response.text)
+        self.assertIn("min-height: 44px", stylesheet_response.text)
         self.assertIn(
             "height: calc(100vh - var(--topbar-height) - 70px",
             stylesheet_response.text,
@@ -1047,10 +1057,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("publishProgress(progressBody)", script_response.text)
         self.assertIn("return polledBody || latestBody", script_response.text)
         self.assertNotIn("const latestBody = await refreshRun();", script_response.text)
-        self.assertIn(
-            'id="trace-list" class="trace-list" aria-live="polite"',
-            response.text,
-        )
+        self.assertNotIn('id="trace-list"', response.text)
         self.assertIn("workspace_id", script_response.text)
         self.assertNotIn("workspace_mode: workspaceMode", script_response.text)
         self.assertNotIn('$("agent-workspace-mode-select")', script_response.text)

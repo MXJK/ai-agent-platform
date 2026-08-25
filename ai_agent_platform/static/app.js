@@ -7,6 +7,10 @@ const SUSPENDED_RUN_STATUSES = new Set(["waiting_approval", "waiting_input", "pa
 const TERMINAL_RUN_STATUSES = new Set([...FINAL_RUN_STATUSES, ...SUSPENDED_RUN_STATUSES]);
 const TRACE_STEP_REVEAL_DELAY_MS = 16;
 const MAX_TRACE_REPLAY_MS = 1200;
+const PANEL_WIDTHS = {
+  sidebar: { cssVariable: "--sidebar-width", min: 188, max: 360, defaultValue: 220 },
+  inspector: { cssVariable: "--inspector-width", min: 240, max: 440, defaultValue: 288 },
+};
 const responseTimers = new WeakMap();
 const COMPOSER_BUILTIN_COMMANDS = [
   {
@@ -751,31 +755,11 @@ function showToast(message, type = "success", timeout = 4200) {
   window.setTimeout(close, timeout);
 }
 
-function setRaw(value) {
-  $("raw-output").textContent = typeof value === "string" ? value : jsonPretty(value);
-}
+function setRaw(_value) {}
 
-function setTrace(items) {
-  const list = $("trace-list");
-  list.innerHTML = "";
-  if (!items || items.length === 0) {
-    list.innerHTML = '<div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div>';
-    return;
-  }
-  for (const [index, item] of items.entries()) {
-    const node = document.createElement("div");
-    node.className = "trace-item";
-    node.innerHTML = `
-      <strong>${escapeHtml(item.step ?? index + 1)} · ${escapeHtml(item.node ?? "step")}</strong>
-      <p>${escapeHtml(item.summary ?? "")}</p>
-    `;
-    list.appendChild(node);
-  }
-}
+function setTrace(_items) {}
 
-function setLastRequestId(value) {
-  $("last-request-id").textContent = `Request ID：${value || "—"}`;
-}
+function setLastRequestId(_value) {}
 
 function loadUiPreferences() {
   try {
@@ -796,7 +780,10 @@ function saveUiPreferences() {
       UI_STORAGE_KEY,
       JSON.stringify({
         view: state.currentView,
+        sidebarHidden: document.body.classList.contains("sidebar-hidden"),
         inspectorHidden: document.body.classList.contains("inspector-hidden"),
+        sidebarWidth: panelWidth("sidebar"),
+        inspectorWidth: panelWidth("inspector"),
         rerankEnabled: state.rerankEnabled,
         knowledgeBaseId: $("kb-id-input")?.value || "",
         knowledgeTab: state.activeKnowledgeTab,
@@ -831,9 +818,9 @@ function resizeComposerInput() {
   const input = $("chat-message-input");
   if (!input) return;
   input.style.height = "0px";
-  const nextHeight = Math.min(220, Math.max(64, input.scrollHeight));
+  const nextHeight = Math.min(180, Math.max(44, input.scrollHeight));
   input.style.height = `${nextHeight}px`;
-  input.style.overflowY = input.scrollHeight > 220 ? "auto" : "hidden";
+  input.style.overflowY = input.scrollHeight > 180 ? "auto" : "hidden";
 }
 
 function setComposerValue(value, { save = true, focus = false } = {}) {
@@ -1328,14 +1315,57 @@ function syncInspectorPresentation(visible) {
   document.body.classList.toggle("inspector-drawer-open", visible && drawer);
 }
 
+function clampPanelWidth(name, value) {
+  const config = PANEL_WIDTHS[name];
+  const numeric = Number(value);
+  return Math.min(config.max, Math.max(config.min, Number.isFinite(numeric) ? numeric : config.defaultValue));
+}
+
+function panelWidth(name) {
+  const config = PANEL_WIDTHS[name];
+  const value = getComputedStyle(document.documentElement).getPropertyValue(config.cssVariable);
+  return Math.round(clampPanelWidth(name, Number.parseFloat(value)));
+}
+
+function setPanelWidth(name, value, { persist = false } = {}) {
+  const width = Math.round(clampPanelWidth(name, value));
+  const config = PANEL_WIDTHS[name];
+  document.documentElement.style.setProperty(config.cssVariable, `${width}px`);
+  $(`${name}-resizer`).setAttribute("aria-valuenow", String(width));
+  if (persist) saveUiPreferences();
+  return width;
+}
+
+function applyPanelPreferences(preferences) {
+  setPanelWidth("sidebar", preferences.sidebarWidth ?? PANEL_WIDTHS.sidebar.defaultValue);
+  setPanelWidth("inspector", preferences.inspectorWidth ?? PANEL_WIDTHS.inspector.defaultValue);
+}
+
+function syncSidebarPresentation() {
+  const panel = $("primary-sidebar");
+  const hidden = document.body.classList.contains("sidebar-hidden") && window.innerWidth > 900;
+  panel.setAttribute("aria-hidden", String(hidden));
+  panel.inert = hidden;
+}
+
+function setSidebarVisible(visible) {
+  document.body.classList.toggle("sidebar-hidden", !visible);
+  $("toggle-sidebar-btn").setAttribute("aria-expanded", String(visible));
+  $("toggle-sidebar-btn").setAttribute("aria-label", visible ? "隐藏主导航" : "显示主导航");
+  $("toggle-sidebar-btn").title = visible ? "隐藏主导航" : "显示主导航";
+  syncSidebarPresentation();
+  saveUiPreferences();
+}
+
 function setInspectorVisible(visible) {
   const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
   $("toggle-inspector-btn").setAttribute(
     "aria-label",
-    visible ? "隐藏会话与运行详情" : "显示会话与运行详情",
+    visible ? "隐藏最近会话" : "显示最近会话",
   );
+  $("toggle-inspector-btn").title = visible ? "隐藏最近会话" : "显示最近会话";
   panel.setAttribute("aria-hidden", String(!visible));
   panel.inert = !visible;
   panel.hidden = !visible;
@@ -1343,14 +1373,44 @@ function setInspectorVisible(visible) {
   saveUiPreferences();
 }
 
-function selectInspectorTab(name) {
-  const isTrace = name === "trace";
-  $("trace-panel").hidden = !isTrace;
-  $("raw-panel").hidden = isTrace;
-  $("trace-tab").classList.toggle("active", isTrace);
-  $("raw-tab").classList.toggle("active", !isTrace);
-  $("trace-tab").setAttribute("aria-selected", String(isTrace));
-  $("raw-tab").setAttribute("aria-selected", String(!isTrace));
+function bindPanelResizer(name) {
+  const handle = $(`${name}-resizer`);
+  const config = PANEL_WIDTHS[name];
+  const supportsResize = () => window.innerWidth > (name === "sidebar" ? 900 : 1120);
+  const widthFromPointer = (clientX) => name === "sidebar" ? clientX : window.innerWidth - clientX;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (!supportsResize()) return;
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    document.body.classList.add("is-resizing-panels");
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    setPanelWidth(name, widthFromPointer(event.clientX));
+  });
+  const finishResize = (event) => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    handle.releasePointerCapture(event.pointerId);
+    document.body.classList.remove("is-resizing-panels");
+    saveUiPreferences();
+  };
+  handle.addEventListener("pointerup", finishResize);
+  handle.addEventListener("pointercancel", finishResize);
+  handle.addEventListener("dblclick", () => {
+    if (supportsResize()) setPanelWidth(name, config.defaultValue, { persist: true });
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (!supportsResize()) return;
+    let next = panelWidth(name);
+    if (event.key === "Home") next = config.min;
+    else if (event.key === "End") next = config.max;
+    else if (event.key === "ArrowLeft") next += name === "sidebar" ? -16 : 16;
+    else if (event.key === "ArrowRight") next += name === "sidebar" ? 16 : -16;
+    else return;
+    event.preventDefault();
+    setPanelWidth(name, next, { persist: true });
+  });
 }
 
 function openSettings() {
@@ -4236,7 +4296,7 @@ function failureGuidance(detail, code = "") {
   if (code === "max_output_tokens") {
     return "已保留生成的部分内容。可以提高模型输出额度，或缩小本次任务范围。";
   }
-  return "保留当前会话上下文后重试；需要诊断时打开运行详情查看失败阶段。";
+  return "保留当前会话上下文后重试；需要诊断时打开 Trace 审计查看失败阶段。";
 }
 
 function failureRecoveryMarkup(detail, { code = "", requestId = "" } = {}) {
@@ -4250,7 +4310,7 @@ function failureRecoveryMarkup(detail, { code = "", requestId = "" } = {}) {
           ${iconMarkup("refresh")}重试
         </button>
         <button class="button secondary" type="button" data-response-action="choose-model">更换模型</button>
-        <button class="button ghost" type="button" data-response-action="show-details">查看运行详情</button>
+        <button class="button ghost" type="button" data-response-action="show-trace">打开 Trace 审计</button>
       </div>
     </section>
   `;
@@ -4288,9 +4348,8 @@ async function handleConversationAction(target) {
     scrollConversationToLatest({ behavior: preferredScrollBehavior() });
     return;
   }
-  if (responseAction === "show-details") {
-    setInspectorVisible(true);
-    $("close-inspector-btn").focus();
+  if (responseAction === "show-trace") {
+    switchView("trace-audit");
     return;
   }
   if (responseAction === "choose-model") {
@@ -4973,7 +5032,7 @@ function renderAgentChatResponse(
   } else if (!holdAnswer && ["paused", "waiting_input"].includes(actualStatus)) {
     contentNode.innerHTML = "<p>Agent 已在安全边界暂停，请在下方补充信息或继续。</p>";
   } else if (!holdAnswer && actualStatus === "failed") {
-    const detail = body.error || "Agent 运行失败，请查看运行详情。";
+    const detail = body.error || "Agent 运行失败，请打开 Trace 审计查看详情。";
     contentNode.innerHTML = failureRecoveryMarkup(detail, {
       code: body.error_code || "agent_run_failed",
       requestId: body.request_id || "",
@@ -8284,12 +8343,11 @@ function bindEvents() {
     }
   });
 
+  $("toggle-sidebar-btn").addEventListener("click", () => {
+    setSidebarVisible(document.body.classList.contains("sidebar-hidden"));
+  });
   $("toggle-inspector-btn").addEventListener("click", () => {
     setInspectorVisible(document.body.classList.contains("inspector-hidden"));
-  });
-  $("active-session-inspector-btn").addEventListener("click", () => {
-    setInspectorVisible(true);
-    $("close-inspector-btn").focus();
   });
   $("close-inspector-btn").addEventListener("click", () => setInspectorVisible(false));
   $("inspector-backdrop").addEventListener("click", () => {
@@ -8298,6 +8356,7 @@ function bindEvents() {
   });
   window.addEventListener("resize", () => {
     syncInspectorPresentation(!$("inspector-panel").hidden);
+    syncSidebarPresentation();
     if (window.innerWidth > 900) setMobileMoreOpen(false);
   }, { passive: true });
   document.addEventListener("keydown", (event) => {
@@ -8310,8 +8369,8 @@ function bindEvents() {
       $("mobile-more-btn").focus();
     }
   });
-  $("trace-tab").addEventListener("click", () => selectInspectorTab("trace"));
-  $("raw-tab").addEventListener("click", () => selectInspectorTab("raw"));
+  bindPanelResizer("sidebar");
+  bindPanelResizer("inspector");
 
   const createNewSession = () => {
     if (canSwitchSession()) {
@@ -8782,12 +8841,6 @@ function bindEvents() {
     renderRequestLog();
     renderOverview();
   });
-  $("clear-detail-btn").addEventListener("click", () => {
-    setTrace([]);
-    setRaw("等待响应…");
-    setLastRequestId("");
-  });
-
   $("conversation-id-input").addEventListener("input", (event) => {
     updateContextSummary();
   });
@@ -8852,6 +8905,7 @@ async function restoreInitialSession() {
 
 async function init() {
   const preferences = loadUiPreferences();
+  applyPanelPreferences(preferences);
   state.composerDrafts = preferences.composerDrafts && typeof preferences.composerDrafts === "object"
     ? preferences.composerDrafts
     : {};
@@ -8884,8 +8938,8 @@ async function init() {
   renderRerankControl();
   updateComposerMode(state.composerMode);
   switchView(initialView, !location.hash);
+  setSidebarVisible(!preferences.sidebarHidden);
   setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);
-  selectInspectorTab("trace");
   setTrace([]);
   renderRequestLog();
   renderSessions();

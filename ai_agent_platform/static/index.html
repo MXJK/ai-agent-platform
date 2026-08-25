@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260825-token-budget-percentage-v5" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260825-chat-layout-token-budget-v1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -44,13 +44,26 @@
     <a class="skip-link" href="#main-workspace">跳到主要内容</a>
 
     <header class="topbar">
-      <a class="brand" href="#chat" aria-label="AI Agent Platform 首页">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <span>
-          <strong>AI Agent Platform</strong>
-          <small>Agent engineering console</small>
-        </span>
-      </a>
+      <div class="topbar-leading">
+        <button
+          id="toggle-sidebar-btn"
+          class="icon-button panel-toggle panel-toggle-left"
+          type="button"
+          aria-label="隐藏主导航"
+          aria-controls="primary-sidebar"
+          aria-expanded="true"
+          title="隐藏主导航"
+        >
+          <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
+        </button>
+        <a class="brand" href="#chat" aria-label="AI Agent Platform 首页">
+          <span class="brand-mark" aria-hidden="true">A</span>
+          <span>
+            <strong>AI Agent Platform</strong>
+            <small>Agent engineering console</small>
+          </span>
+        </a>
+      </div>
 
       <div class="topbar-context" aria-label="当前工作上下文">
         <span class="context-label">当前会话</span>
@@ -71,12 +84,12 @@
         </button>
         <button
           id="toggle-inspector-btn"
-          class="icon-button"
+          class="icon-button panel-toggle"
           type="button"
-          aria-label="显示会话与运行详情"
+          aria-label="显示最近会话"
           aria-controls="inspector-panel"
           aria-expanded="true"
-          title="会话与运行详情"
+          title="显示最近会话"
         >
           <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
         </button>
@@ -88,6 +101,17 @@
 
     <div class="app-shell">
       <aside class="sidebar" id="primary-sidebar">
+        <div
+          id="sidebar-resizer"
+          class="panel-resizer panel-resizer-left"
+          role="separator"
+          aria-label="调整主导航宽度"
+          aria-orientation="vertical"
+          aria-valuemin="188"
+          aria-valuemax="360"
+          aria-valuenow="220"
+          tabindex="0"
+        ></div>
         <nav class="primary-nav" aria-label="主要功能">
           <button class="nav-item mobile-primary active" type="button" data-view="chat" aria-current="page">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-message"></use></svg></span>
@@ -179,10 +203,6 @@
               </span>
               <button id="rename-current-session-btn" class="icon-button small" type="button" aria-label="重命名当前会话" title="重命名当前会话">
                 <svg class="app-icon" aria-hidden="true"><use href="#icon-edit"></use></svg>
-              </button>
-              <button id="active-session-inspector-btn" class="button secondary compact-action" type="button">
-                <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
-                运行详情
               </button>
             </div>
           </header>
@@ -315,7 +335,7 @@
               <label class="sr-only" for="chat-message-input">输入消息</label>
               <textarea
                 id="chat-message-input"
-                rows="3"
+                rows="2"
                 maxlength="8000"
                 placeholder="输入消息，键入 / 使用 Skill 或 MCP，Enter 发送…"
                 aria-autocomplete="list"
@@ -1123,43 +1143,33 @@
         </section>
       </main>
 
-      <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭会话与运行详情" hidden></button>
-      <aside id="inspector-panel" class="inspector" aria-label="会话与运行详情">
+      <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭最近会话" hidden></button>
+      <aside id="inspector-panel" class="inspector" aria-label="最近会话侧栏">
+        <div
+          id="inspector-resizer"
+          class="panel-resizer panel-resizer-right"
+          role="separator"
+          aria-label="调整最近会话宽度"
+          aria-orientation="vertical"
+          aria-valuemin="240"
+          aria-valuemax="440"
+          aria-valuenow="288"
+          tabindex="0"
+        ></div>
         <header class="inspector-header">
-          <div><p class="eyebrow">Workspace Rail</p><h2>会话与运行</h2></div>
-          <button id="close-inspector-btn" class="icon-button small" type="button" aria-label="关闭会话与运行详情">
-            <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
-          </button>
+          <div><h2>最近会话</h2><p>快速回到最近工作</p></div>
+          <div class="inspector-header-actions">
+            <button id="view-all-sessions-btn" class="text-button" type="button">查看全部</button>
+            <button id="close-inspector-btn" class="icon-button small" type="button" aria-label="关闭最近会话">
+              <svg class="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+            </button>
+          </div>
         </header>
 
-        <section class="inspector-recent" aria-labelledby="recent-sessions-title">
-          <div class="recent-sessions-heading">
-            <div><p class="eyebrow">Conversations</p><h3 id="recent-sessions-title">最近会话</h3></div>
-            <button id="view-all-sessions-btn" class="text-button" type="button">查看全部</button>
-          </div>
+        <section class="inspector-recent" aria-label="最近会话">
           <div id="recent-sessions-list" class="recent-sessions-list" aria-live="polite">
             <div class="empty-state compact">暂无会话</div>
           </div>
-        </section>
-
-        <section class="inspector-detail" aria-labelledby="inspector-detail-title">
-          <header class="inspector-detail-header">
-            <div><p class="eyebrow">Inspector</p><h3 id="inspector-detail-title">运行详情</h3></div>
-          </header>
-          <div class="inspector-tabs" role="tablist" aria-label="详情类型">
-            <button id="trace-tab" class="inspector-tab active" type="button" role="tab" aria-selected="true" aria-controls="trace-panel">执行轨迹</button>
-            <button id="raw-tab" class="inspector-tab" type="button" role="tab" aria-selected="false" aria-controls="raw-panel">原始数据</button>
-          </div>
-          <section id="trace-panel" class="inspector-content" role="tabpanel" aria-labelledby="trace-tab">
-            <div id="trace-list" class="trace-list" aria-live="polite" aria-atomic="false" aria-relevant="additions text"><div class="empty-state">开始一次任务后，这里会显示执行轨迹。</div></div>
-          </section>
-          <section id="raw-panel" class="inspector-content" role="tabpanel" aria-labelledby="raw-tab" hidden>
-            <pre id="raw-output" class="raw-output">等待响应…</pre>
-          </section>
-          <footer class="inspector-footer">
-            <span id="last-request-id">Request ID：—</span>
-            <button id="clear-detail-btn" class="text-button" type="button">清空详情</button>
-          </footer>
         </section>
       </aside>
     </div>
@@ -1322,6 +1332,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260825-token-budget-percentage-v2" defer></script>
+    <script src="/static/app.js?v=20260825-chat-layout-token-budget-v1" defer></script>
   </body>
 </html>

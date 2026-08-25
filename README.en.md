@@ -322,6 +322,9 @@ The browser workspace also includes:
 - an auto-growing conversation input with per-session unsent drafts, availability
   that reflects empty/busy/archived/workspace states, and follow-near-bottom
   scrolling with an explicit jump-to-latest action when the user reads history;
+- compact top/session/composer chrome that gives the message stream more room,
+  plus independently collapsible and resizable desktop rails whose visibility
+  and widths are stored as device UI preferences;
 - safe Markdown rendering, response cancellation, responsive navigation, and
   accessible textual status indicators.
 
@@ -345,9 +348,10 @@ configuration to user defaults without rewriting older sessions. Archived
 conversations remain readable but Chat, message writes and Agent execution
 return `409` until the conversation is restored.
 
-The collapsible desktop inspector places the latest 12 active conversations
-above run details on the right, grouped by today, the previous seven days and
-older entries; the left rail is reserved for primary navigation. Startup recovery checks the URL
+The collapsible, resizable right rail is dedicated to the latest 12 active
+conversations, grouped by today, the previous seven days and older entries;
+full run diagnostics live in the standalone Trace Audit page. The primary
+navigation rail is also collapsible and resizable. Startup recovery checks the URL
 session first, then `last_active_session_id`, then the latest active session;
 stale zero-message candidates are skipped. With no valid session it keeps the
 welcome page and does not create another empty record. Loading a session
