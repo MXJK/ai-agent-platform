@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "TOKEN-BUDGET-PERCENTAGE"
-next_action: "Verify non-zero percentage precision in the live composer."
+next_action: "Merge the verified token percentage branch after explicit user approval."
 blockers: []
-last_verified_commit: "d4e0f4b343a506819fd63ded810c25dbdf2758a0"
-updated_at: "2026-08-25T11:08:26+08:00"
+last_verified_commit: "9c2263a5029f1129e7076fbf52764097636afad4"
+updated_at: "2026-08-25T11:16:14+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
