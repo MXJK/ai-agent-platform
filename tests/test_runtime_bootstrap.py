@@ -9,6 +9,7 @@ from ai_agent_platform.main import create_app
 from ai_agent_platform.model_registry import (
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
+    ModelRegistryService,
 )
 from ai_agent_platform.runtime import (
     ApplicationFactory,
@@ -162,6 +163,22 @@ class RuntimeBootstrapTests(unittest.TestCase):
             [(item["provider"], item["model"]) for item in registry.list_models()],
             [("fake", "ephemeral-test-model")],
         )
+
+    def test_periodic_model_probes_start_only_for_api_role(self) -> None:
+        factory = ApplicationFactory()
+        settings = self.settings(model_probe_interval_seconds=60)
+
+        with patch.object(
+            ModelRegistryService,
+            "start_periodic_probes",
+        ) as start_probes:
+            api = factory.build_runtime(settings, role="api")
+            cli = factory.build_runtime(settings, role="cli")
+            try:
+                start_probes.assert_called_once_with(interval_seconds=60)
+            finally:
+                api.close()
+                cli.close()
 
     def test_api_and_worker_use_the_same_application_factory_graph(self) -> None:
         factory = _RecordingFactory()

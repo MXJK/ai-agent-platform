@@ -87,6 +87,7 @@ class ModelRegistryResponse(BaseModel):
     connections: list[ProviderConnectionResponse]
     models: list[RegisteredModelResponse]
     routing_policies: list[str]
+    probe_policy: dict[str, Any]
 
 
 class SessionModelPreferenceRequest(BaseModel):
@@ -118,3 +119,4 @@ class ModelConnectionTestResponse(BaseModel):
     model: str
     status: str
     elapsed_ms: int
+    checked_at: datetime

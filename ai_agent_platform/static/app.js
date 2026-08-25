@@ -48,6 +48,7 @@ const COMPOSER_BUILTIN_COMMANDS = [
 ];
 let composerDraftSaveTimer = null;
 let conversationFollowFrame = null;
+let modelRegistryRefreshTimer = null;
 
 const state = {
   conversationId: "",
@@ -1266,6 +1267,7 @@ function switchView(viewName, updateHash = true) {
   }
   state.currentView = normalizedView;
   if (normalizedView !== "trace-audit") clearAuditPoll();
+  syncModelRegistryRefresh();
   setMobileMoreOpen(false);
   document.querySelectorAll("[data-view-panel]").forEach((item) => {
     const active = item.dataset.viewPanel === normalizedView;
@@ -3294,6 +3296,22 @@ async function loadModelRegistry(showRaw = false) {
   return body;
 }
 
+function syncModelRegistryRefresh() {
+  if (modelRegistryRefreshTimer) {
+    window.clearInterval(modelRegistryRefreshTimer);
+    modelRegistryRefreshTimer = null;
+  }
+  if (state.currentView !== "models" || document.hidden) return;
+  modelRegistryRefreshTimer = window.setInterval(() => {
+    if (state.currentView !== "models" || document.hidden) return;
+    loadModelRegistry().catch(() => null);
+  }, 60_000);
+}
+
+function refreshModelRegistryTelemetry() {
+  loadModelRegistry().catch(() => null);
+}
+
 async function loadModelPreference(sessionId = state.conversationId) {
   if (!sessionId) {
     renderSessionModelControls();
@@ -3360,6 +3378,13 @@ async function saveModelPreference() {
 
 function renderProviderConnections() {
   const grid = $("provider-connection-grid");
+  const probePolicy = state.modelRegistry.probe_policy || {};
+  const probePolicyNote = $("model-probe-policy-note");
+  if (probePolicyNote) {
+    probePolicyNote.textContent = probePolicy.periodic_enabled
+      ? `周期探测已启用：每 ${formatDuration(Number(probePolicy.interval_seconds) * 1000)} 检查长期无真实流量的模型。`
+      : "页面状态会自动刷新；周期探测默认关闭，单次测速会产生一次最短模型调用。";
+  }
   grid.innerHTML = MODEL_PROVIDERS.map(([provider, displayName]) => {
     const connection = state.modelRegistry.connections.find((item) => item.provider === provider);
     const status = connection?.status || "unavailable";
@@ -3573,6 +3598,31 @@ async function deleteRegisteredModel(modelId) {
   }
 }
 
+async function testRegisteredModel(modelId, button) {
+  const model = registeredModel(modelId);
+  if (!model) return;
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "测速中…";
+  try {
+    const result = await fetchJson(
+      `/model-registry/models/${encodeURIComponent(modelId)}/test`,
+      { method: "POST" },
+    );
+    await loadModelRegistry();
+    showToast(
+      `${model.display_name} 测速完成 · ${formatDuration(result.elapsed_ms)}`,
+      "success",
+    );
+  } catch (error) {
+    showToast(`测速失败：${humanizeError(error)}`, "error");
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = originalLabel;
+  }
+}
+
 function renderRegisteredModels() {
   const list = $("registered-model-list");
   const models = state.modelRegistry.models || [];
@@ -3583,20 +3633,31 @@ function renderRegisteredModels() {
   }
   list.innerHTML = models.map((model) => {
     const telemetry = model.telemetry || {};
+    const probe = telemetry.probe || {};
     const routing = model.routing_metadata || {};
     const latency = routing.latency_source === "observed_p50"
       ? `实测 P50 ${formatDuration(routing.routing_latency_ms)} · P95 ${formatDuration(telemetry.total_latency_p95_ms)}`
       : `冷启动先验 ${formatDuration(routing.routing_latency_ms || model.configured_latency_ms)}`;
+    const latestProbeFailed = probe.last_failure_at
+      && (!probe.last_success_at || new Date(probe.last_failure_at) > new Date(probe.last_success_at));
+    const probeLatency = latestProbeFailed
+      ? `探测失败 · ${truncate(probe.last_error, 48)}`
+      : (probe.success_count
+        ? `固定探测 ${formatDuration(probe.last_latency_ms)} · P50 ${formatDuration(probe.latency_p50_ms)}`
+        : "尚未手动测速");
+    const latestUpdate = [probe.updated_at, telemetry.updated_at]
+      .filter(Boolean)
+      .sort((left, right) => new Date(right) - new Date(left))[0];
     return `
       <article class="registered-model-card" data-model-id="${escapeHtml(model.id)}">
         <div class="registered-model-heading">
           <div><strong>${escapeHtml(model.display_name)}</strong><small>${escapeHtml(model.provider)} · ${escapeHtml(model.model)}</small></div>
           <span class="status-pill ${modelStatusClass(model.status)}"><span class="status-dot"></span>${escapeHtml(modelStatusLabel(model.status))}</span>
         </div>
-        <div class="model-stat-row"><span>${escapeHtml(latency)}</span><span>成功 ${telemetry.success_rate == null ? "—" : `${Math.round(telemetry.success_rate * 100)}%`}</span><span>${model.context_window_tokens.toLocaleString()} ctx</span><span>${model.max_output_tokens.toLocaleString()} output</span></div>
-        <p>${escapeHtml(modelTierLabel(routing.quality_tier))} · ${escapeHtml(modelTierLabel(routing.cost_tier))} · ${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
+        <div class="model-stat-row"><span>${escapeHtml(latency)} · ${Number(telemetry.sample_count || 0).toLocaleString()} 个业务样本</span><span>${escapeHtml(probeLatency)} · ${Number(probe.sample_count || 0).toLocaleString()} 次</span><span>${model.context_window_tokens.toLocaleString()} ctx</span><span>${model.max_output_tokens.toLocaleString()} output</span></div>
+        <p>${escapeHtml(modelTierLabel(routing.quality_tier))} · ${escapeHtml(modelTierLabel(routing.cost_tier))} · ${model.auto_eligible ? "可自动选择" : "仅手动选择"}${model.enabled ? "" : " · 已停用"} · 最近更新 ${escapeHtml(latestUpdate ? formatDate(latestUpdate) : "暂无样本")}${telemetry.last_error ? ` · ${escapeHtml(truncate(telemetry.last_error, 80))}` : ""}</p>
         <div class="model-output-control"><label>最大输出 token<input type="number" min="1" max="1000000" step="1" value="${model.max_output_tokens}" data-model-output-limit /></label><button class="button ghost" type="button" data-model-action="save-output-limit">保存上限</button></div>
-        <div class="button-row"><button class="button ghost" type="button" data-model-action="toggle-enabled">${model.enabled ? "停用" : "启用"}</button><button class="button ghost" type="button" data-model-action="toggle-auto">${model.auto_eligible ? "仅手动" : "加入自动"}</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
+        <div class="button-row"><button class="button secondary" type="button" data-model-action="test-latency" ${model.enabled ? "" : "disabled"} aria-label="测试 ${escapeHtml(model.display_name)} 延迟">测试延迟</button><button class="button ghost" type="button" data-model-action="toggle-enabled">${model.enabled ? "停用" : "启用"}</button><button class="button ghost" type="button" data-model-action="toggle-auto">${model.auto_eligible ? "仅手动" : "加入自动"}</button><button class="button ghost" type="button" data-model-action="delete">删除</button></div>
       </article>`;
   }).join("");
 }
@@ -5226,6 +5287,7 @@ async function runAgentFromComposer() {
     sendButton.removeAttribute("aria-busy");
     modeInput.disabled = false;
     updateComposerAvailability();
+    if (submitted) refreshModelRegistryTelemetry();
   }
 }
 
@@ -5478,6 +5540,7 @@ async function streamChat() {
     stopButton.classList.add("hidden");
     $("chat-output").removeAttribute("aria-busy");
     await refreshTokenUsageData();
+    refreshModelRegistryTelemetry();
     updateComposerAvailability();
     if (!input.disabled) {
       input.focus();
@@ -8849,7 +8912,8 @@ function bindEvents() {
   $("save-registered-model-btn").addEventListener("click", saveRegisteredModel);
   $("registered-model-list").addEventListener("click", (event) => {
     const card = event.target.closest("[data-model-id]");
-    const action = event.target.closest("[data-model-action]")?.dataset.modelAction;
+    const actionButton = event.target.closest("[data-model-action]");
+    const action = actionButton?.dataset.modelAction;
     if (!card || !action) return;
     if (action === "toggle-enabled") {
       const model = registeredModel(card.dataset.modelId);
@@ -8868,7 +8932,16 @@ function bindEvents() {
       }
       updateRegisteredModel(model.id, { max_output_tokens: maxOutputTokens });
     }
+    if (action === "test-latency") {
+      testRegisteredModel(card.dataset.modelId, actionButton);
+    }
     if (action === "delete") deleteRegisteredModel(card.dataset.modelId);
+  });
+  document.addEventListener("visibilitychange", () => {
+    syncModelRegistryRefresh();
+    if (!document.hidden && state.currentView === "models") {
+      loadModelRegistry().catch(() => null);
+    }
   });
 
   $("refresh-overview-btn").addEventListener("click", async () => {

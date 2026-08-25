@@ -318,6 +318,14 @@ class ApplicationFactory:
                 container.llm_client,
                 secret_store=container.secret_store,
             )
+            if role == "api" and settings.model_probe_interval_seconds > 0:
+                container.model_registry.start_periodic_probes(
+                    interval_seconds=settings.model_probe_interval_seconds
+                )
+                container.register_cleanup(
+                    "model_registry_probes",
+                    container.model_registry.close,
+                )
             container.game_agent_runtime = self.create_game_agent_runtime()
             container.workspace_service = WorkspaceService(
                 store=container.workspace_store,

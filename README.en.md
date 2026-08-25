@@ -399,14 +399,29 @@ run (including resume), and RAG Ask:
 - a manually preferred model with an explicit fallback switch and a custom
   picker sorted by latency, showing exact milliseconds and green/yellow/red
   latency tiers (`≤1000 ms`, `≤3000 ms`, `>3000 ms`);
-- per-model availability plus observed P50/P95 first-token and total latency.
+- per-model availability, live-request sample count, last update time, observed
+  P50/P95 first-token and total latency, plus an exact-model fixed-prompt test.
 
 `smart` creates a deterministic, explainable task profile without another LLM
 call. Easy tasks weight cost and latency more heavily, while difficult tasks
 weight the backend quality profile more heavily. Background embedding, conversation
 compression, and memory extraction retain their independent service policy.
-Connection tests are user-triggered; normal status and latency come from passive
-observations of real requests rather than periodic paid probes.
+While Model Management is visible, it refreshes registry state every 60 seconds;
+Chat and Agent completion also refresh state. These reads never call a model.
+The per-model latency action and the compatible Provider-level connection test send
+one fixed minimal-reply request. Their persistent probe statistics are separate from
+live traffic, so they do not add live samples or change routing P50.
+
+Periodic probes are disabled by default. Set `MODEL_PROBE_INTERVAL_SECONDS` to at
+least 60 seconds to opt in. Only the API process schedules them, the first pass waits
+one full interval, and a model with real success or failure traffic inside that
+interval is skipped. Probes are serialized per model and stop with the runtime.
+They may incur Provider charges and never participate in `smart`/`latency` ranking:
+
+```dotenv
+# Disabled by default; 900 would check idle models every 15 minutes.
+MODEL_PROBE_INTERVAL_SECONDS=0
+```
 
 ## Gemini protocol support
 
@@ -1547,6 +1562,10 @@ Revision `20260820_0022` adds `registered_models.max_output_tokens`. Existing
 DeepSeek rows are backfilled to 8192, fake rows to 4096, and other rows to
 16384. The revision ships with this change but was not applied to the current
 database by this task.
+
+Revision `20260825_0025` adds `model_probe_stats`, persistently separating manual
+and periodic fixed-prompt measurements from live-request latency samples. The
+revision ships with this change and was not applied to the current database.
 
 Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;

@@ -8,6 +8,7 @@ from threading import Lock
 from typing import Any, Protocol
 
 from .models import (
+    ModelProbeStats,
     ModelRuntimeStats,
     ProviderConnection,
     RegisteredModel,
@@ -36,6 +37,8 @@ class ModelRegistryRepository(Protocol):
     ) -> None: ...
     def get_runtime_stats(self, model_id: str) -> ModelRuntimeStats | None: ...
     def upsert_runtime_stats(self, stats: ModelRuntimeStats) -> ModelRuntimeStats: ...
+    def get_probe_stats(self, model_id: str) -> ModelProbeStats | None: ...
+    def upsert_probe_stats(self, stats: ModelProbeStats) -> ModelProbeStats: ...
 
 
 class InMemoryModelRegistryRepository:
@@ -46,6 +49,7 @@ class InMemoryModelRegistryRepository:
         self._run_preferences: dict[str, SessionModelPreference] = {}
         self._run_selections: dict[str, ModelSelection] = {}
         self._stats: dict[str, ModelRuntimeStats] = {}
+        self._probe_stats: dict[str, ModelProbeStats] = {}
         self._lock = Lock()
 
     def list_connections(self) -> list[ProviderConnection]:
@@ -72,6 +76,7 @@ class InMemoryModelRegistryRepository:
             for model_id in model_ids:
                 self._models.pop(model_id, None)
                 self._stats.pop(model_id, None)
+                self._probe_stats.pop(model_id, None)
 
     def list_models(self) -> list[RegisteredModel]:
         with self._lock:
@@ -116,6 +121,7 @@ class InMemoryModelRegistryRepository:
         with self._lock:
             self._models.pop(model_id, None)
             self._stats.pop(model_id, None)
+            self._probe_stats.pop(model_id, None)
 
     def get_session_preference(self, session_id: str) -> SessionModelPreference | None:
         with self._lock:
@@ -159,6 +165,15 @@ class InMemoryModelRegistryRepository:
     def upsert_runtime_stats(self, stats: ModelRuntimeStats) -> ModelRuntimeStats:
         with self._lock:
             self._stats[stats.model_id] = stats
+            return stats
+
+    def get_probe_stats(self, model_id: str) -> ModelProbeStats | None:
+        with self._lock:
+            return self._probe_stats.get(model_id)
+
+    def upsert_probe_stats(self, stats: ModelProbeStats) -> ModelProbeStats:
+        with self._lock:
+            self._probe_stats[stats.model_id] = stats
             return stats
 
 
@@ -461,6 +476,56 @@ class PostgresModelRegistryRepository:
             ).fetchone()
         return _stats_from_row(row)
 
+    def get_probe_stats(self, model_id: str) -> ModelProbeStats | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT model_id, sample_count, success_count, failure_count,
+                          latency_samples_ms, last_latency_ms, last_success_at,
+                          last_failure_at, last_error, updated_at
+                   FROM model_probe_stats WHERE model_id = %s""",
+                (model_id,),
+            ).fetchone()
+        return _probe_stats_from_row(row) if row else None
+
+    def upsert_probe_stats(self, stats: ModelProbeStats) -> ModelProbeStats:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO model_probe_stats (
+                    model_id, sample_count, success_count, failure_count,
+                    latency_samples_ms, last_latency_ms, last_success_at,
+                    last_failure_at, last_error, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (model_id) DO UPDATE SET
+                    sample_count = EXCLUDED.sample_count,
+                    success_count = EXCLUDED.success_count,
+                    failure_count = EXCLUDED.failure_count,
+                    latency_samples_ms = EXCLUDED.latency_samples_ms,
+                    last_latency_ms = EXCLUDED.last_latency_ms,
+                    last_success_at = EXCLUDED.last_success_at,
+                    last_failure_at = EXCLUDED.last_failure_at,
+                    last_error = EXCLUDED.last_error,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING model_id, sample_count, success_count, failure_count,
+                          latency_samples_ms, last_latency_ms, last_success_at,
+                          last_failure_at, last_error, updated_at
+                """,
+                (
+                    stats.model_id,
+                    stats.sample_count,
+                    stats.success_count,
+                    stats.failure_count,
+                    Jsonb(list(stats.latency_samples_ms)),
+                    stats.last_latency_ms,
+                    stats.last_success_at,
+                    stats.last_failure_at,
+                    stats.last_error,
+                    stats.updated_at,
+                ),
+            ).fetchone()
+        return _probe_stats_from_row(row)
+
     def _connect(self):
         return _require_psycopg().connect(self._database_url)
 
@@ -520,6 +585,16 @@ def _stats_from_row(row: tuple[Any, ...]) -> ModelRuntimeStats:
         failure_count=int(row[3]), ttft_samples_ms=tuple(row[4] or []),
         total_latency_samples_ms=tuple(row[5] or []), last_success_at=row[6],
         last_failure_at=row[7], last_error=row[8], updated_at=row[9]
+    )
+
+
+def _probe_stats_from_row(row: tuple[Any, ...]) -> ModelProbeStats:
+    return ModelProbeStats(
+        model_id=str(row[0]), sample_count=int(row[1]), success_count=int(row[2]),
+        failure_count=int(row[3]), latency_samples_ms=tuple(row[4] or []),
+        last_latency_ms=int(row[5]) if row[5] is not None else None,
+        last_success_at=row[6], last_failure_at=row[7], last_error=row[8],
+        updated_at=row[9],
     )
 
 

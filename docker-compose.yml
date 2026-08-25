@@ -15,6 +15,7 @@ x-app-environment: &app-environment
   LANGGRAPH_CHECKPOINTER: "postgres"
   MODEL_REGISTRY_STORE: "postgres"
   MODEL_SECRET_BACKEND: "encrypted_file"
+  MODEL_PROBE_INTERVAL_SECONDS: "${MODEL_PROBE_INTERVAL_SECONDS:-0}"
   RAG_VECTOR_STORE: "qdrant"
   PROJECT_MEMORY_STORE: "postgres"
   PROJECT_MEMORY_VECTOR_STORE: "qdrant"

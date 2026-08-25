@@ -168,6 +168,7 @@ class Settings:
     llm_circuit_error_rate_threshold: float = 0.5
     model_registry_store: str = "memory"
     model_secret_backend: str = "keyring"
+    model_probe_interval_seconds: float = 0.0
     session_token_budget: int = 0
     workspace_token_budget: int = 0
     token_budget_action: str = "reject"
@@ -716,6 +717,16 @@ class Settings:
             )
         if self.llm_max_retries < 0:
             raise ValueError("llm_max_retries must be greater than or equal to 0")
+        if not math.isfinite(self.model_probe_interval_seconds):
+            raise ValueError("model_probe_interval_seconds must be finite")
+        if 0 < self.model_probe_interval_seconds < 60:
+            raise ValueError(
+                "model_probe_interval_seconds must be 0 or at least 60"
+            )
+        if self.model_probe_interval_seconds < 0:
+            raise ValueError(
+                "model_probe_interval_seconds must be greater than or equal to 0"
+            )
         for name, value in (
             (
                 "llm_retry_base_delay_seconds",
