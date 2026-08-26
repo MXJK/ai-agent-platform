@@ -1244,6 +1244,13 @@ candidates. Source-backed mutable facts are hash-checked before injection and
 become `stale` after the source changes. Long-unconfirmed records are
 down-ranked rather than deleted solely because of age.
 
+Extraction deduplicates additional evidence by source kind, source ID, and path
+before selecting at most five sources. The first complete span/hash is retained;
+different hits in the same file are not spliced together. PostgreSQL ignores
+duplicate evidence IDs and existing source unique-key conflicts while other
+errors still roll back the transaction. This does not automatically replay old
+failed jobs; a completed job with zero stored candidates added no memories.
+
 Retrieval combines dense and lexical recall using weighted RRF, then reloads
 every result from the configured L1 source of truth to verify workspace,
 revision, status, expiry, and version. PostgreSQL/Qdrant remain available for

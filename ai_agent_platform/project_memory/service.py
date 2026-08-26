@@ -1044,19 +1044,28 @@ class ProjectMemoryService:
                 excerpt=candidate.content,
             )
         ]
-        for item in source_evidence[:5]:
-            evidence.append(
-                _evidence(
-                    memory.id,
-                    source_kind=str(item.get("kind") or "source"),
-                    source_id=str(item.get("source_id") or source_id),
-                    path=_optional_text(item.get("path"), 2000),
-                    start_line=_optional_int(item.get("start_line")),
-                    end_line=_optional_int(item.get("end_line")),
-                    content_hash=_optional_hash(item.get("content_hash")),
-                    excerpt=_optional_text(item.get("excerpt"), 500),
-                )
+        seen_sources = {
+            (item.source_kind, item.source_id, item.path) for item in evidence
+        }
+        for item in source_evidence:
+            source = _evidence(
+                memory.id,
+                source_kind=str(item.get("kind") or "source"),
+                source_id=str(item.get("source_id") or source_id),
+                path=_optional_text(item.get("path"), 2000),
+                start_line=_optional_int(item.get("start_line")),
+                end_line=_optional_int(item.get("end_line")),
+                content_hash=_optional_hash(item.get("content_hash")),
+                excerpt=_optional_text(item.get("excerpt"), 500),
             )
+            key = (source.source_kind, source.source_id, source.path)
+            if key in seen_sources:
+                continue
+            # Match the persisted source key, keeping the first span/hash intact.
+            seen_sources.add(key)
+            evidence.append(source)
+            if len(evidence) == 6:  # Origin plus at most five distinct sources.
+                break
         return self._store_with_conflict_policy(
             memory,
             evidence=evidence,

@@ -423,6 +423,89 @@ class ProjectMemoryServiceTests(unittest.TestCase):
             self.assertEqual(job.candidate_count, 1)
             self.assertIn("no eligible model", job.error or "")
 
+    def test_fallback_extraction_deduplicates_sources_before_evidence_limit(self) -> None:
+        class RaisingLLM:
+            def complete(self, prompt: str):
+                raise ValueError("invalid model JSON")
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "project"
+            workspace.mkdir()
+            service, repository, _ = self._service(
+                root, extractor=LLMMemoryExtractor(RaisingLLM())
+            )
+            service._workspace_service.register(
+                workspace_id="project", root_path=str(workspace)
+            )
+            service.ensure_workspace_admin(workspace_id="project", actor_user_id="alice")
+            service.update_settings(
+                workspace_id="project", actor_user_id="alice", mode="auto"
+            )
+            source = {
+                "kind": "search_match",
+                "source_id": "run_duplicates",
+                "path": ".dockerignore",
+                "start_line": 1,
+                "end_line": 2,
+                "content_hash": "a" * 64,
+                "excerpt": "Build exclusions",
+            }
+            payload = dict(
+                workspace_id="project",
+                actor_user_id="alice",
+                source_type="agent_run",
+                source_id="run_duplicates",
+                user_message="Inspect the build configuration",
+                assistant_message="The Docker build excludes local cache files.",
+                verified=True,
+                source_evidence=[
+                    source,
+                    *[
+                        dict(source, start_line=10, end_line=12, content_hash="b" * 64)
+                        for _ in range(5)
+                    ],
+                    dict(source, path="Dockerfile"),
+                    dict(source, source_id="run_other"),
+                    dict(source, kind="file"),
+                    {"kind": "validation_result", "source_id": "run_duplicates"},
+                    dict(source, path="over-budget.py"),
+                ],
+            )
+            job = service.extract_and_store(**payload)
+            assert job is not None
+            self.assertEqual(
+                (job.status, job.candidate_count, job.active_count),
+                ("completed", 1, 1),
+            )
+            self.assertIn("invalid model JSON", job.error or "")
+            memories = service.list_memories(
+                workspace_id="project", actor_user_id="alice", limit=10
+            )
+            self.assertEqual(len(memories), 1)
+            memory = repository.get_memory(memories[0].id)
+            assert memory is not None
+            self.assertEqual(
+                [
+                    (item.source_kind, item.source_id, item.path)
+                    for item in memory.evidence
+                ],
+                [
+                    ("agent_run", "run_duplicates", None),
+                    ("search_match", "run_duplicates", ".dockerignore"),
+                    ("search_match", "run_duplicates", "Dockerfile"),
+                    ("search_match", "run_other", ".dockerignore"),
+                    ("file", "run_duplicates", ".dockerignore"),
+                    ("validation_result", "run_duplicates", None),
+                ],
+            )
+            first = memory.evidence[1]
+            self.assertEqual(
+                (first.start_line, first.end_line, first.content_hash),
+                (1, 2, "a" * 64),
+            )
+            self.assertIsNone(service.extract_and_store(**payload))
+
     def test_dense_failure_falls_back_to_lexical_retrieval(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -840,9 +841,9 @@ class PostgresRepositoryTests(unittest.TestCase):
         evidence = MemoryEvidence(
             id="mev_0000000000000001",
             memory_id=memory.id,
-            source_kind="manual",
-            source_id="alice",
-            path=None,
+            source_kind="search_match",
+            source_id="run_duplicates",
+            path=".dockerignore",
             start_line=None,
             end_line=None,
             content_hash=None,
@@ -858,7 +859,9 @@ class PostgresRepositoryTests(unittest.TestCase):
             metadata={"status": "active"},
             created_at=now,
         )
-        connection = FakeConnection([None, None, None, None])
+        duplicate = replace(evidence, id="mev_0000000000000002", start_line=10)
+        other_file = replace(evidence, id="mev_0000000000000003", path="Dockerfile")
+        connection = FakeConnection([])
         with patch(
             "ai_agent_platform.repositories.project_memory._require_psycopg",
             return_value=object(),
@@ -872,7 +875,7 @@ class PostgresRepositoryTests(unittest.TestCase):
             repository._connect = lambda: connection
             stored = repository.create_memory(
                 memory,
-                evidence=[evidence],
+                evidence=[evidence, duplicate, other_file],
                 audit=audit,
             )
 
@@ -882,8 +885,99 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("INSERT INTO project_memory_evidence", sql)
         self.assertIn("INSERT INTO memory_audit_events", sql)
         self.assertIn("INSERT INTO memory_index_outbox", sql)
-        audit_params = connection.calls[2][1]
+        evidence_calls = [
+            call for call in connection.calls
+            if "INSERT INTO project_memory_evidence" in call[0]
+        ]
+        self.assertEqual(len(evidence_calls), 3)
+        for statement, _ in evidence_calls:
+            # Both ID replay and the independent source unique key are harmless.
+            self.assertIn("ON CONFLICT DO NOTHING", statement)
+        self.assertEqual(evidence_calls[0][1][1:5], evidence_calls[1][1][1:5])
+        self.assertNotEqual(evidence_calls[0][1][0], evidence_calls[1][1][0])
+        audit_params = next(
+            params for statement, params in connection.calls
+            if "INSERT INTO memory_audit_events" in statement
+        )
         self.assertNotIn(memory.content, repr(audit_params))
+
+    def test_project_memory_evidence_sql_skips_unique_conflicts_only(self) -> None:
+        # Exercise this portable INSERT against real local constraints without
+        # requiring PostgreSQL. Only the parameter placeholder syntax differs.
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        evidence = MemoryEvidence(
+            id="mev_first", memory_id="mem_1", source_kind="search_match",
+            source_id="run_1", path=".dockerignore", start_line=1, end_line=2,
+            content_hash="a" * 64, excerpt="Build exclusions", created_at=now,
+        )
+        with sqlite3.connect(":memory:") as connection:
+            connection.executescript("""
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE project_memories (id TEXT PRIMARY KEY);
+                INSERT INTO project_memories VALUES ('mem_1'), ('mem_2');
+                CREATE TABLE project_memory_evidence (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL REFERENCES project_memories(id),
+                    source_kind TEXT NOT NULL, source_id TEXT NOT NULL, path TEXT,
+                    start_line INTEGER, end_line INTEGER, content_hash TEXT,
+                    excerpt TEXT, created_at TEXT NOT NULL,
+                    UNIQUE (memory_id, source_kind, source_id, path)
+                );
+            """)
+
+            class LocalSQLConnection:
+                def execute(self, sql, params):
+                    return connection.execute(
+                        sql.replace("%s", "?"),
+                        tuple(
+                            p.isoformat() if isinstance(p, datetime) else p
+                            for p in params
+                        ),
+                    )
+
+            with patch(
+                "ai_agent_platform.repositories.project_memory._require_psycopg",
+                return_value=object(),
+            ):
+                repository = PostgresProjectMemoryRepository(database_url="unused")
+            local = LocalSQLConnection()
+            repository._insert_evidence(local, [
+                evidence, evidence,
+                replace(
+                    evidence, id="mev_duplicate", start_line=10,
+                    content_hash="b" * 64,
+                ),
+                replace(evidence, id="mev_other_file", path="Dockerfile"),
+            ])
+            repository._insert_evidence(local, [
+                replace(evidence, id="mev_replay"),
+                replace(evidence, id="mev_other_run", source_id="run_2"),
+                replace(evidence, id="mev_other_kind", source_kind="file"),
+                replace(evidence, id="mev_other_memory", memory_id="mem_2"),
+            ])
+            ids = {
+                row[0] for row in connection.execute(
+                    "SELECT id FROM project_memory_evidence"
+                )
+            }
+            self.assertEqual(ids, {
+                "mev_first", "mev_other_file", "mev_other_run",
+                "mev_other_kind", "mev_other_memory",
+            })
+            self.assertEqual(
+                connection.execute(
+                    "SELECT start_line, end_line, content_hash "
+                    "FROM project_memory_evidence WHERE id='mev_first'"
+                ).fetchone(),
+                (1, 2, "a" * 64),
+            )
+            for invalid in (
+                replace(evidence, id="mev_orphan", memory_id="missing"),
+                replace(evidence, id="mev_invalid", source_kind=None),
+            ):
+                with self.subTest(evidence_id=invalid.id):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        repository._insert_evidence(local, [invalid])
 
     def test_project_memory_optimistic_update_uses_expected_version(self) -> None:
         now = datetime(2026, 7, 30, tzinfo=timezone.utc)

@@ -1017,6 +1017,8 @@ class PostgresProjectMemoryRepository:
 
     def _insert_evidence(self, conn, evidence: list[MemoryEvidence]) -> None:
         for item in evidence:
+            # Retries can repeat an ID or a source tuple with a fresh ID. Both
+            # unique conflicts are harmless; FK/NOT NULL errors must still fail.
             conn.execute(
                 """
                 INSERT INTO project_memory_evidence (
@@ -1024,7 +1026,7 @@ class PostgresProjectMemoryRepository:
                     start_line, end_line, content_hash, excerpt, created_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     item.id,
