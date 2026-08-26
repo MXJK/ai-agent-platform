@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "MODEL-LATENCY-PROBES"
-next_action: "Authorize database migration 20260825_0025 and run root-stack browser QA before rollout."
+active_task: "SESSION-HISTORY-IN-PAGE"
+next_action: "Authorize Docker app rebuild; retain MODEL-LATENCY-PROBES migration and root-stack QA prerequisites."
 blockers: []
 last_verified_commit: "23c8d3b9eabbd54b503067e7470dcc9fe44d56c5"
-updated_at: "2026-08-25T12:11:10+08:00"
+updated_at: "2026-08-26T09:54:28+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -49,6 +49,7 @@ function loadAgentSubmissionHarness(fetchImplementation) {
     showToast = () => { testEvents.push("toast"); };
   `, context);
   return {
+    context,
     events,
     run: () => vm.runInContext(`runAgent({
       message: "检查消息时序",
@@ -137,4 +138,67 @@ test("message delivery state is explicit and clears after acceptance", () => {
   assert.equal(classes.size, 0);
   assert.equal(statusNode.hidden, true);
   assert.equal(statusNode.textContent, "");
+});
+
+function loadSessionNavigationHarness({ archived = false } = {}) {
+  const session = { id: "history_1", message_count: 1, archived_at: archived ? "2026-08-26" : null };
+  const message = { role: "user", content: "历史会话内容" };
+  const { context, events } = loadAgentSubmissionHarness(async (calls, path) => {
+    calls.push(`request:${path}`);
+    if (path.endsWith("/summary")) return { session_id: session.id, message_count: 1 };
+    if (path.endsWith("/messages")) return { messages: [message] };
+    if (path.endsWith("/token-usage")) return { total_tokens: 42 };
+    if (path === "/users/me/preferences") return { last_active_session_id: session.id };
+    if (path === `/sessions/${session.id}`) return session;
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  vm.runInContext(`
+    state.currentView = "sessions";
+    const nodes = new Map();
+    document.getElementById = (id) => {
+      if (!nodes.has(id)) nodes.set(id, { value: "", textContent: "" });
+      return nodes.get(id);
+    };
+    resetLatestAgentRunState = () => {};
+    invalidateSlashCapabilities = () => {};
+    renderSessionSummary = (summary, usage) => {
+      testEvents.push("summary:" + summary.session_id + ":" + usage.total_tokens);
+    };
+    renderMessages = (messages) => { testEvents.push("messages:" + messages[0].content); };
+    renderChatHistory = () => {};
+    applyConfigurationToInputs = () => {};
+    loadModelPreference = async () => {};
+    restoreComposerDraft = () => {};
+    updateSessionUrl = () => {};
+    replaceSessionInLists = () => {};
+    renderSessions = () => {};
+    updateContextSummary = () => {};
+    switchView = (view) => { state.currentView = view; testEvents.push("navigate:" + view); };
+    restoreLatestAgentRun = async () => {};
+    setRaw = () => {};
+  `, context);
+  return { context, events };
+}
+
+for (const archived of [false, true]) {
+  test(`opening an ${archived ? "archived" : "active"} history entry renders details without leaving sessions`, async () => {
+    const { context, events } = loadSessionNavigationHarness({ archived });
+
+    await vm.runInContext('handleSessionAction("history_1", "open")', context);
+
+    assert.equal(vm.runInContext("state.currentView", context), "sessions");
+    assert.equal(vm.runInContext("state.currentSession.id", context), "history_1");
+    assert.ok(events.includes("summary:history_1:42"));
+    assert.ok(events.includes("messages:历史会话内容"));
+    assert.equal(events.some((event) => event.startsWith("navigate:")), false);
+  });
+}
+
+test("direct session loading still opens the conversation workbench", async () => {
+  const { context, events } = loadSessionNavigationHarness();
+
+  await vm.runInContext('loadSession(true, "history_1")', context);
+
+  assert.equal(vm.runInContext("state.currentView", context), "chat");
+  assert.ok(events.includes("navigate:chat"));
 });

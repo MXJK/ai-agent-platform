@@ -4079,7 +4079,7 @@ async function refreshCurrentSessionMetadata() {
 
 async function handleSessionAction(sessionId, action) {
   if (action === "open") {
-    await loadSession(true, sessionId);
+    await loadSession(true, sessionId, { navigate: false });
     return;
   }
   if (action === "rename") {
