@@ -123,6 +123,7 @@ class LLMToolDecision:
     stop_reason: str
     usage: LLMUsage | None = None
     provider_items: list[dict[str, Any]] | None = None
+    answer_delta_count: int = 0
     route_trace: dict[str, Any] | None = None
 
 
@@ -440,6 +441,7 @@ class LLMClient:
         alias_tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         (
             provider,
@@ -527,6 +529,17 @@ class LLMClient:
             candidate_error: LLMProviderError | None = None
             attempt_messages = list(messages)
             attempt = 0
+            stream_started = False
+            first_delta_at: float | None = None
+
+            def forward_delta(text: str) -> None:
+                nonlocal stream_started, first_delta_at
+                if text and on_delta is not None:
+                    stream_started = True
+                    if first_delta_at is None:
+                        first_delta_at = time.perf_counter()
+                    on_delta(text)
+
             while True:
                 attempt_started = time.perf_counter()
                 try:
@@ -549,11 +562,15 @@ class LLMClient:
                         aliases,
                         max_output_tokens=request_plan.max_output_tokens,
                         disable_tool_calls=disable_tool_calls,
+                        **({"on_delta": forward_delta} if on_delta is not None else {}),
                     )
                     self._observe_success(
                         candidate,
                         started_at=attempt_started,
-                        ttft_ms=None,
+                        ttft_ms=(
+                            (first_delta_at - attempt_started) * 1000
+                            if first_delta_at is not None else None
+                        ),
                     )
                     usage = decision.usage or LLMUsage(
                         input_tokens=request_plan.input_tokens,
@@ -584,6 +601,10 @@ class LLMClient:
                         error=str(exc),
                     )
                     candidate_error = exc
+                    if stream_started:
+                        # Never silently replay or switch models after public text.
+                        exc.retryable = False
+                        break
                     if exc.code == "context_overflow":
                         break
                     retry_limit = self._retry_limit(exc)
@@ -611,8 +632,11 @@ class LLMClient:
                 code=candidate_error.code,
                 message=str(candidate_error),
                 retryable=candidate_error.retryable,
-                after_stream_start=False,
+                after_stream_start=stream_started,
             )
+            if stream_started:
+                candidate_error.route_trace = trace.to_dict()
+                raise candidate_error
             if candidate_error.code == "context_overflow":
                 candidate_error.route_trace = trace.to_dict()
                 raise candidate_error
@@ -887,6 +911,7 @@ class LLMClient:
         reason: str,
         tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         """Produce one final, text-only turn over the complete tool transcript.
 
@@ -916,6 +941,7 @@ class LLMClient:
             alias_tools=final_tools,
             max_output_tokens=max_output_tokens,
             disable_tool_calls=True,
+            **({"on_delta": on_delta} if on_delta is not None else {}),
         )
         if decision.tool_calls:
             raise LLMProviderError(
@@ -1144,11 +1170,18 @@ class LLMClient:
         *,
         max_output_tokens: int,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         adapter = self._provider_adapters.get(candidate.provider)
         if adapter is not None:
             # Adapters have no tool-choice channel, so a text-only turn keeps
             # offering them nothing to call.
+            stream_tools = getattr(adapter, "stream_tools", None)
+            if on_delta is not None and callable(stream_tools):
+                return stream_tools(
+                    messages, [] if disable_tool_calls else tools,
+                    model=candidate.model, on_delta=on_delta,
+                )
             return adapter.decide_tools(
                 messages,
                 [] if disable_tool_calls else tools,
@@ -1162,6 +1195,7 @@ class LLMClient:
                 candidate.model,
                 max_output_tokens=max_output_tokens,
                 disable_tool_calls=disable_tool_calls,
+                on_delta=on_delta,
             )
         if candidate.provider == "deepseek":
             return self._decide_deepseek_tools(
@@ -1171,6 +1205,7 @@ class LLMClient:
                 candidate.model,
                 max_output_tokens=max_output_tokens,
                 disable_tool_calls=disable_tool_calls,
+                on_delta=on_delta,
             )
         if candidate.provider == "anthropic":
             return self._decide_anthropic_tools(
@@ -1180,6 +1215,7 @@ class LLMClient:
                 candidate.model,
                 max_output_tokens=max_output_tokens,
                 disable_tool_calls=disable_tool_calls,
+                on_delta=on_delta,
             )
         if candidate.provider == "google":
             return self._decide_google_tools(
@@ -1189,6 +1225,7 @@ class LLMClient:
                 candidate.model,
                 max_output_tokens=max_output_tokens,
                 disable_tool_calls=disable_tool_calls,
+                on_delta=on_delta,
             )
         if candidate.provider == "fake":
             return self._decide_fake_tools(messages, candidate.model)
@@ -1246,6 +1283,7 @@ class LLMClient:
         *,
         max_output_tokens: int,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         api_key = self._api_key("openai")
         if not api_key:
@@ -1270,13 +1308,15 @@ class LLMClient:
                 "tool_choice": "none" if disable_tool_calls else "auto",
                 "parallel_tool_calls": not disable_tool_calls,
             })
-        body = self._post_json(
+        body = self._native_tool_response(
+            "openai",
             "https://api.openai.com/v1/responses",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             payload=payload,
+            on_delta=on_delta,
         )
         output = body.get("output", [])
         output = output if isinstance(output, list) else []
@@ -1337,6 +1377,7 @@ class LLMClient:
         *,
         max_output_tokens: int,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         api_key = self._api_key("anthropic")
         if not api_key:
@@ -1370,7 +1411,8 @@ class LLMClient:
             })
         if system:
             payload["system"] = "\n\n".join(system)
-        body = self._post_json(
+        body = self._native_tool_response(
+            "anthropic",
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": api_key,
@@ -1378,6 +1420,7 @@ class LLMClient:
                 "Content-Type": "application/json",
             },
             payload=payload,
+            on_delta=on_delta,
         )
         content = body.get("content", [])
         content = content if isinstance(content, list) else []
@@ -1422,6 +1465,7 @@ class LLMClient:
         *,
         max_output_tokens: int,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         api_key = self._api_key("deepseek")
         if not api_key:
@@ -1450,13 +1494,15 @@ class LLMClient:
                 ],
                 "tool_choice": "none" if disable_tool_calls else "auto",
             })
-        body = self._post_json(
+        body = self._native_tool_response(
+            "deepseek",
             "https://api.deepseek.com/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             payload=payload,
+            on_delta=on_delta,
         )
         choices = body.get("choices")
         first = choices[0] if isinstance(choices, list) and choices else {}
@@ -1506,6 +1552,7 @@ class LLMClient:
         *,
         max_output_tokens: int,
         disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         api_key = self._api_key("google")
         if not api_key:
@@ -1549,11 +1596,48 @@ class LLMClient:
             ),
         )
         try:
-            response = client.models.generate_content(
-                model=model,
-                contents=_google_tool_contents(messages, types, reverse_aliases),
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
+            request = {
+                "model": model,
+                "contents": _google_tool_contents(messages, types, reverse_aliases),
+                "config": types.GenerateContentConfig(**config_kwargs),
+            }
+            if on_delta is None:
+                response = client.models.generate_content(**request)
+            else:
+                parts = []
+                usage_metadata = None
+                finish_reason = None
+                stream = client.models.generate_content_stream(**request)
+                try:
+                    for chunk in stream:
+                        candidates = getattr(chunk, "candidates", None) or []
+                        current = candidates[0] if candidates else None
+                        content = getattr(current, "content", None)
+                        for part in getattr(content, "parts", None) or []:
+                            parts.append(part)
+                            if part.text and not getattr(part, "thought", False):
+                                on_delta(part.text)
+                        usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
+                        finish_reason = _google_candidate_finish_reason(current) or finish_reason
+                finally:
+                    close_stream = getattr(stream, "close", None)
+                    if callable(close_stream):
+                        close_stream()
+                if not finish_reason:
+                    raise LLMProviderError(
+                        "native tool stream ended before its terminal event",
+                        code="llm_stream_incomplete", retryable=True,
+                        usage=_google_usage(usage_metadata),
+                    )
+                response = types.GenerateContentResponse(
+                    candidates=[types.Candidate(
+                        content=types.Content(role="model", parts=parts),
+                        finish_reason=finish_reason,
+                    )],
+                    usage_metadata=usage_metadata,
+                )
+        except LLMProviderError:
+            raise
         except Exception as exc:
             request_error = _classify_wrapped_request_error(exc)
             if request_error is not None:
@@ -1587,7 +1671,7 @@ class LLMClient:
                     )
                 )
             text = getattr(part, "text", None)
-            if isinstance(text, str) and text:
+            if isinstance(text, str) and text and not getattr(part, "thought", False):
                 text_parts.append(text)
         provider_items: list[dict[str, Any]] = []
         if content is not None:
@@ -2423,6 +2507,34 @@ class LLMClient:
                 code="llm_invalid_response",
             )
         return body
+
+    def _native_tool_response(
+        self,
+        provider: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        on_delta: Callable[[str], None] | None,
+    ) -> dict[str, Any]:
+        if on_delta is None:
+            return self._post_json(url, headers=headers, payload=payload)
+        from ai_agent_platform.integrations.native_streaming import NativeStreamAccumulator
+
+        accumulator = NativeStreamAccumulator(provider, on_delta)
+        payload = {**payload, "stream": True}
+        if provider == "deepseek":
+            payload["stream_options"] = {"include_usage": True}
+        try:
+            for _ in self._stream_http_sse(
+                url, headers=headers, payload=payload, parser=accumulator.parse,
+            ):
+                pass
+            return accumulator.result()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LLMProviderError(
+                "invalid native tool stream", code="llm_invalid_response",
+            ) from exc
 
     def _stream_factory(
         self,

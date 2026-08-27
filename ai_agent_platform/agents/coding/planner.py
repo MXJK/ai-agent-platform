@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from typing import Any
@@ -200,6 +201,7 @@ class LLMStructuredAgentPlanner:
         tool_specs: list[ToolSpec],
         *,
         max_output_tokens: int | None = None,
+        on_delta=None,
     ) -> LLMToolDecision:
         decide = getattr(self._llm_client, "decide_tools", None)
         if not callable(decide):
@@ -209,6 +211,8 @@ class LLMStructuredAgentPlanner:
             if max_output_tokens is not None
             else {}
         )
+        if on_delta is not None and "on_delta" in inspect.signature(decide).parameters:
+            kwargs["on_delta"] = on_delta
         return decide(messages, tool_specs, **kwargs)
 
     def finalize_tool_session(
@@ -218,6 +222,7 @@ class LLMStructuredAgentPlanner:
         reason: str,
         tool_specs: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        on_delta=None,
     ) -> LLMToolDecision:
         finalize = getattr(self._llm_client, "finalize_tools", None)
         if not callable(finalize):
@@ -227,6 +232,8 @@ class LLMStructuredAgentPlanner:
             if max_output_tokens is not None
             else {}
         )
+        if on_delta is not None and "on_delta" in inspect.signature(finalize).parameters:
+            kwargs["on_delta"] = on_delta
         return finalize(
             messages,
             reason=reason,

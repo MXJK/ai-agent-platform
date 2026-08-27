@@ -335,7 +335,14 @@ class ToolLoopNodes:
                 mutation_tokens=self._mutation_max_output_tokens,
             )
         try:
-            decision = decide(native_messages, tool_specs, **decide_kwargs)
+            decision = self._completion_policy.stream_decision(
+                state, decide, native_messages, tool_specs,
+                allow_text=(
+                    state.get("intent") != "change_planning"
+                    or _has_successful_native_mutation(state)
+                ),
+                **decide_kwargs,
+            )
         except LLMProviderError as exc:
             if exc.code != "context_overflow":
                 raise
@@ -383,7 +390,14 @@ class ToolLoopNodes:
                 terminal["artifacts"] = artifacts
                 return terminal
             try:
-                decision = decide(native_messages, tool_specs, **decide_kwargs)
+                decision = self._completion_policy.stream_decision(
+                    state, decide, native_messages, tool_specs,
+                    allow_text=(
+                        state.get("intent") != "change_planning"
+                        or _has_successful_native_mutation(state)
+                    ),
+                    **decide_kwargs,
+                )
             except LLMProviderError as retry_exc:
                 if retry_exc.code != "context_overflow":
                     raise

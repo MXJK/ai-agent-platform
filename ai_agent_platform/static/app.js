@@ -1786,6 +1786,7 @@ function auditEventTitle(event) {
     tool_result: `工具完成 · ${output.name || "未知工具"}`,
     tool_error: `工具失败 · ${output.name || "未知工具"}`,
     answer_delta: "回答增量",
+    answer_reset: "重置临时回答",
     answer_completed: "回答生成完成",
   };
   return labels[event.type] || event.summary || event.type || "审计事件";
@@ -6036,10 +6037,11 @@ function agentProgressBodyFromEvents(events, runId = state.latestRunId) {
     latest_node: latestEvent.node || trace.at(-1)?.node || null,
     trace,
     stream_events: events,
-    streamed_answer: events
-      .filter((event) => event.type === "answer_delta")
-      .map((event) => String(event.output?.text || ""))
-      .join(""),
+    streamed_answer: events.reduce((answer, event) => {
+      if (event.type === "answer_reset") return "";
+      if (event.type === "answer_delta") return answer + String(event.output?.text || "");
+      return answer;
+    }, ""),
   };
 }
 

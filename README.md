@@ -283,10 +283,13 @@ Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；�
 为一行工作摘要，仍可展开复盘真实阶段与工具，不暴露模型私有 chain-of-thought。
 Chat 使用模型提供方的 SSE 用量；Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
 输入、输出、思考和总 Token。Agent 在执行源头实时追加 `node_started`、
-`node_completed`、`reasoning_summary`、工具生命周期和 `answer_delta` 事件；cursor SSE
-直接驱动当前阶段、工具结果和回答正文，只在终态读取一次完整 Run 快照，断流时才回退
-轮询。`reasoning_summary` 是面向用户的结构化进度摘要，不包含 Provider 私有
-chain-of-thought。快速任务仍使用有界短暂回放保持阶段顺序。
+`node_completed`、`reasoning_summary`、工具生命周期和回答事件；OpenAI、Anthropic、
+DeepSeek 与 Google 的原生工具调用正文在 Provider 生成时即写入 `answer_delta`，cursor
+SSE 直接驱动当前阶段、工具结果和回答正文，只在终态读取一次完整 Run 快照，断流时才
+回退轮询。如果同一模型轮次随后选择工具，`answer_reset` 会清除临时前言，避免污染工具
+执行后的最终回答。`reasoning_summary` 是面向用户的结构化进度摘要，不包含 Provider
+私有 chain-of-thought；工具参数和私有思考也不会作为回答 delta 推送。快速任务仍使用
+有界短暂回放保持阶段顺序。
 
 所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
 Ask 和嵌入调用都会记录：
@@ -1022,8 +1025,10 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 `AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。图节点包装器在进入和
 完成边界分别追加 `node_started` / `node_completed`，并把节点的安全摘要记录为
 `reasoning_summary`。工具执行按 call ID 实时追加 `tool_selected`、`tool_started`、
-`tool_result` 或 `tool_error`；最终回答以有界小批次写入 `answer_delta`，并以
-`answer_completed` 收尾。稳定 event key 让 Worker 重投与终态投影不会重复同一工具事实。
+`tool_result` 或 `tool_error`；Provider 文本生成期间以有界小批次写入 `answer_delta`，
+工具轮次的临时文字通过 `answer_reset` 清除，最终以 `answer_completed` 收尾。工具参数只在
+完整聚合和 JSON 校验后执行，Provider 私有思考不进入回答事件；首个公开 delta 之后也不再
+静默重试或切换模型。稳定 event key 让 Worker 重投与终态投影不会重复同一执行事实。
 浏览器按事件类型归约当前节点、实时活动和回答正文，在终态读取一次完整 Run 快照；连接
 失败或提前结束时回退到状态轮询。`run.read_artifact` 继续复用无正文的 observability
 投影，保留 artifact 身份、读取范围与完整性元数据而不泄漏正文。审批恢复在重新入队前

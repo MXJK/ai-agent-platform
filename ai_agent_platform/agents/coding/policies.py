@@ -20,6 +20,73 @@ from ai_agent_platform.agents.coding.runtime_support import (
 ANSWER_EVENT_CHUNK_CHARS = 512
 
 
+class AnswerEventStream:
+    """One tentative answer; reset boundaries survive reconnects and node retries."""
+
+    def __init__(
+        self,
+        run_id: str,
+        sink: Callable[..., Any] | None,
+        *,
+        stream_id: str,
+    ) -> None:
+        self.run_id = run_id
+        self.sink = sink
+        self.stream_id = stream_id
+        self.parts: list[str] = []
+        self.pending = ""
+        self.delta_count = 0
+        self.last_flush = perf_counter()
+
+    def _event(self, kind: str, output: dict[str, Any], key: str) -> None:
+        if self.run_id and self.sink is not None:
+            self.sink(
+                run_id=self.run_id,
+                event_type=kind,
+                node="compose_answer",
+                summary="Agent answer text updated.",
+                output=output,
+                event_key=f"answer:{self.stream_id}:{key}",
+            )
+
+    def emit(self, text: str) -> None:
+        if not text:
+            return
+        self.parts.append(text)
+        self.pending += text
+        if (
+            not self.delta_count
+            or len(self.pending) >= 128
+            or perf_counter() - self.last_flush >= 0.1
+        ):
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.pending:
+            return
+        if not self.delta_count:
+            self._event("answer_reset", {}, "start")
+        for offset in range(0, len(self.pending), ANSWER_EVENT_CHUNK_CHARS):
+            self.delta_count += 1
+            self._event(
+                "answer_delta",
+                {
+                    "text": self.pending[
+                        offset : offset + ANSWER_EVENT_CHUNK_CHARS
+                    ],
+                    "index": self.delta_count,
+                },
+                str(self.delta_count),
+            )
+        self.pending = ""
+        self.last_flush = perf_counter()
+
+    def discard(self) -> None:
+        self.pending = ""
+        if self.delta_count:
+            self._event("answer_reset", {}, "discard")
+
+
 class ControlPolicy:
     """Consume queued steering and control actions at safe graph boundaries."""
 
@@ -136,6 +203,41 @@ class CompletionPolicy:
     def set_event_sink(self, event_sink: Callable[..., Any]) -> None:
         self._event_sink = event_sink
 
+    def stream_decision(
+        self,
+        state: CodingAgentState,
+        decide: Callable[..., Any],
+        *args: Any,
+        allow_text: bool = True,
+        stream_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        if (
+            not allow_text or state.get("evaluation_isolated", False)
+            or "on_delta" not in inspect.signature(decide).parameters
+        ):
+            return decide(*args, **kwargs)
+        stream = AnswerEventStream(
+            str(state.get("run_id") or ""),
+            self._event_sink,
+            stream_id=stream_id or f"turn:{state.get('native_tool_round', 0) + 1}",
+        )
+        try:
+            decision = decide(*args, on_delta=stream.emit, **kwargs)
+            if (
+                decision.tool_calls
+                or "".join(stream.parts).strip() != decision.text.strip()
+            ):
+                stream.discard()
+                return decision
+            stream.flush()
+            return replace(decision, answer_delta_count=stream.delta_count)
+        except Exception as exc:
+            stream.discard()
+            if stream.delta_count and hasattr(exc, "retryable"):
+                exc.retryable = False
+            raise
+
     def finalize_native_session(
         self,
         state: CodingAgentState,
@@ -153,12 +255,29 @@ class CompletionPolicy:
                     }
                     if "max_output_tokens" in inspect.signature(finalize).parameters:
                         kwargs["max_output_tokens"] = self._final_max_output_tokens
-                    decision = finalize(native_messages, **kwargs)
+                    decision = self.stream_decision(
+                        state,
+                        finalize,
+                        native_messages,
+                        stream_id=(
+                            f"finalize:{reason}:{state.get('native_tool_round', 0)}"
+                        ),
+                        **kwargs,
+                    )
                 else:
-                    decision = finalize(native_messages, reason=reason)
+                    decision = self.stream_decision(
+                        state,
+                        finalize,
+                        native_messages,
+                        reason=reason,
+                        stream_id=(
+                            f"finalize:{reason}:{state.get('native_tool_round', 0)}"
+                        ),
+                    )
             else:
                 decide = getattr(self._planner, "decide_tool_calls")
-                decision = decide(
+                decision = self.stream_decision(
+                    state, decide,
                     native_messages
                     + [
                         {
@@ -171,6 +290,9 @@ class CompletionPolicy:
                         }
                     ],
                     [],
+                    stream_id=(
+                        f"finalize:{reason}:{state.get('native_tool_round', 0)}"
+                    ),
                 )
             if decision.tool_calls:
                 raise ValueError("finalization returned tool calls")
@@ -205,43 +327,41 @@ class CompletionPolicy:
 
     def compose_answer(self, state: CodingAgentState) -> CodingAgentState:
         run_id = str(state.get("run_id") or "")
-        delta_index = 0
-
-        def emit_delta(text: str) -> None:
-            nonlocal delta_index
-            if not text or not run_id or self._event_sink is None:
-                return
-            for offset in range(0, len(text), ANSWER_EVENT_CHUNK_CHARS):
-                chunk = text[offset : offset + ANSWER_EVENT_CHUNK_CHARS]
-                delta_index += 1
-                self._event_sink(
-                    run_id=run_id,
-                    event_type="answer_delta",
-                    node="compose_answer",
-                    summary="Agent generated answer text.",
-                    output={"text": chunk, "index": delta_index},
-                    event_key=f"answer-delta:{delta_index}",
-                )
+        stream = AnswerEventStream(
+            run_id,
+            self._event_sink,
+            stream_id=f"compose:{state.get('native_tool_round', 0)}",
+        )
+        prior_delta_count = 0
 
         try:
             compose = getattr(self._planner, "compose_answer", None)
             native_answer = str(state.get("native_tool_answer") or "").strip()
             if native_answer:
                 answer = native_answer
-                emit_delta(answer)
+                last_assistant = next((
+                    message for message in reversed(state.get("native_tool_messages", []))
+                    if message.get("role") == "assistant"
+                ), {})
+                if str(last_assistant.get("content") or "").strip() == answer:
+                    prior_delta_count = int(last_assistant.get("answer_delta_count") or 0)
+                if not prior_delta_count:
+                    stream.emit(answer)
             else:
                 if callable(compose) and "on_delta" in inspect.signature(compose).parameters:
-                    answer = compose(state, on_delta=emit_delta)
+                    answer = compose(state, on_delta=stream.emit)
                 else:
                     answer = (
                         compose(state)
                         if callable(compose)
                         else RuleBasedAgentPlanner().compose_answer(state)
                     )
-                if answer and delta_index == 0:
-                    emit_delta(str(answer))
+                if answer and not stream.parts:
+                    stream.emit(str(answer))
+            stream.flush()
             errors: list[dict[str, Any]] = []
         except Exception as exc:
+            stream.discard()
             answer = ""
             errors = [
                 _error_from_exception(
@@ -257,7 +377,10 @@ class CompletionPolicy:
                 event_type="answer_completed",
                 node="compose_answer",
                 summary="Agent answer generation completed.",
-                output={"answer_chars": len(answer), "delta_count": delta_index},
+                output={
+                    "answer_chars": len(answer),
+                    "delta_count": prior_delta_count or stream.delta_count,
+                },
                 event_key="answer-completed",
             )
         return {
@@ -304,6 +427,11 @@ def native_assistant_message(decision: Any) -> dict[str, Any]:
         "content": str(decision.text or ""),
         "provider": str(decision.provider or ""),
         "provider_items": decision.provider_items or [],
+        **(
+            {"answer_delta_count": decision.answer_delta_count}
+            if getattr(decision, "answer_delta_count", 0)
+            else {}
+        ),
         "tool_calls": [
             {
                 "call_id": call.call_id,

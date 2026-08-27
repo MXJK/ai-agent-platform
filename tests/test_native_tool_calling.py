@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import httpx
 from google.genai import types
 
 from ai_agent_platform.agents.coding.models import CodingAgentState
@@ -1540,6 +1541,195 @@ class RefusalThenMutationPlanner(ScriptedNativePlanner):
             provider="test",
             stop_reason="end_turn",
         )
+
+
+class NativeAnswerStreamingTests(unittest.TestCase):
+    def _client(self, provider):
+        return LLMClient(
+            Settings(llm_provider=provider, llm_model="stream-test", llm_max_retries=2),
+            credential_resolver=lambda _: "test-key",
+            sleep=lambda _: None,
+        )
+
+    def _http_turn(self, provider, events, *, on_delta=None, finalize=False):
+        client = self._client(provider)
+        deltas = []
+        observed = {}
+        test_case = self
+
+        class ResponseStream(httpx.SyncByteStream):
+            def __iter__(self):
+                for event in events:
+                    if callable(event):
+                        event(deltas)
+                    elif isinstance(event, Exception):
+                        raise event
+                    else:
+                        yield ("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode()
+
+            def close(self):
+                observed["closed"] = True
+
+        def respond(request):
+            payload = json.loads(request.content)
+            observed["payload"] = payload
+            test_case.assertTrue(payload["stream"])
+            return httpx.Response(200, stream=ResponseStream())
+
+        def collect(text):
+            deltas.append(text)
+            if on_delta:
+                on_delta(text)
+
+        http_client = httpx.Client(transport=httpx.MockTransport(respond))
+        with patch("httpx.Client", return_value=http_client), patch.object(
+            client, "_count_tool_input_tokens", return_value=(10, "test")
+        ):
+            if finalize:
+                decision = client.finalize_tools(
+                    [{"role": "user", "content": "explain"}],
+                    tools=[_tool_spec()], reason="soft_budget", on_delta=collect,
+                )
+            else:
+                decision = client.decide_tools(
+                    [{"role": "user", "content": "explain"}],
+                    [_tool_spec()], on_delta=collect,
+                )
+        self.assertTrue(observed["closed"])
+        return decision, deltas, observed["payload"]
+
+    def _text_events(self, provider, probe):
+        if provider == "openai":
+            return [
+                {"type": "response.output_text.delta", "delta": "第一段"}, probe,
+                {"type": "response.output_text.delta", "delta": "，第二段"},
+                {"type": "response.completed", "response": {
+                    "status": "completed", "output": [{"type": "message", "content": [
+                        {"type": "output_text", "text": "第一段，第二段"},
+                    ]}], "usage": {"input_tokens": 10, "output_tokens": 6},
+                }},
+            ]
+        if provider == "anthropic":
+            return [
+                {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "第一段"}}, probe,
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "，第二段"}},
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}},
+                {"type": "message_stop"},
+            ]
+        return [
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "private thought"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "第一段"}}]}, probe,
+            {"choices": [{"index": 0, "delta": {"content": "，第二段"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 6}},
+        ]
+
+    def test_http_native_answers_arrive_before_completion_and_preserve_usage(self):
+        for provider in ("openai", "anthropic", "deepseek"):
+            for finalize in (False, True):
+                with self.subTest(provider=provider, finalize=finalize):
+                    def probe(deltas):
+                        self.assertEqual(deltas, ["第一段"])
+                    decision, deltas, payload = self._http_turn(
+                        provider, self._text_events(provider, probe), finalize=finalize,
+                    )
+                    self.assertEqual("".join(deltas), decision.text)
+                    self.assertEqual(decision.text, "第一段，第二段")
+                    self.assertEqual(decision.usage, LLMUsage(10, 6))
+                    self.assertFalse(decision.tool_calls)
+                    if finalize:
+                        self.assertEqual(payload["tool_choice"], {"type": "none"} if provider == "anthropic" else "none")
+
+    def test_native_tool_stream_keeps_arguments_and_signed_private_blocks(self):
+        fixtures = {
+            "openai": [
+                {"type": "response.function_call_arguments.delta", "delta": '{"path":'},
+                {"type": "response.completed", "response": {"output": [
+                    {"type": "reasoning", "id": "r1", "encrypted_content": "opaque"},
+                    {"type": "function_call", "call_id": "c1", "name": "repo_read_file", "arguments": '{"path":"README.md"}'},
+                ]}},
+            ],
+            "anthropic": [
+                {"type": "message_start", "message": {}},
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "private"}},
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "opaque"}},
+                {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "c1", "name": "repo_read_file", "input": {}}},
+                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"path":'}},
+                {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '"README.md"}'}},
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+                {"type": "message_stop"},
+            ],
+            "deepseek": [
+                {"choices": [{"delta": {"reasoning_content": "private"}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "repo_read_file", "arguments": '{"path":'}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"README.md"}'}}]}, "finish_reason": "tool_calls"}]},
+            ],
+        }
+        for provider, events in fixtures.items():
+            with self.subTest(provider=provider):
+                decision, deltas, _ = self._http_turn(provider, events)
+                self.assertEqual(deltas, [])
+                self.assertEqual(decision.tool_calls[0].call_id, "c1")
+                self.assertEqual(decision.tool_calls[0].name, "repo.read_file")
+                self.assertEqual(decision.tool_calls[0].arguments, {"path": "README.md"})
+                self.assertIn("opaque" if provider != "deepseek" else "private", json.dumps(decision.provider_items))
+
+    def test_partial_stream_failure_is_not_retried_or_switched(self):
+        client = self._client("deepseek")
+        deltas = []
+        def attempt(*args, on_delta, **kwargs):
+            on_delta("partial")
+            raise LLMProviderError("connection lost", code="llm_read_error", retryable=True)
+        with patch.object(client, "_count_tool_input_tokens", return_value=(10, "test")), patch.object(
+            client, "_decide_tools_once", side_effect=attempt,
+        ) as request:
+            with self.assertRaises(LLMProviderError) as caught:
+                client.decide_tools([{"role": "user", "content": "hello"}], [_tool_spec()], on_delta=deltas.append)
+        self.assertEqual(request.call_count, 1)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(deltas, ["partial"])
+        failure = caught.exception.route_trace["failures"][-1]
+        self.assertEqual(failure["provider"], "deepseek")
+        self.assertTrue(failure["after_stream_start"])
+
+    def test_missing_terminal_event_is_not_accepted_as_a_complete_answer(self):
+        for provider in ("openai", "anthropic", "deepseek"):
+            with self.subTest(provider=provider):
+                events = self._text_events(provider, lambda _: None)
+                # Stop immediately after the first visible fragment.
+                cutoff = next(i for i, event in enumerate(events) if callable(event))
+                with self.assertRaises(LLMProviderError) as caught:
+                    self._http_turn(provider, events[:cutoff])
+                self.assertEqual(caught.exception.code, "llm_stream_incomplete")
+                self.assertFalse(caught.exception.retryable)
+
+    def test_google_native_stream_preserves_parts_and_filters_thought_text(self):
+        deltas = []
+        client = self._client("google")
+        def chunks(**kwargs):
+            yield types.GenerateContentResponse(candidates=[types.Candidate(content=types.Content(parts=[
+                types.Part(text="private", thought=True), types.Part(text="第一段"),
+            ]))])
+            self.assertEqual(deltas, ["第一段"])
+            yield types.GenerateContentResponse(candidates=[types.Candidate(content=types.Content(parts=[
+                types.Part(text="，第二段", thought_signature=b"signed"),
+            ]), finish_reason="STOP")], usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=10, candidates_token_count=6, thoughts_token_count=3,
+            ))
+        sdk_client = SimpleNamespace(models=SimpleNamespace(generate_content_stream=chunks), close=lambda: None)
+        with patch("google.genai.Client", return_value=sdk_client):
+            decision = client._decide_google_tools(
+                [{"role": "user", "content": "hello"}], [_tool_spec()], {"repo_read_file": "repo.read_file"},
+                "stream-test", max_output_tokens=100, on_delta=deltas.append,
+            )
+        self.assertEqual(decision.text, "".join(deltas))
+        self.assertEqual(decision.usage, LLMUsage(10, 6, 3))
+        self.assertEqual(len(decision.provider_items[0]["parts"]), 3)
+        self.assertTrue(decision.provider_items[0]["parts"][-1]["thought_signature"])
 
 
 class NativeToolLoopTests(unittest.TestCase):

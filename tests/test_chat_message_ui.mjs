@@ -202,3 +202,36 @@ test("direct session loading still opens the conversation workbench", async () =
   assert.equal(vm.runInContext("state.currentView", context), "chat");
   assert.ok(events.includes("navigate:chat"));
 });
+
+test("Agent answer deltas render while running and resets remove tool preambles", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  vm.runInContext(`
+    renderExecutionProcess = () => {};
+    renderInlineAgentCheckpoint = () => {};
+    renderInlineAgentControls = () => {};
+    renderInlineRunFooter = () => {};
+    renderMarkdown = (text) => text;
+    performance = { now: () => 100 };
+    const contentNode = { innerHTML: "" };
+    const events = [
+      { type: "answer_reset", sequence: 1, status: "running", output: {} },
+      { type: "answer_delta", sequence: 2, status: "running", output: { text: "temporary tool preamble" } },
+    ];
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
+    events.push({ type: "answer_reset", sequence: 3, status: "running", output: {} });
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
+    events.push({ type: "answer_delta", sequence: 4, status: "running", output: { text: "第一段" } });
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
+    events.push({ type: "answer_delta", sequence: 5, status: "running", output: { text: "，第二段" } });
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
+    renderAgentChatResponse(contentNode, {
+      ...agentProgressBodyFromEvents(events), status: "completed", result: { answer: "第一段，第二段" },
+    }, 0);
+    testEvents.push(contentNode.innerHTML);
+  `, context);
+  assert.deepEqual(context.testEvents, ["temporary tool preamble", "", "第一段", "第一段，第二段", "第一段，第二段"]);
+});

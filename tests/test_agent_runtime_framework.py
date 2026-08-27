@@ -15,9 +15,10 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
 )
 from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_READ_TOOL
+from ai_agent_platform.agents.coding.policies import CompletionPolicy, native_assistant_message
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
-from ai_agent_platform.integrations.llm import LLMToolDecision
+from ai_agent_platform.integrations.llm import LLMProviderError, LLMToolDecision
 from ai_agent_platform.integrations.tools import ToolCall, ToolRegistry
 
 
@@ -164,6 +165,120 @@ class BlockingClassificationPlanner(SteeringPlanner):
 
 
 class AgentRuntimeFrameworkTests(unittest.TestCase):
+    def test_native_answer_is_persisted_while_model_is_still_generating(self) -> None:
+        first_delta = Event()
+        release_answer = Event()
+
+        class StreamingPlanner(SteeringPlanner):
+            def decide_tool_calls(self, messages, tool_specs, *, on_delta=None):
+                on_delta("第一段")
+                first_delta.set()
+                if not release_answer.wait(timeout=5):
+                    raise TimeoutError("test did not release generation")
+                on_delta("，第二段")
+                return replace(super().decide_tool_calls(messages, tool_specs), text="第一段，第二段")
+
+        store = InMemoryAgentRunStore()
+        runtime = CodingAgentRuntime(planner=StreamingPlanner(), run_store=store)
+        results = []
+        with TemporaryDirectory() as root:
+            queued = runtime.create_queued_run(conversation_id="live_answer", workspace_id="workspace_main", workspace_root=root)
+            worker = Thread(target=lambda: results.append(runtime.run(
+                run_id=queued.run_id, conversation_id=queued.conversation_id,
+                user_input="explain this repository", history=[],
+                workspace_id=queued.workspace_id, workspace_root=root,
+            )))
+            worker.start()
+            try:
+                self.assertTrue(first_delta.wait(timeout=5))
+                live = store.list_events(queued.run_id)
+                self.assertEqual([e.output["text"] for e in live if e.type == "answer_delta"], ["第一段"])
+                self.assertNotIn("answer_completed", [e.type for e in live])
+                self.assertEqual(store.get(queued.run_id).status, "running")
+                cursor = live[-1].sequence
+            finally:
+                release_answer.set()
+                worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0].answer, "第一段，第二段")
+        final = store.list_events(queued.run_id)
+        self.assertEqual("".join(e.output["text"] for e in final if e.type == "answer_delta"), results[0].answer)
+        self.assertEqual([e.type for e in final].count("answer_completed"), 1)
+        self.assertEqual([e.output["text"] for e in store.list_events(queued.run_id, after=cursor) if e.type == "answer_delta"], ["，第二段"])
+
+    def test_streamed_tool_preamble_is_reset_and_finalization_is_not_duplicated(self) -> None:
+        events = []
+        class Planner(SteeringPlanner):
+            def finalize_tool_session(self, messages, *, reason, tool_specs, max_output_tokens, on_delta=None):
+                on_delta("最终")
+                self_test.assertTrue(any(e["event_type"] == "answer_delta" for e in events))
+                on_delta("答案")
+                return replace(super().decide_tool_calls(messages, tool_specs), text="最终答案")
+        self_test = self
+        policy = CompletionPolicy(planner=Planner(), visible_tool_specs=lambda _: [], final_max_output_tokens=100)
+        policy.set_event_sink(lambda **event: events.append(event))
+        state = {"run_id": "stream_policy", "trace": []}
+        def tools(*, on_delta=None):
+            on_delta("先查文件")
+            return LLMToolDecision(text="先查文件", tool_calls=[ToolCall(name="repo.read_file", arguments={"path": "README.md"})], model="test", provider="test", stop_reason="tool_use")
+        decision = policy.stream_decision(state, tools)
+        self.assertEqual(decision.answer_delta_count, 0)
+        self.assertEqual(events[-1]["event_type"], "answer_reset")
+        answer, message, errors = policy.finalize_native_session(state, [], reason="budget")
+        self.assertFalse(errors)
+        count_before = sum(e["event_type"] == "answer_delta" for e in events)
+        result = policy.compose_answer({**state, "native_tool_answer": answer, "native_tool_messages": [message]})
+        self.assertEqual(result["answer"], "最终答案")
+        self.assertEqual(sum(e["event_type"] == "answer_delta" for e in events), count_before)
+        visible = ""
+        for event in events:
+            if event["event_type"] == "answer_reset":
+                visible = ""
+            elif event["event_type"] == "answer_delta":
+                visible += event["output"]["text"]
+        self.assertEqual(visible, answer)
+
+    def test_failed_stream_discards_partial_text_and_keeps_retry_disabled(self) -> None:
+        events = []
+        policy = CompletionPolicy(planner=SteeringPlanner(), visible_tool_specs=lambda _: [], final_max_output_tokens=100)
+        policy.set_event_sink(lambda **event: events.append(event))
+        def fail(*, on_delta):
+            on_delta("incomplete")
+            raise LLMProviderError("stream lost", retryable=True)
+        with self.assertRaises(LLMProviderError) as caught:
+            policy.stream_decision({"run_id": "failed_stream"}, fail)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(events[-1]["event_type"], "answer_reset")
+
+    def test_change_completion_gate_does_not_publish_unverified_answer(self) -> None:
+        class UnverifiedPlanner(SteeringPlanner):
+            def __init__(self):
+                super().__init__()
+                self.delta_callbacks = []
+
+            def classify_intent(self, user_input):
+                return {**super().classify_intent(user_input), "intent": "change_planning"}
+
+            def decide_tool_calls(self, messages, tool_specs, *, on_delta=None):
+                self.delta_callbacks.append(on_delta)
+                if on_delta:
+                    on_delta("unverified change claim")
+                return replace(super().decide_tool_calls(messages, tool_specs), text="unverified change claim")
+
+        store = InMemoryAgentRunStore()
+        planner = UnverifiedPlanner()
+        with TemporaryDirectory() as root:
+            result = CodingAgentRuntime(planner=planner, run_store=store).run(
+                conversation_id="gate_stream", user_input="implement a new file", history=[],
+                workspace_id="workspace_main", workspace_root=root,
+            )
+        self.assertEqual(result.status, "blocked")
+        # The completion gate withheld live callbacks for all unverified turns.
+        # compose_answer may still publish the final blocked explanation afterward.
+        self.assertGreaterEqual(len(planner.delta_callbacks), 2)
+        self.assertTrue(all(callback is None for callback in planner.delta_callbacks[:-1]))
+        self.assertTrue(callable(planner.delta_callbacks[-1]))
+
     def test_node_progress_events_are_persisted_before_run_completion(self) -> None:
         planner = BlockingClassificationPlanner()
         store = InMemoryAgentRunStore()

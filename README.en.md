@@ -256,11 +256,14 @@ metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
 usage across structured planning and answer generation. The UI shows input,
 output, thinking, and total tokens per response. Agent execution emits
 `node_started`, `node_completed`, `reasoning_summary`, tool lifecycle, and
-`answer_delta` events at their source. Cursor SSE drives the current stage,
-tool results, and answer text directly, with one full Run snapshot fetched at a
-terminal state and polling used only after a disconnect. A
-`reasoning_summary` is a user-facing structured progress summary, never the
-provider's private chain-of-thought. Fast runs retain a bounded short replay.
+answer events at their source. OpenAI, Anthropic, DeepSeek, and Google native
+tool turns publish bounded `answer_delta` events while the provider is still
+generating. Cursor SSE drives the current stage, tool results, and answer text
+directly, with one full Run snapshot fetched at a terminal state and polling
+used only after a disconnect. If the same turn later selects a tool,
+`answer_reset` removes its tentative preamble. Tool arguments and
+provider-private reasoning never become answer deltas. Fast runs retain a
+bounded short replay.
 
 All model use is persisted in one ledger. Chat, Agent model turns, semantic
 conversation compression, RAG Ask, and embedding calls carry an `operation`,
@@ -1082,9 +1085,13 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 The event stream uses resumable cursors. Graph-node wrappers append
 `node_started` and `node_completed` at execution boundaries and persist a safe
 `reasoning_summary`. Tool calls append idempotent `tool_selected`, `tool_started`,
-and `tool_result` or `tool_error` events by call ID. Final answer text is stored
-in bounded `answer_delta` batches followed by `answer_completed`. Stable event
-keys prevent worker replay and terminal projection from duplicating tool facts.
+and `tool_result` or `tool_error` events by call ID. Provider text is stored in
+bounded `answer_delta` batches while it is generated, tentative tool-turn text
+is cleared with `answer_reset`, and the accepted answer ends with
+`answer_completed`. Tool arguments execute only after complete JSON aggregation
+and validation. Once public text has been emitted, the request is not silently
+retried or moved to another model. Stable event keys prevent worker replay and
+terminal projection from duplicating execution facts.
 The browser reduces each event type into the current stage, live activity list,
 and answer body, fetches one complete Run snapshot at a terminal state, and
 falls back to status polling if the stream fails or ends early. Provider-private
