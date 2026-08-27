@@ -208,7 +208,6 @@ test("Agent answer deltas render while running and resets remove tool preambles"
   vm.runInContext(`
     renderExecutionProcess = () => {};
     renderInlineAgentCheckpoint = () => {};
-    renderInlineAgentControls = () => {};
     renderInlineRunFooter = () => {};
     renderMarkdown = (text) => text;
     performance = { now: () => 100 };
@@ -234,4 +233,72 @@ test("Agent answer deltas render while running and resets remove tool preambles"
     testEvents.push(contentNode.innerHTML);
   `, context);
   assert.deepEqual(context.testEvents, ["temporary tool preamble", "", "第一段", "第一段，第二段", "第一段，第二段"]);
+});
+
+test("composer Run control changes from pause to continue for the current Agent Run", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  vm.runInContext(`
+    state.conversationId = "sess_1";
+    state.latestRunId = "run_1";
+    state.latestRunConversationId = "sess_1";
+    state.latestRunStatus = "running";
+  `, context);
+
+  const running = vm.runInContext("composerRunControlPresentation()", context);
+  assert.equal(running.action, "pause");
+  assert.equal(running.icon, "pause");
+  assert.equal(running.label, "暂停 Agent");
+
+  vm.runInContext('state.latestRunStatus = "paused"', context);
+  const paused = vm.runInContext("composerRunControlPresentation()", context);
+  assert.equal(paused.action, "continue");
+  assert.equal(paused.icon, "arrow-up");
+  assert.equal(paused.label, "继续 Agent");
+
+  vm.runInContext('state.latestRunConversationId = "sess_other"', context);
+  assert.equal(vm.runInContext("composerRunControlPresentation()", context), null);
+});
+
+test("paused composer control continues with optional input", async () => {
+  const { context, events } = loadAgentSubmissionHarness(async (calls, path, options) => {
+    calls.push(`request:${path}`);
+    calls.push(`message:${JSON.parse(options.body).message}`);
+    return {
+      run_id: "run_1",
+      conversation_id: "sess_1",
+      status: "running",
+      trace: [],
+    };
+  });
+  vm.runInContext(`
+    state.conversationId = "sess_1";
+    state.latestRunId = "run_1";
+    state.latestRunConversationId = "sess_1";
+    state.latestRunStatus = "paused";
+    performance = { now: () => 100 };
+    const composerInput = { value: "只补测试，不改 API" };
+    document.getElementById = (id) => id === "chat-message-input" ? composerInput : null;
+    chatContentForRun = () => null;
+    updateComposerAvailability = () => { testEvents.push("availability"); };
+    clearComposerInput = () => { composerInput.value = ""; testEvents.push("clear"); };
+    renderAgentRun = (body) => {
+      state.latestRunStatus = body.status;
+      state.latestRunBody = body;
+      testEvents.push("render:" + body.status);
+    };
+    setChatStatusFromRun = () => { testEvents.push("status"); };
+    watchRunUntilTerminal = async () => {
+      state.latestRunStatus = "completed";
+      testEvents.push("watch");
+      return { run_id: "run_1", conversation_id: "sess_1", status: "completed" };
+    };
+  `, context);
+
+  await vm.runInContext("handleComposerRunControl()", context);
+
+  assert.ok(events.includes("request:/agent/runs/run_1/continue"));
+  assert.ok(events.includes("message:只补测试，不改 API"));
+  assert.ok(events.includes("clear"));
+  assert.ok(events.includes("render:running"));
+  assert.ok(events.includes("watch"));
 });

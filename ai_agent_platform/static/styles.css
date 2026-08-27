@@ -2332,6 +2332,40 @@ body.is-resizing-panels .panel-resizer::after {
   padding: 3px 2px 0 7px;
 }
 
+.composer-run-control {
+  width: 40px;
+  height: 40px;
+  border-color: rgba(234, 240, 247, 0.82);
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--canvas-deep);
+}
+
+.composer-run-control:hover {
+  border-color: var(--ink);
+  background: var(--ink-soft);
+  color: var(--canvas-deep);
+}
+
+.composer-run-control[data-action="continue"] {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--canvas-deep);
+}
+
+.composer-run-control[data-action="continue"]:hover {
+  border-color: var(--brand-strong);
+  background: var(--brand-strong);
+}
+
+.composer-run-control[aria-busy="true"]::before {
+  display: none;
+}
+
+.composer-run-control[aria-busy="true"] .app-icon {
+  animation: status-pulse 1.1s ease-in-out infinite;
+}
+
 .composer-hints {
   display: flex;
   flex-wrap: wrap;
@@ -2642,40 +2676,6 @@ body.is-resizing-panels .panel-resizer::after {
   font-size: 9px;
 }
 
-.inline-agent-controls {
-  display: grid;
-  width: min(640px, 100%);
-  gap: 8px;
-  margin-top: 12px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface-soft);
-}
-
-.inline-agent-controls label {
-  display: grid;
-  gap: 6px;
-}
-
-.inline-agent-controls label > span {
-  color: var(--ink-soft);
-  font-size: 10px;
-  font-weight: 750;
-}
-
-.inline-agent-controls small {
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.inline-agent-controls input {
-  min-width: 0;
-  background: var(--canvas-deep);
-  font-size: 11px;
-}
-
-.inline-control-actions,
 .change-review-actions,
 .change-review-actions > div {
   display: flex;
@@ -2683,11 +2683,6 @@ body.is-resizing-panels .panel-resizer::after {
   gap: 8px;
 }
 
-.inline-control-actions {
-  justify-content: flex-end;
-}
-
-.inline-control-error,
 .change-review-error {
   margin: 0;
   color: var(--red);
@@ -6430,19 +6425,16 @@ body.inspector-hidden .inspector {
     width: 100%;
   }
 
-  .inline-agent-controls,
   .inline-change-review {
     width: 100%;
   }
 
-  .inline-control-actions,
   .change-review-actions,
   .change-review-actions > div {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .inline-control-actions .button,
   .change-review-actions .button {
     width: 100%;
   }

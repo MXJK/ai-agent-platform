@@ -68,6 +68,8 @@ const state = {
   latestRunStatus: "",
   latestRunConversationId: "",
   latestRunBody: null,
+  composerRunControlBusy: false,
+  composerPauseRequestedRunId: "",
   checkpointHistory: [],
   checkpointRunId: "",
   selectedCheckpointId: "",
@@ -1638,11 +1640,79 @@ function updateComposerAvailability() {
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
   $("composer-mode-input").disabled = archived || streaming;
-  $("send-chat-btn").disabled = archived || streaming || agentNeedsWorkspace || empty;
+  const runControl = updateComposerRunControl({ archived });
+  $("send-chat-btn").disabled = Boolean(runControl)
+    || archived
+    || streaming
+    || agentNeedsWorkspace
+    || empty;
   if (archived) {
     setChatStatus("已归档 · 恢复后可继续", "warning");
   }
   renderSessionModelControls();
+}
+
+function composerRunControlPresentation({ archived = false } = {}) {
+  if (
+    archived
+    || !state.latestRunId
+    || state.latestRunConversationId !== state.conversationId
+  ) {
+    return null;
+  }
+  if (state.latestRunStatus === "running") {
+    const pending = state.composerPauseRequestedRunId === state.latestRunId;
+    return {
+      action: "pause",
+      icon: "pause",
+      label: pending ? "正在暂停 Agent" : "暂停 Agent",
+      pending,
+    };
+  }
+  if (state.latestRunStatus === "paused") {
+    return {
+      action: "continue",
+      icon: "arrow-up",
+      label: "继续 Agent",
+      pending: false,
+    };
+  }
+  return null;
+}
+
+function updateComposerRunControl({ archived = false } = {}) {
+  if (
+    state.composerPauseRequestedRunId
+    && state.latestRunStatus !== "running"
+  ) {
+    state.composerPauseRequestedRunId = "";
+  }
+  const presentation = composerRunControlPresentation({ archived });
+  const button = $("agent-run-control-btn");
+  const sendButton = $("send-chat-btn");
+  const input = $("chat-message-input");
+  if (!input.dataset.defaultPlaceholder) {
+    input.dataset.defaultPlaceholder = input.placeholder;
+  }
+  button.hidden = !presentation;
+  sendButton.hidden = Boolean(presentation);
+  input.placeholder = presentation?.action === "continue"
+    ? "补充要求（可选），点击右侧继续…"
+    : input.dataset.defaultPlaceholder;
+  if (!presentation) {
+    button.disabled = true;
+    button.removeAttribute("data-action");
+    button.removeAttribute("aria-busy");
+    return null;
+  }
+  const busy = state.composerRunControlBusy || presentation.pending;
+  button.dataset.action = presentation.action;
+  button.disabled = busy;
+  button.setAttribute("aria-label", presentation.label);
+  button.setAttribute("title", presentation.label);
+  button.setAttribute("aria-busy", String(busy));
+  button.querySelector("use").setAttribute("href", `#icon-${presentation.icon}`);
+  return presentation;
 }
 
 function setChatStatus(label, status = "neutral") {
@@ -3710,6 +3780,8 @@ function resetLatestAgentRunState() {
   state.latestRunStatus = "";
   state.latestRunConversationId = "";
   state.latestRunBody = null;
+  state.composerRunControlBusy = false;
+  state.composerPauseRequestedRunId = "";
   state.checkpointHistory = [];
   state.checkpointRunId = "";
   state.selectedCheckpointId = "";
@@ -4499,6 +4571,10 @@ function renderInlineAgentCheckpoint(contentNode, body) {
   const status = agentRunStatus(body);
   let card = bubble.querySelector(".inline-agent-checkpoint");
   const shouldFocusCheckpoint = !card || card.dataset.status !== status;
+  if (status === "paused") {
+    card?.remove();
+    return;
+  }
   if (!SUSPENDED_RUN_STATUSES.has(status)) {
     if (!card?.dataset.decision) {
       card?.remove();
@@ -4572,21 +4648,19 @@ function renderInlineAgentCheckpoint(contentNode, body) {
       </div>
     `;
   } else {
-    const needsInput = status === "waiting_input";
-    const question = pending.question
-      || (needsInput ? "Agent 需要你补充信息后才能继续。" : "Agent 已在安全边界暂停。你可以补充新的方向后继续。")
-    card.setAttribute("aria-label", needsInput ? "Agent 等待输入" : "Agent 已暂停");
+    const question = pending.question || "Agent 需要你补充信息后才能继续。";
+    card.setAttribute("aria-label", "Agent 等待输入");
     card.innerHTML = `
       <div class="inline-checkpoint-heading">
-        <span class="inline-checkpoint-mark" aria-hidden="true">${needsInput ? "?" : "Ⅱ"}</span>
+        <span class="inline-checkpoint-mark" aria-hidden="true">?</span>
         <div>
-          <span>${needsInput ? "需要你的输入" : "安全暂停"}</span>
+          <span>需要你的输入</span>
           <h3>${escapeHtml(question)}</h3>
         </div>
         <code>${escapeHtml(agentRunId(body))}</code>
       </div>
       <label class="inline-checkpoint-feedback">
-        <span>${needsInput ? "回复 Agent" : "继续时的补充要求"}</span>
+        <span>回复 Agent</span>
         <textarea rows="3" maxlength="4000" placeholder="${escapeHtml(question)}"></textarea>
       </label>
       <p class="inline-checkpoint-error" role="alert" hidden></p>
@@ -4614,43 +4688,6 @@ function renderInlineAgentCheckpoint(contentNode, body) {
   }
 }
 
-function renderInlineAgentControls(contentNode, body) {
-  const bubble = contentNode.closest(".chat-bubble");
-  if (!bubble) return;
-  const status = agentRunStatus(body);
-  let controls = bubble.querySelector(".inline-agent-controls");
-  if (!["queued", "running"].includes(status)) {
-    controls?.remove();
-    return;
-  }
-  const runId = agentRunId(body) || contentNode.closest("[data-agent-run-id]")?.dataset.agentRunId;
-  if (controls?.dataset.runId === runId) return;
-  if (!controls) {
-    controls = document.createElement("section");
-    bubble.appendChild(controls);
-  }
-  controls.className = "inline-agent-controls";
-  controls.dataset.runId = runId;
-  controls.setAttribute("aria-label", "Agent 运行控制");
-  controls.innerHTML = `
-    <label>
-      <span>运行中转向 <small>将在下一个安全边界生效</small></span>
-      <input maxlength="4000" placeholder="例如：先不要改 API，优先补回归测试" />
-    </label>
-    <p class="inline-control-error" role="alert" hidden></p>
-    <div class="inline-control-actions">
-      <button class="button ghost" type="button" data-inline-run-action="steer">发送转向</button>
-      <button class="button ghost" type="button" data-inline-run-action="pause">暂停</button>
-      <button class="button danger" type="button" data-inline-run-action="cancel">取消</button>
-    </div>
-  `;
-  controls.querySelectorAll("[data-inline-run-action]").forEach((button) => {
-    button.addEventListener("click", () => {
-      handleInlineRunControl(contentNode, body, button.dataset.inlineRunAction, controls);
-    });
-  });
-}
-
 async function handleInlineRunControl(contentNode, body, action, controls) {
   const runId = controls.dataset.runId;
   const conversationId = agentRunConversationId(body)
@@ -4667,11 +4704,9 @@ async function handleInlineRunControl(contentNode, body, action, controls) {
     input.focus();
     return;
   }
-  const errorNode = controls.querySelector(".inline-control-error");
   const checkpointErrorNode = controls.querySelector(".inline-checkpoint-error");
   controls.setAttribute("aria-busy", "true");
   controls.querySelectorAll("button, input, textarea").forEach((node) => { node.disabled = true; });
-  if (errorNode) errorNode.hidden = true;
   if (checkpointErrorNode) checkpointErrorNode.hidden = true;
   try {
     const nextBody = await fetchJson(
@@ -4694,10 +4729,9 @@ async function handleInlineRunControl(contentNode, body, action, controls) {
   } catch (error) {
     controls.removeAttribute("aria-busy");
     controls.querySelectorAll("button, input, textarea").forEach((node) => { node.disabled = false; });
-    const visibleErrorNode = errorNode || checkpointErrorNode;
-    if (visibleErrorNode) {
-      visibleErrorNode.textContent = humanizeError(error);
-      visibleErrorNode.hidden = false;
+    if (checkpointErrorNode) {
+      checkpointErrorNode.textContent = humanizeError(error);
+      checkpointErrorNode.hidden = false;
     }
   }
 }
@@ -5049,7 +5083,122 @@ function stopChat() {
   }
 }
 
+async function handleComposerRunControl() {
+  const presentation = composerRunControlPresentation({
+    archived: Boolean(state.currentSession?.archived_at),
+  });
+  if (!presentation || state.composerRunControlBusy || presentation.pending) return;
+  const runId = state.latestRunId;
+  const conversationId = state.latestRunConversationId || state.conversationId;
+  const contentNode = chatContentForRun(runId);
+  const input = $("chat-message-input");
+  const message = input.value.trim();
+  let pauseAccepted = false;
+  state.composerRunControlBusy = true;
+  if (presentation.action === "pause") {
+    state.composerPauseRequestedRunId = runId;
+  }
+  updateComposerAvailability();
+  try {
+    const nextBody = await fetchJson(
+      `/agent/runs/${encodeURIComponent(runId)}/${presentation.action}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          message: presentation.action === "continue" ? message : "",
+        }),
+      },
+    );
+    if (
+      runId !== state.latestRunId
+      || conversationId !== state.conversationId
+    ) {
+      return;
+    }
+    pauseAccepted = presentation.action === "pause";
+    if (presentation.action === "continue" && message) {
+      clearComposerInput();
+    }
+    renderAgentRun(nextBody);
+    if (
+      contentNode
+      && (
+        presentation.action === "continue"
+        || agentRunStatus(nextBody) !== "running"
+      )
+    ) {
+      renderAgentChatResponse(
+        contentNode,
+        nextBody,
+        performance.now() - (nextBody?.result?.metrics?.elapsed_ms || 0),
+      );
+    }
+    setChatStatusFromRun(nextBody);
+    if (presentation.action === "pause") {
+      showToast("暂停请求已发送，将在安全边界生效", "success");
+      return;
+    }
+
+    const startedAt = performance.now() - (nextBody?.result?.metrics?.elapsed_ms || 0);
+    const presenter = contentNode
+      ? createAgentProgressPresenter(contentNode, startedAt, {
+          initialTrace: agentRunTrace(nextBody),
+        })
+      : null;
+    if (contentNode) startResponseTimer(contentNode, startedAt);
+    state.composerRunControlBusy = false;
+    updateComposerAvailability();
+    if (presenter) await presenter.update(nextBody);
+    const finalBody = await watchRunUntilTerminal({
+      runId,
+      conversationId,
+      preserveChat: true,
+      onProgress: (latestBody) => presenter?.update(latestBody),
+    });
+    if (
+      runId !== state.latestRunId
+      || conversationId !== state.conversationId
+    ) {
+      if (contentNode) stopResponseTimer(contentNode);
+      return;
+    }
+    if (finalBody && presenter) await presenter.update(finalBody);
+    setChatStatusFromRun(finalBody || nextBody);
+    if (contentNode && TERMINAL_RUN_STATUSES.has(state.latestRunStatus)) {
+      stopResponseTimer(contentNode);
+    }
+    await Promise.allSettled([
+      refreshCurrentSessionMetadata(),
+      refreshRecentSessions(),
+    ]);
+  } catch (error) {
+    if (
+      conversationId === state.conversationId
+      && runId === state.latestRunId
+    ) {
+      showToast(humanizeError(error), "error");
+    }
+  } finally {
+    state.composerRunControlBusy = false;
+    if (!pauseAccepted && state.composerPauseRequestedRunId === runId) {
+      state.composerPauseRequestedRunId = "";
+    }
+    updateComposerAvailability();
+  }
+}
+
 async function submitComposerMessage() {
+  const runControl = composerRunControlPresentation({
+    archived: Boolean(state.currentSession?.archived_at),
+  });
+  if (runControl) {
+    if (runControl.action === "continue") {
+      await handleComposerRunControl();
+    } else {
+      showToast("Agent 仍在运行；可使用输入框右侧按钮先暂停", "warning");
+    }
+    return;
+  }
   const submission = composerSubmission($("chat-message-input").value);
   if (submission.invocation?.item.kind === "builtin") {
     await runBuiltinComposerCommand(
@@ -5103,8 +5252,10 @@ function renderAgentChatResponse(
       : "<p>Agent 已完成，但没有返回文本内容。</p>";
   } else if (!holdAnswer && actualStatus === "waiting_approval") {
     contentNode.innerHTML = "<p>Agent 已在执行前暂停。请检查下方计划并决定是否继续。</p>";
-  } else if (!holdAnswer && ["paused", "waiting_input"].includes(actualStatus)) {
-    contentNode.innerHTML = "<p>Agent 已在安全边界暂停，请在下方补充信息或继续。</p>";
+  } else if (!holdAnswer && actualStatus === "paused") {
+    contentNode.innerHTML = "<p>Agent 已在安全边界暂停。可在输入框补充要求，或点击右侧继续。</p>";
+  } else if (!holdAnswer && actualStatus === "waiting_input") {
+    contentNode.innerHTML = "<p>Agent 正在等待你的补充，请在下方回复后继续。</p>";
   } else if (!holdAnswer && actualStatus === "failed") {
     const detail = body.error || "Agent 运行失败，请打开 Trace 审计查看详情。";
     contentNode.innerHTML = failureRecoveryMarkup(detail, {
@@ -5130,7 +5281,6 @@ function renderAgentChatResponse(
   }
   if (!holdAnswer) {
     renderInlineAgentCheckpoint(contentNode, body);
-    renderInlineAgentControls(contentNode, body);
     const changeSetId = agentChangeSetId(body);
     if (changeSetId && FINAL_RUN_STATUSES.has(actualStatus)) {
       loadInlineChangeSet(agentRunId(body), contentNode).catch((error) => {
@@ -5959,6 +6109,7 @@ function renderAgentRun(body) {
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
+  updateComposerAvailability();
 }
 
 async function refreshRun(
@@ -6055,6 +6206,7 @@ function renderStreamedAgentProgress(events, runId = state.latestRunId) {
   };
   setTrace(body.trace);
   renderOverview();
+  updateComposerAvailability();
   return body;
 }
 
@@ -8567,6 +8719,7 @@ function bindEvents() {
 
   $("send-chat-btn").addEventListener("click", submitComposerMessage);
   $("stop-chat-btn").addEventListener("click", stopChat);
+  $("agent-run-control-btn").addEventListener("click", handleComposerRunControl);
   $("composer-mode-input").addEventListener("change", (event) => {
     persistComposerMode(event.target.value);
   });

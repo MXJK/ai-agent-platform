@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AGENT-FINAL-ANSWER-STREAM"
-next_action: "Review and commit the verified Agent final-answer streaming changes."
+active_task: "AGENT-COMPOSER-RUN-CONTROL"
+next_action: "Review and commit the verified compact Agent composer control changes."
 blockers: []
 last_verified_commit: "23c8d3b9eabbd54b503067e7470dcc9fe44d56c5"
-updated_at: "2026-08-27T21:33:48+08:00"
+updated_at: "2026-08-27T23:58:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

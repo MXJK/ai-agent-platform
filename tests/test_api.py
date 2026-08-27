@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260825-chat-message-ui-v2',
+            '/static/styles.css?v=20260827-composer-run-control',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260825-chat-message-ui-v2',
+            '/static/app.js?v=20260827-composer-run-control',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -920,7 +920,10 @@ class ApiTests(unittest.TestCase):
         self.assertIn("restoreLatestAgentRun", script_response.text)
         self.assertIn("inline-agent-checkpoint", script_response.text)
         self.assertIn("data-inline-agent-action", script_response.text)
-        self.assertIn("inline-agent-controls", script_response.text)
+        self.assertNotIn("inline-agent-controls", script_response.text)
+        self.assertIn('id="agent-run-control-btn"', response.text)
+        self.assertIn("composerRunControlPresentation", script_response.text)
+        self.assertIn("handleComposerRunControl", script_response.text)
         self.assertIn("data-inline-run-action", script_response.text)
         self.assertIn("renderInlineRunFooter", script_response.text)
         self.assertIn("data-inline-checkpoint-history", script_response.text)
@@ -975,7 +978,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".knowledge-workbench", stylesheet_response.text)
         self.assertIn(".document-actions", stylesheet_response.text)
         self.assertIn(".inline-agent-checkpoint", stylesheet_response.text)
-        self.assertIn(".inline-agent-controls", stylesheet_response.text)
+        self.assertNotIn(".inline-agent-controls", stylesheet_response.text)
+        self.assertIn(".composer-run-control", stylesheet_response.text)
         self.assertIn(".inline-run-footer", stylesheet_response.text)
         self.assertNotIn(".active-run-control", stylesheet_response.text)
         self.assertIn(".checkpoint-history-dialog", stylesheet_response.text)

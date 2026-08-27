@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260825-chat-message-ui-v2" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260827-composer-run-control" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -352,6 +352,16 @@
                   <button id="stop-chat-btn" class="button ghost hidden" type="button">
                     <svg class="app-icon" aria-hidden="true"><use href="#icon-stop"></use></svg>
                     停止
+                  </button>
+                  <button
+                    id="agent-run-control-btn"
+                    class="icon-button composer-run-control"
+                    type="button"
+                    aria-label="暂停 Agent"
+                    title="暂停 Agent"
+                    hidden
+                  >
+                    <svg class="app-icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
                   </button>
                   <button id="send-chat-btn" class="button primary" type="button">
                     发送
@@ -1326,6 +1336,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260825-chat-message-ui-v2" defer></script>
+    <script src="/static/app.js?v=20260827-composer-run-control" defer></script>
   </body>
 </html>
