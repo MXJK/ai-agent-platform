@@ -19,6 +19,28 @@ from ai_agent_platform.agents.coding.runtime_support import (
 
 ANSWER_EVENT_CHUNK_CHARS = 512
 
+_TOOL_CALL_TEXT_OPENERS = (
+    "<tool_calls",
+    "<invoke",
+    "<function_call",
+    "<tool_call",
+    "<antml:invoke",
+)
+
+
+def _looks_like_tool_call(text: str) -> bool:
+    """Detect a model answer that is actually an unexecuted tool-call block.
+
+    Some models emit their native tool-call markup as message content instead
+    of a provider ``tool_calls`` array. Treating such text as a terminal answer
+    leaks the raw block to the user, so answers shaped this way are replaced by
+    the deterministic grounded renderer.
+    """
+    stripped = str(text or "").lstrip()
+    if not stripped:
+        return False
+    return stripped.lower().startswith(_TOOL_CALL_TEXT_OPENERS)
+
 
 class AnswerEventStream:
     """One tentative answer; reset boundaries survive reconnects and node retries."""
@@ -297,6 +319,8 @@ class CompletionPolicy:
             if decision.tool_calls:
                 raise ValueError("finalization returned tool calls")
             answer = str(decision.text or "").strip()
+            if _looks_like_tool_call(answer):
+                raise ValueError("finalization returned tool-call-shaped text")
             if not answer:
                 raise ValueError("finalization returned an empty answer")
             return answer, native_assistant_message(decision), []
@@ -358,6 +382,11 @@ class CompletionPolicy:
                     )
                 if answer and not stream.parts:
                     stream.emit(str(answer))
+            if _looks_like_tool_call(answer):
+                stream.discard()
+                answer = str(RuleBasedAgentPlanner().compose_answer(state)).strip()
+                if answer:
+                    stream.emit(answer)
             stream.flush()
             errors: list[dict[str, Any]] = []
         except Exception as exc:

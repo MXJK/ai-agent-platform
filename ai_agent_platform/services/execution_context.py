@@ -867,14 +867,24 @@ class ExecutionContextFactory:
             if view is not None:
                 preferred_provider = view.get("provider")
                 preferred_model = view.get("model")
+        fallback_enabled = bool(values.get("fallback_enabled", True))
         if preferred_provider or preferred_model:
-            candidates = tuple(
+            preferred_candidates = tuple(
                 item
                 for item in configs
                 if (not preferred_provider or item.provider == preferred_provider)
                 and (not preferred_model or item.model == preferred_model)
                 and item.enabled
             )
+            if preferred_candidates or not fallback_enabled:
+                candidates = preferred_candidates
+            else:
+                # The preferred model is unavailable. The router will fall back
+                # to an auto-eligible model, so the frozen tool pool must reflect
+                # that fallback instead of collapsing to an empty capability set.
+                candidates = tuple(
+                    item for item in configs if item.enabled and item.auto_eligible
+                )
         else:
             candidates = tuple(
                 item for item in configs if item.enabled and item.auto_eligible

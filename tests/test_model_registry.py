@@ -18,7 +18,11 @@ from ai_agent_platform.integrations import (
     ModelRouter,
     RoutingRequirements,
 )
-from ai_agent_platform.integrations.llm import LLMStreamEvent, _parse_deepseek_event
+from ai_agent_platform.integrations.llm import (
+    LLMStreamEvent,
+    _parse_deepseek_event,
+    _parse_dsh_tool_calls,
+)
 from ai_agent_platform.integrations.tools import ToolSpec
 from ai_agent_platform.main import create_app
 from ai_agent_platform.model_registry import (
@@ -1006,6 +1010,108 @@ class DeepSeekProtocolTests(unittest.TestCase):
         self.assertEqual(decision.tool_calls[0].arguments, {"path": "README.md"})
         self.assertEqual(decision.tool_calls[0].source, "deepseek_native")
         self.assertEqual(decision.usage.total_tokens, 25)
+
+    def test_parse_dsh_tool_calls_extracts_invokes_and_parameters(self) -> None:
+        content = (
+            "<tool_calls>\n"
+            '<invoke name="repo_list_files">\n'
+            '<parameter name="path" string="true">src</parameter>\n'
+            '<parameter name="max_results">12</parameter>\n'
+            "</invoke>\n"
+            '<invoke name="repo.list_files">\n'
+            '<parameter name="pattern" string="true">**/*.py</parameter>\n'
+            "</invoke>\n"
+            "</tool_calls>\n"
+            "trailing prose"
+        )
+        calls, leftover = _parse_dsh_tool_calls(
+            content,
+            {"repo_list_files": "repo.list_files"},
+        )
+        self.assertEqual(
+            [call.name for call in calls],
+            ["repo.list_files", "repo.list_files"],
+        )
+        self.assertEqual(
+            calls[0].arguments,
+            {"path": "src", "max_results": 12},
+        )
+        self.assertEqual(calls[1].arguments, {"pattern": "**/*.py"})
+        self.assertEqual(calls[0].source, "deepseek_dsh_xml")
+        self.assertEqual(leftover, "trailing prose")
+
+    def test_parse_dsh_tool_calls_returns_none_for_plain_text(self) -> None:
+        self.assertIsNone(
+            _parse_dsh_tool_calls(
+                "Please read the README file.",
+                {"repo.read_file": "repo.read_file"},
+            )
+        )
+
+    def test_dsh_xml_content_is_parsed_as_deepseek_tool_calls(self) -> None:
+        client = LLMClient(
+            Settings(
+                llm_provider="fake",
+                llm_model="demo-stream-model",
+                embedding_provider="local",
+            ),
+            credential_resolver=lambda provider: (
+                "deepseek-secret" if provider == "deepseek" else None
+            ),
+        )
+        captured = {}
+
+        def fake_post(url, *, headers, payload):
+            captured.update(url=url, headers=headers, payload=payload)
+            return {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": (
+                                "<tool_calls>\n"
+                                '<invoke name="repo.list_files">\n'
+                                '<parameter name="pattern" string="true">**/*</parameter>\n'
+                                "</invoke>\n"
+                                "</tool_calls>"
+                            ),
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 6,
+                    "total_tokens": 26,
+                },
+            }
+
+        client._post_json = fake_post
+        tool = ToolSpec(
+            name="repo.list_files",
+            description="List files",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
+            output_schema={"type": "object"},
+            provider="local",
+        )
+
+        decision = client._decide_deepseek_tools(
+            [{"role": "user", "content": "list the files"}],
+            [tool],
+            {"repo.list_files": "repo.list_files"},
+            "deepseek-v4-flash",
+            max_output_tokens=512,
+        )
+
+        self.assertEqual(decision.tool_calls[0].name, "repo.list_files")
+        self.assertEqual(decision.tool_calls[0].arguments, {"pattern": "**/*"})
+        self.assertEqual(decision.tool_calls[0].source, "deepseek_dsh_xml")
+        self.assertEqual(decision.text, "")
+        self.assertEqual(decision.stop_reason, "tool_calls")
+        self.assertEqual(decision.provider_items, [])
 
 
 class SmartRoutingTests(unittest.TestCase):

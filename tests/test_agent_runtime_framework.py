@@ -15,7 +15,11 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
 )
 from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_READ_TOOL
-from ai_agent_platform.agents.coding.policies import CompletionPolicy, native_assistant_message
+from ai_agent_platform.agents.coding.policies import (
+    CompletionPolicy,
+    _looks_like_tool_call,
+    native_assistant_message,
+)
 from ai_agent_platform.agents.coding.store import InMemoryAgentRunStore
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
 from ai_agent_platform.integrations.llm import LLMProviderError, LLMToolDecision
@@ -237,6 +241,53 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
             elif event["event_type"] == "answer_delta":
                 visible += event["output"]["text"]
         self.assertEqual(visible, answer)
+
+    def test_looks_like_tool_call_detects_markup_and_ignores_prose(self) -> None:
+        self.assertTrue(
+            _looks_like_tool_call(
+                '<tool_calls><invoke name="repo.list_files">'
+                "</invoke></tool_calls>"
+            )
+        )
+        self.assertTrue(
+            _looks_like_tool_call(
+                '  <invoke name="repo.read_file">\n'
+                '<parameter name="path" string="true">a.py</parameter>\n'
+                "</invoke>"
+            )
+        )
+        self.assertFalse(_looks_like_tool_call("Here is the final answer."))
+        self.assertFalse(_looks_like_tool_call(""))
+        self.assertFalse(_looks_like_tool_call("   \n  "))
+
+    def test_tool_call_shaped_native_answer_is_replaced_by_grounded_fallback(self) -> None:
+        events = []
+        policy = CompletionPolicy(
+            planner=SteeringPlanner(),
+            visible_tool_specs=lambda _: [],
+            final_max_output_tokens=100,
+        )
+        policy.set_event_sink(lambda **event: events.append(event))
+        raw = (
+            "<tool_calls>\n"
+            '<invoke name="repo.list_files">\n'
+            '<parameter name="pattern" string="true">**/*</parameter>\n'
+            "</invoke>\n"
+            "</tool_calls>"
+        )
+        state = {
+            "run_id": "guard_stream",
+            "trace": [],
+            "workspace_id": "test-workspace",
+            "context_route": "repo",
+            "context_sources": [],
+            "native_tool_answer": raw,
+            "native_tool_messages": [{"role": "assistant", "content": raw}],
+        }
+        result = policy.compose_answer(state)
+        self.assertNotIn("<tool_calls>", result["answer"])
+        self.assertNotEqual(result["answer"], raw)
+        self.assertIn("无法可靠回答", result["answer"])
 
     def test_failed_stream_discards_partial_text_and_keeps_retry_disabled(self) -> None:
         events = []

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
+import html
 import json
 import math
 import random
@@ -1531,16 +1532,27 @@ class LLMClient:
                     source="deepseek_native",
                 )
             )
+        content_text = str(message.get("content") or "").strip()
+        provider_items = [message] if message else []
+        if not calls:
+            dsh = _parse_dsh_tool_calls(content_text, aliases)
+            if dsh is not None:
+                calls, content_text = dsh
+                finish_reason = "tool_calls"
+                # The raw provider message carries the DSH XML in its content,
+                # not a replayable tool_calls array; reconstructing the turn
+                # from the synthesized tool_calls keeps the transcript valid.
+                provider_items = []
         if not calls:
             _raise_truncated_tool_turn(finish_reason, usage)
         return LLMToolDecision(
-            text=str(message.get("content") or "").strip(),
+            text=content_text,
             tool_calls=calls,
             model=str(body.get("model") or model),
             provider="deepseek",
             stop_reason=finish_reason,
             usage=usage,
-            provider_items=[message] if message else [],
+            provider_items=provider_items,
         )
 
     def _decide_google_tools(
@@ -3678,6 +3690,101 @@ def _deepseek_tool_messages(
                 )
         converted.append(item)
     return converted
+
+
+_DSH_INVOKE_RE = re.compile(
+    r"<invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</invoke\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSH_PARAMETER_RE = re.compile(
+    r"<parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)</parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSH_WRAPPER_RE = re.compile(
+    r"</?\s*(?:tool_calls|antml:tool_calls)\s*>",
+    re.IGNORECASE,
+)
+
+
+def _parse_dsh_tool_calls(
+    content: str,
+    aliases: Mapping[str, str],
+) -> tuple[list[ToolCall], str] | None:
+    """Extract DeepSeek-Harness XML tool calls from assistant text content.
+
+    DSH models may emit their native ``<tool_calls><invoke ...><parameter ...>``
+    protocol as message content instead of an OpenAI-style ``tool_calls`` array.
+    This parser is deliberately deepseek-only: other providers never reach it,
+    and it is only consulted when no native ``tool_calls`` were returned.
+    """
+    text = str(content or "")
+    if "<invoke" not in text:
+        return None
+    calls: list[ToolCall] = []
+    spans: list[tuple[int, int]] = []
+    for match in _DSH_INVOKE_RE.finditer(text):
+        tool_name = _dsh_attr_value(match.group("attrs"), "name")
+        if not tool_name:
+            continue
+        arguments: dict[str, Any] = {}
+        for parameter in _DSH_PARAMETER_RE.finditer(match.group("body")):
+            parameter_name = _dsh_attr_value(parameter.group("attrs"), "name")
+            if not parameter_name:
+                continue
+            raw_value = html.unescape(parameter.group("body")).strip()
+            string_flag = _dsh_attr_value(parameter.group("attrs"), "string")
+            arguments[parameter_name] = _dsh_parameter_value(
+                raw_value,
+                string_flag,
+            )
+        calls.append(
+            ToolCall(
+                name=aliases.get(tool_name, tool_name),
+                arguments=arguments,
+                source="deepseek_dsh_xml",
+            )
+        )
+        spans.append((match.start(), match.end()))
+    if not calls:
+        return None
+    spans.extend(
+        (wrapper.start(), wrapper.end())
+        for wrapper in _DSH_WRAPPER_RE.finditer(text)
+    )
+    leftover = _dsh_remove_spans(text, spans).strip()
+    return calls, leftover
+
+
+def _dsh_attr_value(attrs: str, name: str) -> str | None:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*=\s*[\"']([^\"']*)[\"']",
+        attrs,
+        re.IGNORECASE,
+    )
+    return html.unescape(match.group(1)) if match else None
+
+
+def _dsh_parameter_value(raw: str, string_flag: str | None) -> Any:
+    if string_flag is not None and string_flag.strip().lower() in {
+        "true",
+        "1",
+        "yes",
+    }:
+        return raw
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
+
+
+def _dsh_remove_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    result: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        result.append(text[cursor:start])
+        cursor = end
+    result.append(text[cursor:])
+    return "".join(result)
 
 
 def _assess_task_complexity(

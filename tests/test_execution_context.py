@@ -16,6 +16,7 @@ from ai_agent_platform.agents.coding import AgentRunRecord, InMemoryAgentRunStor
 from ai_agent_platform.agents.coding.context import InstructionSecurityError
 from ai_agent_platform.core import ConfigResolver, ConfigSecurityError
 from ai_agent_platform.domain import Session, RunContextSnapshot
+from ai_agent_platform.integrations import ModelCapabilities, ModelConfig
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.model_registry import ModelSelection
 from ai_agent_platform.repositories import (
@@ -136,6 +137,64 @@ class ExecutionContextFactoryTests(unittest.TestCase):
         self.assertTrue(
             snapshot.metadata.entrypoint_metadata["evaluation"]["isolated"]
         )
+
+    def test_model_capabilities_falls_back_when_preferred_model_unavailable(self) -> None:
+        class _Registry:
+            def __init__(self, configs: tuple[ModelConfig, ...]) -> None:
+                self._configs = configs
+
+            def model_configs(self) -> tuple[ModelConfig, ...]:
+                return self._configs
+
+            def list_models(self) -> list[dict]:
+                return []
+
+        registry = _Registry(
+            (
+                ModelConfig(
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                    context_window_tokens=128_000,
+                    capabilities=ModelCapabilities(
+                        tool_calling=True,
+                        structured_output=True,
+                    ),
+                    enabled=True,
+                    auto_eligible=True,
+                ),
+            )
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            factory = ExecutionContextFactory(
+                session_service=_SessionService(),
+                workspace_service=_workspace_service(root, ("main", root)),
+                model_registry=registry,
+            )
+            # Preferred demo model is unavailable: fallback must reflect the
+            # auto-eligible deepseek model instead of an empty capability set.
+            capabilities = factory._model_capabilities(
+                ModelSelection(
+                    mode="manual",
+                    preferred_provider="fake",
+                    preferred_model="demo-stream-model",
+                    fallback_enabled=True,
+                )
+            )
+            self.assertTrue(capabilities["tool_calling"])
+            self.assertTrue(capabilities["structured_output"])
+
+            # With fallback disabled the preferred model's absence is final.
+            disabled = factory._model_capabilities(
+                ModelSelection(
+                    mode="manual",
+                    preferred_provider="fake",
+                    preferred_model="demo-stream-model",
+                    fallback_enabled=False,
+                )
+            )
+            self.assertFalse(disabled["tool_calling"])
+            self.assertFalse(disabled["structured_output"])
 
     def test_direct_mode_is_capability_gated_and_frozen_in_run_context(self) -> None:
         with TemporaryDirectory() as temp_dir, TemporaryDirectory() as runtime_dir:
