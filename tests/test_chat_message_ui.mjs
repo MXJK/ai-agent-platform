@@ -140,6 +140,59 @@ test("message delivery state is explicit and clears after acceptance", () => {
   assert.equal(statusNode.textContent, "");
 });
 
+test("composer context meter separates cumulative usage from current history pressure", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  context.testUsage = {
+    total_tokens: 180_000,
+    context: { estimated_tokens: 18_000, budget_tokens: 72_704 },
+  };
+
+  const presentation = vm.runInContext(
+    "composerContextUsagePresentation(testUsage)",
+    context,
+  );
+
+  assert.equal(presentation.kicker, "累计 180,000 tokens");
+  assert.equal(presentation.label, "上下文 ≈ 18,000 / 72,704 · 24.76%");
+  assert.equal(presentation.compactLabel, "上下文 24.76% · ≈ 1.8万");
+  assert.ok(presentation.meterPercent > 24.75 && presentation.meterPercent < 24.77);
+  assert.equal(presentation.tone, null);
+  assert.match(presentation.description, /累计实际消耗 180,000 tokens/);
+  assert.match(presentation.description, /会话历史上下文估算 18,000 \/ 72,704 tokens/);
+  assert.doesNotMatch(presentation.label, /247\.58%/);
+});
+
+test("composer context meter handles unknown budgets and high estimated usage", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  context.unknownUsage = {
+    total_tokens: 9_000,
+    context: { estimated_tokens: 420, budget_tokens: 0 },
+  };
+  context.highUsage = {
+    total_tokens: 240_000,
+    context: { estimated_tokens: 66_000, budget_tokens: 72_704 },
+  };
+
+  const unknown = vm.runInContext(
+    "composerContextUsagePresentation(unknownUsage)",
+    context,
+  );
+  const high = vm.runInContext(
+    "composerContextUsagePresentation(highUsage)",
+    context,
+  );
+
+  assert.equal(unknown.label, "上下文 ≈ 420 · 上限未知");
+  assert.equal(unknown.compactLabel, "上下文 ≈ 420 · 上限未知");
+  assert.equal(unknown.meterPercent, 0);
+  assert.equal(unknown.tone, null);
+  assert.doesNotMatch(unknown.label, /%/);
+  assert.equal(high.label, "上下文 ≈ 66,000 / 72,704 · 90.78%");
+  assert.equal(high.compactLabel, "上下文 90.78% · ≈ 6.6万");
+  assert.ok(high.meterPercent > 90.77 && high.meterPercent < 90.79);
+  assert.equal(high.tone, "error");
+});
+
 function loadSessionNavigationHarness({ archived = false } = {}) {
   const session = { id: "history_1", message_count: 1, archived_at: archived ? "2026-08-26" : null };
   const message = { role: "user", content: "历史会话内容" };

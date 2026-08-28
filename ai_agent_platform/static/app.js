@@ -332,6 +332,13 @@ function formatTokenCount(value) {
   return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
 }
 
+function formatCompactTokenCount(value) {
+  return new Intl.NumberFormat("zh-CN", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Math.max(0, Number(value || 0)));
+}
+
 function formatTokenPercentage(value) {
   const normalized = Number.isFinite(value) ? Math.max(0, value) : 0;
   if (normalized > 0 && normalized < 0.0001) {
@@ -341,6 +348,40 @@ function formatTokenPercentage(value) {
     style: "percent",
     maximumFractionDigits: 2,
   }).format(normalized);
+}
+
+function composerContextUsagePresentation(usage) {
+  if (!usage) {
+    return {
+      kicker: "累计 Token",
+      label: "等待首轮请求",
+      compactLabel: "等待首轮请求",
+      meterPercent: 0,
+      tone: null,
+      description: "发起请求后分别显示累计实际消耗和当前会话历史上下文估算",
+    };
+  }
+
+  const total = Math.max(0, Number(usage.total_tokens || 0));
+  const estimated = Math.max(0, Number(usage.context?.estimated_tokens || 0));
+  const budget = Math.max(0, Number(usage.context?.budget_tokens || 0));
+  const ratio = budget > 0 ? estimated / budget : 0;
+  const percentage = budget > 0 ? formatTokenPercentage(ratio) : null;
+  const estimateDescription = budget > 0
+    ? `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} tokens（${percentage}）`
+    : `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} tokens；当前模型未提供输入预算`;
+  return {
+    kicker: `累计 ${formatTokenCount(total)} tokens`,
+    label: budget > 0
+      ? `上下文 ≈ ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} · ${percentage}`
+      : `上下文 ≈ ${formatTokenCount(estimated)} · 上限未知`,
+    compactLabel: budget > 0
+      ? `上下文 ${percentage} · ≈ ${formatCompactTokenCount(estimated)}`
+      : `上下文 ≈ ${formatCompactTokenCount(estimated)} · 上限未知`,
+    meterPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
+    tone: ratio >= 0.9 ? "error" : ratio >= 0.72 ? "warning" : null,
+    description: `累计实际消耗 ${formatTokenCount(total)} tokens。${estimateDescription}；估算不含下一条用户输入、系统提示、工具 Schema 和工作区检索内容。`,
+  };
 }
 
 function humanizeAgentNode(value) {
@@ -1481,26 +1522,16 @@ function updateComposerScopeSummary() {
   const usage = state.conversationId
     ? state.sessionTokenUsage[state.conversationId]
     : null;
-  const total = Math.max(0, Number(usage?.total_tokens || 0));
-  const budget = Number(usage?.context?.budget_tokens || 0);
-  const ratio = budget > 0 ? total / budget : 0;
-  const percentage = formatTokenPercentage(ratio);
+  const contextUsage = composerContextUsagePresentation(usage);
   const contextNode = $("composer-context-budget");
-  contextNode.classList.remove("warning", "error");
-  $("composer-context-kicker").textContent = usage
-    ? `累计 ${formatTokenCount(total)} tokens`
-    : "累计 Token";
-  $("composer-context-label").textContent = usage
-    ? budget > 0
-      ? `上下文上限 ${formatTokenCount(budget)} · ${percentage}`
-      : "上下文上限未知"
-    : "等待首轮请求";
-  $("composer-context-meter-fill").style.width = `${Math.round(Math.min(1, ratio) * 100)}%`;
-  contextNode.title = usage
-    ? budget > 0
-      ? `累计实际消耗 ${formatTokenCount(total)} tokens / 单次请求上下文上限 ${formatTokenCount(budget)} tokens（${percentage}）。累计消耗会跨多次请求增长，超过 100% 不代表当前请求超出上下文窗口。`
-      : `累计实际消耗 ${formatTokenCount(total)} tokens；当前模型未提供上下文上限。`
-    : "发起请求后显示累计实际消耗、上下文上限和两者比例";
+  contextNode.classList.toggle("warning", contextUsage.tone === "warning");
+  contextNode.classList.toggle("error", contextUsage.tone === "error");
+  $("composer-context-kicker").textContent = contextUsage.kicker;
+  $("composer-context-label-full").textContent = contextUsage.label;
+  $("composer-context-label-compact").textContent = contextUsage.compactLabel;
+  $("composer-context-meter-fill").style.width = `${contextUsage.meterPercent}%`;
+  contextNode.title = contextUsage.description;
+  contextNode.setAttribute("aria-label", contextUsage.description);
 }
 
 function updateContextSummary() {

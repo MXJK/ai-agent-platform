@@ -275,11 +275,14 @@ context and the most recent final Prompt's provider-counted input tokens. The
 operations page shows the same totals, operation distribution, and budget
 status for every registered workspace.
 
-The composer keeps these two scopes explicit: cumulative actual usage comes
-from the ledger, while the history preview contains only retained conversation
-messages and summaries and is not the complete final Prompt. The session usage
-API resolves that preview budget from the session's current model preference,
-and changing the model refreshes the displayed denominator immediately.
+The composer keeps these two scopes explicit: cumulative actual usage remains
+a ledger statistic, while the meter and percentage use the retained-history
+estimate divided by the current model's input budget. The history preview
+contains only retained conversation messages and summaries; it excludes the
+next user input, system prompt, tool schemas, and workspace retrieval, so it is
+not the complete final Prompt. The session usage API resolves that preview
+budget from the session's current model preference, and changing the model
+refreshes the displayed denominator immediately.
 
 The context card remains a local `unicode_heuristic_v1` preview because it is
 not yet a provider request. Immediately before an actual LLM request, after

@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260827-composer-run-control" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260828-context-token-meter" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -256,7 +256,13 @@
               </button>
               <div id="composer-context-budget" class="scope-chip context-scope" role="status" aria-live="polite">
                 <svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
-                <span class="scope-chip-copy"><small id="composer-context-kicker">累计 Token</small><strong id="composer-context-label">等待首轮请求</strong></span>
+                <span class="scope-chip-copy">
+                  <small id="composer-context-kicker">累计 Token</small>
+                  <strong id="composer-context-label">
+                    <span id="composer-context-label-full" class="composer-context-label-full">等待首轮请求</span>
+                    <span id="composer-context-label-compact" class="composer-context-label-compact">等待首轮请求</span>
+                  </strong>
+                </span>
                 <span class="context-meter" aria-hidden="true"><i id="composer-context-meter-fill"></i></span>
               </div>
             </div>
@@ -1336,6 +1342,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260827-composer-run-control" defer></script>
+    <script src="/static/app.js?v=20260828-context-token-meter" defer></script>
   </body>
 </html>

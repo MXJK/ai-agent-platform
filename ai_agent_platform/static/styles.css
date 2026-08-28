@@ -232,6 +232,10 @@ button.scope-chip:focus-visible {
   font-size: 10px;
 }
 
+.composer-context-label-compact {
+  display: none;
+}
+
 .scope-chip em {
   color: var(--brand-strong);
   font-family: var(--font-mono);
@@ -257,7 +261,7 @@ button.scope-chip:focus-visible {
   height: 100%;
   border-radius: inherit;
   background: var(--signal);
-  transition: width var(--transition-base), background var(--transition-fast);
+  transition: background var(--transition-fast);
 }
 
 .context-scope.warning .context-meter i {
@@ -676,6 +680,14 @@ button.scope-chip:focus-visible {
 
   .scope-chip-copy strong {
     font-size: 9px;
+  }
+
+  .composer-context-label-full {
+    display: none;
+  }
+
+  .composer-context-label-compact {
+    display: inline;
   }
 
   .scope-chip em,
