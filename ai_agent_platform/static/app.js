@@ -170,6 +170,7 @@ const state = {
   followConversation: true,
   currentView: "chat",
   composerMode: "chat",
+  autoApprove: false,
   chatController: null,
   agentPollGeneration: 0,
   changeSetRequestGeneration: 0,
@@ -830,6 +831,7 @@ function saveUiPreferences() {
         rerankEnabled: state.rerankEnabled,
         knowledgeBaseId: $("kb-id-input")?.value || "",
         knowledgeTab: state.activeKnowledgeTab,
+        autoApprove: state.autoApprove,
         composerDrafts,
       }),
     );
@@ -1614,7 +1616,9 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
   $("composer-mode-input").value = state.composerMode;
   const isAgent = state.composerMode === "agent";
   $("composer-mode-description").textContent = isAgent
-    ? "读取工作区并运行工具；高风险操作等待审批。"
+    ? (state.autoApprove
+      ? "读取工作区并自动执行工具；写操作已开启自动审批。"
+      : "读取工作区并运行工具；高风险操作等待审批。")
     : "流式回答，不执行代码工具。";
   $("chat-message-input").placeholder = isAgent
     ? "描述代码任务，键入 / 使用 Skill 或 MCP，Enter 交给 Agent…"
@@ -1628,6 +1632,11 @@ function updateComposerMode(mode = $("composer-mode-input").value) {
     });
   }
   updateComposerAvailability();
+}
+
+function syncAutoApproveControl() {
+  const toggle = $("auto-approve-toggle");
+  if (toggle) toggle.checked = state.autoApprove;
 }
 
 async function persistComposerMode(mode) {
@@ -5860,6 +5869,7 @@ async function runAgent({
       workspace_id: workspace.id,
       ...optionalModelFields(),
       focus_files: focusFiles,
+      ...(state.autoApprove ? { approval_policy: "auto_approve" } : {}),
       ...(skillName ? {
         skill_name: skillName,
         skill_arguments: skillArguments,
@@ -8754,6 +8764,17 @@ function bindEvents() {
   $("composer-mode-input").addEventListener("change", (event) => {
     persistComposerMode(event.target.value);
   });
+  $("auto-approve-toggle").addEventListener("change", (event) => {
+    state.autoApprove = Boolean(event.target.checked);
+    queueUiPreferenceSave();
+    updateComposerAvailability();
+    showToast(
+      state.autoApprove
+        ? "已开启自动审批：Agent 的写操作将直接执行，不再逐次请求确认"
+        : "已恢复请求批准：Agent 的写操作会先请求你的确认",
+      "info",
+    );
+  });
   $("auto-model-toggle").addEventListener("change", async (event) => {
     state.modelPreference.mode = event.target.checked ? "auto" : "manual";
     renderSessionModelControls();
@@ -9230,6 +9251,7 @@ async function init() {
     ? requestedView
     : preferredView;
   state.composerMode = "chat";
+  state.autoApprove = preferences.autoApprove === true;
   state.rerankEnabled = preferences.rerankEnabled === true;
   state.preferredKnowledgeBaseId = preferences.knowledgeBaseId || "";
   state.activeKnowledgeTab = ["documents", "ask", "settings"].includes(preferences.knowledgeTab)
@@ -9237,6 +9259,7 @@ async function init() {
     : "documents";
   setKnowledgeTab(state.activeKnowledgeTab);
   renderRerankControl();
+  syncAutoApproveControl();
   updateComposerMode(state.composerMode);
   switchView(initialView, !location.hash);
   setSidebarVisible(!preferences.sidebarHidden);

@@ -205,7 +205,12 @@ class PermissionResolver:
         risk = request.risk_summary
         name = request.name
 
-        if context.approval_policy not in {"always", "on_request", "never"}:
+        if context.approval_policy not in {
+            "always",
+            "on_request",
+            "never",
+            "auto_approve",
+        }:
             return self._deny(
                 "process.invalid_approval_policy",
                 "The effective approval policy is invalid.",
@@ -295,6 +300,16 @@ class PermissionResolver:
                 reason="Central policy allows this read-only operation.",
                 risk_summary=risk,
             )
+        if context.approval_policy == "auto_approve":
+            return PermissionDecision(
+                effect="allow",
+                matched_rule="approval_policy.auto_approve",
+                reason=(
+                    "The effective approval policy auto-approves operations "
+                    "that would otherwise require human review."
+                ),
+                risk_summary=risk,
+            )
         if context.approval_policy == "never":
             return self._deny(
                 "approval_policy.never",
@@ -381,6 +396,23 @@ def _same_root(first: str, second: str) -> bool:
     )
 
 
+def effective_approval_policy(
+    configured: str,
+    runtime_override: object,
+) -> str:
+    """Resolve the effective approval policy for a single Run.
+
+    The runtime override originates from a per-run UI choice (the composer's
+    auto-approve toggle). It may only relax the default ``on_request`` policy
+    to ``auto_approve``; it never bypasses the strict ``always`` or ``never``
+    policies, which remain hard process/project security boundaries.
+    """
+
+    if configured == "on_request" and runtime_override == "auto_approve":
+        return "auto_approve"
+    return configured
+
+
 __all__ = [
     "PermissionDecision",
     "PermissionEffect",
@@ -391,4 +423,5 @@ __all__ = [
     "ToolExecutionContext",
     "ToolUseContext",
     "canonical_arguments_hash",
+    "effective_approval_policy",
 ]

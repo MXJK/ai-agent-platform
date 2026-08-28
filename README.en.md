@@ -855,6 +855,14 @@ Run events. The model can invoke `agent.request_user_input` to enter
 `waiting_input`, while users can pause, continue, cancel, or steer at safe tool
 boundaries. `AGENT_APPROVAL_POLICY=always|on_request|never` controls approvals;
 `never` blocks approval-requiring calls rather than silently authorizing them.
+The composer's "auto-approve" toggle is a per-Run runtime override that relaxes
+the default `on_request` policy to `auto_approve`: approval-requiring write,
+command, and external calls execute directly instead of entering
+`waiting_approval`. Hard denies (process deny rules, Workspace root boundaries,
+and identity RBAC) still apply, and the override only relaxes `on_request` — it
+cannot bypass `always` or `never`. `agent_approval_policy` still accepts only
+`always|on_request|never`; `auto_approve` is a runtime in-chat choice, not a
+configuration value.
 
 `ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
 validates both input and output at execution. A validation failure reports the

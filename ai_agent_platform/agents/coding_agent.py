@@ -59,6 +59,7 @@ from ai_agent_platform.domain import (
     RunContextSnapshot,
 )
 from ai_agent_platform.integrations.llm import LLMUsageAccumulator
+from ai_agent_platform.integrations.permissions import effective_approval_policy
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder
 
@@ -240,7 +241,7 @@ class CodingAgentRuntime:
         self._tool_result_max_tokens = tool_result_max_tokens
         self._metrics = metrics or MetricsRegistry()
         self._graph_recursion_limit = graph_recursion_limit
-        if approval_policy not in {"always", "on_request", "never"}:
+        if approval_policy not in {"always", "on_request", "never", "auto_approve"}:
             raise ValueError("unsupported approval_policy")
         self._approval_policy = approval_policy
         self._knowledge_context_provider = knowledge_context_provider
@@ -331,6 +332,10 @@ class CodingAgentRuntime:
                 "runtime",
                 "agent_approval_policy",
                 default=self._approval_policy,
+            )
+            approval_policy = effective_approval_policy(
+                approval_policy,
+                run_context.metadata.entrypoint_metadata.get("approval_policy"),
             )
             focus_files = list(run_context.instructions.focus_files)
             history = [

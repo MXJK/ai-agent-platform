@@ -326,6 +326,9 @@ class ToolRegistry:
             if needs_approval and context.approval_policy == "never":
                 effect = "deny"
                 rule = "approval_policy.never"
+            elif needs_approval and context.approval_policy == "auto_approve":
+                effect = "allow"
+                rule = "approval_policy.auto_approve"
             elif needs_approval:
                 effect = "ask"
                 rule = "tool_spec.approval_required"
@@ -341,7 +344,12 @@ class ToolRegistry:
                     else (
                         "The effective approval policy denies this operation."
                         if effect == "deny"
-                        else "ToolSpec allows this read-only operation."
+                        else (
+                            "The effective approval policy auto-approves this "
+                            "operation."
+                            if rule == "approval_policy.auto_approve"
+                            else "ToolSpec allows this read-only operation."
+                        )
                     )
                 ),
                 risk_summary=spec.risk_summary,

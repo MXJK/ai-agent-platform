@@ -763,6 +763,12 @@ PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL �
 变化都会重新进入审批。项目把 `on_request` 改成 `always` 或 `never` 都可收紧；进程已为
 `always` 或 `never` 时，项目不能切换到另一种策略造成部分调用重新放行。
 
+Composer 的「自动审批」开关按 per-Run 运行时覆盖把默认 `on_request` 放宽为
+`auto_approve`：需要审批的写、命令或外部调用直接执行，不再进入 `waiting_approval`。
+该覆盖仍受进程 deny、Workspace root 边界与身份 RBAC 等硬拒绝约束，且只对 `on_request`
+生效，不能绕过 `always` 或 `never`。`agent_approval_policy` 配置仍只接受
+`always|on_request|never`，`auto_approve` 仅是用户在对话内的运行时选择。
+
 `ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
 和输出。校验失败只回报路径、约束名、schema 侧期望值以及被拒值的类型和长度，凭据或
 文件内容不会经由错误文本回灌模型。工具规格还声明超时、重试和幂等行为。只有幂等工具

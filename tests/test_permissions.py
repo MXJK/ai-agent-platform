@@ -8,6 +8,7 @@ from ai_agent_platform.integrations.permissions import (
     PermissionRequest,
     PermissionResolver,
     ToolUseContext,
+    effective_approval_policy,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolRegistry
 
@@ -66,6 +67,53 @@ class PermissionResolverMatrixTests(unittest.TestCase):
                 self.assertTrue(decision.matched_rule)
                 self.assertTrue(decision.reason)
                 self.assertTrue(decision.risk_summary)
+
+    def test_auto_approve_policy_allows_operations_that_would_require_review(self) -> None:
+        write_decision = self.resolver.resolve(
+            self.write,
+            self.context(workspace_role="editor", approval_policy="auto_approve"),
+            phase="plan",
+        )
+        self.assertEqual(write_decision.effect, "allow")
+        self.assertEqual(write_decision.matched_rule, "approval_policy.auto_approve")
+
+        read_decision = self.resolver.resolve(
+            self.read,
+            self.context(workspace_role="viewer", approval_policy="auto_approve"),
+            phase="plan",
+        )
+        self.assertEqual(read_decision.effect, "allow")
+
+    def test_auto_approve_does_not_bypass_hard_boundaries(self) -> None:
+        process_denied = self.resolver.resolve(
+            self.write,
+            self.context(
+                workspace_role="editor",
+                approval_policy="auto_approve",
+                process_denied_tools=("sandbox.write",),
+            ),
+            phase="plan",
+        )
+        self.assertEqual(process_denied.effect, "deny")
+        self.assertEqual(process_denied.matched_rule, "process.explicit_deny")
+
+        viewer = self.resolver.resolve(
+            self.write,
+            self.context(workspace_role="viewer", approval_policy="auto_approve"),
+            phase="plan",
+        )
+        self.assertEqual(viewer.effect, "deny")
+        self.assertEqual(viewer.matched_rule, "workspace.rbac.editor")
+
+    def test_effective_approval_policy_only_relaxes_on_request(self) -> None:
+        self.assertEqual(
+            effective_approval_policy("on_request", "auto_approve"),
+            "auto_approve",
+        )
+        self.assertEqual(effective_approval_policy("on_request", None), "on_request")
+        self.assertEqual(effective_approval_policy("on_request", "on_request"), "on_request")
+        self.assertEqual(effective_approval_policy("always", "auto_approve"), "always")
+        self.assertEqual(effective_approval_policy("never", "auto_approve"), "never")
 
     def test_hard_deny_and_explicit_deny_precede_project_allow_and_approval(self) -> None:
         bound = self.context(

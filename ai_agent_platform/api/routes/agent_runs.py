@@ -111,6 +111,11 @@ def create_agent_runs_router(
                         "transport": "http",
                         "api_version": "v1",
                         "route": "/agent/runs",
+                        **(
+                            {"approval_policy": request.approval_policy}
+                            if request.approval_policy is not None
+                            else {}
+                        ),
                     },
                 )
             )

@@ -52,6 +52,13 @@ class AgentRunRequest(BaseModel):
         max_length=256,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
     )
+    approval_policy: Optional[Literal["on_request", "auto_approve"]] = Field(
+        default=None,
+        description=(
+            "Per-run approval policy. auto_approve only relaxes a default "
+            "on_request policy; strict always/never policies cannot be bypassed."
+        ),
+    )
 
     @field_validator("additional_workspace_ids")
     @classmethod

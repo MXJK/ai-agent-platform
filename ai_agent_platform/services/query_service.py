@@ -55,6 +55,7 @@ from ai_agent_platform.integrations.permissions import (
     PermissionResolver,
     ToolUseContext,
     canonical_arguments_hash,
+    effective_approval_policy,
 )
 from ai_agent_platform.integrations.tools import ToolRegistry
 from ai_agent_platform.integrations.tool_pool import (
@@ -1713,15 +1714,23 @@ def _is_evaluation_record(record: AgentRunRecord) -> bool:
 
 
 def _snapshot_approval_policy(snapshot: object) -> str:
+    configured = "on_request"
     project = getattr(snapshot, "project", None)
-    config = getattr(project, "project_config", {})
-    if not isinstance(config, dict):
-        return "on_request"
-    sections = config.get("config")
-    runtime = sections.get("runtime") if isinstance(sections, dict) else None
-    field = runtime.get("agent_approval_policy") if isinstance(runtime, dict) else None
-    value = field.get("value") if isinstance(field, dict) else None
-    return str(value) if value in {"always", "on_request", "never"} else "on_request"
+    config = getattr(project, "project_config", None)
+    if isinstance(config, dict):
+        sections = config.get("config")
+        runtime = sections.get("runtime") if isinstance(sections, dict) else None
+        field = runtime.get("agent_approval_policy") if isinstance(runtime, dict) else None
+        value = field.get("value") if isinstance(field, dict) else None
+        if value in {"always", "on_request", "never", "auto_approve"}:
+            configured = str(value)
+    metadata = getattr(snapshot, "metadata", None)
+    override = None
+    if metadata is not None:
+        entrypoint = getattr(metadata, "entrypoint_metadata", None)
+        if isinstance(entrypoint, dict):
+            override = entrypoint.get("approval_policy")
+    return effective_approval_policy(configured, override)
 
 
 __all__ = ["AgentRunExecutionError", "QueryService"]
