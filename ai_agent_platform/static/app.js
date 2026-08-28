@@ -442,38 +442,421 @@ function traceToolNames(trace, events = []) {
   return names;
 }
 
+const AGENT_ACTIVITY_EVENT_TYPES = new Set([
+  "node_started",
+  "reasoning_summary",
+  "tool_selected",
+  "tool_started",
+  "tool_result",
+  "tool_error",
+  "context",
+  "answer_completed",
+]);
+
+const AGENT_CONTEXT_ACTIVITY_NODES = new Set([
+  "load_project_instructions",
+  "classify_request",
+  "decide_context_source",
+  "retrieve_knowledge",
+  "retrieve_project_memory",
+  "assess_context",
+  "merge_evidence",
+]);
+
+function agentToolLabel(name) {
+  const labels = {
+    "repo.read_file": "读取文件",
+    "repo.search_code": "搜索代码",
+    "repo.find_files": "查找文件",
+    "repo.list_files": "列出文件",
+    "sandbox.write_file": "写入文件",
+    "sandbox.apply_patch": "应用补丁",
+    "sandbox.run_command": "执行命令",
+    "sandbox.workspace_status": "查看工作区",
+    "sandbox.git_diff": "查看变更",
+    "run.read_artifact": "读取运行产物",
+    "agent.load_skill": "加载技能",
+    "agent.request_user_input": "请求用户输入",
+    "file_symbol_locator": "定位符号",
+  };
+  return labels[name] || name;
+}
+
+function agentToolArgumentsText(name, args = {}) {
+  const path = typeof args.path === "string" && args.path ? args.path : "";
+  switch (name) {
+    case "repo.read_file": {
+      const parts = [];
+      if (path) parts.push(path);
+      const start = Number(args.start_line);
+      const end = Number(args.end_line);
+      if (start >= 1) {
+        parts.push(`第 ${start}–${end >= start ? end : "末"} 行`);
+      }
+      return parts.join(" · ") || "读取工作区文件";
+    }
+    case "repo.search_code": {
+      const query = typeof args.query === "string" ? args.query : "";
+      const parts = [];
+      if (query) parts.push(`“${query}”`);
+      if (path && path !== ".") parts.push(`在 ${path}`);
+      return parts.join(" ") || "搜索代码";
+    }
+    case "repo.find_files": {
+      const query = typeof args.query === "string" ? args.query : "";
+      const parts = [];
+      if (query) parts.push(`“${query}”`);
+      if (path && path !== ".") parts.push(`在 ${path}`);
+      return parts.join(" ") || "查找文件";
+    }
+    case "repo.list_files":
+      return path && path !== "." ? `目录 ${path}` : "列出工作区文件";
+    case "sandbox.run_command": {
+      const command = typeof args.command === "string"
+        ? args.command
+        : Array.isArray(args.command)
+        ? args.command.join(" ")
+        : "";
+      return command || "运行命令";
+    }
+    case "sandbox.write_file":
+      return path || "写入工作区文件";
+    case "sandbox.apply_patch": {
+      const patch = typeof args.patch === "string" ? args.patch : "";
+      const first = patch.split("\n").map((line) => line.trim()).find(Boolean) || "";
+      return first || "应用补丁";
+    }
+    case "sandbox.git_diff":
+      return "生成变更差异";
+    case "sandbox.workspace_status":
+      return "查看工作区状态";
+    case "run.read_artifact": {
+      const id = typeof args.artifact_id === "string" ? args.artifact_id : "";
+      return id ? `产物 ${id.slice(0, 24)}` : "读取运行产物";
+    }
+    case "agent.load_skill": {
+      const skillName = typeof args.name === "string" ? args.name : "";
+      return skillName || "加载技能";
+    }
+    case "agent.request_user_input": {
+      const question = typeof args.question === "string" ? args.question : "";
+      return question || "请求用户输入";
+    }
+    case "file_symbol_locator": {
+      const query = typeof args.query === "string" ? args.query : "";
+      return query || "定位符号";
+    }
+    default: {
+      const entries = Object.entries(args || {}).filter(
+        ([key]) => ![
+          "max_results",
+          "max_chars",
+          "context_lines",
+          "start_line",
+          "end_line",
+          "timeout_seconds",
+          "cwd",
+          "expected_sha256",
+        ].includes(key),
+      );
+      return entries.slice(0, 2).map(([key, value]) => {
+        if (typeof value === "string") {
+          return value.length > 80 ? `${value.slice(0, 80)}…` : value;
+        }
+        return `${key}: ${JSON.stringify(value)}`;
+      }).join(" · ") || "";
+    }
+  }
+}
+
+function agentToolResultText(name, output = {}) {
+  const duration = output.duration_ms !== undefined ? formatDuration(output.duration_ms) : "";
+  if (output.error) {
+    return [duration, String(output.error).slice(0, 200)].filter(Boolean).join(" · ");
+  }
+  const result = output.result;
+  if (result && typeof result === "object") {
+    const tail = duration ? ` · ${duration}` : "";
+    switch (name) {
+      case "repo.read_file": {
+        const parts = [];
+        if (result.path) parts.push(result.path);
+        if (Number.isFinite(Number(result.chars))) parts.push(`${result.chars} 字符`);
+        if (result.truncated) parts.push("已截断");
+        return (parts.join(" · ") || "已读取文件") + tail;
+      }
+      case "repo.search_code": {
+        const parts = [];
+        if (result.query) parts.push(`“${result.query}”`);
+        if (Number.isFinite(Number(result.count))) parts.push(`${result.count} 处匹配`);
+        return (parts.join(" · ") || "搜索完成") + tail;
+      }
+      case "repo.find_files": {
+        const parts = [];
+        if (result.query) parts.push(`“${result.query}”`);
+        if (Number.isFinite(Number(result.count))) parts.push(`${result.count} 个文件`);
+        return (parts.join(" · ") || "查找完成") + tail;
+      }
+      case "repo.list_files": {
+        const parts = [];
+        if (result.path) parts.push(result.path);
+        if (Number.isFinite(Number(result.count))) parts.push(`${result.count} 个文件`);
+        return (parts.join(" · ") || "列出完成") + tail;
+      }
+      case "sandbox.run_command": {
+        const command = Array.isArray(result.command)
+          ? result.command.join(" ")
+          : result.command || "";
+        const exitCode = result.exit_code !== undefined ? `退出码 ${result.exit_code}` : "";
+        const timedOut = result.timed_out ? "超时" : "";
+        return [command, exitCode, timedOut].filter(Boolean).join(" · ") + tail || "命令已执行" + tail;
+      }
+      case "sandbox.write_file": {
+        const parts = [];
+        if (result.path) parts.push(result.path);
+        if (Number.isFinite(Number(result.bytes))) parts.push(`${result.bytes} 字节`);
+        return (parts.join(" · ") || "已写入文件") + tail;
+      }
+      case "sandbox.apply_patch": {
+        const changed = Array.isArray(result.changed_files) ? result.changed_files.length : 0;
+        return (changed ? `修改 ${changed} 个文件` : "已应用补丁") + tail;
+      }
+      case "sandbox.git_diff": {
+        const changed = Array.isArray(result.changed_files) ? result.changed_files.length : 0;
+        return (changed ? `${changed} 个文件变更` : "变更差异已生成") + tail;
+      }
+      case "sandbox.workspace_status": {
+        const changed = Array.isArray(result.changed_files) ? result.changed_files.length : 0;
+        return (changed ? `${changed} 个文件已变更` : "工作区状态已查看") + tail;
+      }
+      case "run.read_artifact": {
+        const returned = Number(result.returned_chars);
+        const total = Number(result.total_chars);
+        const chars = Number.isFinite(total)
+          ? `${Number.isFinite(returned) ? returned : total} / ${total} 字符`
+          : `${Number.isFinite(returned) ? returned : ""} 字符`;
+        return `读取产物 · ${chars}` + tail;
+      }
+      case "agent.load_skill":
+        return `已加载 ${result.name || ""}` + tail;
+      case "agent.request_user_input":
+        return (typeof result.answer === "string" ? `已回答：${result.answer}` : "已提问") + tail;
+      default: {
+        const entries = Object.entries(result).filter(([key, value]) => {
+          if ([
+            "content",
+            "stdout",
+            "stderr",
+            "diff",
+            "patch",
+            "instructions",
+            "text",
+            "workspace",
+            "execution_root",
+          ].includes(key)) return false;
+          if (value == null) return false;
+          if (typeof value === "object") {
+            return Array.isArray(value) && value.length <= 5;
+          }
+          return String(value).length <= 120;
+        });
+        const rendered = entries.slice(0, 2).map(([key, value]) => (
+          Array.isArray(value) ? `${key}: ${value.join(", ")}` : `${key}: ${value}`
+        ));
+        return (rendered.join(" · ") || "已完成") + tail;
+      }
+    }
+  }
+  return [duration, output.summary || ""].filter(Boolean).join(" · ") || "工具已返回结果";
+}
+
+function agentContextInjectionTitle(node) {
+  const titles = {
+    load_project_instructions: "注入项目指令",
+    classify_request: "识别任务意图",
+    decide_context_source: "选择上下文来源",
+    retrieve_knowledge: "注入知识库证据",
+    retrieve_project_memory: "注入项目记忆",
+    assess_context: "装配上下文",
+    merge_evidence: "合并上下文证据",
+  };
+  return titles[node] || humanizeAgentNode(node);
+}
+
+function agentContextInjectionSummary(node, output = {}) {
+  switch (node) {
+    case "load_project_instructions": {
+      const files = Array.isArray(output.files) ? output.files : [];
+      const parts = [];
+      if (files.length) {
+        parts.push(`${files.length} 份项目指令`);
+        parts.push(
+          files.slice(0, 3).join("、") + (files.length > 3 ? ` 等 ${files.length} 个` : ""),
+        );
+      } else {
+        parts.push("未加载项目指令");
+      }
+      if (Number.isFinite(Number(output.chars))) parts.push(`${output.chars} 字符`);
+      return parts.join(" · ");
+    }
+    case "classify_request": {
+      const parts = [];
+      if (output.intent) parts.push(`意图 ${output.intent}`);
+      if (output.proposed_context_route) parts.push(`路由 ${output.proposed_context_route}`);
+      return parts.join(" · ") || "识别任务意图";
+    }
+    case "decide_context_source": {
+      const parts = [];
+      if (output.context_route) parts.push(`路由 ${output.context_route}`);
+      const selected = Array.isArray(output.selected_knowledge_base_ids)
+        ? output.selected_knowledge_base_ids
+        : [];
+      if (selected.length) parts.push(`知识库 ${selected.join("、")}`);
+      return parts.join(" · ") || "选择上下文来源";
+    }
+    case "retrieve_knowledge": {
+      const count = Number(output.source_count);
+      const hits = output.hit_counts && typeof output.hit_counts === "object"
+        ? output.hit_counts
+        : {};
+      const parts = [];
+      if (Number.isFinite(count)) {
+        parts.push(count ? `${count} 条知识库证据` : "未检索到知识库证据");
+      }
+      const hitParts = Object.entries(hits).map(([kb, n]) => `${kb}：${n} 条`);
+      if (hitParts.length) parts.push(hitParts.join("，"));
+      return parts.join(" · ") || "检索知识库";
+    }
+    case "retrieve_project_memory": {
+      const count = Number(output.source_count);
+      if (Number.isFinite(count)) return count ? `${count} 条项目记忆` : "未检索到项目记忆";
+      return "检索项目记忆";
+    }
+    case "assess_context": {
+      const parts = [];
+      if (Number.isFinite(Number(output.file_count))) {
+        parts.push(`${output.file_count} 个文件纳入上下文`);
+      }
+      if (Number.isFinite(Number(output.chars))) parts.push(`${output.chars} 字符`);
+      if (output.budget_exhausted) parts.push("预算已用尽");
+      return parts.join(" · ") || "评估上下文";
+    }
+    case "merge_evidence": {
+      const parts = [];
+      if (output.repo_source_count) parts.push(`工作区 ${output.repo_source_count} 份`);
+      if (output.knowledge_source_count) parts.push(`知识库 ${output.knowledge_source_count} 份`);
+      if (output.memory_source_count) parts.push(`记忆 ${output.memory_source_count} 份`);
+      return parts.length ? `合并证据：${parts.join("、")}` : "合并证据";
+    }
+    default:
+      return output.summary || "";
+  }
+}
+
+function agentContextStageSummary(output = {}) {
+  const parts = [];
+  if (output.stage) parts.push(String(output.stage));
+  const metrics = [];
+  if (output.evicted) metrics.push(`驱逐 ${output.evicted}`);
+  if (output.compacted) metrics.push(`压缩 ${output.compacted}`);
+  if (output.dropped) metrics.push(`丢弃 ${output.dropped}`);
+  if (output.truncated) metrics.push(`截断 ${output.truncated}`);
+  if (metrics.length) parts.push(metrics.join("、"));
+  if (Number.isFinite(Number(output.estimated_tokens))) {
+    const budget = Number(output.budget_tokens);
+    parts.push(
+      budget > 0
+        ? `≈ ${formatTokenCount(output.estimated_tokens)} / ${formatTokenCount(budget)} tokens`
+        : `≈ ${formatTokenCount(output.estimated_tokens)} tokens`,
+    );
+  }
+  return parts.join(" · ") || "上下文已调整";
+}
+
+function agentActivityEventKey(event) {
+  const output = event.output || {};
+  if (["tool_selected", "tool_started"].includes(event.type)) {
+    return `tool-invoke:${output.call_id || output.name || ""}`;
+  }
+  if (["tool_result", "tool_error"].includes(event.type)) {
+    return `tool-result:${output.call_id || output.name || ""}`;
+  }
+  if (event.type === "node_started") {
+    return `${event.type}:${event.node || ""}:${output.step || ""}`;
+  }
+  return `${event.type}:${event.sequence || ""}`;
+}
+
 function executionActivityEvents(events) {
+  const seen = new Set();
   return (events || [])
-    .filter((event) => [
-      "node_started",
-      "reasoning_summary",
-      "tool_started",
-      "tool_result",
-      "tool_error",
-      "answer_completed",
-    ].includes(event.type))
-    .slice(-16);
+    .filter((event) => {
+      if (event.type === "node_completed") {
+        return AGENT_CONTEXT_ACTIVITY_NODES.has(event.node);
+      }
+      if (!AGENT_ACTIVITY_EVENT_TYPES.has(event.type)) return false;
+      const key = agentActivityEventKey(event);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(-24);
+}
+
+function executionActiveActivitySequence(events, status = "running") {
+  if (TERMINAL_RUN_STATUSES.has(status) || status === "done") return null;
+  const values = events || [];
+  const completedToolCalls = new Set(
+    values
+      .filter((event) => ["tool_result", "tool_error"].includes(event.type))
+      .map((event) => event.output?.call_id)
+      .filter(Boolean),
+  );
+  const activeTool = values.findLast((event) => (
+    ["tool_selected", "tool_started"].includes(event.type)
+    && (!event.output?.call_id || !completedToolCalls.has(event.output.call_id))
+  ));
+  if (activeTool) return activeTool.sequence;
+
+  const activeNode = values.findLast((event) => {
+    if (event.type !== "node_started") return false;
+    return !values.some((candidate) => (
+      candidate.type === "node_completed"
+      && candidate.sequence > event.sequence
+      && candidate.node === event.node
+    ));
+  });
+  return activeNode?.sequence ?? null;
 }
 
 function executionActivityTitle(event) {
   const output = event.output || {};
   if (event.type === "node_started") return `正在${humanizeAgentNode(event.node)}`;
+  if (event.type === "node_completed") return agentContextInjectionTitle(event.node);
   if (event.type === "reasoning_summary") return "阶段思路";
-  if (event.type === "tool_started") return `调用工具 · ${output.name || "未知工具"}`;
-  if (event.type === "tool_result") return `工具完成 · ${output.name || "未知工具"}`;
-  if (event.type === "tool_error") return `工具失败 · ${output.name || "未知工具"}`;
+  if (["tool_selected", "tool_started"].includes(event.type)) {
+    return `调用工具 · ${agentToolLabel(output.name)}`;
+  }
+  if (event.type === "tool_result") return `工具完成 · ${agentToolLabel(output.name)}`;
+  if (event.type === "tool_error") return `工具失败 · ${agentToolLabel(output.name)}`;
+  if (event.type === "context") return "压缩上下文";
   if (event.type === "answer_completed") return "回答生成完成";
   return event.type || "实时活动";
 }
 
 function executionActivitySummary(event) {
   const output = event.output || {};
+  if (["tool_selected", "tool_started"].includes(event.type)) {
+    return agentToolArgumentsText(output.name, output.arguments || output.arguments_summary || {});
+  }
   if (["tool_result", "tool_error"].includes(event.type)) {
-    const result = output.result ?? output.error ?? event.summary ?? "";
-    const rendered = typeof result === "string" ? result : JSON.stringify(result);
-    const preview = rendered.length > 280 ? `${rendered.slice(0, 280)}…` : rendered;
-    const duration = output.duration_ms !== undefined ? `${output.duration_ms} ms` : "";
-    return [duration, preview].filter(Boolean).join(" · ") || event.summary || "工具已返回结果";
+    return agentToolResultText(output.name, output);
+  }
+  if (event.type === "node_completed") {
+    return agentContextInjectionSummary(event.node, output);
+  }
+  if (event.type === "context") {
+    return agentContextStageSummary(output);
   }
   return event.summary || humanizeAgentNode(event.node);
 }
@@ -556,6 +939,7 @@ function renderExecutionProcess(
     fallbackNode = "",
     fallbackSummary = "",
     events = [],
+    activityOnly = false,
   } = {},
 ) {
   const details = ensureExecutionProcess(contentNode);
@@ -564,6 +948,7 @@ function renderExecutionProcess(
   const presentation = executionProcessPresentation(status);
   const tools = traceToolNames(trace, events);
   const activities = executionActivityEvents(events);
+  const activeActivitySequence = executionActiveActivitySequence(events, status);
   const steps = trace.length
     ? trace
     : terminal
@@ -582,6 +967,7 @@ function renderExecutionProcess(
     "status-cancelled",
   );
   details.classList.add(presentation.tone);
+  details.classList.toggle("activity-only", activityOnly);
   details.classList.toggle("complete", terminal);
   details.dataset.status = status === "done" ? "completed" : status;
   details.dataset.terminal = String(terminal);
@@ -596,11 +982,18 @@ function renderExecutionProcess(
     details.open = true;
   }
   details.querySelector(".execution-title").textContent = presentation.title;
-  const terminalSummary = steps.length
+  const terminalSummary = activityOnly
+    ? `${activities.length} 条实时活动`
+    : steps.length
     ? `${steps.length} 个步骤${tools.length ? ` · ${tools.length} 个工具` : ""}`
     : "没有阶段详情";
   const latestStep = steps.at(-1);
-  details.querySelector(".execution-summary-text").textContent = terminal
+  const latestActivity = activities.at(-1);
+  details.querySelector(".execution-summary-text").textContent = activityOnly
+    ? latestActivity
+      ? executionActivityTitle(latestActivity)
+      : terminalSummary
+    : terminal
     ? presentation.stepState === "complete"
       ? terminalSummary
       : `${latestStep ? humanizeAgentNode(latestStep.node) : terminalSummary}${
@@ -608,7 +1001,9 @@ function renderExecutionProcess(
         }${tools.length ? ` · ${tools.length} 个工具` : ""}`
     : humanizeAgentNode(latestStep?.node);
   details.querySelector(".execution-duration").textContent = formatWorkDuration(displayedElapsedMs);
-  details.querySelector(".execution-steps").innerHTML = steps
+  const stepList = details.querySelector(".execution-steps");
+  stepList.hidden = activityOnly;
+  stepList.innerHTML = activityOnly ? "" : steps
     .map((step, index) => {
       const stepState = executionStepState(index, steps.length, presentation);
       return `
@@ -624,22 +1019,40 @@ function renderExecutionProcess(
     `;
     })
     .join("");
-  if (!steps.length) {
-    details.querySelector(".execution-steps").innerHTML =
+  if (!activityOnly && !steps.length) {
+    stepList.innerHTML =
       '<li class="execution-step-empty">本次运行没有返回可解释的阶段详情。</li>';
   }
   const activityList = details.querySelector(".execution-live-events");
-  activityList.hidden = activities.length === 0;
-  activityList.querySelector("ol").innerHTML = activities.map((event) => `
-    <li class="${escapeHtml(event.type === "tool_error" ? "error" : "")}">
+  activityList.hidden = activities.length === 0 && !activityOnly;
+  const activityItems = activityList.querySelector("ol");
+  const activitySignature = activities
+    .map((event) => `${event.sequence}:${event.sequence === activeActivitySequence ? "active" : "idle"}`)
+    .join("|");
+  if (activityItems.dataset.signature !== activitySignature) {
+    activityItems.dataset.signature = activitySignature;
+    activityItems.innerHTML = activities.length ? activities.map((event) => {
+      const active = event.sequence === activeActivitySequence;
+      const isContext = event.type === "context"
+        || (event.type === "node_completed" && AGENT_CONTEXT_ACTIVITY_NODES.has(event.node));
+      const isTool = ["tool_selected", "tool_result", "tool_error"].includes(event.type);
+      const classes = [
+        event.type === "tool_error" ? "error" : "",
+        active ? "active" : "",
+        isContext ? "context" : "",
+        isTool ? "tool" : "",
+      ].filter(Boolean).join(" ");
+      return `
+    <li class="${escapeHtml(classes)}"${active ? ' aria-current="true"' : ""}>
       <span class="execution-live-marker" aria-hidden="true"></span>
       <div>
         <strong>${escapeHtml(executionActivityTitle(event))}</strong>
         <p>${escapeHtml(executionActivitySummary(event))}</p>
       </div>
     </li>
-  `).join("");
-  const latestActivity = activities.at(-1);
+  `;
+    }).join("") : '<li class="empty"><p>等待首个实时活动…</p></li>';
+  }
   const announcer = details.querySelector(".execution-live-announcer");
   const activitySequence = String(latestActivity?.sequence || "");
   if (announcer.dataset.sequence !== activitySequence) {
@@ -649,8 +1062,8 @@ function renderExecutionProcess(
       : "";
   }
   const toolList = details.querySelector(".execution-tools");
-  toolList.hidden = tools.length === 0;
-  toolList.innerHTML = tools.length
+  toolList.hidden = activityOnly || tools.length === 0;
+  toolList.innerHTML = !activityOnly && tools.length
     ? `<span class="execution-tools-label"><svg class="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span>相关工具</span></span><span class="execution-tool-list">${tools
         .map((name) => `<code>${escapeHtml(name)}</code>`)
         .join("")}</span>`
@@ -5282,6 +5695,7 @@ function renderAgentChatResponse(
       ? "Agent 任务已进入执行队列。"
       : "Agent 正在运行 LangGraph 工作流。",
     events: streamEvents,
+    activityOnly: true,
   });
 
   if (!holdAnswer && actualStatus === "cancelled") {
@@ -6303,7 +6717,7 @@ async function watchRunUntilTerminal(options = {}) {
         streamedEvents.push(event);
         const progressBody = renderStreamedAgentProgress(streamedEvents, runId);
         publishProgress(progressBody);
-        if (TERMINAL_RUN_STATUSES.has(progressBody.status)) {
+        if (FINAL_RUN_STATUSES.has(progressBody.status)) {
           latestBody = {
             ...await refreshRun(runId, { conversationId }),
             stream_events: [...streamedEvents],
@@ -6326,6 +6740,26 @@ async function watchRunUntilTerminal(options = {}) {
     || conversationId !== state.conversationId
   ) {
     return latestBody;
+  }
+  // The stream can end without a FINAL event when the backend stops it at a
+  // suspended boundary (waiting_approval/waiting_input/paused) or on timeout.
+  // Preserve the events collected so far so the activity list is not wiped by
+  // the follow-up polling, which re-renders from the record without events.
+  if (!latestBody && streamedEvents.length) {
+    const refreshed = await refreshRun(runId, { conversationId });
+    if (refreshed) {
+      latestBody = {
+        ...refreshed,
+        stream_events: [...streamedEvents],
+        streamed_answer: streamedEvents.reduce((answer, event) => {
+          if (event.type === "answer_reset") return "";
+          if (event.type === "answer_delta") return answer + String(event.output?.text || "");
+          return answer;
+        }, ""),
+      };
+      publishProgress(latestBody);
+      await progressUpdates;
+    }
   }
   const polledBody = await pollRunUntilTerminal(
     { ...options, runId, conversationId },

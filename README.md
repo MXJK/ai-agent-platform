@@ -278,9 +278,11 @@ Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；�
 - 两种模式共享会话历史和持久化滚动摘要。压缩后的历史与数量受控的近期消息可以
   共同参与 Chat、Agent 探索和原生工具选择，同时保留原始消息。
 
-两种响应都会在消息内展示执行过程和用量指标。运行时以“正在工作”、当前动作和已用
-时间为主，展开的连续工作轨区分已完成、当前、等待、失败与取消；进入终态后自动收敛
-为一行工作摘要，仍可展开复盘真实阶段与工具，不暴露模型私有 chain-of-thought。
+两种响应都会在消息内展示运行状态和用量指标。快速对话保留连续执行过程；代码 Agent
+运行卡片只展示 EventStore 驱动的实时活动，不再重复步骤流程和工具汇总。尚未收到对应
+完成事件的节点或工具调用以轻量脉冲标识，完成、失败和终态活动保持静止，并尊重系统的
+减少动态效果偏好。进入终态后卡片自动收敛为一行工作摘要；完整执行事实仍可在 Trace
+审计页按 sequence 复盘，不暴露模型私有 chain-of-thought。
 Chat 使用模型提供方的 SSE 用量；Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
 输入、输出、思考和总 Token。Agent 在执行源头实时追加 `node_started`、
 `node_completed`、`reasoning_summary`、工具生命周期和回答事件；OpenAI、Anthropic、
@@ -1037,8 +1039,9 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 工具轮次的临时文字通过 `answer_reset` 清除，最终以 `answer_completed` 收尾。工具参数只在
 完整聚合和 JSON 校验后执行，Provider 私有思考不进入回答事件；首个公开 delta 之后也不再
 静默重试或切换模型。稳定 event key 让 Worker 重投与终态投影不会重复同一执行事实。
-浏览器按事件类型归约当前节点、实时活动和回答正文，在终态读取一次完整 Run 快照；连接
-失败或提前结束时回退到状态轮询。`run.read_artifact` 继续复用无正文的 observability
+浏览器按事件类型归约当前节点、实时活动和回答正文；代码 Agent 的消息内卡片只呈现实时
+活动，并依据 `node_completed`、`tool_result` / `tool_error` 停止对应进行中标识。在终态
+读取一次完整 Run 快照；连接失败或提前结束时回退到状态轮询。`run.read_artifact` 继续复用无正文的 observability
 投影，保留 artifact 身份、读取范围与完整性元数据而不泄漏正文。审批恢复在重新入队前
 追加含操作者与原始请求的 `approval_decided`。因此审计页不依赖瞬时前端状态，也能按
 sequence 复盘执行事实；Provider 私有 chain-of-thought 不进入事件协议。

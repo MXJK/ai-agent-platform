@@ -288,6 +288,42 @@ test("Agent answer deltas render while running and resets remove tool preambles"
   assert.deepEqual(context.testEvents, ["temporary tool preamble", "", "第一段", "第一段，第二段", "第一段，第二段"]);
 });
 
+test("only unfinished Agent activities are marked active", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  const events = [
+    { type: "node_started", sequence: 1, node: "plan", output: {} },
+    { type: "node_completed", sequence: 2, node: "plan", output: {} },
+    { type: "tool_started", sequence: 3, output: { call_id: "done", name: "read" } },
+    { type: "tool_result", sequence: 4, output: { call_id: "done", name: "read" } },
+    { type: "node_started", sequence: 5, node: "execute", output: {} },
+    { type: "tool_started", sequence: 6, output: { call_id: "active", name: "search" } },
+  ];
+  context.testActivityEvents = events;
+
+  assert.equal(
+    vm.runInContext('executionActiveActivitySequence(testActivityEvents, "running")', context),
+    6,
+  );
+  assert.equal(
+    vm.runInContext('executionActiveActivitySequence(testActivityEvents, "completed")', context),
+    null,
+  );
+  events.push({
+    type: "tool_error",
+    sequence: 7,
+    output: { call_id: "active", name: "search" },
+  });
+  assert.equal(
+    vm.runInContext('executionActiveActivitySequence(testActivityEvents, "running")', context),
+    5,
+  );
+  events.push({ type: "node_completed", sequence: 8, node: "execute", output: {} });
+  assert.equal(
+    vm.runInContext('executionActiveActivitySequence(testActivityEvents, "running")', context),
+    null,
+  );
+});
+
 test("composer Run control changes from pause to continue for the current Agent Run", () => {
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   vm.runInContext(`
@@ -354,4 +390,136 @@ test("paused composer control continues with optional input", async () => {
   assert.ok(events.includes("clear"));
   assert.ok(events.includes("render:running"));
   assert.ok(events.includes("watch"));
+});
+
+function loadWatchRunHarness({ events, refreshStatus }) {
+  const captured = [];
+  const pollCalls = [];
+  const sseText = events
+    .map((event) => (
+      `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+    ))
+    .join("");
+  const context = vm.createContext({
+    AbortController,
+    Blob,
+    DOMException,
+    EventSource: class {},
+    FormData,
+    Headers,
+    Intl,
+    Map,
+    Request,
+    Response,
+    Set,
+    TextDecoder,
+    TextEncoder,
+    URL,
+    URLSearchParams,
+    WeakMap,
+    console,
+    document: {},
+    location: { hash: "" },
+    navigator: {},
+    performance: { now: () => 100 },
+    window: {},
+    testCaptured: captured,
+    testPollCalls: pollCalls,
+    testSseText: sseText,
+    testRefreshStatus: refreshStatus,
+  });
+  const source = readFileSync(APP_PATH, "utf8").replace(/\ninit\(\);\s*$/, "\n");
+  vm.runInContext(source, context, { filename: APP_PATH.pathname });
+  vm.runInContext(`
+    state.conversationId = "sess_1";
+    state.latestRunId = "run_1";
+    state.latestRunConversationId = "sess_1";
+    state.latestRunStatus = "queued";
+    state.latestRunBody = null;
+    state.agentPollGeneration = 0;
+    fetch = async () => {
+      let sent = false;
+      const encoder = new TextEncoder();
+      return {
+        ok: true,
+        body: {
+          getReader() {
+            return {
+              read: async () => {
+                if (sent) return { value: undefined, done: true };
+                sent = true;
+                return { value: encoder.encode(testSseText), done: false };
+              },
+              cancel: async () => {},
+            };
+          },
+        },
+      };
+    };
+    document.getElementById = (id) => (
+      id === "user-id-input" ? { value: { trim: () => "demo_user" } } : null
+    );
+    setTrace = () => {};
+    renderOverview = () => {};
+    updateComposerAvailability = () => {};
+    refreshRun = async () => ({
+      run_id: "run_1",
+      conversation_id: "sess_1",
+      status: testRefreshStatus,
+      result: {},
+    });
+    pollRunUntilTerminal = async (options, initialBody) => {
+      testPollCalls.push({ options, initialBody });
+      return initialBody;
+    };
+    captureProgress = (body) => { testCaptured.push(body); };
+  `, context);
+  return { context, captured, pollCalls };
+}
+
+test("resume event stream continues past a historical approval boundary", async () => {
+  const events = [
+    { type: "node_started", sequence: 1, status: "running", node: "plan_tools", output: {} },
+    { type: "approval_required", sequence: 2, status: "waiting_approval", node: "review_tool_plan", output: {} },
+    { type: "tool_started", sequence: 3, status: "running", output: { call_id: "c1", name: "sandbox.write_file" } },
+    { type: "tool_result", sequence: 4, status: "running", output: { call_id: "c1", name: "sandbox.write_file", result: { ok: true } } },
+    { type: "run_completed", sequence: 5, status: "completed", node: "compose_answer", output: {} },
+  ];
+  const { context, pollCalls } = loadWatchRunHarness({
+    events,
+    refreshStatus: "completed",
+  });
+
+  const result = await vm.runInContext(
+    'watchRunUntilTerminal({ runId: "run_1", conversationId: "sess_1", onProgress: captureProgress })',
+    context,
+  );
+
+  assert.equal(result.stream_events.length, 5);
+  assert.ok(
+    result.stream_events.some(
+      (event) => event.type === "tool_result" && event.output?.name === "sandbox.write_file",
+    ),
+  );
+  assert.equal(pollCalls.length, 1);
+  assert.equal(pollCalls[0].initialBody.stream_events.length, 5);
+});
+
+test("suspended stream end preserves collected activities", async () => {
+  const events = [
+    { type: "node_started", sequence: 1, status: "running", node: "plan_tools", output: {} },
+    { type: "approval_required", sequence: 2, status: "waiting_approval", node: "review_tool_plan", output: {} },
+  ];
+  const { context } = loadWatchRunHarness({
+    events,
+    refreshStatus: "waiting_approval",
+  });
+
+  const result = await vm.runInContext(
+    'watchRunUntilTerminal({ runId: "run_1", conversationId: "sess_1", onProgress: captureProgress })',
+    context,
+  );
+
+  assert.equal(result.status, "waiting_approval");
+  assert.equal(result.stream_events.length, 2);
 });

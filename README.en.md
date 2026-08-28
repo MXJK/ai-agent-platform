@@ -251,8 +251,14 @@ The shared composer offers:
   exploration and native tool selection without discarding the original
   messages.
 
-Both response modes render an in-message execution process and response
-metrics. Chat uses provider SSE usage; Agent runs aggregate provider-reported
+Both response modes render in-message runtime status and response metrics.
+Quick Chat keeps its sequential execution process; the Code Agent card shows
+only EventStore-backed live activities, without a duplicate step track or tool
+summary. A restrained pulse marks only nodes and tool calls that have not yet
+received their matching completion event; completed, failed, and terminal
+activities stay still, including under the system reduced-motion preference.
+The complete sequence remains available on the Trace audit page. Chat uses
+provider SSE usage; Agent runs aggregate provider-reported
 usage across structured planning and answer generation. The UI shows input,
 output, thinking, and total tokens per response. Agent execution emits
 `node_started`, `node_completed`, `reasoning_summary`, tool lifecycle, and
@@ -1105,7 +1111,9 @@ and validation. Once public text has been emitted, the request is not silently
 retried or moved to another model. Stable event keys prevent worker replay and
 terminal projection from duplicating execution facts.
 The browser reduces each event type into the current stage, live activity list,
-and answer body, fetches one complete Run snapshot at a terminal state, and
+and answer body. The Code Agent in-message card renders only that live activity
+list and clears an activity's running marker when `node_completed`, `tool_result`,
+or `tool_error` arrives. It fetches one complete Run snapshot at a terminal state and
 falls back to status polling if the stream fails or ends early. Provider-private
 chain-of-thought never enters the event protocol. Artifact-read result events
 reuse the body-free observability projection for `run.read_artifact`, preserving

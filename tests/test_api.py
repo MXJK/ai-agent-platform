@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260828-context-token-meter',
+            '/static/styles.css?v=20260828-agent-activity-detail',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260828-context-token-meter',
+            '/static/app.js?v=20260828-agent-activity-detail',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -1090,6 +1090,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("agentProgressBodyFromEvents", script_response.text)
         self.assertIn("renderStreamedAgentProgress", script_response.text)
         self.assertIn("executionActivityEvents", script_response.text)
+        self.assertIn("executionActiveActivitySequence", script_response.text)
+        self.assertIn("activityOnly: true", script_response.text)
+        self.assertIn('stepList.innerHTML = activityOnly ? "" : steps', script_response.text)
         self.assertIn('event.type === "answer_delta"', script_response.text)
         self.assertIn("streamed_answer", script_response.text)
         self.assertIn("publishProgress(progressBody)", script_response.text)
@@ -1113,6 +1116,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", stylesheet_response.text)
         self.assertIn(".execution-process", stylesheet_response.text)
         self.assertIn(".execution-step-marker", stylesheet_response.text)
+        self.assertIn(".execution-process.activity-only", stylesheet_response.text)
+        self.assertIn("@keyframes execution-live-pulse", stylesheet_response.text)
         self.assertIn(".execution-process.complete:not([open])", stylesheet_response.text)
         self.assertIn("@keyframes execution-spin", stylesheet_response.text)
         self.assertIn(".response-metrics", stylesheet_response.text)
