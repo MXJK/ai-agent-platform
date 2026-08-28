@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -109,6 +109,7 @@ class ConversationContextUsage:
     truncated_messages: int = 0
     synchronous_compactions: int = 0
     summary_realigned: bool = False
+    shares: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

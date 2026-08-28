@@ -243,33 +243,140 @@ button.scope-chip:focus-visible {
   font-style: normal;
 }
 
-.context-scope {
-  grid-template-columns: auto minmax(0, 1fr);
+.context-ring {
+  position: relative;
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
 }
 
-.context-meter {
-  grid-column: 1 / -1;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: var(--line);
+.context-ring-svg {
+  width: 26px;
+  height: 26px;
+  transform: rotate(-90deg);
 }
 
-.context-meter i {
-  display: block;
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
+.context-ring-track,
+.context-ring-fill {
+  fill: none;
+  stroke-width: 3.5;
+}
+
+.context-ring-track {
+  stroke: var(--line);
+}
+
+.context-ring-fill {
+  stroke: var(--signal);
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--transition-fast), stroke var(--transition-fast);
+}
+
+.context-ring strong {
+  position: absolute;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 750;
+}
+
+.context-scope.warning .context-ring-fill {
+  stroke: var(--amber);
+}
+
+.context-scope.error .context-ring-fill {
+  stroke: var(--red);
+}
+
+.context-ring-tooltip {
+  position: fixed;
+  z-index: 3000;
+  min-width: 190px;
+  max-width: 260px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: 0 10px 28px rgba(6, 14, 23, 0.18);
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.context-ring-tooltip[hidden] {
+  display: none;
+}
+
+.context-ring-tooltip-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.context-ring-tooltip-head strong {
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.context-ring-tooltip-head em {
+  color: var(--brand-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.context-ring-tooltip-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-ring-tooltip-list li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.context-ring-tooltip-list .ring-legend-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.context-ring-tooltip-list strong {
+  margin-left: auto;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+}
+
+.ring-legend-system {
+  background: var(--muted);
+}
+
+.ring-legend-tools {
   background: var(--signal);
-  transition: background var(--transition-fast);
 }
 
-.context-scope.warning .context-meter i {
-  background: var(--amber);
+.ring-legend-messages {
+  background: var(--blue);
 }
 
-.context-scope.error .context-meter i {
-  background: var(--red);
+.context-ring-tooltip-note {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 9px;
 }
 
 .composer-config {
@@ -715,7 +822,7 @@ button.scope-chip:focus-visible {
   }
 
   .scope-chip em,
-  .context-meter {
+  .context-ring {
     display: none;
   }
 

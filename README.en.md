@@ -282,11 +282,13 @@ operations page shows the same totals, operation distribution, and budget
 status for every registered workspace.
 
 The composer keeps these two scopes explicit: cumulative actual usage remains
-a ledger statistic, while the meter and percentage use the retained-history
-estimate divided by the current model's input budget. The history preview
-contains only retained conversation messages and summaries; it excludes the
-next user input, system prompt, tool schemas, and workspace retrieval, so it is
-not the complete final Prompt. The session usage API resolves that preview
+a ledger statistic, while the ring and percentage use the retained-history
+estimate divided by the current model's input budget. Hovering the ring reveals
+the system-context, tool-call, and conversation-message token split (derived
+from the latest Agent run's `context_shares`, shown in `k` units). The history
+preview contains only retained conversation messages and summaries; it excludes
+the next user input, system prompt, tool schemas, and workspace retrieval, so it
+is not the complete final Prompt. The session usage API resolves that preview
 budget from the session's current model preference, and changing the model
 refreshes the displayed denominator immediately.
 

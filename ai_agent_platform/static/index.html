@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260828-agent-activity-detail" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260828-context-ring-r1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -263,7 +263,13 @@
                     <span id="composer-context-label-compact" class="composer-context-label-compact">等待首轮请求</span>
                   </strong>
                 </span>
-                <span class="context-meter" aria-hidden="true"><i id="composer-context-meter-fill"></i></span>
+                <span id="composer-context-ring" class="context-ring" aria-hidden="true">
+                  <svg class="context-ring-svg" viewBox="0 0 36 36">
+                    <circle class="context-ring-track" cx="18" cy="18" r="15.5"></circle>
+                    <circle id="composer-context-ring-fill" class="context-ring-fill" cx="18" cy="18" r="15.5"></circle>
+                  </svg>
+                  <strong id="composer-context-ring-label">–</strong>
+                </span>
               </div>
             </div>
             <div class="composer">
@@ -1347,6 +1353,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260828-agent-activity-detail" defer></script>
+    <script src="/static/app.js?v=20260828-context-ring-r1" defer></script>
   </body>
 </html>

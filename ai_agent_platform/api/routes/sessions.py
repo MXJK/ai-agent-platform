@@ -37,6 +37,7 @@ from ai_agent_platform.schemas import (
     UserPreferencesResponse,
 )
 from ai_agent_platform.services import (
+    QueryService,
     SessionService,
     WorkspaceNotFoundError,
     WorkspaceService,
@@ -63,6 +64,7 @@ def create_sessions_router(
     memory_service: ProjectMemoryService | None = None,
     model_registry: ModelRegistryService | None = None,
     llm_client: LLMClient | None = None,
+    query_service: QueryService | None = None,
 ) -> APIRouter:
     router = APIRouter()
     settings = settings or Settings()
@@ -290,6 +292,11 @@ def create_sessions_router(
                 settings.llm_max_context_messages_ceiling
             ),
         )
+        if query_service is not None:
+            context = replace(
+                context,
+                shares=query_service.latest_context_shares(session_id),
+            )
         return TokenUsagesResponse(
             session_id=session_id,
             input_tokens=totals.input_tokens,

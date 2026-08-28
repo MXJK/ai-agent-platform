@@ -195,6 +195,7 @@ class ContextTokenUsageResponse(BaseModel):
     truncated_messages: int = 0
     synchronous_compactions: int = 0
     summary_realigned: bool = False
+    shares: dict[str, int] = Field(default_factory=dict)
 
     @classmethod
     def from_domain(

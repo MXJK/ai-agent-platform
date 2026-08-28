@@ -351,6 +351,35 @@ function formatTokenPercentage(value) {
   }).format(normalized);
 }
 
+function formatTokenK(value) {
+  const n = Math.max(0, Number(value || 0));
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function contextRingBreakdown(shares) {
+  const system = Number(shares?.system_tokens || 0)
+    + Number(shares?.tool_schema_tokens || 0);
+  const tools = Number(shares?.transcript_tokens || 0);
+  const messages = Number(shares?.history_tokens || 0)
+    + Number(shares?.evidence_tokens || 0);
+  return [
+    { key: "system", label: "系统上下文", tokens: system },
+    { key: "tools", label: "工具调用", tokens: tools },
+    { key: "messages", label: "对话消息", tokens: messages },
+  ];
+}
+
+function contextRingCenterLabel(ratio, hasBudget) {
+  if (!hasBudget) return "–";
+  const pct = ratio * 100;
+  if (pct <= 0) return "0%";
+  if (pct < 1) return "<1%";
+  if (pct >= 99.5) return "100%";
+  return `${Math.round(pct)}%`;
+}
+
 function composerContextUsagePresentation(usage) {
   if (!usage) {
     return {
@@ -360,6 +389,13 @@ function composerContextUsagePresentation(usage) {
       meterPercent: 0,
       tone: null,
       description: "发起请求后分别显示累计实际消耗和当前会话历史上下文估算",
+      ringPercent: 0,
+      ringLabel: "–",
+      percentage: null,
+      estimated: 0,
+      budget: 0,
+      breakdown: contextRingBreakdown({}),
+      hasBreakdown: false,
     };
   }
 
@@ -368,6 +404,8 @@ function composerContextUsagePresentation(usage) {
   const budget = Math.max(0, Number(usage.context?.budget_tokens || 0));
   const ratio = budget > 0 ? estimated / budget : 0;
   const percentage = budget > 0 ? formatTokenPercentage(ratio) : null;
+  const breakdown = contextRingBreakdown(usage.context?.shares);
+  const hasBreakdown = breakdown.some((item) => item.tokens > 0);
   const estimateDescription = budget > 0
     ? `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} tokens（${percentage}）`
     : `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} tokens；当前模型未提供输入预算`;
@@ -382,6 +420,13 @@ function composerContextUsagePresentation(usage) {
     meterPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
     tone: ratio >= 0.9 ? "error" : ratio >= 0.72 ? "warning" : null,
     description: `累计实际消耗 ${formatTokenCount(total)} tokens。${estimateDescription}；估算不含下一条用户输入、系统提示、工具 Schema 和工作区检索内容。`,
+    ringPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
+    ringLabel: contextRingCenterLabel(ratio, budget > 0),
+    percentage,
+    estimated,
+    budget,
+    breakdown,
+    hasBreakdown,
   };
 }
 
@@ -1944,9 +1989,105 @@ function updateComposerScopeSummary() {
   $("composer-context-kicker").textContent = contextUsage.kicker;
   $("composer-context-label-full").textContent = contextUsage.label;
   $("composer-context-label-compact").textContent = contextUsage.compactLabel;
-  $("composer-context-meter-fill").style.width = `${contextUsage.meterPercent}%`;
+  renderContextRing(contextUsage);
   contextNode.title = contextUsage.description;
   contextNode.setAttribute("aria-label", contextUsage.description);
+}
+
+let contextRingTooltipNode = null;
+
+function ensureContextRingTooltip() {
+  if (contextRingTooltipNode || !document.body) return contextRingTooltipNode;
+  const node = document.createElement("div");
+  node.id = "composer-context-ring-tooltip";
+  node.className = "context-ring-tooltip";
+  node.setAttribute("role", "tooltip");
+  node.hidden = true;
+  document.body.appendChild(node);
+  contextRingTooltipNode = node;
+  return node;
+}
+
+function contextRingTooltipHtml(contextUsage) {
+  const total = contextUsage.budget > 0
+    ? `上下文 ≈ ${formatTokenK(contextUsage.estimated)} / ${formatTokenK(contextUsage.budget)}`
+    : `上下文 ≈ ${formatTokenK(contextUsage.estimated)}`;
+  const rows = contextUsage.hasBreakdown
+    ? contextUsage.breakdown
+        .map((item) => `
+          <li>
+            <span class="ring-legend-dot ring-legend-${item.key}"></span>
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${formatTokenK(item.tokens)}</strong>
+          </li>`)
+        .join("")
+    : "";
+  const note = contextUsage.hasBreakdown
+    ? "三段为最近一次 Agent 运行的输入预算拆解（本地估算）"
+    : "当前仅对话历史估算，无系统/工具拆解";
+  return `
+    <div class="context-ring-tooltip-head">
+      <strong>${escapeHtml(total)}</strong>
+      <em>${contextUsage.percentage ?? "–"}</em>
+    </div>
+    ${rows ? `<ul class="context-ring-tooltip-list">${rows}</ul>` : ""}
+    <div class="context-ring-tooltip-note">${escapeHtml(note)}</div>`;
+}
+
+function positionContextRingTooltip(anchor) {
+  const node = contextRingTooltipNode;
+  if (!node || !anchor) return;
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  const nodeWidth = node.offsetWidth;
+  const nodeHeight = node.offsetHeight;
+  let left = rect.left;
+  if (left + nodeWidth > window.innerWidth - margin) {
+    left = Math.max(margin, window.innerWidth - nodeWidth - margin);
+  }
+  let top = rect.top - nodeHeight - margin;
+  if (top < margin) {
+    top = rect.bottom + margin;
+  }
+  node.style.left = `${Math.round(left)}px`;
+  node.style.top = `${Math.round(top)}px`;
+}
+
+function renderContextRing(contextUsage) {
+  const ring = $("composer-context-ring");
+  if (!ring) return;
+  const fill = $("composer-context-ring-fill");
+  const label = $("composer-context-ring-label");
+  const circumference = 2 * Math.PI * 15.5;
+  const fraction = Math.max(0, Math.min(1, (contextUsage.ringPercent || 0) / 100));
+  if (fill) {
+    fill.setAttribute("stroke-dasharray", circumference.toFixed(2));
+    fill.setAttribute("stroke-dashoffset", (circumference * (1 - fraction)).toFixed(2));
+  }
+  if (label) label.textContent = contextUsage.ringLabel;
+
+  const node = ensureContextRingTooltip();
+  if (node) node.innerHTML = contextRingTooltipHtml(contextUsage);
+  wireContextRingTooltip();
+}
+
+function wireContextRingTooltip() {
+  const ring = $("composer-context-ring");
+  if (!ring || ring.__contextRingTooltipWired) return;
+  ring.__contextRingTooltipWired = true;
+  const show = () => {
+    const node = ensureContextRingTooltip();
+    if (!node) return;
+    node.hidden = false;
+    positionContextRingTooltip(ring);
+  };
+  const hide = () => {
+    if (contextRingTooltipNode) contextRingTooltipNode.hidden = true;
+  };
+  ring.addEventListener("mouseenter", show);
+  ring.addEventListener("mouseleave", hide);
+  ring.addEventListener("focus", show);
+  ring.addEventListener("blur", hide);
 }
 
 function updateContextSummary() {

@@ -888,6 +888,28 @@ class QueryService:
         self._assert_actor(record, actor_user_id)
         return record
 
+    def latest_context_shares(self, conversation_id: str) -> dict[str, int]:
+        """Return the latest run's resolved context shares, or an empty mapping.
+
+        ``context_shares`` is computed once in ``setup_workspace`` and persisted
+        on that run's trace. It is an allocation breakdown (system, tool schema,
+        evidence, history, transcript) rather than a provider-counted prompt, so
+        callers must not present it as an exact final-Prompt measurement.
+        """
+        get_latest = getattr(self._runtime, "get_latest_run", None)
+        record = get_latest(conversation_id) if callable(get_latest) else None
+        for step in getattr(record, "trace", None) or []:
+            if step.get("node") != "setup_workspace":
+                continue
+            shares = (step.get("output") or {}).get("context_shares")
+            if isinstance(shares, dict):
+                return {
+                    key: int(value)
+                    for key, value in shares.items()
+                    if isinstance(value, (int, float))
+                }
+        return {}
+
     def list_events_for_actor(
         self,
         run_id: str,

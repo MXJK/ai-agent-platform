@@ -28,7 +28,8 @@
       "dropped_messages": 2,
       "truncated_messages": 0,
       "synchronous_compactions": 0,
-      "summary_realigned": false
+      "summary_realigned": false,
+      "shares": {}
     }
   },
   "truncate_single": {
@@ -48,7 +49,8 @@
       "dropped_messages": 0,
       "truncated_messages": 1,
       "synchronous_compactions": 0,
-      "summary_realigned": false
+      "summary_realigned": false,
+      "shares": {}
     }
   },
   "protect_summary_and_live_turn": {
@@ -72,7 +74,8 @@
       "dropped_messages": 1,
       "truncated_messages": 1,
       "synchronous_compactions": 0,
-      "summary_realigned": false
+      "summary_realigned": false,
+      "shares": {}
     }
   }
 }

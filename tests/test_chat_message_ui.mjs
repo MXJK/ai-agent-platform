@@ -157,6 +157,10 @@ test("composer context meter separates cumulative usage from current history pre
   assert.equal(presentation.compactLabel, "上下文 24.76% · ≈ 1.8万");
   assert.ok(presentation.meterPercent > 24.75 && presentation.meterPercent < 24.77);
   assert.equal(presentation.tone, null);
+  assert.equal(presentation.ringLabel, "25%");
+  assert.equal(presentation.hasBreakdown, false);
+  assert.equal(presentation.breakdown.length, 3);
+  assert.ok(presentation.breakdown.every((item) => item.tokens === 0));
   assert.match(presentation.description, /累计实际消耗 180,000 tokens/);
   assert.match(presentation.description, /会话历史上下文估算 18,000 \/ 72,704 tokens/);
   assert.doesNotMatch(presentation.label, /247\.58%/);
@@ -191,6 +195,53 @@ test("composer context meter handles unknown budgets and high estimated usage", 
   assert.equal(high.compactLabel, "上下文 90.78% · ≈ 6.6万");
   assert.ok(high.meterPercent > 90.77 && high.meterPercent < 90.79);
   assert.equal(high.tone, "error");
+});
+
+test("composer context ring breaks context_shares into system, tools, and messages", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  context.shareUsage = {
+    total_tokens: 50_000,
+    context: {
+      estimated_tokens: 30_000,
+      budget_tokens: 72_704,
+      shares: {
+        system_tokens: 405,
+        tool_schema_tokens: 1736,
+        evidence_tokens: 17_640,
+        history_tokens: 10_584,
+        transcript_tokens: 42_339,
+      },
+    },
+  };
+
+  const presentation = vm.runInContext(
+    "composerContextUsagePresentation(shareUsage)",
+    context,
+  );
+
+  assert.equal(presentation.hasBreakdown, true);
+  assert.equal(presentation.breakdown[0].key, "system");
+  assert.equal(presentation.breakdown[0].tokens, 405 + 1736);
+  assert.equal(presentation.breakdown[1].key, "tools");
+  assert.equal(presentation.breakdown[1].tokens, 42_339);
+  assert.equal(presentation.breakdown[2].key, "messages");
+  assert.equal(presentation.breakdown[2].tokens, 17_640 + 10_584);
+  assert.equal(
+    vm.runInContext("formatTokenK(2141)", context),
+    "2.1k",
+  );
+  assert.equal(
+    vm.runInContext("formatTokenK(72_704)", context),
+    "72.7k",
+  );
+  assert.equal(
+    vm.runInContext("formatTokenK(1_000_000)", context),
+    "1.0M",
+  );
+  assert.equal(
+    vm.runInContext("formatTokenK(420)", context),
+    "420",
+  );
 });
 
 function loadSessionNavigationHarness({ archived = false } = {}) {

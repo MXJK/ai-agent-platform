@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260828-agent-activity-detail',
+            '/static/styles.css?v=20260828-context-ring-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260828-agent-activity-detail',
+            '/static/app.js?v=20260828-context-ring-r1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -845,8 +845,12 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-context-kicker"', response.text)
         self.assertIn('id="composer-context-label-full"', response.text)
         self.assertIn('id="composer-context-label-compact"', response.text)
+        self.assertIn('id="composer-context-ring"', response.text)
+        self.assertIn('id="composer-context-ring-fill"', response.text)
+        self.assertIn('id="composer-context-ring-label"', response.text)
         self.assertIn("累计 Token", response.text)
         self.assertIn("function formatTokenPercentage(value)", script_response.text)
+        self.assertIn("function formatTokenK(value)", script_response.text)
         self.assertIn('return "<0.01%"', script_response.text)
         self.assertIn("maximumFractionDigits: 2", script_response.text)
         self.assertIn(
