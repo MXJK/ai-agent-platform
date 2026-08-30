@@ -309,7 +309,7 @@ class AgentContextBudgetTests(unittest.TestCase):
 
             result = runtime.run(
                 conversation_id="session",
-                user_input="这个项目是干什么的？",
+                user_input="这个仓库里有哪些文件？简要说明项目结构。",
                 history=[],
                 workspace_id="workspace",
                 workspace_root=str(root),
@@ -330,6 +330,7 @@ class AgentContextBudgetTests(unittest.TestCase):
             strategies,
             ["discover_project_entries", "read_discovered_entries"],
         )
+        self.assertEqual(len(strategies), 2)
         assessments = [
             item for item in result.trace if item["node"] == "assess_context"
         ]

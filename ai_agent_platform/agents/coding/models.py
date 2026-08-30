@@ -102,6 +102,8 @@ class CodingAgentState(TypedDict, total=False):
     llm_input_tokens: int
     llm_output_tokens: int
     llm_thoughts_tokens: int
+    llm_request_count: int
+    llm_retry_count: int
     artifacts: list[dict[str, Any]]
     run_artifact_read_enabled: bool
     changed_files: list[str]
@@ -181,6 +183,8 @@ class AgentRunMetrics:
     node_count: int = 0
     tool_call_count: int = 0
     successful_tool_call_count: int = 0
+    model_request_count: int = 0
+    model_retry_count: int = 0
     retry_count: int = 0
     error_count: int = 0
     recovered_error_count: int = 0

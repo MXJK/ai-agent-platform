@@ -49,6 +49,12 @@ PROJECT_OVERVIEW_MARKERS = (
     "项目是做什么",
     "介绍一下这个项目",
     "介绍这个项目",
+    "仓库里有哪些文件",
+    "仓库有哪些文件",
+    "说明项目结构",
+    "介绍项目结构",
+    "项目结构是什么",
+    "仓库结构",
     "what does this project do",
     "what is this project",
     "project overview",
@@ -877,7 +883,16 @@ class ContextRetrievalNodes:
             if path not in context_files
         ]
         has_repo_evidence = bool(sources)
-        sufficient = has_repo_evidence and (budget_exhausted or not unread)
+        native_seed_limit = min(2, self._max_exploration_rounds)
+        native_seed_complete = bool(
+            getattr(self._planner, "uses_native_tool_calling", False)
+            and native_seed_limit > 0
+            and round_number >= native_seed_limit
+            and has_repo_evidence
+        )
+        sufficient = has_repo_evidence and (
+            budget_exhausted or native_seed_complete or not unread
+        )
         failed_count = sum(
             1
             for result in state.get("exploration_results", [])
@@ -892,6 +907,8 @@ class ContextRetrievalNodes:
         )
         if budget_exhausted:
             stop_reason = "budget_exhausted"
+        elif native_seed_complete:
+            stop_reason = "native_seed_sufficient"
         elif sufficient:
             stop_reason = "evidence_sufficient"
         elif unread:
@@ -940,6 +957,7 @@ class ContextRetrievalNodes:
                     "unread_candidates": len(unread),
                     "sufficient": sufficient,
                     "budget_exhausted": budget_exhausted,
+                    "native_seed_complete": native_seed_complete,
                     "stop_reason": stop_reason,
                     "failed_tools": failed_count,
                     "zero_result_tools": zero_result_count,

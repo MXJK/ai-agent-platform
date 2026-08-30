@@ -145,6 +145,8 @@ class AgentRunMetricsResponse(BaseModel):
     node_count: int
     tool_call_count: int
     successful_tool_call_count: int
+    model_request_count: int
+    model_retry_count: int
     retry_count: int
     error_count: int
     recovered_error_count: int
@@ -265,6 +267,8 @@ class AgentRunResponse(BaseModel):
                 successful_tool_call_count=(
                     result.metrics.successful_tool_call_count
                 ),
+                model_request_count=result.metrics.model_request_count,
+                model_retry_count=result.metrics.model_retry_count,
                 retry_count=result.metrics.retry_count,
                 error_count=result.metrics.error_count,
                 recovered_error_count=result.metrics.recovered_error_count,

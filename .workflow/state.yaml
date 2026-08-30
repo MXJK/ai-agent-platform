@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "COMPOSER-CONTEXT-TOKEN-METER"
-next_action: "Review and commit the verified composer context Token meter correction."
+active_task: "AGENT-RUN-EFFICIENCY"
+next_action: "Review and commit the verified Agent run efficiency fix when ready."
 blockers: []
 last_verified_commit: "23c8d3b9eabbd54b503067e7470dcc9fe44d56c5"
-updated_at: "2026-08-28T10:27:43+08:00"
+updated_at: "2026-08-30T16:32:55+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

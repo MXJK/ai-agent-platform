@@ -1168,6 +1168,15 @@ function renderResponseMetrics(contentNode, metrics) {
   if (metrics.tool_call_count !== undefined) {
     values.push(["工具", formatTokenCount(metrics.tool_call_count)]);
   }
+  if (metrics.model_request_count !== undefined) {
+    values.push(["模型请求", formatTokenCount(metrics.model_request_count)]);
+  }
+  if (metrics.model_retry_count !== undefined) {
+    values.push(["模型重试", formatTokenCount(metrics.model_retry_count)]);
+  }
+  if (metrics.retry_count !== undefined) {
+    values.push(["总重试", formatTokenCount(metrics.retry_count)]);
+  }
   footer.innerHTML = values
     .map(([label, value]) => `<span><small>${escapeHtml(label)}</small>${escapeHtml(value)}</span>`)
     .join("");
@@ -5868,6 +5877,9 @@ function renderAgentChatResponse(
       elapsed_ms: result.metrics.elapsed_ms,
       node_count: result.metrics.node_count,
       tool_call_count: result.metrics.tool_call_count,
+      model_request_count: result.metrics.model_request_count,
+      model_retry_count: result.metrics.model_retry_count,
+      retry_count: result.metrics.retry_count,
       input_tokens: result.metrics.input_tokens,
       output_tokens: result.metrics.output_tokens,
       thoughts_tokens: result.metrics.thoughts_tokens,

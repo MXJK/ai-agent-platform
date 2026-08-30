@@ -177,6 +177,7 @@ class ToolLoopNodes:
             }
 
         native_messages = list(state.get("native_tool_messages", []))
+        starting_native_session = not native_messages
         if not native_messages:
             native_messages = native_tool_messages(
                 state,
@@ -486,6 +487,11 @@ class ToolLoopNodes:
         else:
             proposed_calls = budgeted_calls
         turn_dropped = budgeted_calls[len(proposed_calls):]
+        seeded_signatures = (
+            _seeded_native_tool_signatures(state)
+            if starting_native_session
+            else set()
+        )
         previous_signatures = set(state.get("native_tool_signatures", []))
         tool_calls: list[ToolCall] = []
         suppressed_calls: list[tuple[ToolCall, str]] = []
@@ -493,6 +499,10 @@ class ToolLoopNodes:
             signature = _native_tool_call_key(call, state)
             if signature in previous_signatures:
                 suppressed_calls.append((call, "repeated_tool_call"))
+                continue
+            if signature in seeded_signatures:
+                previous_signatures.add(signature)
+                suppressed_calls.append((call, "seeded_evidence"))
                 continue
             previous_signatures.add(signature)
             tool_calls.append(call)
@@ -1286,7 +1296,23 @@ class ToolLoopNodes:
 
 
 def _tool_call_key(call: ToolCall) -> str:
-    return f"tool:{call.name}:{json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)}"
+    arguments = call.arguments
+    if call.name in {"repo.search_code", "repo.find_files"}:
+        identity = {
+            "query": arguments.get("query"),
+            "path": arguments.get("path") or "",
+        }
+    elif call.name == "repo.list_files":
+        identity = {"path": arguments.get("path") or ""}
+    elif call.name == "repo.read_file":
+        identity = {
+            "path": arguments.get("path"),
+            "start_line": arguments.get("start_line") or 1,
+            "end_line": arguments.get("end_line"),
+        }
+    else:
+        identity = arguments
+    return f"tool:{call.name}:{json.dumps(identity, sort_keys=True, ensure_ascii=False)}"
 
 
 def _native_tool_call_key(call: ToolCall, state: CodingAgentState) -> str:
@@ -1294,6 +1320,28 @@ def _native_tool_call_key(call: ToolCall, state: CodingAgentState) -> str:
     if call.name in SANDBOX_MUTATION_TOOLS:
         return key
     return f"generation:{state.get('change_iteration', 0)}:{key}"
+
+
+def _seeded_native_tool_signatures(state: CodingAgentState) -> set[str]:
+    complete_files = {
+        str(source.path)
+        for source in state.get("context_sources", [])
+        if getattr(source, "kind", "") == "file"
+        and not bool(getattr(source, "truncated", False))
+    }
+    signatures: set[str] = set()
+    for call in state.get("tool_calls", []):
+        if call.name == "repo.read_file":
+            if str(call.arguments.get("path") or "") not in complete_files:
+                continue
+        elif call.name not in {
+            "repo.search_code",
+            "repo.find_files",
+            "repo.list_files",
+        }:
+            continue
+        signatures.add(_native_tool_call_key(call, state))
+    return signatures
 
 
 def _native_assistant_message(decision: Any) -> dict[str, Any]:

@@ -78,7 +78,7 @@ class NativeMultiTurnPlanner(ReadOnlyPlanner):
                     ToolCall(
                         call_id=f"native_read_{path.removesuffix('.py')}",
                         name="repo.read_file",
-                        arguments={"path": path},
+                        arguments={"path": path, "start_line": 1, "end_line": 1},
                         source="golden",
                     )
                 ],

@@ -218,7 +218,11 @@ class _OverflowAfterSmallResultsPlanner(_InputThenCompletePlanner):
                     ToolCall(
                         call_id=f"small_{label}",
                         name="repo.read_file",
-                        arguments={"path": f"{label}.txt"},
+                        arguments={
+                            "path": f"{label}.txt",
+                            "start_line": 1,
+                            "end_line": 1,
+                        },
                     )
                 ],
                 model="scripted",

@@ -440,22 +440,29 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
     )
     tool_results = state.get("tool_results", [])
     errors = state.get("errors", [])
+    executed_results = {
+        str(result.get("call_id") or f"result:{index}"): result
+        for index, result in enumerate(tool_results)
+    }
+    model_retry_count = max(0, int(state.get("llm_retry_count", 0)))
+    tool_retry_count = sum(
+        1
+        for error in errors
+        if int(error.get("attempt", 1)) < int(error.get("max_attempts", 1))
+    ) + sum(
+        max(0, int(result.get("attempts", 1)) - 1)
+        for result in executed_results.values()
+    )
     return AgentRunMetrics(
         elapsed_ms=max(0, elapsed_ms),
         node_count=len(state.get("trace", [])),
-        tool_call_count=len(state.get("tool_calls", [])),
+        tool_call_count=len(executed_results),
         successful_tool_call_count=sum(
-            1 for result in tool_results if result.get("ok")
+            1 for result in executed_results.values() if result.get("ok")
         ),
-        retry_count=sum(
-            1
-            for error in errors
-            if int(error.get("attempt", 1)) < int(error.get("max_attempts", 1))
-        )
-        + sum(
-            max(0, int(result.get("attempts", 1)) - 1)
-            for result in tool_results
-        ),
+        model_request_count=max(0, int(state.get("llm_request_count", 0))),
+        model_retry_count=model_retry_count,
+        retry_count=model_retry_count + tool_retry_count,
         error_count=len(errors),
         recovered_error_count=sum(
             1 for error in errors if error.get("recovered", False)

@@ -359,6 +359,7 @@ class NativeProviderMappingTests(unittest.TestCase):
                 llm_provider="deepseek",
                 llm_model="deepseek-v4-flash",
                 llm_max_retries=1,
+                llm_retry_policy_json='{"tool_output_truncated": 1}',
             ),
             usage_ledger=ledger,
             model_router=router,
@@ -440,6 +441,8 @@ class NativeProviderMappingTests(unittest.TestCase):
         self.assertEqual(len(ledger.records), 2)
         self.assertEqual(usage.input_tokens, 44)
         self.assertEqual(usage.output_tokens, 4108)
+        self.assertEqual(usage.request_count, 2)
+        self.assertEqual(usage.retry_count, 1)
 
     def test_google_converts_foreign_tool_history_to_text_without_signatures(self) -> None:
         contents = _google_tool_contents(
@@ -1020,6 +1023,55 @@ class ScriptedNativePlanner:
         return "fallback"
 
 
+class SeededEvidenceNativePlanner(ScriptedNativePlanner):
+    single_tool_per_turn = True
+    parallel_read_tools = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_seed_suppression = False
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="repeat_seed_inventory",
+                        name="repo.list_files",
+                        arguments={"path": "", "max_results": 20},
+                    ),
+                    ToolCall(
+                        call_id="repeat_seed_read",
+                        name="repo.read_file",
+                        arguments={"path": "README.md"},
+                    ),
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        self.observed_seed_suppression = all(
+            any(
+                message.get("role") == "tool"
+                and message.get("call_id") == call_id
+                and message.get("content", {}).get("error_code")
+                == "seeded_evidence"
+                for message in messages
+            )
+            for call_id in ("repeat_seed_inventory", "repeat_seed_read")
+        )
+        return LLMToolDecision(
+            text="The seed evidence already describes the project.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class OversizedToolResultPlanner(ScriptedNativePlanner):
     def __init__(self, tool_name: str) -> None:
         super().__init__()
@@ -1259,7 +1311,7 @@ class HardBudgetNativePlanner(ScriptedNativePlanner):
                 ToolCall(
                     call_id=f"hard_{self.decisions}",
                     name="repo.read_file",
-                    arguments={"path": path},
+                    arguments={"path": path, "start_line": 1, "end_line": 1},
                     source="test_native",
                 )
             ],
@@ -1733,6 +1785,63 @@ class NativeAnswerStreamingTests(unittest.TestCase):
 
 
 class NativeToolLoopTests(unittest.TestCase):
+    def test_native_seed_stops_after_two_rounds_and_suppresses_duplicate_reads(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text(
+                "# Demo\nA small repository.\n",
+                encoding="utf-8",
+            )
+            planner = SeededEvidenceNativePlanner()
+            result = CodingAgentRuntime(planner=planner).run(
+                conversation_id="sess_seeded_evidence",
+                user_input="这个仓库里有哪些文件？简要说明项目结构。",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+
+        exploration_plans = [
+            step
+            for step in result.trace
+            if step["node"] == "plan_exploration"
+        ]
+        final_assessment = next(
+            step
+            for step in reversed(result.trace)
+            if step["node"] == "assess_context"
+        )
+        suppressed = [
+            item
+            for step in result.trace
+            for item in step["output"].get("suppressed_tools", [])
+        ]
+        executed_call_ids = {
+            str(item.get("call_id") or "") for item in result.tool_results
+        }
+
+        self.assertEqual(len(exploration_plans), 2)
+        self.assertEqual(
+            final_assessment["output"]["stop_reason"],
+            "native_seed_sufficient",
+        )
+        self.assertTrue(planner.observed_seed_suppression)
+        self.assertEqual(
+            {
+                item["call_id"]: item["reason"]
+                for item in suppressed
+                if item["call_id"].startswith("repeat_seed_")
+            },
+            {
+                "repeat_seed_inventory": "seeded_evidence",
+                "repeat_seed_read": "seeded_evidence",
+            },
+        )
+        self.assertNotIn("repeat_seed_inventory", executed_call_ids)
+        self.assertNotIn("repeat_seed_read", executed_call_ids)
+
     def _assert_oversized_result_uses_harness_budget(
         self,
         *,

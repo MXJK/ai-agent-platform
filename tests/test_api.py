@@ -804,7 +804,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260828-context-ring-r1',
+            '/static/app.js?v=20260830-agent-efficiency-r1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -1062,6 +1062,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn('aria-current="step"', script_response.text)
         self.assertIn('aria-live="polite" aria-atomic="true"', script_response.text)
         self.assertIn("renderResponseMetrics", script_response.text)
+        self.assertIn('values.push(["模型请求"', script_response.text)
+        self.assertIn('values.push(["模型重试"', script_response.text)
+        self.assertIn('values.push(["总重试"', script_response.text)
         self.assertIn('class="welcome-signal"', script_response.text)
         self.assertIn("--signal: #62d6c2", stylesheet_response.text)
         self.assertIn("@keyframes signal-arrive", stylesheet_response.text)

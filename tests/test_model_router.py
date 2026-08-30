@@ -10,10 +10,12 @@ from fastapi.testclient import TestClient
 
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import (
+    collect_llm_usage,
     LLMClient,
     LLMProviderError,
     LLMStreamEvent,
     LLMToolDecision,
+    LLMUsage,
     ModelCapabilities,
     ModelConfig,
     ModelRouter,
@@ -469,6 +471,31 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         self.assertEqual(retry["code"], "invalid_tool_arguments")
         self.assertEqual(retry["wait_source"], "exponential_backoff")
         self.assertEqual(retry["delay_seconds"], 0.3)
+
+    def test_tool_output_truncation_skips_same_model_retry_by_default(self) -> None:
+        primary = ScriptedFakeProvider()
+        primary.tool_error = LLMProviderError(
+            "tool turn exhausted its output",
+            retryable=True,
+            code="tool_output_truncated",
+            finish_reason="length",
+            usage=LLMUsage(input_tokens=31_000, output_tokens=0, thoughts_tokens=4096),
+        )
+        backup = ScriptedFakeProvider()
+        client = self.client(
+            primary,
+            backup,
+            settings=Settings(llm_max_retries=2),
+        )
+
+        with collect_llm_usage() as usage:
+            decision = client.decide_tools(_messages(), [])
+
+        self.assertEqual(decision.model, "backup-model")
+        self.assertEqual(primary.tool_calls, ["primary-model"])
+        self.assertEqual(backup.tool_calls, ["backup-model"])
+        self.assertEqual(usage.request_count, 2)
+        self.assertEqual(usage.retry_count, 1)
 
     def test_runtime_unavailable_catalog_model_is_filtered_before_provider_call(self) -> None:
         primary = ScriptedFakeProvider([_success_script("primary-model")])

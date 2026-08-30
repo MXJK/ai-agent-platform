@@ -15,6 +15,7 @@ from ai_agent_platform.agents.coding.models import (
     CodingAgentState,
 )
 from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_READ_TOOL
+from ai_agent_platform.agents.coding.runtime_support import build_run_metrics
 from ai_agent_platform.agents.coding.policies import (
     CompletionPolicy,
     _looks_like_tool_call,
@@ -169,6 +170,29 @@ class BlockingClassificationPlanner(SteeringPlanner):
 
 
 class AgentRuntimeFrameworkTests(unittest.TestCase):
+    def test_run_metrics_count_executed_tools_and_model_retries(self) -> None:
+        state: CodingAgentState = {
+            "tool_calls": [
+                ToolCall(call_id="proposed_only", name="repo.list_files", arguments={}),
+            ],
+            "tool_results": [
+                {"call_id": "executed_1", "name": "repo.read_file", "ok": True},
+                {"call_id": "executed_2", "name": "repo.read_file", "ok": False},
+            ],
+            "errors": [],
+            "trace": [],
+            "llm_request_count": 4,
+            "llm_retry_count": 3,
+        }
+
+        metrics = build_run_metrics(state)
+
+        self.assertEqual(metrics.tool_call_count, 2)
+        self.assertEqual(metrics.successful_tool_call_count, 1)
+        self.assertEqual(metrics.model_request_count, 4)
+        self.assertEqual(metrics.model_retry_count, 3)
+        self.assertEqual(metrics.retry_count, 3)
+
     def test_native_answer_is_persisted_while_model_is_still_generating(self) -> None:
         first_delta = Event()
         release_answer = Event()

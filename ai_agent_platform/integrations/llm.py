@@ -133,11 +133,18 @@ class LLMUsageAccumulator:
     input_tokens: int = 0
     output_tokens: int = 0
     thoughts_tokens: int = 0
+    request_count: int = 0
+    retry_count: int = 0
 
     def add(self, usage: LLMUsage) -> None:
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
         self.thoughts_tokens += usage.thoughts_tokens
+
+    def record_request(self, *, retry: bool = False) -> None:
+        self.request_count += 1
+        if retry:
+            self.retry_count += 1
 
     @property
     def total_tokens(self) -> int:
@@ -327,6 +334,11 @@ class LLMClient:
         for key in keys:
             if key in self._retry_policy:
                 return self._retry_policy[key]
+        if error.code == "tool_output_truncated":
+            # Replaying the same long tool transcript with the same output cap
+            # usually repeats an all-reasoning, no-tool response. Prefer the
+            # next eligible candidate unless an operator explicitly opts in.
+            return 0
         return self._settings.llm_max_retries
 
     def _retry_delay(
@@ -500,6 +512,7 @@ class LLMClient:
             )
         aliases = _tool_aliases(alias_tools if alias_tools is not None else tools)
         last_error: LLMProviderError | None = None
+        provider_request_count = 0
         for routed_candidate in candidates:
             try:
                 request_plan = self._prepare_tool_candidate(
@@ -556,6 +569,12 @@ class LLMClient:
                         )
                         trace = request_plan.route_trace or trace
                         candidate = request_plan.candidate or candidate
+                    accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                    if accumulator is not None:
+                        accumulator.record_request(
+                            retry=provider_request_count > 0,
+                        )
+                    provider_request_count += 1
                     decision = self._decide_tools_once(
                         candidate,
                         attempt_messages,
@@ -696,6 +715,7 @@ class LLMClient:
 
         last_error: LLMProviderError | None = None
         fallback_candidates = list(plan.fallback_candidates)
+        provider_request_count = 0
         while True:
             candidate_error: LLMProviderError | None = None
             attempt = 0
@@ -708,6 +728,12 @@ class LLMClient:
                 latest_usage: LLMUsage | None = None
                 usage_recorded = False
                 try:
+                    accumulator = _LLM_USAGE_ACCUMULATOR.get()
+                    if accumulator is not None:
+                        accumulator.record_request(
+                            retry=provider_request_count > 0,
+                        )
+                    provider_request_count += 1
                     stream_factory = self._stream_factory(
                         candidate.provider,
                         candidate.model,

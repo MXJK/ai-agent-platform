@@ -81,6 +81,14 @@ def _merge_llm_usage(
         int(getattr(previous_metrics, "thoughts_tokens", 0))
         + usage.thoughts_tokens
     )
+    merged["llm_request_count"] = (
+        int(getattr(previous_metrics, "model_request_count", 0))
+        + usage.request_count
+    )
+    merged["llm_retry_count"] = (
+        int(getattr(previous_metrics, "model_retry_count", 0))
+        + usage.retry_count
+    )
     return merged  # type: ignore[return-value]
 
 
@@ -485,6 +493,8 @@ class CodingAgentRuntime:
             "context_sufficient": False,
             "context_budget_exhausted": False,
             "context_stop_reason": "not_started",
+            "llm_request_count": 0,
+            "llm_retry_count": 0,
             "change_iteration": 0,
             "changed_files": [],
             "change_set_id": "",
