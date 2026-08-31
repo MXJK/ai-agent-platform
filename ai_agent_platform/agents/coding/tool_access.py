@@ -92,10 +92,18 @@ class ToolAccessCoordinator:
                 tools = self._run_tools.get(run_id)
             if tools is not None:
                 tools.list_specs()
-                return tools
+                return self._task_profile_view(tools, state)
         selected_values = state.get("enabled_tools")
         selected = tuple(selected_values) if selected_values is not None else None
-        return self.legacy_view(selected)
+        return self._task_profile_view(self.legacy_view(selected), state)
+
+    @staticmethod
+    def _task_profile_view(tools: Any, state: CodingAgentState):
+        profile = tuple(state.get("task_tool_profile", []))
+        if not profile:
+            return tools
+        available = set(tools.allowed_names)
+        return tools.select(tuple(name for name in profile if name in available))
 
     def tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
         approvals = tuple(
@@ -132,6 +140,10 @@ class ToolAccessCoordinator:
             specs = [
                 spec for spec in specs if spec.name != RUN_ARTIFACT_TOOL_NAME
             ]
+        profile = state.get("task_tool_profile", [])
+        if profile:
+            by_name = {spec.name: spec for spec in specs}
+            specs = [by_name[name] for name in profile if name in by_name]
         return specs
 
 

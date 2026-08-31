@@ -666,6 +666,34 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 数量和截断状态。部分失败不丢弃成功证据；checkpoint 重放通过稳定子调用身份复用已完成
 结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
 
+Evidence Executor 之上还有一层确定性的任务整形。分类节点结合规范化后的中英文请求、
+显式路径/符号、intent、context route，以及是否明确要求修改、验证或调查，冻结本 Run 的
+`task_shape`、`evidence_contract` 和有序工具 Profile；`分析下当前项目`、`看看当前项目`、
+`summarize this project` 等无具体目标请求归为 `overview`，但“分析当前项目的登录故障”
+归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
+LangGraph checkpoint，resume 不重新分类或放宽工具集合。
+
+| task shape | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `overview` | 5 | 2 / 3 | 8 / 12 | 12,000 | repository list/find/search/read + `repo.collect_evidence` |
+| `targeted_read` | 8 | 4 / 6 | 12 / 20 | 16,000 | search/read/collect evidence |
+| `bounded_change` | 26 | 12 / 24 | 36 / 72 | 24,000 | search/read/patch/test |
+| `investigation` | 20 | 10 / 18 | 30 / 54 | 24,000 | search/read/log/test |
+| `broad_review` | 12 | 6 / 10 | 20 / 32 | 20,000 | 较宽但仍只读的审查工具 |
+
+任务预算只会收紧进程级安全上限：显式配置得更小的 runtime 上限仍优先，复杂修改继续
+保留原有 24/72 ceiling，不受 overview 的小预算影响。overview 的真实执行视图不包含
+write、shell、MCP 或控制工具；其他 Profile 也在执行点按冻结集合复判，而不只依赖模型
+可见 Schema。
+
+每个 native 工具观察边界维护 `evidence_coverage`、`new_evidence_count`、
+`coverage_delta`、`unresolved_requirements`、`duplicate_tool_call_count` 和
+`evidence_extension_rounds`。必需证据齐全后立即进入文本终答；一轮没有有效新证据，或
+模型再次提出等价/已由种子满足的调用时停止且不执行重复调用。达到 soft 预算后只在有
+明确 unresolved requirement 时开放一次、受 hard 差额约束的扩展；否则优先完成答案。
+hard 预算仍返回既有 `partial`/`blocked` 语义。最终回答是独立的 text-only 请求，传给
+Provider 的工具集合始终为空。
+
 创建/修改任务在空工作区也必须继续调用 `sandbox.write_file` 或
 `sandbox.apply_patch`；目录盘点使用 `repo.list_files`。`sandbox.run_command` 的模型
 可见契约列出允许的 executable basename，并定位为变更后的验证工具。变更前失败的
@@ -726,11 +754,11 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 `RunContextSnapshot`、`AgentRunRecord` 与 `AgentRunResult`，不接触 LangGraph state。
 拆分由稳定轨迹 golden tests 约束，节点名、边、审批、预算、工具顺序和终态语义不变。
 
-默认软预算是 12 轮/36 次工具调用，触发后只提示模型尽快收敛；硬预算是 24 轮/72 次，
-另有 900 秒、连续三轮无进展和连续三次失败保护。硬停止会保留一次文本最终总结：请求仍
-下发同一批工具定义，并由 Provider 的 tool choice 禁止调用，因为 transcript 中已有的
-tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返回 `partial`/`blocked`，
-不会把预算耗尽误报为 `completed`。相关配置为
+12 轮/36 次 soft 与 24 轮/72 次 hard 现在是进程级 ceiling 和 `bounded_change` 默认值；
+实际 Run 使用上表任务契约，并另有 900 秒和连续三次失败保护。证据契约把 native
+无进展收紧为一轮，同时失败诊断本身仍是可观察的新证据，可继续进入恢复计划。硬停止会
+保留一次工具集合为空的文本最终总结并返回 `partial`/`blocked`，不会把预算耗尽误报为
+`completed`。相关进程配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、

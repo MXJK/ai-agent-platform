@@ -20,7 +20,13 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
     build_workspace_query,
 )
-from ai_agent_platform.agents.coding.text import extract_paths, unique
+from ai_agent_platform.agents.coding.task_shaping import (
+    build_evidence_contract,
+    classify_task_shape,
+    freeze_tool_profile,
+    update_evidence_progress,
+)
+from ai_agent_platform.agents.coding.text import extract_paths, extract_symbols, unique
 from ai_agent_platform.integrations.permissions import ToolApproval
 from ai_agent_platform.integrations.tools import ToolCall
 from ai_agent_platform.token_counting import estimate_text_tokens
@@ -280,12 +286,36 @@ class ContextRetrievalNodes:
                 "selected_knowledge_base_ids": selected,
             }
         intent = str(decision.get("intent") or "repository_question")
+        context_route = str(decision.get("context_route") or "repo")
+        task_shape = classify_task_shape(
+            state["user_input"],
+            paths=unique(
+                state.get("focus_files", []) + extract_paths(state["user_input"])
+            ),
+            symbols=extract_symbols(state["user_input"]),
+            intent=intent,
+            context_route=context_route,
+        )
+        evidence_contract = build_evidence_contract(
+            task_shape,
+            user_input=state["user_input"],
+        )
+        task_tool_profile = freeze_tool_profile(
+            task_shape,
+            self._tools_for_state(state).list_specs(),
+        )
         return {
             "intent": intent,
             "intent_reason": str(decision.get("reason") or ""),
             "intent_confidence": bounded_confidence(decision.get("confidence")),
             "planner_source": str(decision.get("source") or "unknown"),
-            "context_route": str(decision.get("context_route") or "repo"),
+            "task_shape": task_shape,
+            "evidence_contract": evidence_contract,
+            "task_tool_profile": task_tool_profile,
+            "unresolved_requirements": list(
+                evidence_contract["required_evidence"]
+            ),
+            "context_route": context_route,
             "route_reason": str(decision.get("route_reason") or ""),
             "selected_knowledge_base_ids": list(
                 decision.get("selected_knowledge_base_ids") or []
@@ -299,6 +329,9 @@ class ContextRetrievalNodes:
                 summary="分类任务意图并提出上下文来源。",
                 output={
                     "intent": intent,
+                    "task_shape": task_shape,
+                    "evidence_contract": evidence_contract,
+                    "task_tool_profile": task_tool_profile,
                     "proposed_context_route": decision.get("context_route"),
                     "catalog_size": len(catalog),
                     "catalog_truncated": catalog_truncated,
@@ -596,7 +629,7 @@ class ContextRetrievalNodes:
         proposed = [
             call for call in proposed if call.name in READ_ONLY_REPOSITORY_TOOLS
         ]
-        if _is_generic_project_overview_request(
+        if state.get("task_shape") == "overview" or _is_generic_project_overview_request(
             state["user_input"],
             state.get("knowledge_base_catalog", []),
         ):
@@ -683,9 +716,12 @@ class ContextRetrievalNodes:
             return strategy, calls
 
         previous_results = state.get("exploration_results", [])
-        generic_project_overview = _is_generic_project_overview_request(
-            state["user_input"],
-            state.get("knowledge_base_catalog", []),
+        generic_project_overview = (
+            state.get("task_shape") == "overview"
+            or _is_generic_project_overview_request(
+                state["user_input"],
+                state.get("knowledge_base_catalog", []),
+            )
         )
         if generic_project_overview and not previous_results:
             return (
@@ -1001,8 +1037,14 @@ class ContextRetrievalNodes:
                 pass
             else:
                 repo_count += 1
+        progress = update_evidence_progress(
+            state,
+            context_sources=merged,
+            completed_round=False,
+        )
         return {
             "context_sources": merged,
+            **progress,
             "trace": _append_trace(
                 state,
                 node="merge_evidence",
@@ -1015,6 +1057,10 @@ class ContextRetrievalNodes:
                         item.kind == "project_memory" for item in merged
                     ),
                     "source_count": len(merged),
+                    "evidence_coverage": progress["evidence_coverage"],
+                    "unresolved_requirements": progress[
+                        "unresolved_requirements"
+                    ],
                     "warnings": state.get("context_warnings", []),
                 },
             ),

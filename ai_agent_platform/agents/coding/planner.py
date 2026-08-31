@@ -57,7 +57,9 @@ def native_system_prompt(max_parallel_read_calls: int = 1) -> str:
         "After observing tool results, either call another useful tool or provide "
         "a grounded final answer. Cite source paths and line ranges. Do not repeat "
         "an identical tool call, and do not claim an action succeeded unless its "
-        "tool result reports success. You may emit up to "
+        "tool result reports success. The task's evidence_contract is authoritative: "
+        "finish as soon as its required evidence is covered, and use a limited "
+        "extension only for the listed unresolved requirements. You may emit up to "
         f"{max(1, max_parallel_read_calls)} independent, idempotent, approval-free "
         "read-only tool calls in one turn when they can safely run in parallel. "
         "Do not mix such reads with a mutation, validation, approval-requiring "
@@ -514,9 +516,30 @@ def native_tool_messages(
             sources,
             max(0, int(shares.get("evidence_tokens", 0))),
         )
+    evidence_contract = state.get("evidence_contract", {})
+    compact_contract = {
+        key: evidence_contract.get(key)
+        for key in (
+            "required_evidence",
+            "max_evidence_tokens",
+            "max_extension_rounds",
+        )
+        if key in evidence_contract
+    }
     user_payload = {
         "task": state["user_input"],
         "intent": state.get("intent"),
+        "task_shape": state.get("task_shape"),
+        "evidence_contract": compact_contract,
+        "evidence_progress": {
+            "coverage": state.get("evidence_coverage", []),
+            "unresolved_requirements": state.get(
+                "unresolved_requirements", []
+            ),
+            "new_evidence_count": state.get("new_evidence_count", 0),
+            "coverage_delta": state.get("coverage_delta", 0),
+            "extension_rounds": state.get("evidence_extension_rounds", 0),
+        },
         "workspace_id": state["workspace_id"],
         "focus_files": state.get("focus_files", []),
         "conversation_context": recent_conversation_context(

@@ -15,6 +15,10 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
     error_from_exception as _error_from_exception,
 )
+from ai_agent_platform.agents.coding.task_shaping import (
+    evidence_contract_satisfied,
+    task_budget,
+)
 
 
 ANSWER_EVENT_CHUNK_CHARS = 512
@@ -182,7 +186,18 @@ class BudgetPolicy:
             >= self.max_consecutive_failures
         ):
             return "max_consecutive_tool_failures", "blocked"
-        if state.get("native_no_progress_rounds", 0) >= self.no_progress_rounds:
+        if evidence_contract_satisfied(state):
+            return "evidence_contract_satisfied", "completed"
+        if (
+            state.get("evidence_contract")
+            and state.get("evidence_rounds_completed", 0) >= 1
+            and state.get("new_evidence_count", 0) <= 0
+        ):
+            return "no_new_evidence", "partial"
+        if (
+            not state.get("evidence_contract")
+            and state.get("native_no_progress_rounds", 0) >= self.no_progress_rounds
+        ):
             return "no_progress", "partial"
         if (
             state.get("native_unfulfilled_change_rounds", 0)
@@ -194,16 +209,27 @@ class BudgetPolicy:
             perf_counter() - started_at >= self.max_elapsed_seconds
         ):
             return "max_elapsed_time", "partial"
-        if state.get("native_tool_round", 0) >= self.max_tool_rounds:
+        max_model_requests = task_budget(
+            state, "max_model_requests", self.max_tool_rounds + 2
+        )
+        if state.get("task_model_request_count", 0) >= max(0, max_model_requests - 1):
+            return "hard_model_request_budget", "partial"
+        if state.get("native_tool_round", 0) >= task_budget(
+            state, "max_tool_rounds", self.max_tool_rounds
+        ):
             return "hard_tool_round_budget", "partial"
-        if state.get("native_tool_call_count", 0) >= self.max_tool_calls:
+        if state.get("native_tool_call_count", 0) >= task_budget(
+            state, "max_tool_calls", self.max_tool_calls
+        ):
             return "hard_tool_call_budget", "partial"
         return "", "completed"
 
     def soft_limit_reached(self, state: CodingAgentState) -> bool:
         return (
-            state.get("native_tool_round", 0) >= self.soft_tool_rounds
-            or state.get("native_tool_call_count", 0) >= self.soft_tool_calls
+            state.get("native_tool_round", 0)
+            >= task_budget(state, "soft_tool_rounds", self.soft_tool_rounds)
+            or state.get("native_tool_call_count", 0)
+            >= task_budget(state, "soft_tool_calls", self.soft_tool_calls)
         )
 
 
@@ -273,7 +299,8 @@ class CompletionPolicy:
                 if "tool_specs" in inspect.signature(finalize).parameters:
                     kwargs: dict[str, Any] = {
                         "reason": reason,
-                        "tool_specs": self._visible_tool_specs(state),
+                        # Final-answer requests are a separate, text-only phase.
+                        "tool_specs": [],
                     }
                     if "max_output_tokens" in inspect.signature(finalize).parameters:
                         kwargs["max_output_tokens"] = self._final_max_output_tokens
@@ -300,17 +327,7 @@ class CompletionPolicy:
                 decide = getattr(self._planner, "decide_tool_calls")
                 decision = self.stream_decision(
                     state, decide,
-                    native_messages
-                    + [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Tools are disabled. Return the best final answer, "
-                                "including incomplete work and the stopping reason: "
-                                + reason
-                            ),
-                        }
-                    ],
+                    native_messages,
                     [],
                     stream_id=(
                         f"finalize:{reason}:{state.get('native_tool_round', 0)}"

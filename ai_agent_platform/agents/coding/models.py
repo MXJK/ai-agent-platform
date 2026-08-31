@@ -51,6 +51,9 @@ class CodingAgentState(TypedDict, total=False):
     intent_reason: str
     intent_confidence: float
     planner_source: str
+    task_shape: str
+    evidence_contract: dict[str, Any]
+    task_tool_profile: list[str]
     context_route: str
     route_reason: str
     selected_knowledge_base_ids: list[str]
@@ -80,6 +83,7 @@ class CodingAgentState(TypedDict, total=False):
     native_tool_messages: list[dict[str, Any]]
     native_tool_round: int
     native_tool_call_count: int
+    task_model_request_count: int
     native_pending_tool_calls: list[ToolCall]
     native_parallel_read_batch: bool
     native_tool_signatures: list[str]
@@ -88,6 +92,15 @@ class CodingAgentState(TypedDict, total=False):
     native_tool_stop_reason: str
     native_soft_limit_warned: bool
     native_no_progress_rounds: int
+    evidence_coverage: list[str]
+    evidence_keys: list[str]
+    new_evidence_count: int
+    coverage_delta: int
+    unresolved_requirements: list[str]
+    duplicate_tool_call_count: int
+    evidence_extension_rounds: int
+    evidence_rounds_completed: int
+    evidence_contract_satisfied: bool
     native_unfulfilled_change_rounds: int
     native_consecutive_failures: int
     native_context_compactions: int
@@ -175,6 +188,40 @@ class ContextSource:
     relevance_score: float | None = None
     recency_score: float | None = None
     importance_score: float | None = None
+
+
+@dataclass(frozen=True)
+class EvidencePlan:
+    """Validated, bounded instructions for deterministic repository evidence."""
+
+    queries: list[str] = field(default_factory=list)
+    candidate_paths: list[str] = field(default_factory=list)
+    max_files: int = 8
+    max_depth: int = 3
+    max_results_per_query: int = 12
+    max_chars_per_file: int = 8000
+    max_evidence_tokens: int = 12000
+    required_evidence: list[str] = field(default_factory=list)
+    stop_when: list[str] = field(default_factory=list)
+
+
+class EvidenceItem(TypedDict):
+    path: str
+    location: str
+    summary: str
+    snippet: str
+    reason: str
+    artifact_id: str
+
+
+class EvidenceBundle(TypedDict):
+    coverage: list[str]
+    evidence: list[EvidenceItem]
+    unresolved: list[str]
+    errors: list[dict[str, Any]]
+    raw_result_count: int
+    deduplicated_count: int
+    truncated: bool
 
 
 @dataclass(frozen=True)

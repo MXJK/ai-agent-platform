@@ -41,6 +41,11 @@ from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
 )
+from ai_agent_platform.agents.coding.task_shaping import (
+    clamp_evidence_call,
+    task_budget,
+    update_evidence_progress,
+)
 from ai_agent_platform.integrations.llm import LLMProviderError
 from ai_agent_platform.integrations.tools import ToolCall
 from ai_agent_platform.token_counting import estimate_text_tokens
@@ -116,10 +121,17 @@ class ToolLoopNodes:
         )
         warnings = list(state.get("context_warnings", []))
         if not uses_native:
-            proposed_tool_calls = [
+            planned_tool_calls = [
                 call
                 for call in self._planner.plan_tool_calls(state, tool_specs)
                 if call.name not in READ_ONLY_REPOSITORY_TOOLS
+            ]
+            visible_names = {spec.name for spec in visible_tool_specs}
+            profile_suppressed_calls = [
+                call for call in planned_tool_calls if call.name not in visible_names
+            ]
+            proposed_tool_calls = [
+                call for call in planned_tool_calls if call.name in visible_names
             ]
             permission_context = self._tool_use_context(state)
             permission_decisions = [
@@ -172,6 +184,13 @@ class ToolLoopNodes:
                     output={
                         "planned_tools": [
                             call.name for call in proposed_tool_calls
+                        ],
+                        "suppressed_tools": [
+                            _call_lifecycle_detail(
+                                call,
+                                reason="task_tool_profile",
+                            )
+                            for call in profile_suppressed_calls
                         ],
                         "denied_tools": [
                             _call_lifecycle_detail(
@@ -326,19 +345,57 @@ class ToolLoopNodes:
             return terminal
 
         soft_warned = state.get("native_soft_limit_warned", False)
-        if not soft_warned and self._budget_policy.soft_limit_reached(state):
+        extension_rounds = state.get("evidence_extension_rounds", 0)
+        if self._budget_policy.soft_limit_reached(state):
             soft_warned = True
-            native_messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "The soft execution budget has been reached. Prefer a final "
-                        "answer now; use more tools only when they are necessary to "
-                        "verify or complete the task."
-                    ),
-                }
-            )
-            warnings.append("native tool loop reached its soft execution budget")
+            unresolved = list(state.get("unresolved_requirements", []))
+            max_extensions = task_budget(state, "max_extension_rounds", 0)
+            if unresolved and extension_rounds < max_extensions:
+                extension_rounds += 1
+                native_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "The soft execution budget has been reached. Prefer a "
+                            "final answer now. One limited evidence extension is "
+                            "allowed only for these explicit unresolved requirements: "
+                            + json.dumps(unresolved, ensure_ascii=False)
+                        ),
+                    }
+                )
+                warnings.append(
+                    "native tool loop entered its single limited evidence extension"
+                )
+            else:
+                reason = (
+                    "evidence_extension_exhausted"
+                    if unresolved
+                    else "soft_budget_completion"
+                )
+                answer, final_message, final_errors = (
+                    self._completion_policy.finalize_native_session(
+                        state,
+                        native_messages,
+                        reason=reason,
+                    )
+                )
+                native_messages.append(final_message)
+                terminal = self._native_terminal_plan(
+                    state,
+                    native_messages=native_messages,
+                    answer=answer,
+                    status="partial" if unresolved else "completed",
+                    reason=reason,
+                    compactions=compactions,
+                    context_chars=_native_messages_chars(native_messages),
+                    context_stages=context_stages,
+                )
+                terminal["errors"] = _append_errors(state, final_errors)
+                terminal["context_warnings"] = warnings
+                terminal["artifacts"] = artifacts
+                terminal["native_soft_limit_warned"] = True
+                terminal["evidence_extension_rounds"] = extension_rounds
+                return terminal
 
         decide = self._planner.decide_tool_calls
         decide_kwargs: dict[str, Any] = {}
@@ -443,11 +500,29 @@ class ToolLoopNodes:
                 terminal["artifacts"] = artifacts
                 return terminal
         native_round = state.get("native_tool_round", 0) + 1
+        task_model_request_count = state.get("task_model_request_count", 0) + 1
         stop_reason = decision.stop_reason
-        all_proposed_calls = list(decision.tool_calls)
+        effective_max_calls = task_budget(
+            state, "max_tool_calls", self._max_tool_calls
+        )
+        remaining_actual_calls = max(
+            0,
+            effective_max_calls - state.get("native_tool_call_count", 0),
+        )
+        evidence_token_limit = task_budget(
+            state, "max_evidence_tokens", 12000
+        )
+        all_proposed_calls = [
+            clamp_evidence_call(
+                call,
+                max_evidence_tokens=evidence_token_limit,
+                max_child_calls=remaining_actual_calls,
+            )
+            for call in decision.tool_calls
+        ]
         remaining_calls = max(
             0,
-            self._max_tool_calls - state.get("native_tool_call_count", 0),
+            effective_max_calls - state.get("native_tool_call_count", 0),
         )
         tools_for_state = self._tools_for_state(state)
         permission_context = self._tool_use_context(state)
@@ -550,6 +625,62 @@ class ToolLoopNodes:
             _synthetic_tool_message(call, reason)
             for call, reason in suppressed_calls
         )
+        duplicate_increment = sum(
+            reason in {"repeated_tool_call", "seeded_evidence"}
+            for _, reason in suppressed_calls
+        )
+        duplicate_tool_call_count = (
+            state.get("duplicate_tool_call_count", 0) + duplicate_increment
+        )
+        if all_proposed_calls and not tool_calls and duplicate_increment:
+            duplicate_stop_reason = (
+                "hard_tool_round_budget"
+                if native_round
+                >= task_budget(state, "max_tool_rounds", self._max_tool_rounds)
+                else "duplicate_equivalent_tool_call"
+            )
+            answer, final_message, final_errors = (
+                self._completion_policy.finalize_native_session(
+                    state,
+                    native_messages,
+                    reason=duplicate_stop_reason,
+                )
+            )
+            native_messages.append(final_message)
+            terminal = self._native_terminal_plan(
+                state,
+                native_messages=native_messages,
+                answer=answer,
+                status="partial",
+                reason=duplicate_stop_reason,
+                compactions=compactions,
+                context_chars=_native_messages_chars(native_messages),
+                context_stages=context_stages,
+            )
+            terminal.update(
+                {
+                    "tool_calls": list(state.get("tool_calls", []))
+                    + all_proposed_calls,
+                    "native_tool_round": native_round,
+                    "task_model_request_count": task_model_request_count,
+                    "native_tool_signatures": list(previous_signatures),
+                    "duplicate_tool_call_count": duplicate_tool_call_count,
+                    "native_soft_limit_warned": soft_warned,
+                    "evidence_extension_rounds": extension_rounds,
+                    "errors": _append_errors(state, final_errors),
+                    "context_warnings": warnings,
+                    "artifacts": artifacts,
+                }
+            )
+            terminal_trace = terminal.get("trace", [])
+            if terminal_trace:
+                terminal_trace[-1].setdefault("output", {})[
+                    "suppressed_tools"
+                ] = [
+                    _call_lifecycle_detail(call, reason=reason)
+                    for call, reason in suppressed_calls
+                ]
+            return terminal
         no_progress = state.get("native_no_progress_rounds", 0)
         if all_proposed_calls and not tool_calls:
             no_progress += 1
@@ -652,11 +783,14 @@ class ToolLoopNodes:
             "artifacts": artifacts,
             "native_tool_round": native_round,
             "native_tool_call_count": native_call_count,
+            "task_model_request_count": task_model_request_count,
             "native_tool_signatures": native_signatures,
             "native_tool_loop_active": uses_native,
             "native_tool_answer": native_answer,
             "native_tool_stop_reason": stop_reason,
             "native_soft_limit_warned": soft_warned,
+            "duplicate_tool_call_count": duplicate_tool_call_count,
+            "evidence_extension_rounds": extension_rounds,
             "native_no_progress_rounds": no_progress,
             "native_unfulfilled_change_rounds": unfulfilled_change_rounds,
             "native_context_compactions": compactions,
@@ -688,8 +822,17 @@ class ToolLoopNodes:
                     "round": native_round,
                     "stop_reason": stop_reason,
                     "soft_limit_warned": soft_warned,
-                    "hard_round_limit": self._max_tool_rounds,
-                    "hard_call_limit": self._max_tool_calls,
+                    "hard_round_limit": task_budget(
+                        state, "max_tool_rounds", self._max_tool_rounds
+                    ),
+                    "hard_call_limit": effective_max_calls,
+                    "max_model_requests": task_budget(
+                        state,
+                        "max_model_requests",
+                        self._max_tool_rounds + 2,
+                    ),
+                    "evidence_extension_rounds": extension_rounds,
+                    "duplicate_tool_call_count": duplicate_tool_call_count,
                     "parallel_read_batch": parallel_read_batch,
                     "context_compactions": compactions,
                     "context_reduction_stages": context_stages,
@@ -1018,6 +1161,7 @@ class ToolLoopNodes:
             model_results: list[dict[str, Any]] = []
             evidence_messages: list[dict[str, Any]] = []
             evidence_artifacts: list[dict[str, Any]] = []
+            evidence_bundles: list[dict[str, Any]] = []
             parallel_read_batch = bool(
                 state.get("native_parallel_read_batch") and len(calls) > 1
             )
@@ -1080,6 +1224,7 @@ class ToolLoopNodes:
                         bundle, child_results, child_artifacts = executor.collect(
                             outer_call=call
                         )
+                        evidence_bundles.append(bundle)
                         results.extend(child_results)
                         evidence_artifacts.extend(child_artifacts)
                         evidence_messages.append(
@@ -1135,6 +1280,18 @@ class ToolLoopNodes:
                 consecutive_failures = 0
             no_progress = state.get("native_no_progress_rounds", 0)
             no_progress = 0 if successful_new_result else no_progress + 1
+            progress = update_evidence_progress(
+                state,
+                context_sources=state.get("context_sources", []),
+                results=results,
+                bundles=evidence_bundles,
+                completed_round=True,
+            )
+            actual_call_count = (
+                state.get("native_tool_call_count", 0)
+                + len(results)
+                - len(calls)
+            )
             return {
                 "tool_results": list(state.get("tool_results", [])) + results,
                 "artifacts": _merge_artifacts(
@@ -1161,6 +1318,8 @@ class ToolLoopNodes:
                 ),
                 "native_consecutive_failures": consecutive_failures,
                 "native_no_progress_rounds": no_progress,
+                "native_tool_call_count": max(0, actual_call_count),
+                **progress,
                 "native_unfulfilled_change_rounds": (
                     0
                     if successful_mutation
@@ -1183,6 +1342,12 @@ class ToolLoopNodes:
                         ],
                         "consecutive_failures": consecutive_failures,
                         "no_progress_rounds": no_progress,
+                        "new_evidence_count": progress["new_evidence_count"],
+                        "coverage_delta": progress["coverage_delta"],
+                        "evidence_coverage": progress["evidence_coverage"],
+                        "unresolved_requirements": progress[
+                            "unresolved_requirements"
+                        ],
                         "artifact_reads": [
                             artifact_read_trace(result)
                             for result in results
