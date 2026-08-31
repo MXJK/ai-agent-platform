@@ -558,6 +558,12 @@ class QueryService:
                 message=message,
                 actor_user_id=actor_user_id,
             )
+        if resolved is QueryCommand.COMPACT:
+            return self.compact_run(
+                run_id=run_id,
+                instruction=message,
+                actor_user_id=actor_user_id,
+            )
         return self.control_run(
             run_id=run_id,
             action=resolved.value,
@@ -970,6 +976,45 @@ class QueryService:
             raise
         self._metrics.increment("agent_run_continues_submitted_total")
         return queued_record
+
+    def compact_run(
+        self,
+        *,
+        run_id: str,
+        instruction: str = "",
+        actor_user_id: str | None = None,
+    ) -> AgentRunRecord:
+        record = self.get_run_for_actor(run_id, actor_user_id)
+        self._assert_command(QueryCommand.COMPACT, record)
+        request_compaction = getattr(self._runtime, "request_compaction", None)
+        if not callable(request_compaction):
+            raise RuntimeError("Agent runtime does not support context compaction")
+        updated = request_compaction(run_id=run_id, instruction=instruction)
+        if record.status != "paused":
+            self._metrics.increment("agent_run_compactions_requested_total")
+            return updated
+        selection = self._selection_for_record(updated)
+        mark_resume_queued = getattr(self._runtime, "mark_resume_queued", None)
+        queued = mark_resume_queued(run_id) if callable(mark_resume_queued) else updated
+        try:
+            self._task_queue.submit(
+                "agent_resume",
+                self.execute_resume_task,
+                run_id=run_id,
+                approved=True,
+                feedback=None,
+                actor_user_id=actor_user_id,
+                model_selection=(
+                    selection.__dict__ if record.context_snapshot is None else None
+                ),
+            )
+        except TaskQueueError:
+            restore_record = getattr(self._runtime, "restore_record", None)
+            if callable(restore_record):
+                restore_record(updated)
+            raise
+        self._metrics.increment("agent_run_compactions_requested_total")
+        return queued
 
     def close(self) -> None:
         if self._owns_task_queue:

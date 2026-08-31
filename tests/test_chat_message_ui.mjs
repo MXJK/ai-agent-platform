@@ -399,6 +399,37 @@ test("composer Run control changes from pause to continue for the current Agent 
   assert.equal(vm.runInContext("composerRunControlPresentation()", context), null);
 });
 
+test("/compact queues the current Run before active-run composer interception", async () => {
+  const { context, events } = loadAgentSubmissionHarness(async (calls, path, options) => {
+    calls.push(`request:${path}`);
+    calls.push(`instruction:${JSON.parse(options.body).instruction}`);
+    return {
+      run_id: "run_1",
+      conversation_id: "sess_1",
+      status: "running",
+      trace: [],
+    };
+  });
+  vm.runInContext(`
+    state.conversationId = "sess_1";
+    state.latestRunId = "run_1";
+    state.latestRunConversationId = "sess_1";
+    state.latestRunStatus = "running";
+    const composerInput = { value: "/compact 重点保留数据库迁移" };
+    document.getElementById = (id) => id === "chat-message-input" ? composerInput : null;
+    clearComposerInput = () => { composerInput.value = ""; testEvents.push("clear"); };
+    renderAgentRun = (body) => { testEvents.push("render:" + body.status); };
+  `, context);
+
+  await vm.runInContext("submitComposerMessage()", context);
+
+  assert.ok(events.includes("request:/agent/runs/run_1/compact"));
+  assert.ok(events.includes("instruction:重点保留数据库迁移"));
+  assert.ok(events.includes("clear"));
+  assert.ok(events.includes("render:running"));
+  assert.ok(events.includes("watch"));
+});
+
 test("paused composer control continues with optional input", async () => {
   const { context, events } = loadAgentSubmissionHarness(async (calls, path, options) => {
     calls.push(`request:${path}`);

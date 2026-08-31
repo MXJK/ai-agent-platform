@@ -15,6 +15,14 @@ const responseTimers = new WeakMap();
 const COMPOSER_BUILTIN_COMMANDS = [
   {
     kind: "builtin",
+    command: "compact",
+    title: "压缩当前 Agent 上下文",
+    description: "在安全边界压缩当前 Run，可附带需要重点保留的内容。",
+    action: "compact",
+    keywords: ["context", "上下文", "压缩"],
+  },
+  {
+    kind: "builtin",
     command: "agent",
     title: "切换到代码 Agent",
     description: "读取工作区并按权限运行工具。",
@@ -799,14 +807,34 @@ function agentContextInjectionSummary(node, output = {}) {
 }
 
 function agentContextStageSummary(output = {}) {
+  const labels = {
+    result_externalized: "大结果已外置",
+    snip: "已清理远古上下文",
+    micro_compact: "已执行 Micro-Compact",
+    auto_compact: "已自动压缩上下文",
+    compaction_fallback: "已执行确定性压缩兜底",
+    compaction_failed: "模型压缩失败，已安全降级",
+  };
   const parts = [];
-  if (output.stage) parts.push(String(output.stage));
+  if (output.stage) parts.push(labels[output.stage] || String(output.stage));
   const metrics = [];
   if (output.evicted) metrics.push(`驱逐 ${output.evicted}`);
   if (output.compacted) metrics.push(`压缩 ${output.compacted}`);
   if (output.dropped) metrics.push(`丢弃 ${output.dropped}`);
   if (output.truncated) metrics.push(`截断 ${output.truncated}`);
   if (metrics.length) parts.push(metrics.join("、"));
+  if (Number.isFinite(Number(output.block_count)) && Number(output.block_count) > 0) {
+    parts.push(`${output.block_count} 个块`);
+  }
+  if (Number.isFinite(Number(output.reclaimed_tokens)) && Number(output.reclaimed_tokens) > 0) {
+    parts.push(`释放约 ${formatTokenCount(output.reclaimed_tokens)} Token`);
+  }
+  if (
+    Number.isFinite(Number(output.before_tokens))
+    && Number.isFinite(Number(output.after_tokens))
+  ) {
+    parts.push(`${formatTokenCount(output.before_tokens)} → ${formatTokenCount(output.after_tokens)} Token`);
+  }
   if (Number.isFinite(Number(output.estimated_tokens))) {
     const budget = Number(output.budget_tokens);
     parts.push(
@@ -1651,6 +1679,26 @@ async function runBuiltinComposerCommand(item, remaining = "") {
     if (canSwitchSession()) {
       await createSession();
       if (draft) setComposerValue(draft, { focus: true });
+    }
+    return;
+  }
+  if (item.action === "compact") {
+    const runId = state.latestRunId;
+    if (!runId || !["running", "paused"].includes(state.latestRunStatus)) {
+      showToast("当前没有可压缩的运行中或已暂停 Agent Run", "warning");
+      return;
+    }
+    clearComposerInput();
+    const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/compact`, {
+      method: "POST",
+      body: JSON.stringify({ instruction: remaining.trim() }),
+    });
+    renderAgentRun(body);
+    showToast("上下文压缩请求已排队，将在安全边界执行", "success");
+    if (!TERMINAL_RUN_STATUSES.has(agentRunStatus(body))) {
+      watchRunUntilTerminal({ preserveChat: true }).catch((error) =>
+        showToast(humanizeError(error), "error"),
+      );
     }
     return;
   }
@@ -5829,6 +5877,17 @@ async function handleComposerRunControl() {
 }
 
 async function submitComposerMessage() {
+  const submission = composerSubmission($("chat-message-input").value);
+  if (
+    submission.invocation?.item.kind === "builtin"
+    && submission.invocation.item.action === "compact"
+  ) {
+    await runBuiltinComposerCommand(
+      submission.invocation.item,
+      submission.invocation.remaining,
+    );
+    return;
+  }
   const runControl = composerRunControlPresentation({
     archived: Boolean(state.currentSession?.archived_at),
   });
@@ -5840,7 +5899,6 @@ async function submitComposerMessage() {
     }
     return;
   }
-  const submission = composerSubmission($("chat-message-input").value);
   if (submission.invocation?.item.kind === "builtin") {
     await runBuiltinComposerCommand(
       submission.invocation.item,

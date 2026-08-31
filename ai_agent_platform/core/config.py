@@ -293,6 +293,14 @@ class Settings:
     agent_mutation_max_output_tokens: int = 16384
     agent_final_max_output_tokens: int = 4096
     agent_tool_result_max_tokens: int = 2000
+    agent_snip_enabled: bool = True
+    agent_snip_pressure_ratio: float = 0.60
+    agent_snip_keep_recent_groups: int = 4
+    agent_micro_compact_idle_seconds: int = 3600
+    agent_micro_compact_keep_recent_results: int = 5
+    agent_compaction_max_output_tokens: int = 4096
+    agent_compaction_safety_buffer_tokens: int = 2048
+    agent_compaction_min_reclaimable_tokens: int = 2048
     agent_graph_recursion_limit: int = 128
     agent_approval_policy: str = "on_request"
     live_workspace_writes_enabled: bool = False
@@ -700,6 +708,12 @@ class Settings:
                 self.agent_final_max_output_tokens,
             ),
             ("agent_tool_result_max_tokens", self.agent_tool_result_max_tokens),
+            ("agent_snip_keep_recent_groups", self.agent_snip_keep_recent_groups),
+            ("agent_micro_compact_idle_seconds", self.agent_micro_compact_idle_seconds),
+            ("agent_micro_compact_keep_recent_results", self.agent_micro_compact_keep_recent_results),
+            ("agent_compaction_max_output_tokens", self.agent_compaction_max_output_tokens),
+            ("agent_compaction_safety_buffer_tokens", self.agent_compaction_safety_buffer_tokens),
+            ("agent_compaction_min_reclaimable_tokens", self.agent_compaction_min_reclaimable_tokens),
             ("agent_graph_recursion_limit", self.agent_graph_recursion_limit),
             ("change_set_max_files", self.change_set_max_files),
             ("change_set_max_patch_chars", self.change_set_max_patch_chars),
@@ -707,6 +721,8 @@ class Settings:
             _require_positive(name, value)
         if self.agent_tool_result_max_tokens < 64:
             raise ValueError("agent_tool_result_max_tokens must be at least 64")
+        if not 0 < self.agent_snip_pressure_ratio < 1:
+            raise ValueError("agent_snip_pressure_ratio must be between 0 and 1")
         if self.agent_soft_tool_rounds > self.agent_max_tool_rounds:
             raise ValueError(
                 "agent_soft_tool_rounds must not exceed agent_max_tool_rounds"
@@ -1487,6 +1503,30 @@ class Settings:
                 "AGENT_TOOL_RESULT_MAX_TOKENS",
                 cls.agent_tool_result_max_tokens,
                 dotenv,
+            ),
+            agent_snip_enabled=_bool_env(
+                "AGENT_SNIP_ENABLED", cls.agent_snip_enabled, dotenv
+            ),
+            agent_snip_pressure_ratio=_float_env(
+                "AGENT_SNIP_PRESSURE_RATIO", cls.agent_snip_pressure_ratio, dotenv
+            ),
+            agent_snip_keep_recent_groups=_int_env(
+                "AGENT_SNIP_KEEP_RECENT_GROUPS", cls.agent_snip_keep_recent_groups, dotenv
+            ),
+            agent_micro_compact_idle_seconds=_int_env(
+                "AGENT_MICRO_COMPACT_IDLE_SECONDS", cls.agent_micro_compact_idle_seconds, dotenv
+            ),
+            agent_micro_compact_keep_recent_results=_int_env(
+                "AGENT_MICRO_COMPACT_KEEP_RECENT_RESULTS", cls.agent_micro_compact_keep_recent_results, dotenv
+            ),
+            agent_compaction_max_output_tokens=_int_env(
+                "AGENT_COMPACTION_MAX_OUTPUT_TOKENS", cls.agent_compaction_max_output_tokens, dotenv
+            ),
+            agent_compaction_safety_buffer_tokens=_int_env(
+                "AGENT_COMPACTION_SAFETY_BUFFER_TOKENS", cls.agent_compaction_safety_buffer_tokens, dotenv
+            ),
+            agent_compaction_min_reclaimable_tokens=_int_env(
+                "AGENT_COMPACTION_MIN_RECLAIMABLE_TOKENS", cls.agent_compaction_min_reclaimable_tokens, dotenv
             ),
             agent_graph_recursion_limit=_int_env(
                 "AGENT_GRAPH_RECURSION_LIMIT",

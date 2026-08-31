@@ -65,6 +65,7 @@ class QueryContractTests(unittest.TestCase):
             QueryCommand.RESUME: {"waiting_approval"},
             QueryCommand.CONTINUE: {"waiting_input", "paused"},
             QueryCommand.PAUSE: {"running"},
+            QueryCommand.COMPACT: {"running", "paused"},
             QueryCommand.STEER: set(QueryLifecycle.ACTIVE_STATUSES)
             | set(QueryLifecycle.SUSPENDED_STATUSES),
             QueryCommand.CANCEL: set(QueryLifecycle.ACTIVE_STATUSES)
@@ -84,6 +85,45 @@ class QueryContractTests(unittest.TestCase):
         for status in QueryLifecycle.SUSPENDED_STATUSES:
             self.assertTrue(QueryLifecycle.is_resumable(status))
             self.assertIsNotNone(QueryLifecycle.status_event(status))
+
+    def test_paused_compact_is_persisted_then_resumed_through_worker_queue(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="inspect app.py",
+                    workspace_id="workspace_main",
+                )
+            )
+            paused = replace(
+                record,
+                status="paused",
+                checkpoint_id="checkpoint_paused",
+                latest_node="plan_tools",
+                next_nodes=["plan_tools"],
+            )
+            kernel["run_store"].save(paused)
+            kernel["queue"].names.clear()
+            kernel["queue"].payloads.clear()
+
+            updated = service.execute(
+                QueryCommand.COMPACT,
+                run_id=record.run_id,
+                message="preserve migration state",
+            )
+
+            self.assertEqual(updated.status, "running")
+            self.assertEqual(updated.control_action, "resume")
+            self.assertEqual(
+                updated.pending_compaction["instruction"],
+                "preserve migration state",
+            )
+            self.assertEqual(kernel["queue"].names, ["agent_resume"])
+            self.assertEqual(
+                kernel["queue"].payloads[0]["run_id"], record.run_id
+            )
 
     def test_old_http_api_maps_to_query_params_and_preserves_response_schema(self) -> None:
         record = AgentRunRecord(

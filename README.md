@@ -788,20 +788,22 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 这里的“完整”指进入 Agent Harness 的完整 `ToolResult` canonical JSON；若 Provider 或
 `ToolRegistry` 在此之前已经按自身输出边界截断，Artifact 不承诺恢复更早的原始 payload。
 除 `repo.collect_evidence` 的内部原始结果会按协议立即外置外，未超过单结果上限的普通
-小结果不会预先创建 Artifact；只有正文确实即将被 eviction、fold、
-drop/truncate 或 Provider overflow 的一次强制恢复改变时，`plan_tools` 才按内容哈希惰性外置，
+小结果不会预先创建 Artifact；只有正文确实即将被 Snip、Micro-Compact、Auto-Compact
+或确定性 fallback 改变时，`plan_tools` 才按内容哈希惰性外置，
 并把 Artifact additions 与缩减后的 messages 放进同一个 LangGraph state update。该过程不需要
-数据库 migration。
-工具会话超过 `AGENT_NATIVE_CONTEXT_MAX_CHARS`，或超过统一 input allowance 扣除
-工具 Schema 份额后的消息预算时，按固定成本顺序收缩：先把较旧
-工具结果正文替换成单行标记，只保留最近 `AGENT_TOOL_RESULT_KEEP_RECENT`（默认 6）份完整
-结果；仍超限才按完整 assistant/tool 组折叠旧观察；折叠后重新计量，必要时用共享预算原语
-成组丢弃并截断正文。所有阶段保留多 tool-call assistant 与全部 result 的原子配对。
-初始请求、checkpoint 恢复方向以及 pause/resume steering 不会被截断；若这些逐字指令自身
-已无法放入预算，Run 会明确阻断而不是带着残缺指令继续请求模型。被折叠的转录继续交给
-会话压缩器，模型不可用时回退到确定性摘要。
+额外模型调用。四层治理按成本递增且每层后重新计量：L1 立即外置超限结果；L2 在消息预算
+达到 `AGENT_SNIP_PRESSURE_RATIO=0.60` 且存在至少两个安全候选时，在动态 Prompt 后缀暴露
+`agent.snip_context`，模型可在正常回合移除远古只读幂等 assistant/tool 块，最近
+`AGENT_SNIP_KEEP_RECENT_GROUPS=4` 组、用户消息、变更、失败验证与未解决错误不可选；L3 在
+距上次模型请求超过 `AGENT_MICRO_COMPACT_IDLE_SECONDS=3600` 秒时，把旧的可重现只读结果
+惰性外置，只保留最近 `AGENT_MICRO_COMPACT_KEEP_RECENT_RESULTS=5` 份完整正文；L4 使用
+`message_budget - min(message_budget/4, 4096+2048)` 触发 Auto-Compact，先做一次 Micro
+预处理，再由当前 Run 的同一模型在无工具环境生成九段严格 JSON 工作摘要。全部用户消息仍在
+摘要外逐字保留，冻结 system/任务/权限/工具 Profile 重新使用，不重新读取磁盘指令。
+Context Collapse/读时投影没有实现。
 
-当前 Run 的模型可通过只读、幂等工具 `run.read_artifact` 分页回读这些正文。模型只能传
+当前 Run 的模型可通过只读、幂等工具 `run.read_artifact` 分页回读 `tool_result_*` 与
+`context_transcript_*` 正文。模型只能传
 `artifact_id`、`view=page|head_tail`、`offset_chars` 和 `max_tokens`（默认 800，范围
 64..2000），不能传 `run_id`、conversation、Workspace 或 actor。Runtime 只检查所选
 checkpoint state 实际继承、由自身创建且标为 model-readable 的 Artifact，不做全局哈希查询，
@@ -811,19 +813,24 @@ checkpoint state 实际继承、由自身创建且标为 model-readable 的 Arti
 套 Artifact；trace/SSE/metrics 只记录 ID、call/tool、字符范围、字符/Token 数、哈希与错误码，
 不记录正文。pause/resume、rollback 和 fork 始终以被选择 checkpoint 的 Artifact state 为准。
 
-折叠最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次。压缩后仍无法收敛，或已没有
-可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束，并直接说明停止阶段，
-不再重复消耗模型调用。Provider 返回“上下文长度超限”时统一映射为 `context_overflow`：
+成功全量重写最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次；模型压缩连续失败三次后
+熔断，只保留 pair-safe eviction/fold/drop/truncate 确定性兜底。压缩后仍无法收敛，或已没有
+可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束。Provider 返回
+“上下文长度超限”时统一映射为 `context_overflow`：
 Harness 只允许一次强制压缩和一次重试，第二次同类错误立即阻断。每个 native 压缩阶段都
-产生 `AgentEvent(type="context")`，其 output 含 `stage`、压缩计数、预算、当前估算和
+产生 `AgentEvent(type="context")`，包括 `result_externalized`、`snip`、`micro_compact`、
+`auto_compact`、`compaction_fallback` 与 `compaction_failed`；output 只含 Token 前后值、
+释放量、块数、Artifact ID、耗时/触发原因和
 `fits`；checkpoint 分支继承的历史阶段额外标记 `replayed` 及来源 Run/checkpoint，避免被
 误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。图的独立保险仍由
 `AGENT_GRAPH_RECURSION_LIMIT` 控制。
 
-本阶段不暴露手动 `/compact`：CLI 的每次普通输入都会创建新 Run，只给新 Run 写一个
-“强制压缩”标记并不能收缩既有 Session 或旧 Run 的上下文。真正的手动压缩需要在统一预算、
-结构化快照与 Session 压缩 API 中同时定义 instruction、Token 前后值和可观测结果，延后到
-后续结构化快照阶段实现。
+手动 `/compact [关注点]` 通过
+`POST /api/v1/agent/runs/{run_id}/compact` 与 `QueryCommand.COMPACT` 控制当前 Run，不写会话
+消息。running 请求排队到下一安全边界，paused 自动恢复、压缩并继续；审批/输入等待、queued、
+终态和重复 pending 请求返回 409。pending 请求由 Memory/SQLite/PostgreSQL Run repository
+一致保存。压缩模型调用在 Usage Ledger 中记为 `agent_compaction`，不改写 Provider 原始 Token
+或 Prompt Cache 指标。普通 Chat 的跨轮滚动摘要不受影响。
 
 每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
 root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
@@ -943,7 +950,7 @@ symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都�
 `QueryService` 是 HTTP、CLI/SDK 适配器和 Worker 共用的入口无关命令内核。
 `QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖、可选
 Skill invocation 和入口元数据；
-`QueryCommand` 统一 start/resume/continue/steer/pause/cancel；`AgentEvent` 与 `QueryResult`
+`QueryCommand` 统一 start/resume/continue/steer/pause/cancel/compact；`AgentEvent` 与 `QueryResult`
 分别固定游标事件和终态/恢复结果。FastAPI 仍在 start/resume/continue 入队后立即返回 `202`，
 不会等待 Agent Loop。
 
@@ -1336,7 +1343,7 @@ GET       /api/v1/memory/conversations/search
 手动重建索引或刷新控件；进入页面即自动加载。
 
 当前 Docker MVP 默认启用完整流水线：PostgreSQL 保存 L0 会话和 L1 事实、证据、任务与
-Outbox，Qdrant 保存可重建 L1 向量，SQLite v2 保存 L2 场景与 L3 用户画像：
+Outbox，Qdrant 保存可重建 L1 向量，SQLite v3 保存 L2 场景、L3 用户画像和 Agent pending compact：
 
 ```dotenv
 PROJECT_MEMORY_ENABLED=true
@@ -1384,6 +1391,14 @@ LLM_CONTEXT_HISTORY_RATIO=0.15
 AGENT_TOOL_RESULT_MAX_TOKENS=2000
 AGENT_TOOL_RESULT_KEEP_RECENT=6
 AGENT_NATIVE_MAX_COMPACTIONS=3
+AGENT_SNIP_ENABLED=true
+AGENT_SNIP_PRESSURE_RATIO=0.60
+AGENT_SNIP_KEEP_RECENT_GROUPS=4
+AGENT_MICRO_COMPACT_IDLE_SECONDS=3600
+AGENT_MICRO_COMPACT_KEEP_RECENT_RESULTS=5
+AGENT_COMPACTION_MAX_OUTPUT_TOKENS=4096
+AGENT_COMPACTION_SAFETY_BUFFER_TOKENS=2048
+AGENT_COMPACTION_MIN_RECLAIMABLE_TOKENS=2048
 ```
 
 `LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算
@@ -1529,6 +1544,8 @@ RAG_RERANK_DEFAULT_ENABLED=false
   记录回填为 8192、fake 为 4096，其余为 16384。该迁移随代码交付但未在当前数据库执行。
 - `20260825_0025`：新增 `model_probe_stats`，将固定短提示的手动/周期探测与真实业务请求
   延迟样本分表持久化；该迁移随代码交付，未在当前数据库执行。
+- `20260831_0026`：为 `agent_runs` 添加 `pending_compaction` JSONB，持久化当前 Run 唯一的
+  手动压缩请求；本地 SQLite 对应 schema v3。迁移随代码交付，未在当前数据库执行。
 
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。

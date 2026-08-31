@@ -626,9 +626,9 @@ class SQLiteAgentRunRepository:
                 id, thread_id, conversation_id, workspace_id, workspace_root,
                 status, checkpoint_id, latest_node, next_nodes_json, trace_json,
                 result_json, error, pending_approval_json, errors_json,
-                control_action, steering_messages_json, run_context_snapshot_json,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                control_action, steering_messages_json, pending_compaction_json,
+                run_context_snapshot_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 thread_id=excluded.thread_id, conversation_id=excluded.conversation_id,
                 workspace_id=excluded.workspace_id, workspace_root=excluded.workspace_root,
@@ -638,6 +638,7 @@ class SQLiteAgentRunRepository:
                 error=excluded.error, pending_approval_json=excluded.pending_approval_json,
                 errors_json=excluded.errors_json, control_action=excluded.control_action,
                 steering_messages_json=excluded.steering_messages_json,
+                pending_compaction_json=excluded.pending_compaction_json,
                 run_context_snapshot_json=excluded.run_context_snapshot_json,
                 updated_at=excluded.updated_at
             """,
@@ -658,6 +659,7 @@ class SQLiteAgentRunRepository:
                 _json(record.errors),
                 record.control_action,
                 _json(record.steering_messages),
+                _json(record.pending_compaction) if record.pending_compaction is not None else None,
                 _json(record.context_snapshot.to_dict()) if record.context_snapshot else None,
                 current["created_at"] if current is not None else _iso(now),
                 _iso(now),
@@ -845,6 +847,7 @@ def _run_from_row(row: sqlite3.Row) -> AgentRunRecord:
         errors=_json_load(row["errors_json"], []),
         control_action=row["control_action"],
         steering_messages=_json_load(row["steering_messages_json"], []),
+        pending_compaction=_json_load(row["pending_compaction_json"], None),
         context_snapshot=RunContextSnapshot.from_dict(snapshot_data) if snapshot_data else None,
     )
 

@@ -15,11 +15,13 @@ RUN_ARTIFACT_TOOL_NAME = "run.read_artifact"
 RUN_ARTIFACT_READ_TOOL = RUN_ARTIFACT_TOOL_NAME
 TOOL_RESULT_ARTIFACT_PREFIX = "tool_result_"
 TOOL_RESULT_ARTIFACT_ID_PATTERN = r"^tool_result_[0-9a-f]{20}$"
+CONTEXT_TRANSCRIPT_ARTIFACT_PREFIX = "context_transcript_"
+RUN_ARTIFACT_ID_PATTERN = r"^(?:tool_result|context_transcript)_[0-9a-f]{20}$"
 MIN_ARTIFACT_READ_TOKENS = 64
 MAX_ARTIFACT_READ_TOKENS = 2000
 DEFAULT_ARTIFACT_READ_TOKENS = 800
 
-_ARTIFACT_ID = re.compile(TOOL_RESULT_ARTIFACT_ID_PATTERN)
+_ARTIFACT_ID = re.compile(RUN_ARTIFACT_ID_PATTERN)
 _READ_ARGUMENT_KEYS = frozenset(
     {"artifact_id", "view", "offset_chars", "max_tokens"}
 )
@@ -103,6 +105,33 @@ def build_evidence_result_artifact(
     return artifact
 
 
+def build_context_transcript_artifact(
+    messages: Iterable[dict[str, Any]],
+    *,
+    reason: str,
+    instruction: str = "",
+) -> dict[str, Any]:
+    """Persist a removed model transcript without exposing it in events."""
+
+    payload = {
+        "messages": [dict(message) for message in messages],
+        "reason": str(reason),
+        "instruction": str(instruction),
+    }
+    canonical = canonical_tool_result_json(payload)
+    content_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "type": "context_transcript",
+        "id": CONTEXT_TRANSCRIPT_ARTIFACT_PREFIX + content_sha256[:20],
+        "estimated_tokens": estimate_text_tokens(canonical),
+        "content_chars": len(canonical),
+        "content_sha256": "sha256:" + content_sha256,
+        "runtime_created": True,
+        "model_readable": True,
+        "content": payload,
+    }
+
+
 build_run_tool_result_artifact = build_tool_result_artifact
 
 
@@ -112,8 +141,8 @@ def run_artifact_tool_spec() -> ToolSpec:
     return ToolSpec(
         name=RUN_ARTIFACT_TOOL_NAME,
         description=(
-            "Read a bounded page or exact head/tail ranges from a tool-result "
-            "artifact created in the current Run. Use page with next_offset_chars "
+            "Read a bounded page or exact head/tail ranges from a tool-result or "
+            "compacted-transcript artifact created in the current Run. Use page with next_offset_chars "
             "to reconstruct its canonical JSON."
         ),
         input_schema={
@@ -121,7 +150,7 @@ def run_artifact_tool_spec() -> ToolSpec:
             "properties": {
                 "artifact_id": {
                     "type": "string",
-                    "pattern": TOOL_RESULT_ARTIFACT_ID_PATTERN,
+                    "pattern": RUN_ARTIFACT_ID_PATTERN,
                 },
                 "view": {
                     "type": "string",
@@ -281,7 +310,7 @@ def _validate_read_arguments(
     if not isinstance(artifact_id, str) or _ARTIFACT_ID.fullmatch(artifact_id) is None:
         raise ArtifactReadError(
             "invalid_tool_arguments",
-            "artifact_id must match tool_result_<20 lowercase hex characters>",
+            "artifact_id must match tool_result_<hash> or context_transcript_<hash>",
         )
     if view not in {"page", "head_tail"}:
         raise ArtifactReadError(
@@ -311,7 +340,7 @@ def _validated_artifact_content(
 ) -> tuple[str, str]:
     if (
         artifact is None
-        or artifact.get("type") != "tool_result"
+        or artifact.get("type") not in {"tool_result", "context_transcript"}
         or artifact.get("runtime_created") is not True
         or artifact.get("model_readable") is not True
         or not isinstance(artifact.get("content"), Mapping)
@@ -324,7 +353,7 @@ def _validated_artifact_content(
     ):
         raise ArtifactReadError("artifact_not_found", "artifact is not available")
     content_value = dict(artifact["content"])
-    if (
+    if artifact.get("type") == "tool_result" and (
         artifact.get("call_id") != content_value.get("call_id")
         or artifact.get("name") != content_value.get("name")
     ):
@@ -335,7 +364,13 @@ def _validated_artifact_content(
         "sha256:" + actual_sha256 != artifact["content_sha256"]
         or len(content) != artifact["content_chars"]
         or estimate_text_tokens(content) != artifact["estimated_tokens"]
-        or artifact_id != TOOL_RESULT_ARTIFACT_PREFIX + actual_sha256[:20]
+        or artifact_id
+        != (
+            TOOL_RESULT_ARTIFACT_PREFIX
+            if artifact.get("type") == "tool_result"
+            else CONTEXT_TRANSCRIPT_ARTIFACT_PREFIX
+        )
+        + actual_sha256[:20]
     ):
         raise ArtifactReadError("artifact_not_found", "artifact is not available")
     return content, actual_sha256
@@ -406,10 +441,12 @@ __all__ = [
     "MAX_ARTIFACT_READ_TOKENS",
     "MIN_ARTIFACT_READ_TOKENS",
     "RUN_ARTIFACT_TOOL_NAME",
+    "RUN_ARTIFACT_ID_PATTERN",
     "RUN_ARTIFACT_READ_TOOL",
     "TOOL_RESULT_ARTIFACT_ID_PATTERN",
     "artifact_read_trace",
     "build_evidence_result_artifact",
+    "build_context_transcript_artifact",
     "build_tool_result_artifact",
     "build_run_tool_result_artifact",
     "canonical_tool_result",

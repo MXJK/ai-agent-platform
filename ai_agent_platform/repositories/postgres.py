@@ -720,11 +720,13 @@ class PostgresAgentRunRepository:
                     errors,
                     control_action,
                     steering_messages,
+                    pending_compaction,
                     run_context_snapshot,
                     created_at,
                     updated_at
                 )
                 VALUES (
+                    %s,
                     %s,
                     %s,
                     %s,
@@ -761,6 +763,7 @@ class PostgresAgentRunRepository:
                     errors = EXCLUDED.errors,
                     control_action = EXCLUDED.control_action,
                     steering_messages = EXCLUDED.steering_messages,
+                    pending_compaction = EXCLUDED.pending_compaction,
                     run_context_snapshot = EXCLUDED.run_context_snapshot,
                     updated_at = NOW()
                 WHERE
@@ -786,6 +789,7 @@ class PostgresAgentRunRepository:
                     Jsonb(record.errors),
                     record.control_action,
                     Jsonb(record.steering_messages),
+                    Jsonb(record.pending_compaction),
                     Jsonb(
                         record.context_snapshot.to_dict()
                         if record.context_snapshot is not None
@@ -843,6 +847,7 @@ class PostgresAgentRunRepository:
                     errors,
                     control_action,
                     steering_messages,
+                    pending_compaction,
                     run_context_snapshot
                 FROM agent_runs
                 WHERE id = %s
@@ -877,6 +882,7 @@ class PostgresAgentRunRepository:
                     errors,
                     control_action,
                     steering_messages,
+                    pending_compaction,
                     run_context_snapshot
                 FROM agent_runs
                 WHERE conversation_id = %s
@@ -908,6 +914,7 @@ class PostgresAgentRunRepository:
                     errors,
                     control_action,
                     steering_messages,
+                    pending_compaction,
                     run_context_snapshot
                 FROM agent_runs
                 ORDER BY created_at DESC, id DESC
@@ -2073,9 +2080,10 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
         errors=list(row[13] or []),
         control_action=row[14] if len(row) > 14 else None,
         steering_messages=list(row[15] or []) if len(row) > 15 else [],
+        pending_compaction=row[16] if len(row) > 16 else None,
         context_snapshot=(
-            RunContextSnapshot.from_dict(row[16])
-            if len(row) > 16 and row[16] is not None
+            RunContextSnapshot.from_dict(row[17])
+            if len(row) > 17 and row[17] is not None
             else None
         ),
     )

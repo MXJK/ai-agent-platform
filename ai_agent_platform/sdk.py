@@ -134,7 +134,9 @@ class AgentSDK:
 
         resolved = QueryCommand(command)
         if resolved in {QueryCommand.START, QueryCommand.RESUME}:
-            raise ValueError("control accepts continue, pause, steer, or cancel")
+            raise ValueError(
+                "control accepts continue, pause, steer, compact, or cancel"
+            )
         record = self._query_service.execute(
             resolved,
             run_id=run_id,

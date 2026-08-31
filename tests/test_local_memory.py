@@ -129,7 +129,7 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
         with database.connect() as connection:
             assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
             assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
         with pytest.raises(RuntimeError):
             with database.transaction(immediate=True) as connection:

@@ -1151,6 +1151,7 @@ class WorkerContextRecoveryTests(unittest.TestCase):
                 [],
                 None,
                 [],
+                None,
                 snapshot.to_dict(),
             )
             load_connection = _FakeConnection([row])

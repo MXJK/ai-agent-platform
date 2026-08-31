@@ -5,6 +5,7 @@ from .agent import (
     AgentCheckpointRestoreResponse,
     AgentCheckpointsResponse,
     AgentRunRequest,
+    AgentRunCompactRequest,
     AgentRunEventsResponse,
     AgentRunEventResponse,
     AgentRunControlRequest,

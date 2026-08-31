@@ -16,6 +16,7 @@ class QueryCommand(str, Enum):
     STEER = "steer"
     PAUSE = "pause"
     CANCEL = "cancel"
+    COMPACT = "compact"
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,7 @@ class QueryLifecycle:
         QueryCommand.STEER: ACTIVE_STATUSES | SUSPENDED_STATUSES,
         QueryCommand.PAUSE: frozenset({"running"}),
         QueryCommand.CANCEL: ACTIVE_STATUSES | SUSPENDED_STATUSES,
+        QueryCommand.COMPACT: frozenset({"running", "paused"}),
     }
     _TRANSITIONS = {
         "queued": frozenset({"queued", "running", "cancelled", "failed"}),

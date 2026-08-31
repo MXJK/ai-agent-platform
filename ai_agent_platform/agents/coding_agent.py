@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time as wall_time
 from types import SimpleNamespace
 from typing import Any, Optional
 from uuid import uuid4
@@ -249,6 +249,14 @@ class CodingAgentRuntime:
         mutation_max_output_tokens: int = 16384,
         final_max_output_tokens: int = 4096,
         tool_result_max_tokens: int = 2000,
+        snip_enabled: bool = True,
+        snip_pressure_ratio: float = 0.60,
+        snip_keep_recent_groups: int = 4,
+        micro_compact_idle_seconds: int = 3600,
+        micro_compact_keep_recent_results: int = 5,
+        compaction_max_output_tokens: int = 4096,
+        compaction_safety_buffer_tokens: int = 2048,
+        compaction_min_reclaimable_tokens: int = 2048,
         graph_recursion_limit: int = 128,
         approval_policy: str = "on_request",
         knowledge_context_provider: KnowledgeContextProvider | None = None,
@@ -302,6 +310,26 @@ class CodingAgentRuntime:
         if tool_result_max_tokens < 64:
             raise ValueError("tool_result_max_tokens must be at least 64")
         self._tool_result_max_tokens = tool_result_max_tokens
+        if not 0 < snip_pressure_ratio < 1:
+            raise ValueError("snip_pressure_ratio must be between 0 and 1")
+        for name, value in (
+            ("snip_keep_recent_groups", snip_keep_recent_groups),
+            ("micro_compact_idle_seconds", micro_compact_idle_seconds),
+            ("micro_compact_keep_recent_results", micro_compact_keep_recent_results),
+            ("compaction_max_output_tokens", compaction_max_output_tokens),
+            ("compaction_safety_buffer_tokens", compaction_safety_buffer_tokens),
+            ("compaction_min_reclaimable_tokens", compaction_min_reclaimable_tokens),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than 0")
+        self._snip_enabled = bool(snip_enabled)
+        self._snip_pressure_ratio = snip_pressure_ratio
+        self._snip_keep_recent_groups = snip_keep_recent_groups
+        self._micro_compact_idle_seconds = micro_compact_idle_seconds
+        self._micro_compact_keep_recent_results = micro_compact_keep_recent_results
+        self._compaction_max_output_tokens = compaction_max_output_tokens
+        self._compaction_safety_buffer_tokens = compaction_safety_buffer_tokens
+        self._compaction_min_reclaimable_tokens = compaction_min_reclaimable_tokens
         self._metrics = metrics or MetricsRegistry()
         self._graph_recursion_limit = graph_recursion_limit
         if approval_policy not in {"always", "on_request", "never", "auto_approve"}:
@@ -547,8 +575,13 @@ class CodingAgentRuntime:
             "native_unfulfilled_change_rounds": 0,
             "native_consecutive_failures": 0,
             "native_context_compactions": 0,
+            "native_auto_compactions": 0,
             "native_context_chars": 0,
             "native_context_reduction_stages": [],
+            "native_last_model_request_at": 0.0,
+            "native_snip_candidates": [],
+            "native_compaction_failures": 0,
+            "native_model_compaction_disabled": False,
             "native_artifacts_collected": False,
             "terminal_status": "",
             "terminal_reason": "",
@@ -1169,6 +1202,7 @@ class CodingAgentRuntime:
             errors=_snapshot_errors(snapshot) or record.errors,
             control_action=record.control_action,
             steering_messages=record.steering_messages,
+            pending_compaction=record.pending_compaction,
             context_snapshot=record.context_snapshot,
         )
         return updated
@@ -1281,6 +1315,40 @@ class CodingAgentRuntime:
                 node=updated.latest_node,
                 summary=f"Agent run {action} requested.",
                 output={"message_chars": len(message.strip())},
+            ),
+        )
+        self._run_store.save(updated)
+        return updated
+
+    def request_compaction(
+        self,
+        *,
+        run_id: str,
+        instruction: str = "",
+    ) -> AgentRunRecord:
+        record = self.get_run(run_id)
+        try:
+            QueryLifecycle.assert_command(QueryCommand.COMPACT, record.status)
+        except QueryStateError as exc:
+            raise AgentRunInvalidStateError(run_id, record.status) from exc
+        if record.pending_compaction is not None:
+            raise AgentRunInvalidStateError(run_id, "compaction_pending")
+        updated = replace(
+            record,
+            pending_compaction={
+                "instruction": instruction.strip(),
+                "requested_at": wall_time(),
+            },
+        )
+        self._recorder.append_event(
+            run_id,
+            AgentRunEvent(
+                sequence=0,
+                type="control_compact_requested",
+                status=updated.status,
+                node=updated.latest_node,
+                summary="Agent context compaction requested.",
+                output={"instruction_chars": len(instruction.strip())},
             ),
         )
         self._run_store.save(updated)

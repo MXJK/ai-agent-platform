@@ -158,11 +158,12 @@ class PostgresQueryUnitOfWork:
                     id, thread_id, conversation_id, workspace_id, workspace_root,
                     status, checkpoint_id, latest_node, next_nodes, trace, result,
                     error, pending_approval, errors, control_action,
-                    steering_messages, run_context_snapshot, created_at, updated_at
+                    steering_messages, pending_compaction, run_context_snapshot,
+                    created_at, updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, NOW(), NOW()
+                    %s, %s, %s, %s, %s, NOW(), NOW()
                 )
                 """,
                 (
@@ -182,6 +183,7 @@ class PostgresQueryUnitOfWork:
                     Jsonb(record.errors),
                     record.control_action,
                     Jsonb(record.steering_messages),
+                    Jsonb(record.pending_compaction),
                     Jsonb(
                         record.context_snapshot.to_dict()
                         if record.context_snapshot is not None

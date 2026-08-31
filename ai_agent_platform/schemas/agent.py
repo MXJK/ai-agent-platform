@@ -80,6 +80,12 @@ class AgentRunRequest(BaseModel):
         return values
 
 
+class AgentRunCompactRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(default="", max_length=2000)
+
+
 class ComposerSkillCommandResponse(BaseModel):
     name: str
     description: str
@@ -336,6 +342,7 @@ class AgentRunStatusResponse(BaseModel):
     errors: list[dict[str, Any]]
     control_action: Optional[str]
     steering_message_count: int
+    pending_compaction: Optional[dict[str, Any]]
     trace: list[AgentTraceStepResponse]
     result: Optional[AgentRunResponse]
     workspace_mode: str
@@ -364,6 +371,7 @@ class AgentRunStatusResponse(BaseModel):
             errors=record.errors,
             control_action=record.control_action,
             steering_message_count=len(record.steering_messages),
+            pending_compaction=record.pending_compaction,
             trace=[
                 AgentTraceStepResponse(
                     step=item["step"],

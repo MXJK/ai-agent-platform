@@ -157,6 +157,19 @@ class ControlPolicy:
             self._run_store.save(replace(record, control_action=None))
         return action
 
+    def consume_compaction(self, state: CodingAgentState) -> dict[str, Any] | None:
+        run_id = state.get("run_id")
+        if not run_id:
+            return None
+        try:
+            record = self._run_store.get(run_id)
+        except KeyError:
+            return None
+        request = record.pending_compaction
+        if request is not None:
+            self._run_store.save(replace(record, pending_compaction=None))
+        return dict(request) if isinstance(request, dict) else None
+
 
 class BudgetPolicy:
     """Keep hard and soft native tool-loop limits in one policy boundary."""

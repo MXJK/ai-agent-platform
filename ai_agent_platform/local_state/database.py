@@ -12,7 +12,7 @@ from typing import Iterator
 from ai_agent_platform.text_search import fts_index_text
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class LocalStateDatabase:
@@ -55,6 +55,10 @@ class LocalStateDatabase:
                     if self.fts5_available:
                         self._rebuild_fts(conn)
                     conn.execute("PRAGMA user_version = 2")
+                    current = 2
+                if current < 3:
+                    conn.executescript(_SCHEMA_V3)
+                    conn.execute("PRAGMA user_version = 3")
                 conn.commit()
             if self.path.exists():
                 try:
@@ -462,6 +466,11 @@ CREATE TABLE IF NOT EXISTS user_memory_scenes (
 );
 CREATE INDEX IF NOT EXISTS idx_local_user_memory_scenes_scope
     ON user_memory_scenes(user_id, updated_at DESC, id DESC);
+"""
+
+
+_SCHEMA_V3 = r"""
+ALTER TABLE agent_runs ADD COLUMN pending_compaction_json TEXT;
 """
 
 

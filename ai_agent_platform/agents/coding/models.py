@@ -109,8 +109,13 @@ class CodingAgentState(TypedDict, total=False):
     native_unfulfilled_change_rounds: int
     native_consecutive_failures: int
     native_context_compactions: int
+    native_auto_compactions: int
     native_context_chars: int
     native_context_reduction_stages: list[dict[str, Any]]
+    native_last_model_request_at: float
+    native_snip_candidates: list[dict[str, Any]]
+    native_compaction_failures: int
+    native_model_compaction_disabled: bool
     native_artifacts_collected: bool
     terminal_status: str
     terminal_reason: str
@@ -356,6 +361,7 @@ class AgentRunRecord:
     errors: list[dict[str, Any]] = field(default_factory=list)
     control_action: Optional[str] = None
     steering_messages: list[str] = field(default_factory=list)
+    pending_compaction: Optional[dict[str, Any]] = None
     context_snapshot: RunContextSnapshot | None = None
 
 

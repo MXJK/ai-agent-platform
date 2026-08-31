@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import hashlib
 import json
 import inspect
+import time
+from types import SimpleNamespace
 from typing import Any
 
 from langgraph.types import interrupt
@@ -22,6 +25,16 @@ from ai_agent_platform.agents.coding.evidence_executor import (
     EvidenceExecutor,
 )
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
+from ai_agent_platform.agents.coding.context_compaction import (
+    SNIP_TOOL_NAME,
+    apply_snip,
+    auto_compact_threshold,
+    context_blocks,
+    full_compact,
+    micro_compact,
+    snip_candidate_message,
+    snip_tool_spec,
+)
 from ai_agent_platform.agents.coding.policies import native_assistant_message
 from ai_agent_platform.agents.coding.run_artifacts import (
     RUN_ARTIFACT_TOOL_NAME,
@@ -78,6 +91,14 @@ class ToolLoopNodes:
         self._plan_max_output_tokens = runtime._plan_max_output_tokens
         self._mutation_max_output_tokens = runtime._mutation_max_output_tokens
         self._tool_result_max_tokens = runtime._tool_result_max_tokens
+        self._snip_enabled = runtime._snip_enabled
+        self._snip_pressure_ratio = runtime._snip_pressure_ratio
+        self._snip_keep_recent_groups = runtime._snip_keep_recent_groups
+        self._micro_compact_idle_seconds = runtime._micro_compact_idle_seconds
+        self._micro_compact_keep_recent_results = runtime._micro_compact_keep_recent_results
+        self._compaction_max_output_tokens = runtime._compaction_max_output_tokens
+        self._compaction_safety_buffer_tokens = runtime._compaction_safety_buffer_tokens
+        self._compaction_min_reclaimable_tokens = runtime._compaction_min_reclaimable_tokens
         self._metrics = runtime._metrics
         self._control_policy = runtime._policies.control
         self._budget_policy = runtime._policies.budget
@@ -211,6 +232,7 @@ class ToolLoopNodes:
             )
         native_messages = self._control_policy.consume_steering(state, native_messages)
         control_action = self._control_policy.consume_action(state)
+        manual_compaction = self._control_policy.consume_compaction(state)
         if control_action == "pause":
             resumed = interrupt(
                 {
@@ -267,6 +289,141 @@ class ToolLoopNodes:
 
         max_tokens = self._native_context_budget_tokens(state)
         max_chars = self._native_context_max_chars if max_tokens <= 0 else 0
+        artifacts = list(state.get("artifacts", []))
+        context_stages: list[dict[str, Any]] = []
+        compactions = state.get("native_context_compactions", 0)
+        auto_compactions = state.get("native_auto_compactions", 0)
+        compaction_failures = state.get("native_compaction_failures", 0)
+        model_compaction_disabled = bool(
+            state.get("native_model_compaction_disabled", False)
+        )
+        compaction_specs_by_name = {
+            spec.name: spec
+            for spec in self._tools_for_state(
+                {**state, "task_tool_profile": []}
+            ).list_specs()
+        }
+        now = time.time()
+        last_request_at = float(state.get("native_last_model_request_at", 0.0) or 0.0)
+        idle_due = bool(
+            last_request_at
+            and now - last_request_at >= self._micro_compact_idle_seconds
+        )
+        if idle_due:
+            micro = micro_compact(
+                native_messages,
+                tool_specs=compaction_specs_by_name,
+                artifacts=artifacts,
+                keep_recent_results=self._micro_compact_keep_recent_results,
+                reason="idle_timeout",
+            )
+            native_messages, artifacts = micro.messages, micro.artifacts
+            if micro.stage is not None:
+                context_stages.append(micro.stage)
+
+        threshold = (
+            auto_compact_threshold(
+                max_tokens,
+                compaction_max_output_tokens=self._compaction_max_output_tokens,
+                safety_buffer_tokens=self._compaction_safety_buffer_tokens,
+            )
+            if max_tokens > 0
+            else 0
+        )
+        pressure_due = bool(
+            threshold > 0 and _native_messages_tokens(native_messages) >= threshold
+        )
+        full_requested = bool(manual_compaction) or pressure_due
+        auto_attempted = False
+        full_compaction_changed = False
+        if full_requested:
+            # Auto-Compact always spends the cheaper deterministic prepass first.
+            micro = micro_compact(
+                native_messages,
+                tool_specs=compaction_specs_by_name,
+                artifacts=artifacts,
+                keep_recent_results=self._micro_compact_keep_recent_results,
+                reason="auto_compact_prepass",
+            )
+            native_messages, artifacts = micro.messages, micro.artifacts
+            if micro.stage is not None:
+                context_stages.append(micro.stage)
+            pressure_due = bool(
+                threshold > 0 and _native_messages_tokens(native_messages) >= threshold
+            )
+            manual_instruction = str(
+                (manual_compaction or {}).get("instruction") or ""
+            )
+            reclaimable = _native_reclaimable_tokens(native_messages)
+            should_summarize = bool(manual_compaction) or (
+                pressure_due
+                and reclaimable >= self._compaction_min_reclaimable_tokens
+            )
+            if (
+                should_summarize
+                and not model_compaction_disabled
+                and auto_compactions < self._native_max_compactions
+            ):
+                auto_attempted = True
+                compact_started_at = time.perf_counter()
+                compacted = full_compact(
+                    native_messages,
+                    artifacts=artifacts,
+                    compressor=self._context_compressor,
+                    max_output_tokens=self._compaction_max_output_tokens,
+                    instruction=manual_instruction,
+                    seed_messages=_compaction_seed_messages(
+                        state,
+                        artifacts=artifacts,
+                        max_parallel_read_calls=self._max_read_tools_per_round,
+                    ),
+                )
+                # The pre-compaction transcript Artifact is durable even when the
+                # model summary fails and the deterministic fallback takes over.
+                artifacts = compacted.artifacts
+                if compacted.changed:
+                    full_compaction_changed = True
+                    native_messages = compacted.messages
+                    if compacted.stage is not None:
+                        context_stages.append(compacted.stage)
+                    compactions += 1
+                    auto_compactions += 1
+                    compaction_failures = 0
+                    self._metrics.increment("agent_native_auto_compactions_total")
+                else:
+                    compaction_failures += 1
+                    failed = _context_stage(
+                        "compaction_failed",
+                        native_messages,
+                        max_chars=max_chars,
+                        max_tokens=max_tokens,
+                        forced=bool(manual_compaction),
+                    )
+                    failed["reason"] = compacted.error or "unknown"
+                    failed["failure_count"] = compaction_failures
+                    failed["duration_ms"] = int(
+                        (time.perf_counter() - compact_started_at) * 1000
+                    )
+                    transcript_artifact = next(
+                        (
+                            item
+                            for item in reversed(compacted.artifacts)
+                            if item.get("type") == "context_transcript"
+                        ),
+                        None,
+                    )
+                    failed["artifact_ids"] = (
+                        [transcript_artifact.get("id")]
+                        if transcript_artifact is not None
+                        else []
+                    )
+                    context_stages.append(failed)
+                    self._metrics.increment("agent_native_auto_compaction_failures_total")
+                    if compaction_failures >= 3:
+                        model_compaction_disabled = True
+
+        fallback_before_tokens = _native_messages_tokens(native_messages)
+        fallback_started_at = time.perf_counter()
         reduction, artifacts = self._reduce_with_run_artifacts(
             state,
             native_messages,
@@ -274,16 +431,50 @@ class ToolLoopNodes:
             max_tokens=max_tokens,
             keep_messages=self._native_context_keep_messages,
             tool_result_keep_recent=self._tool_result_keep_recent,
-            previous_compactions=state.get("native_context_compactions", 0),
+            previous_compactions=compactions,
             max_compactions=self._native_max_compactions,
-            compressor=self._context_compressor,
-            artifacts=state.get("artifacts", []),
+            compressor=None,
+            force=auto_attempted and not full_compaction_changed,
+            artifacts=artifacts,
         )
         self._record_context_reduction(reduction)
         native_messages = reduction.messages
         compactions = reduction.compactions
         context_chars = reduction.context_chars
-        context_stages = list(reduction.stages)
+        if auto_attempted and not full_compaction_changed and reduction.changed:
+            context_stages.append(
+                {
+                    "stage": "compaction_fallback",
+                    "before_tokens": fallback_before_tokens,
+                    "after_tokens": reduction.estimated_tokens,
+                    "reclaimed_tokens": max(
+                        0, fallback_before_tokens - reduction.estimated_tokens
+                    ),
+                    "block_count": sum(
+                        int(stage.get("evicted", 0))
+                        + int(stage.get("dropped", 0))
+                        + int(stage.get("truncated", 0))
+                        for stage in reduction.stages
+                    ),
+                    "artifact_ids": [],
+                    "reason": "model_compaction_unavailable_or_insufficient",
+                    "fits": not reduction.exhausted,
+                    "duration_ms": int(
+                        (time.perf_counter() - fallback_started_at) * 1000
+                    ),
+                }
+            )
+        context_stages.extend(reduction.stages)
+        if max_tokens > 0:
+            for stage in context_stages:
+                if "after_tokens" in stage:
+                    stage["fits"] = int(stage.get("after_tokens", 0)) <= max_tokens
+        state = {
+            **state,
+            "native_auto_compactions": auto_compactions,
+            "native_compaction_failures": compaction_failures,
+            "native_model_compaction_disabled": model_compaction_disabled,
+        }
         if reduction.exhausted:
             warnings.append(
                 "native transcript could not be reduced to the context budget"
@@ -392,6 +583,27 @@ class ToolLoopNodes:
                 return terminal
 
         decide = self._planner.decide_tool_calls
+        snip_blocks = []
+        request_messages = native_messages
+        if (
+            self._snip_enabled
+            and max_tokens > 0
+            and _native_messages_tokens(native_messages)
+            >= int(max_tokens * self._snip_pressure_ratio)
+        ):
+            snip_blocks = context_blocks(
+                native_messages,
+                tool_specs=compaction_specs_by_name,
+                keep_recent_groups=self._snip_keep_recent_groups,
+            )
+            if len(snip_blocks) >= 2:
+                tool_specs = [*tool_specs, snip_tool_spec()]
+                request_messages = [
+                    *native_messages,
+                    snip_candidate_message(snip_blocks),
+                ]
+            else:
+                snip_blocks = []
         decide_kwargs: dict[str, Any] = {}
         if "max_output_tokens" in inspect.signature(decide).parameters:
             decide_kwargs["max_output_tokens"] = _native_output_budget(
@@ -401,7 +613,7 @@ class ToolLoopNodes:
             )
         try:
             decision = self._completion_policy.stream_decision(
-                state, decide, native_messages, tool_specs,
+                state, decide, request_messages, tool_specs,
                 allow_text=(
                     state.get("intent") != "change_planning"
                     or _has_successful_native_mutation(state)
@@ -429,7 +641,7 @@ class ToolLoopNodes:
                 tool_result_keep_recent=self._tool_result_keep_recent,
                 previous_compactions=compactions,
                 max_compactions=self._native_max_compactions,
-                compressor=self._context_compressor,
+                compressor=None,
                 force=True,
                 require_progress=seed_stage is None,
                 artifacts=artifacts,
@@ -454,9 +666,11 @@ class ToolLoopNodes:
                 terminal["context_warnings"] = warnings
                 terminal["artifacts"] = artifacts
                 return terminal
+            request_messages = native_messages
+            tool_specs = [spec for spec in tool_specs if spec.name != SNIP_TOOL_NAME]
             try:
                 decision = self._completion_policy.stream_decision(
-                    state, decide, native_messages, tool_specs,
+                    state, decide, request_messages, tool_specs,
                     allow_text=(
                         state.get("intent") != "change_planning"
                         or _has_successful_native_mutation(state)
@@ -523,10 +737,14 @@ class ToolLoopNodes:
         all_permission_decisions = [
             (
                 call,
-                tools_for_state.resolve_permission(
-                    call,
-                    permission_context,
-                    phase="plan",
+                (
+                    SimpleNamespace(effect="allow", reason="runtime_state")
+                    if call.name == SNIP_TOOL_NAME
+                    else tools_for_state.resolve_permission(
+                        call,
+                        permission_context,
+                        phase="plan",
+                    )
                 ),
             )
             for call in all_proposed_calls
@@ -553,6 +771,7 @@ class ToolLoopNodes:
                     "agent.request_user_input",
                     RUN_ARTIFACT_TOOL_NAME,
                     EVIDENCE_TOOL_NAME,
+                    SNIP_TOOL_NAME,
                 }
                 and permission.effect == "allow"
             )
@@ -788,6 +1007,18 @@ class ToolLoopNodes:
             "native_no_progress_rounds": no_progress,
             "native_unfulfilled_change_rounds": unfulfilled_change_rounds,
             "native_context_compactions": compactions,
+            "native_auto_compactions": auto_compactions,
+            "native_compaction_failures": compaction_failures,
+            "native_model_compaction_disabled": model_compaction_disabled,
+            "native_last_model_request_at": now,
+            "native_snip_candidates": [
+                {
+                    "block_id": block.block_id,
+                    "token_cost": block.token_cost,
+                    "tool_names": list(block.tool_names),
+                }
+                for block in snip_blocks
+            ],
             "native_context_chars": _native_messages_chars(native_messages),
             "native_context_reduction_stages": context_stages,
             "terminal_status": terminal_status,
@@ -1026,6 +1257,11 @@ class ToolLoopNodes:
             "native_tool_answer": "",
             "native_tool_stop_reason": stop_reason,
             "native_context_compactions": compactions,
+            "native_auto_compactions": state.get("native_auto_compactions", 0),
+            "native_compaction_failures": state.get("native_compaction_failures", 0),
+            "native_model_compaction_disabled": state.get(
+                "native_model_compaction_disabled", False
+            ),
             "native_context_chars": context_chars,
             "native_context_reduction_stages": list(context_stages),
             "trace": _append_trace(
@@ -1205,6 +1441,23 @@ class ToolLoopNodes:
                         response = self._read_artifact(state, call)
                         results.append(response)
                         model_results.append(response)
+                    elif call.name == SNIP_TOOL_NAME:
+                        response = {
+                            "call_id": call.call_id,
+                            "name": SNIP_TOOL_NAME,
+                            "ok": True,
+                            "result": {
+                                "block_ids": list(call.arguments.get("block_ids") or []),
+                                "reason": str(call.arguments.get("reason") or ""),
+                            },
+                            "provider": "runtime",
+                            "permission_level": "read_only",
+                            "requires_approval": False,
+                            "duration_ms": 0,
+                            "cached": False,
+                        }
+                        results.append(response)
+                        model_results.append(response)
                     elif call.name == EVIDENCE_TOOL_NAME:
                         executor = EvidenceExecutor(
                             lambda child_calls, parallel: (
@@ -1236,11 +1489,84 @@ class ToolLoopNodes:
                         call_results = self._change_loop.execute_tool_calls(state, [call])
                         results.extend(call_results)
                         model_results.extend(call_results)
+            externalization_started_at = time.perf_counter()
             result_messages, result_artifacts = self._budget_tool_results(model_results)
+            externalization_duration_ms = int(
+                (time.perf_counter() - externalization_started_at) * 1000
+            )
             result_messages.extend(evidence_messages)
             result_artifacts.extend(evidence_artifacts)
             native_messages = list(state.get("native_tool_messages", []))
             native_messages.extend(result_messages)
+            merged_artifacts = _merge_artifacts(
+                state.get("artifacts", []),
+                result_artifacts,
+            )
+            externalization_stages = [
+                {
+                    "stage": "result_externalized",
+                    "before_tokens": int(artifact.get("estimated_tokens", 0)),
+                    "after_tokens": min(
+                        int(artifact.get("estimated_tokens", 0)),
+                        self._tool_result_max_tokens,
+                    ),
+                    "reclaimed_tokens": max(
+                        0,
+                        int(artifact.get("estimated_tokens", 0))
+                        - self._tool_result_max_tokens,
+                    ),
+                    "block_count": 1,
+                    "artifact_ids": [artifact.get("id")],
+                    "reason": "tool_result_budget",
+                    "fits": True,
+                    "duration_ms": externalization_duration_ms,
+                }
+                for artifact in result_artifacts
+                if artifact.get("type") == "tool_result"
+                and int(artifact.get("estimated_tokens", 0))
+                > self._tool_result_max_tokens
+            ]
+            snip_stages: list[dict[str, Any]] = []
+            snip_calls = [call for call in calls if call.name == SNIP_TOOL_NAME]
+            if snip_calls:
+                selected = snip_calls[0]
+                snipped = apply_snip(
+                    native_messages,
+                    selected_ids=list(selected.arguments.get("block_ids") or []),
+                    candidate_ids=[
+                        str(item.get("block_id") or "")
+                        for item in state.get("native_snip_candidates", [])
+                        if isinstance(item, dict)
+                    ],
+                    reason=str(selected.arguments.get("reason") or ""),
+                    artifacts=merged_artifacts,
+                )
+                if len(snip_calls) > 1 or snipped.error:
+                    error_code = "multiple_snip_calls" if len(snip_calls) > 1 else snipped.error
+                    for result in results:
+                        if result.get("call_id") == selected.call_id:
+                            result.update(
+                                {
+                                    "ok": False,
+                                    "result": None,
+                                    "error": "context block selection was rejected",
+                                    "error_code": error_code,
+                                }
+                            )
+                    for message in native_messages:
+                        if message.get("call_id") == selected.call_id:
+                            message["content"] = next(
+                                result for result in results
+                                if result.get("call_id") == selected.call_id
+                            )
+                            message["is_error"] = True
+                    self._metrics.increment("agent_native_snip_rejected_total")
+                else:
+                    native_messages = snipped.messages
+                    merged_artifacts = snipped.artifacts
+                    if snipped.stage is not None:
+                        snip_stages.append(snipped.stage)
+                    self._metrics.increment("agent_native_snip_blocks_total", len(selected.arguments.get("block_ids") or []))
             successful_mutation = any(
                 result.get("ok")
                 and result.get("name") in SANDBOX_MUTATION_TOOLS
@@ -1288,13 +1614,16 @@ class ToolLoopNodes:
             )
             return {
                 "tool_results": list(state.get("tool_results", [])) + results,
-                "artifacts": _merge_artifacts(
-                    state.get("artifacts", []),
-                    result_artifacts,
-                ),
+                "artifacts": merged_artifacts,
                 "native_tool_messages": native_messages,
                 "native_pending_tool_calls": [],
                 "native_parallel_read_batch": False,
+                "native_snip_candidates": [],
+                "native_context_reduction_stages": [
+                    *state.get("native_context_reduction_stages", []),
+                    *externalization_stages,
+                    *snip_stages,
+                ],
                 "analysis_tool_calls": [],
                 "change_tool_calls": [],
                 "validation_tool_calls": [],
@@ -1346,6 +1675,10 @@ class ToolLoopNodes:
                             artifact_read_trace(result)
                             for result in results
                             if result.get("name") == RUN_ARTIFACT_TOOL_NAME
+                        ],
+                        "context_reduction_stages": [
+                            *externalization_stages,
+                            *snip_stages,
                         ],
                     },
                 ),
@@ -1734,6 +2067,69 @@ def _serialize_tool_result(value: Any) -> str:
     )
 
 
+def _compaction_seed_messages(
+    state: CodingAgentState,
+    *,
+    artifacts: Sequence[dict[str, Any]],
+    max_parallel_read_calls: int,
+) -> list[dict[str, Any]]:
+    """Rebuild the stable seed from checkpoint state without reloading files."""
+
+    seed = native_tool_messages(
+        state,
+        max_parallel_read_calls=max_parallel_read_calls,
+    )
+    if len(seed) < 2 or not isinstance(seed[1].get("content"), str):
+        return seed
+    try:
+        payload = json.loads(str(seed[1]["content"]))
+    except (TypeError, ValueError):
+        return seed
+    evidence = payload.get("evidence")
+    if isinstance(evidence, list):
+        projected: list[dict[str, Any]] = []
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "")
+            normalized = " ".join(text.split())
+            projected.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "kind",
+                        "path",
+                        "start_line",
+                        "end_line",
+                        "reason",
+                        "truncated",
+                    )
+                    if item.get(key) is not None
+                }
+                | {
+                    "content_sha256": "sha256:"
+                    + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "short_summary": normalized[:320],
+                }
+            )
+        payload["evidence"] = projected
+    payload["runtime_attachment"] = {
+        "workspace_role": state.get("workspace_role"),
+        "approval_policy": state.get("approval_policy"),
+        "tool_profile": list(state.get("task_tool_profile", [])),
+        "artifact_ids": [
+            str(item.get("id")) for item in artifacts if item.get("id")
+        ],
+        "change_iteration": state.get("change_iteration", 0),
+        "validation_status": state.get("validation_status"),
+    }
+    seed[1] = {
+        **seed[1],
+        "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+    }
+    return seed
+
+
 def _tool_result_placeholder(
     serialized: str,
     *,
@@ -1947,6 +2343,16 @@ def _tool_schema_tokens(tool_specs: Sequence[Any]) -> int:
 
 def _native_messages_tokens(messages: Sequence[dict[str, Any]]) -> int:
     return estimate_text_tokens(_serialize_native_messages(messages))
+
+
+def _native_reclaimable_tokens(messages: Sequence[dict[str, Any]]) -> int:
+    """Estimate removable dynamic body while excluding seed and user instructions."""
+
+    return sum(
+        _native_messages_tokens(group.messages)
+        for group in _native_message_groups(list(messages))
+        if not group.truncation_protected
+    )
 
 
 def _serialize_native_messages(messages: Sequence[dict[str, Any]]) -> str:

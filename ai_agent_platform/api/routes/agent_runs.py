@@ -22,6 +22,7 @@ from ai_agent_platform.schemas import (
     AgentRunEventsResponse,
     AgentRunEventResponse,
     AgentRunControlRequest,
+    AgentRunCompactRequest,
     AgentRunRequest,
     AgentRunResumeRequest,
     AgentRunStatusResponse,
@@ -453,6 +454,40 @@ def create_agent_runs_router(
         http_request: Request,
     ) -> AgentRunStatusResponse:
         return control_agent_run(run_id, request, http_request, action="steer")
+
+    @router.post(
+        "/agent/runs/{run_id}/compact",
+        response_model=AgentRunStatusResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def compact_agent_run(
+        run_id: str,
+        request: AgentRunCompactRequest,
+        http_request: Request,
+    ) -> AgentRunStatusResponse:
+        try:
+            record = query_service.execute(
+                QueryCommand.COMPACT,
+                run_id=run_id,
+                message=request.instruction,
+                actor_user_id=(
+                    request_user_id(http_request, settings)
+                    if settings.auth_mode != "disabled"
+                    else None
+                ),
+            )
+        except AgentRunNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="agent run not found") from exc
+        except AgentRunInvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TaskQueueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return AgentRunStatusResponse.from_domain(record)
 
     @router.post("/agent/runs/{run_id}/continue", response_model=AgentRunStatusResponse)
     def continue_agent_run(

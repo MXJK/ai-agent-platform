@@ -152,6 +152,46 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.command, QueryCommand.CANCEL)
         self.assertIn("cancelling active Run", errors.getvalue())
 
+    async def test_repl_compact_uses_query_kernel_control(self) -> None:
+        class StubQueryService:
+            event_encoder = AgentEventEncoder()
+
+            def execute(self, command, **kwargs):
+                self.command = QueryCommand(command)
+                self.kwargs = kwargs
+                return SimpleNamespace(run_id=kwargs["run_id"])
+
+            def get_result(self, run_id, *, actor_user_id=None):
+                return QueryResult(run_id=run_id, status="running", cursor=3)
+
+        service = StubQueryService()
+        runtime = RuntimeContainer(settings=Settings(), role="cli")
+        runtime.query_service = service  # type: ignore[assignment]
+        output = io.StringIO()
+        with TemporaryDirectory() as temp_dir:
+            application = CliApplication(
+                runtime,
+                workspace_root=temp_dir,
+                workspace_id="workspace",
+                output_stream=output,
+                error_stream=io.StringIO(),
+            )
+            application.last_run_id = "run_compact"
+            self.assertFalse(
+                await application._handle_slash_command(
+                    "/compact preserve migration state"
+                )
+            )
+
+        self.assertEqual(service.command, QueryCommand.COMPACT)
+        self.assertEqual(service.kwargs["run_id"], "run_compact")
+        self.assertEqual(
+            service.kwargs["message"], "preserve migration state"
+        )
+        diagnostic = _json_objects(output.getvalue())[0]
+        self.assertEqual(diagnostic["kind"], "compact")
+        self.assertTrue(diagnostic["queued"])
+
     async def test_repl_exposes_required_commands_and_explicit_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

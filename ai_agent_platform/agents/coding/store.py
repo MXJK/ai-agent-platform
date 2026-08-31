@@ -207,10 +207,7 @@ def events_for_record(
                             type="context",
                             status="running",
                             node="context_compaction",
-                            summary=(
-                                "Native context reduction stage completed: "
-                                f"{stage_name}."
-                            ),
+                            summary=_context_stage_summary(stage_name, stage),
                             output=dict(stage),
                         ),
                     )
@@ -280,3 +277,20 @@ def events_for_record(
             )
         )
     return candidates
+
+
+def _context_stage_summary(stage: str, payload: dict[str, Any]) -> str:
+    reclaimed = int(payload.get("reclaimed_tokens", 0) or 0)
+    blocks = int(payload.get("block_count", 0) or 0)
+    labels = {
+        "result_externalized": "Large tool result moved to a Run Artifact.",
+        "snip": "Obsolete context blocks were snipped.",
+        "micro_compact": "Old reproducible tool results were micro-compacted.",
+        "auto_compact": "Agent context was automatically compacted.",
+        "compaction_fallback": "Deterministic context fallback completed.",
+        "compaction_failed": "Model context compaction failed safely.",
+    }
+    summary = labels.get(stage, f"Native context reduction stage completed: {stage}.")
+    if reclaimed or blocks:
+        summary += f" Reclaimed about {reclaimed} tokens across {blocks} block(s)."
+    return summary

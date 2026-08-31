@@ -133,7 +133,7 @@ class CliApplication:
         self._prepare_context()
         self.error_stream.write(
             "AI Agent REPL. Use /skills, /tools, /mcp, /permissions, "
-            "/resume, or /exit.\n"
+            "/compact, /resume, or /exit.\n"
         )
         self.error_stream.flush()
         while True:
@@ -399,6 +399,37 @@ class CliApplication:
             except (QueryStateError, RuntimeError, ValueError) as exc:
                 self._write_diagnostic("error", {"message": str(exc)})
             return False
+        if command == "/compact":
+            run_id = self.last_run_id
+            if not run_id:
+                self._write_diagnostic(
+                    "error",
+                    {"message": "/compact requires an active or paused Run"},
+                )
+                return False
+            try:
+                result = self.sdk.control(
+                    run_id,
+                    QueryCommand.COMPACT,
+                    message=" ".join(arguments).strip(),
+                    actor_user_id=(
+                        self.user_id
+                        if self.runtime.settings.auth_mode != "disabled"
+                        else None
+                    ),
+                )
+            except (QueryStateError, RuntimeError, ValueError) as exc:
+                self._write_diagnostic("error", {"message": str(exc)})
+                return False
+            self._write_diagnostic(
+                "compact",
+                {
+                    "run_id": result.run_id,
+                    "status": result.status,
+                    "queued": True,
+                },
+            )
+            return False
         snapshot = self._effective_snapshot()
         factory = self.runtime.execution_context_factory
         catalog = (
@@ -485,6 +516,7 @@ class CliApplication:
                     "/tools",
                     "/mcp",
                     "/permissions",
+                    "/compact",
                     "/resume",
                     "/exit",
                 ],
