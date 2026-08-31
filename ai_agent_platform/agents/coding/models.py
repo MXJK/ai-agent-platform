@@ -178,6 +178,40 @@ class ContextSource:
 
 
 @dataclass(frozen=True)
+class EvidencePlan:
+    """Validated, bounded instructions for deterministic repository evidence."""
+
+    queries: list[str] = field(default_factory=list)
+    candidate_paths: list[str] = field(default_factory=list)
+    max_files: int = 8
+    max_depth: int = 3
+    max_results_per_query: int = 12
+    max_chars_per_file: int = 8000
+    max_evidence_tokens: int = 12000
+    required_evidence: list[str] = field(default_factory=list)
+    stop_when: list[str] = field(default_factory=list)
+
+
+class EvidenceItem(TypedDict):
+    path: str
+    location: str
+    summary: str
+    snippet: str
+    reason: str
+    artifact_id: str
+
+
+class EvidenceBundle(TypedDict):
+    coverage: list[str]
+    evidence: list[EvidenceItem]
+    unresolved: list[str]
+    errors: list[dict[str, Any]]
+    raw_result_count: int
+    deduplicated_count: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
 class AgentRunMetrics:
     elapsed_ms: int = 0
     node_count: int = 0

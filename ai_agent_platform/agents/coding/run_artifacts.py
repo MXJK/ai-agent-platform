@@ -75,6 +75,34 @@ def build_tool_result_artifact(
     }
 
 
+def build_evidence_result_artifact(
+    result: dict[str, Any],
+    *,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Store one raw Evidence Executor child result with audit metadata."""
+
+    payload = dict(result)
+    payload.pop("artifact_id", None)
+    payload.pop("durable_replay", None)
+    payload["cached"] = False
+    payload["arguments"] = dict(arguments)
+    artifact = build_tool_result_artifact(payload)
+    nested = payload.get("result")
+    nested_truncated = bool(
+        isinstance(nested, Mapping) and nested.get("truncated")
+    )
+    artifact.update(
+        {
+            "evidence_raw_result": True,
+            "arguments": dict(arguments),
+            "ok": bool(payload.get("ok")),
+            "truncated": bool(payload.get("output_truncated") or nested_truncated),
+        }
+    )
+    return artifact
+
+
 build_run_tool_result_artifact = build_tool_result_artifact
 
 
@@ -381,6 +409,7 @@ __all__ = [
     "RUN_ARTIFACT_READ_TOOL",
     "TOOL_RESULT_ARTIFACT_ID_PATTERN",
     "artifact_read_trace",
+    "build_evidence_result_artifact",
     "build_tool_result_artifact",
     "build_run_tool_result_artifact",
     "canonical_tool_result",

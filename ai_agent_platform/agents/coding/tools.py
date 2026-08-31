@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ai_agent_platform.agents.coding.run_artifacts import register_run_artifact_tool
+from ai_agent_platform.agents.coding.evidence_executor import register_evidence_tool
 from ai_agent_platform.integrations.mcp import (
     MCPToolProvider,
     register_mcp_tools,
@@ -30,6 +31,7 @@ def create_coding_tool_registry(
 ) -> ToolRegistry:
     registry = ToolRegistry(permission_resolver=permission_resolver)
     register_repository_tools(registry)
+    register_evidence_tool(registry)
     register_sandbox_tools(
         registry,
         mode=sandbox_mode,

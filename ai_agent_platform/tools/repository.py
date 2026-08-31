@@ -49,6 +49,7 @@ class RepositoryToolKit:
         self,
         path: str = "",
         max_results: int = 100,
+        max_depth: int | None = None,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         root = _workspace_root(context)
@@ -57,7 +58,10 @@ class RepositoryToolKit:
             raise ValueError(f"path is not an existing directory: {path or '.'}")
         limit = max(1, max_results)
         discovered: list[str] = []
-        for candidate in _iter_files(base_path):
+        for candidate in _iter_files(
+            base_path,
+            max_depth=_validated_max_depth(max_depth),
+        ):
             relative = _safe_relative_to(candidate, root)
             if relative is None:
                 continue
@@ -77,6 +81,7 @@ class RepositoryToolKit:
         query: str,
         path: str = "",
         max_results: int = 40,
+        max_depth: int | None = None,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         root = _workspace_root(context)
@@ -87,7 +92,10 @@ class RepositoryToolKit:
         if not terms:
             raise ValueError("query did not contain searchable terms")
         ranked: list[tuple[int, str]] = []
-        for candidate in _iter_files(base_path):
+        for candidate in _iter_files(
+            base_path,
+            max_depth=_validated_max_depth(max_depth),
+        ):
             relative = _relative_to(candidate, root)
             lowered = relative.lower()
             name = candidate.name.lower()
@@ -142,6 +150,7 @@ class RepositoryToolKit:
         path: str = "",
         max_results: int = 20,
         context_lines: int = 0,
+        max_depth: int | None = None,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         root = _workspace_root(context)
@@ -158,6 +167,7 @@ class RepositoryToolKit:
             terms=terms,
             max_results=limit,
             context_lines=max(0, context_lines),
+            max_depth=_validated_max_depth(max_depth),
         )
         engine = "rg"
         if matches is None:
@@ -167,6 +177,7 @@ class RepositoryToolKit:
                 terms=terms,
                 max_results=limit,
                 context_lines=max(0, context_lines),
+                max_depth=_validated_max_depth(max_depth),
             )
             engine = "python"
         return {
@@ -196,6 +207,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
             "properties": {
                 "path": {"type": "string"},
                 "max_results": {"type": "integer"},
+                "max_depth": {"type": "integer", "minimum": 0},
             },
         },
         risk_summary="Lists paths inside the server-selected execution root.",
@@ -212,6 +224,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
                 "query": {"type": "string"},
                 "path": {"type": "string"},
                 "max_results": {"type": "integer"},
+                "max_depth": {"type": "integer", "minimum": 0},
             },
         },
         risk_summary="Finds paths inside the captured workspace root.",
@@ -247,6 +260,7 @@ def register_repository_tools(registry: ToolRegistry) -> None:
                 "path": {"type": "string"},
                 "max_results": {"type": "integer"},
                 "context_lines": {"type": "integer"},
+                "max_depth": {"type": "integer", "minimum": 0},
             },
         },
         risk_summary="Searches non-sensitive text files inside the workspace.",
@@ -274,18 +288,27 @@ def _resolve_path(root: Path, path: str) -> Path:
     return resolved
 
 
-def _iter_files(base_path: Path) -> Iterable[Path]:
+def _iter_files(
+    base_path: Path,
+    *,
+    max_depth: int | None = None,
+) -> Iterable[Path]:
     if base_path.is_file():
         if not base_path.is_symlink() and not _is_ignored(base_path):
             yield base_path
         return
     for current_root, directory_names, filenames in os.walk(base_path):
         current = Path(current_root)
-        directory_names[:] = sorted(
-            name
-            for name in directory_names
-            if not _is_ignored_directory_name(name)
-            and not (current / name).is_symlink()
+        current_depth = len(current.relative_to(base_path).parts)
+        directory_names[:] = (
+            []
+            if max_depth is not None and current_depth >= max_depth
+            else sorted(
+                name
+                for name in directory_names
+                if not _is_ignored_directory_name(name)
+                and not (current / name).is_symlink()
+            )
         )
         for filename in sorted(filenames):
             candidate = current / filename
@@ -318,6 +341,7 @@ def _search_with_rg(
     terms: list[str],
     max_results: int,
     context_lines: int,
+    max_depth: int | None,
 ) -> list[dict[str, Any]] | None:
     executable = shutil.which("rg")
     if executable is None:
@@ -336,9 +360,14 @@ def _search_with_rg(
         "!*.pem",
         "--glob",
         "!*.key",
-        pattern,
-        str(base_path),
     ]
+    for directory in sorted(IGNORED_DIRECTORIES):
+        command.extend(["--glob", f"!**/{directory}/**"])
+    for prefix in IGNORED_DIRECTORY_PREFIXES:
+        command.extend(["--glob", f"!**/{prefix}*/**"])
+    if max_depth is not None:
+        command.extend(["--max-depth", str(max_depth)])
+    command.extend([pattern, str(base_path)])
     result = subprocess.run(
         command,
         cwd=root,
@@ -383,10 +412,11 @@ def _search_with_python(
     terms: list[str],
     max_results: int,
     context_lines: int,
+    max_depth: int | None,
 ) -> list[dict[str, Any]]:
     lowered_terms = [term.lower() for term in terms]
     matches: list[dict[str, Any]] = []
-    for candidate in _iter_files(base_path):
+    for candidate in _iter_files(base_path, max_depth=max_depth):
         if _is_sensitive(candidate) or candidate.stat().st_size > MAX_TEXT_FILE_BYTES:
             continue
         try:
@@ -423,6 +453,14 @@ def _query_terms(query: str) -> list[str]:
         seen.add(normalized)
         cleaned.append(term.strip("`'\".,:;()[]{}"))
     return cleaned[:8]
+
+
+def _validated_max_depth(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("max_depth must be a non-negative integer")
+    return value
 
 
 def _is_ignored(path: Path) -> bool:

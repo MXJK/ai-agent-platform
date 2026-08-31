@@ -648,6 +648,24 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 若再次提出同一路径会收到 `seeded_evidence` 抑制结果，不会重复执行。显式行范围读取、
 后续精确复核，以及单工具失败恢复不受此规则影响。
 
+需要跨文件采证时，标准 native 工具视图只向模型公开一个只读
+`repo.collect_evidence` 协议，而不是要求模型逐条编排 `repo.list_files`、
+`repo.find_files`、`repo.search_code` 和 `repo.read_file`。模型提交严格的
+`EvidencePlan`，包含查询、候选路径、文件/深度/查询结果/单文件字符/总 Evidence Token
+上限、必需证据和停止条件；缺失或越界预算回退到安全默认值，额外字段直接拒绝。Runtime
+在闭集内规范化并去重查询与路径，跳过版本库、依赖、虚拟环境、缓存和构建目录，对独立
+读取受控并发，并按文件内容哈希去重。write、shell、MCP 或任意模型生成代码不能进入该
+执行器。
+
+每个内部 list/search/read 的成功或失败原始结果都会立即成为当前 Run 的
+`tool_result` Artifact，记录稳定子调用 ID、工具、规范化参数、状态和截断信息；子调用
+继续进入实际工具事件、运行详情和 durable execution ledger，但不会成为逐条
+`role=tool` native 消息。模型只收到外层 call ID 对应的一个有
+`max_evidence_tokens` 硬上限的 `EvidenceBundle`，其中保留路径、行定位、短摘要/片段、
+选择原因与 `artifact_id`，并显式报告 coverage、unresolved、结构化 errors、原始/去重
+数量和截断状态。部分失败不丢弃成功证据；checkpoint 重放通过稳定子调用身份复用已完成
+结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
+
 创建/修改任务在空工作区也必须继续调用 `sandbox.write_file` 或
 `sandbox.apply_patch`；目录盘点使用 `repo.list_files`。`sandbox.run_command` 的模型
 可见契约列出允许的 executable basename，并定位为变更后的验证工具。变更前失败的
@@ -693,6 +711,7 @@ JSON 解析位置，不保存可能含源码的原始参数。`tool_output_trunc
 → PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
 → ToolRegistry 在执行点复判并校验/执行
 → 通过 call ID 关联结果或错误
+→ 批量仓库采证：原始子结果全部写 Artifact，只回灌一个 EvidenceBundle
 → Harness 对内置/MCP 结果统一执行 Token 上限，超限原文写入 Run Artifact
 → Provider 原生工具结果消息
 → 模型观察后继续调用工具或作答
@@ -722,7 +741,8 @@ tool_use/tool_result 在缺少工具定义时会被 Provider 拒绝。这样返�
 并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
 这里的“完整”指进入 Agent Harness 的完整 `ToolResult` canonical JSON；若 Provider 或
 `ToolRegistry` 在此之前已经按自身输出边界截断，Artifact 不承诺恢复更早的原始 payload。
-未超过单结果上限的小结果不会预先创建 Artifact；只有正文确实即将被 eviction、fold、
+除 `repo.collect_evidence` 的内部原始结果会按协议立即外置外，未超过单结果上限的普通
+小结果不会预先创建 Artifact；只有正文确实即将被 eviction、fold、
 drop/truncate 或 Provider overflow 的一次强制恢复改变时，`plan_tools` 才按内容哈希惰性外置，
 并把 Artifact additions 与缩减后的 messages 放进同一个 LangGraph state update。该过程不需要
 数据库 migration。

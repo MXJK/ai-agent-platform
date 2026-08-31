@@ -16,6 +16,11 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_VALIDATION_TOOLS,
     partition_tool_calls,
 )
+from ai_agent_platform.agents.coding.evidence_executor import (
+    EVIDENCE_CHILD_TOOLS,
+    EVIDENCE_TOOL_NAME,
+    EvidenceExecutor,
+)
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
 from ai_agent_platform.agents.coding.policies import native_assistant_message
 from ai_agent_platform.agents.coding.run_artifacts import (
@@ -97,7 +102,15 @@ class ToolLoopNodes:
         )
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
-        tool_specs = self._visible_tool_specs(state)
+        visible_tool_specs = self._visible_tool_specs(state)
+        tool_specs = list(visible_tool_specs)
+        if any(spec.name == EVIDENCE_TOOL_NAME for spec in visible_tool_specs):
+            # Standard native runs use one bounded evidence protocol. The
+            # underlying repo tools remain registered for legacy exploration
+            # and for the runtime-owned executor itself.
+            tool_specs = [
+                spec for spec in tool_specs if spec.name not in EVIDENCE_CHILD_TOOLS
+            ]
         uses_native = bool(
             getattr(self._planner, "uses_native_tool_calling", False)
         )
@@ -452,7 +465,10 @@ class ToolLoopNodes:
         permission_by_identity = {
             id(call): permission for call, permission in all_permission_decisions
         }
-        specs_by_name = {spec.name: spec for spec in tool_specs}
+        # Permission and replay compatibility still recognize legacy direct
+        # repo calls from restored checkpoints and deterministic test planners,
+        # even though new native model requests do not advertise them.
+        specs_by_name = {spec.name: spec for spec in visible_tool_specs}
 
         def is_parallel_read(call: ToolCall) -> bool:
             spec = specs_by_name.get(call.name)
@@ -463,7 +479,12 @@ class ToolLoopNodes:
                 and spec.permission_level == "read_only"
                 and not spec.requires_approval
                 and spec.idempotent
-                and call.name not in {"agent.request_user_input", RUN_ARTIFACT_TOOL_NAME}
+                and call.name
+                not in {
+                    "agent.request_user_input",
+                    RUN_ARTIFACT_TOOL_NAME,
+                    EVIDENCE_TOOL_NAME,
+                }
                 and permission.effect == "allow"
             )
 
@@ -994,6 +1015,9 @@ class ToolLoopNodes:
         if state.get("native_tool_loop_active"):
             calls = list(state.get("native_pending_tool_calls", []))
             results: list[dict[str, Any]] = []
+            model_results: list[dict[str, Any]] = []
+            evidence_messages: list[dict[str, Any]] = []
+            evidence_artifacts: list[dict[str, Any]] = []
             parallel_read_batch = bool(
                 state.get("native_parallel_read_batch") and len(calls) > 1
             )
@@ -1003,6 +1027,7 @@ class ToolLoopNodes:
                     calls,
                     parallel_read_only=True,
                 )
+                model_results = list(results)
             else:
                 for call in calls:
                     if call.name == "agent.request_user_input":
@@ -1023,8 +1048,7 @@ class ToolLoopNodes:
                             ).strip()
                         else:
                             answer = str(response or "").strip()
-                        results.append(
-                            {
+                        response = {
                                 "call_id": call.call_id,
                                 "name": call.name,
                                 "ok": bool(answer),
@@ -1037,14 +1061,45 @@ class ToolLoopNodes:
                                 "duration_ms": 0,
                                 "cached": False,
                             }
-                        )
+                        results.append(response)
+                        model_results.append(response)
                     elif call.name == RUN_ARTIFACT_TOOL_NAME:
-                        results.append(self._read_artifact(state, call))
-                    else:
-                        results.extend(
-                            self._change_loop.execute_tool_calls(state, [call])
+                        response = self._read_artifact(state, call)
+                        results.append(response)
+                        model_results.append(response)
+                    elif call.name == EVIDENCE_TOOL_NAME:
+                        executor = EvidenceExecutor(
+                            lambda child_calls, parallel: (
+                                self._change_loop.execute_tool_calls(
+                                    state,
+                                    child_calls,
+                                    parallel_read_only=parallel,
+                                )
+                            )
                         )
-            result_messages, result_artifacts = self._budget_tool_results(results)
+                        bundle, child_results, child_artifacts = executor.collect(
+                            outer_call=call
+                        )
+                        results.extend(child_results)
+                        evidence_artifacts.extend(child_artifacts)
+                        evidence_messages.append(
+                            {
+                                "role": "tool",
+                                "call_id": call.call_id,
+                                "name": EVIDENCE_TOOL_NAME,
+                                "content": bundle,
+                                "is_error": bool(
+                                    bundle["errors"] and not bundle["evidence"]
+                                ),
+                            }
+                        )
+                    else:
+                        call_results = self._change_loop.execute_tool_calls(state, [call])
+                        results.extend(call_results)
+                        model_results.extend(call_results)
+            result_messages, result_artifacts = self._budget_tool_results(model_results)
+            result_messages.extend(evidence_messages)
+            result_artifacts.extend(evidence_artifacts)
             native_messages = list(state.get("native_tool_messages", []))
             native_messages.extend(result_messages)
             successful_mutation = any(
@@ -1120,6 +1175,12 @@ class ToolLoopNodes:
                         "success_count": sum(1 for item in results if item.get("ok")),
                         "failure_count": sum(1 for item in results if not item.get("ok")),
                         "parallel_read_batch": parallel_read_batch,
+                        "evidence_plan_count": sum(
+                            1 for call in calls if call.name == EVIDENCE_TOOL_NAME
+                        ),
+                        "evidence_artifact_ids": [
+                            artifact.get("id") for artifact in evidence_artifacts
+                        ],
                         "consecutive_failures": consecutive_failures,
                         "no_progress_rounds": no_progress,
                         "artifact_reads": [
