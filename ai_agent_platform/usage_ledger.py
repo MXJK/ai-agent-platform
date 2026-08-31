@@ -175,6 +175,7 @@ class UsageLedgerService:
         input_tokens: int,
         output_tokens: int,
         thoughts_tokens: int = 0,
+        total_tokens: int | None = None,
         requested_provider: str | None = None,
         requested_model: str | None = None,
         input_count_method: str = "provider_usage",
@@ -191,6 +192,9 @@ class UsageLedgerService:
             input_tokens=max(0, input_tokens),
             output_tokens=max(0, output_tokens),
             thoughts_tokens=max(0, thoughts_tokens),
+            total_tokens=(
+                max(0, total_tokens) if total_tokens is not None else None
+            ),
             record_id=record_id or f"usage_{uuid4().hex[:16]}",
             operation=scope.operation,
             resource_id=scope.resource_id,

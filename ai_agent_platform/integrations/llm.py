@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
@@ -29,6 +29,11 @@ from ai_agent_platform.integrations.model_router import (
     RoutingPolicy,
     RoutingRequirements,
     load_model_catalog,
+)
+from ai_agent_platform.integrations.prompt_cache import (
+    canonical_tool_specs,
+    prompt_cache_key,
+    supports_openai_explicit_cache,
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 from ai_agent_platform.model_registry.selection import current_model_selection
@@ -71,9 +76,16 @@ class LLMUsage:
     input_tokens: int
     output_tokens: int
     thoughts_tokens: int = 0
+    cached_input_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cache_capability: str = "unsupported"
+    reported_total_tokens: int | None = None
 
     @property
     def total_tokens(self) -> int:
+        if self.reported_total_tokens is not None:
+            return self.reported_total_tokens
         return self.input_tokens + self.output_tokens + self.thoughts_tokens
 
 
@@ -135,11 +147,39 @@ class LLMUsageAccumulator:
     thoughts_tokens: int = 0
     request_count: int = 0
     retry_count: int = 0
+    cached_input_tokens: int | None = 0
+    uncached_input_tokens: int | None = 0
+    cache_write_tokens: int | None = 0
+    provider_total_tokens: int = 0
+    provider_models: list[tuple[str, str, str]] = field(default_factory=list)
 
-    def add(self, usage: LLMUsage) -> None:
+    def add(
+        self,
+        usage: LLMUsage,
+        *,
+        provider: str = "",
+        model: str = "",
+    ) -> None:
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
         self.thoughts_tokens += usage.thoughts_tokens
+        self.provider_total_tokens += usage.total_tokens
+        self.cached_input_tokens = _optional_token_sum(
+            self.cached_input_tokens,
+            usage.cached_input_tokens,
+        )
+        self.uncached_input_tokens = _optional_token_sum(
+            self.uncached_input_tokens,
+            usage.uncached_input_tokens,
+        )
+        self.cache_write_tokens = _optional_token_sum(
+            self.cache_write_tokens,
+            usage.cache_write_tokens,
+        )
+        capability = _provider_cache_capability(provider, model)
+        observation = (provider, model, capability)
+        if (provider or model) and observation not in self.provider_models:
+            self.provider_models.append(observation)
 
     def record_request(self, *, retry: bool = False) -> None:
         self.request_count += 1
@@ -148,7 +188,7 @@ class LLMUsageAccumulator:
 
     @property
     def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens + self.thoughts_tokens
+        return self.provider_total_tokens
 
 
 _LLM_USAGE_ACCUMULATOR: ContextVar[LLMUsageAccumulator | None] = ContextVar(
@@ -170,6 +210,81 @@ _PROVIDER_ERROR_BEARER = re.compile(
 _PROVIDER_ERROR_KEY = re.compile(
     r"\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{12,}\b"
 )
+
+
+def _optional_token_sum(left: int | None, right: int | None) -> int | None:
+    if left is None or right is None:
+        return None
+    return max(0, int(left)) + max(0, int(right))
+
+
+def _provider_cache_capability(provider: str, model: str) -> str:
+    if provider == "openai":
+        return (
+            "explicit_key+breakpoint"
+            if supports_openai_explicit_cache(model)
+            else "explicit_key"
+        )
+    if provider == "anthropic":
+        return "explicit_breakpoint"
+    if provider in {"deepseek", "google"}:
+        return "implicit_kv"
+    return "unsupported"
+
+
+def _merge_stream_usage(
+    previous: LLMUsage | None,
+    current: LLMUsage,
+    *,
+    fallback_input_tokens: int,
+) -> LLMUsage:
+    """Merge cumulative Provider usage events without dropping cache details."""
+
+    input_tokens = current.input_tokens
+    if input_tokens <= 0:
+        input_tokens = (
+            previous.input_tokens
+            if previous is not None and previous.input_tokens > 0
+            else fallback_input_tokens
+        )
+    return LLMUsage(
+        input_tokens=input_tokens,
+        output_tokens=(
+            current.output_tokens
+            if current.output_tokens > 0 or previous is None
+            else previous.output_tokens
+        ),
+        thoughts_tokens=(
+            current.thoughts_tokens
+            if current.thoughts_tokens > 0 or previous is None
+            else previous.thoughts_tokens
+        ),
+        cached_input_tokens=(
+            current.cached_input_tokens
+            if current.cached_input_tokens is not None
+            else previous.cached_input_tokens if previous is not None else None
+        ),
+        uncached_input_tokens=(
+            current.uncached_input_tokens
+            if current.uncached_input_tokens is not None
+            else previous.uncached_input_tokens if previous is not None else None
+        ),
+        cache_write_tokens=(
+            current.cache_write_tokens
+            if current.cache_write_tokens is not None
+            else previous.cache_write_tokens if previous is not None else None
+        ),
+        cache_capability=(
+            current.cache_capability
+            if current.cache_capability != "unsupported" or previous is None
+            else previous.cache_capability
+        ),
+        reported_total_tokens=(
+            current.reported_total_tokens
+            if current.reported_total_tokens is not None
+            else previous.reported_total_tokens if previous is not None else None
+        ),
+    )
 
 
 @contextmanager
@@ -456,6 +571,9 @@ class LLMClient:
         disable_tool_calls: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
+        tools = canonical_tool_specs(tools)
+        if alias_tools is not None:
+            alias_tools = canonical_tool_specs(alias_tools)
         (
             provider,
             model,
@@ -606,7 +724,11 @@ class LLMClient:
                     self._model_router.record_success(trace, candidate)
                     accumulator = _LLM_USAGE_ACCUMULATOR.get()
                     if accumulator is not None:
-                        accumulator.add(usage)
+                        accumulator.add(
+                            usage,
+                            provider=candidate.provider,
+                            model=candidate.model,
+                        )
                     return replace(
                         decision,
                         provider=candidate.provider,
@@ -745,14 +867,10 @@ class LLMClient:
                             continue
                         event_usage = raw_event.usage
                         if raw_event.type == "usage" and event_usage is not None:
-                            latest_usage = LLMUsage(
-                                input_tokens=(
-                                    event_usage.input_tokens
-                                    if event_usage.input_tokens > 0
-                                    else plan.input_tokens
-                                ),
-                                output_tokens=event_usage.output_tokens,
-                                thoughts_tokens=event_usage.thoughts_tokens,
+                            latest_usage = _merge_stream_usage(
+                                latest_usage,
+                                event_usage,
+                                fallback_input_tokens=plan.input_tokens,
                             )
                         event = LLMStreamEvent(
                             type=raw_event.type,
@@ -770,7 +888,11 @@ class LLMClient:
                             self._record_request_usage(plan, latest_usage)
                             accumulator = _LLM_USAGE_ACCUMULATOR.get()
                             if accumulator is not None:
-                                accumulator.add(latest_usage)
+                                accumulator.add(
+                                    latest_usage,
+                                    provider=candidate.provider,
+                                    model=candidate.model,
+                                )
                             usage_recorded = True
                             self._model_router.record_success(
                                 trace,
@@ -809,7 +931,11 @@ class LLMClient:
                         self._record_request_usage(plan, latest_usage)
                         accumulator = _LLM_USAGE_ACCUMULATOR.get()
                         if accumulator is not None:
-                            accumulator.add(latest_usage)
+                            accumulator.add(
+                                latest_usage,
+                                provider=candidate.provider,
+                                model=candidate.model,
+                            )
                     self._model_router.record_success(trace, candidate)
                     if not observation_recorded:
                         self._observe_success(
@@ -837,7 +963,11 @@ class LLMClient:
                             self._record_request_usage(plan, partial_usage)
                             accumulator = _LLM_USAGE_ACCUMULATOR.get()
                             if accumulator is not None:
-                                accumulator.add(partial_usage)
+                                accumulator.add(
+                                    partial_usage,
+                                    provider=candidate.provider,
+                                    model=candidate.model,
+                                )
                         self._model_router.record_failure(
                             trace,
                             candidate,
@@ -852,7 +982,11 @@ class LLMClient:
                         self._record_request_usage(plan, latest_usage)
                         accumulator = _LLM_USAGE_ACCUMULATOR.get()
                         if accumulator is not None:
-                            accumulator.add(latest_usage)
+                            accumulator.add(
+                                latest_usage,
+                                provider=candidate.provider,
+                                model=candidate.model,
+                            )
                     retry_limit = self._retry_limit(exc)
                     if not exc.retryable or attempt >= retry_limit:
                         break
@@ -1318,9 +1452,20 @@ class LLMClient:
         reverse_aliases = {registry_name: alias for alias, registry_name in aliases.items()}
         payload: dict[str, Any] = {
             "model": model,
-            "input": _openai_tool_input(messages, reverse_aliases),
+            "input": _openai_tool_input(
+                messages,
+                reverse_aliases,
+                explicit_cache_breakpoint=supports_openai_explicit_cache(model),
+            ),
             "max_output_tokens": max_output_tokens,
+            "prompt_cache_key": prompt_cache_key(
+                messages,
+                tools,
+                current_model_usage_context(),
+            ),
         }
+        if supports_openai_explicit_cache(model):
+            payload["prompt_cache_options"] = {"mode": "explicit"}
         if tools:
             payload.update({
                 "tools": [
@@ -1437,7 +1582,7 @@ class LLMClient:
                 ),
             })
         if system:
-            payload["system"] = "\n\n".join(system)
+            payload["system"] = _anthropic_cached_system(system)
         body = self._native_tool_response(
             "anthropic",
             "https://api.anthropic.com/v1/messages",
@@ -1467,7 +1612,7 @@ class LLMClient:
                 )
             elif block.get("type") == "text":
                 text_parts.append(str(block.get("text") or ""))
-        usage = _usage_from_mapping(body.get("usage"))
+        usage = _anthropic_usage_from_mapping(body.get("usage"))
         finish_reason = str(
             body.get("stop_reason") or ("tool_use" if calls else "end_turn")
         )
@@ -1538,7 +1683,10 @@ class LLMClient:
         finish_reason = str(
             first.get("finish_reason") or "stop"
         )
-        usage = _chat_usage_from_mapping(body.get("usage"))
+        usage = _chat_usage_from_mapping(
+            body.get("usage"),
+            provider="deepseek",
+        )
         calls: list[ToolCall] = []
         for item in message.get("tool_calls") or []:
             if not isinstance(item, dict):
@@ -2444,6 +2592,7 @@ class LLMClient:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             thoughts_tokens=usage.thoughts_tokens,
+            total_tokens=usage.total_tokens,
             requested_provider=plan.requested_provider,
             requested_model=plan.requested_model,
             input_count_method=plan.input_count_method,
@@ -2466,7 +2615,11 @@ class LLMClient:
         self._record_request_usage(plan, usage)
         accumulator = _LLM_USAGE_ACCUMULATOR.get()
         if accumulator is not None:
-            accumulator.add(usage)
+            accumulator.add(
+                usage,
+                provider=candidate.provider,
+                model=candidate.model,
+            )
 
     def _observe_success(
         self,
@@ -2646,10 +2799,21 @@ class LLMClient:
 
         payload = {
             "model": model,
-            "input": messages,
+            "input": _openai_tool_input(
+                messages,
+                {},
+                explicit_cache_breakpoint=supports_openai_explicit_cache(model),
+            ),
             "max_output_tokens": max_output_tokens,
             "stream": True,
+            "prompt_cache_key": prompt_cache_key(
+                messages,
+                [],
+                current_model_usage_context(),
+            ),
         }
+        if supports_openai_explicit_cache(model):
+            payload["prompt_cache_options"] = {"mode": "explicit"}
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -2687,7 +2851,7 @@ class LLMClient:
             "stream": True,
         }
         if system_messages:
-            payload["system"] = "\n\n".join(system_messages)
+            payload["system"] = _anthropic_cached_system(system_messages)
 
         headers = {
             "x-api-key": api_key,
@@ -3148,10 +3312,9 @@ def _parse_anthropic_event(
         if isinstance(message, dict):
             usage = message.get("usage")
             if isinstance(usage, dict):
-                yield _usage_event(
-                    usage.get("input_tokens"),
-                    usage.get("output_tokens"),
-                )
+                parsed = _anthropic_usage_from_mapping(usage)
+                if parsed is not None:
+                    yield LLMStreamEvent(type="usage", usage=parsed)
     elif event_type == "content_block_delta":
         delta = payload.get("delta")
         if isinstance(delta, dict) and delta.get("type") == "text_delta":
@@ -3174,7 +3337,10 @@ def _parse_deepseek_event(
     error = payload.get("error")
     if error:
         raise LLMProviderError(_error_message(payload), retryable=False)
-    usage = _chat_usage_from_mapping(payload.get("usage"))
+    usage = _chat_usage_from_mapping(
+        payload.get("usage"),
+        provider="deepseek",
+    )
     if usage is not None:
         yield LLMStreamEvent(type="usage", usage=usage)
     choices = payload.get("choices")
@@ -3221,10 +3387,28 @@ def _google_role(role: str) -> str:
 def _google_usage(usage_metadata: object) -> LLMUsage | None:
     if usage_metadata is None:
         return None
+    input_tokens = _int_attr(usage_metadata, "prompt_token_count")
+    cached_input_tokens = _optional_int_attr(
+        usage_metadata,
+        "cached_content_token_count",
+    )
     return LLMUsage(
-        input_tokens=_int_attr(usage_metadata, "prompt_token_count"),
+        input_tokens=input_tokens,
         output_tokens=_int_attr(usage_metadata, "candidates_token_count"),
         thoughts_tokens=_int_attr(usage_metadata, "thoughts_token_count"),
+        cached_input_tokens=cached_input_tokens,
+        # Gemini's prompt_token_count/cache token accounting does not expose a
+        # provider-guaranteed input-cached identity, so do not invent one.
+        uncached_input_tokens=None,
+        cache_capability=(
+            "implicit_kv"
+            if cached_input_tokens is not None
+            else "unsupported"
+        ),
+        reported_total_tokens=_optional_int_attr(
+            usage_metadata,
+            "total_token_count",
+        ),
     )
 
 
@@ -3271,6 +3455,13 @@ def _usage_event(input_tokens: object, output_tokens: object) -> LLMStreamEvent:
 def _int_attr(value: object, name: str) -> int:
     attr = getattr(value, name, 0)
     return attr if isinstance(attr, int) else 0
+
+
+def _optional_int_attr(value: object, name: str) -> int | None:
+    if not hasattr(value, name):
+        return None
+    attr = getattr(value, name, None)
+    return max(0, attr) if isinstance(attr, int) else None
 
 
 def _error_message(payload: dict[str, object]) -> str:
@@ -3462,27 +3653,95 @@ def _usage_from_mapping(value: Any) -> LLMUsage | None:
         return None
     output_details = value.get("output_tokens_details")
     output_details = output_details if isinstance(output_details, dict) else {}
-    output_tokens = int(value.get("output_tokens") or 0)
-    thoughts_tokens = int(output_details.get("reasoning_tokens") or 0)
+    input_details = value.get("input_tokens_details")
+    input_details = input_details if isinstance(input_details, dict) else {}
+    input_tokens = max(0, int(value.get("input_tokens") or 0))
+    output_tokens = max(0, int(value.get("output_tokens") or 0))
+    thoughts_tokens = max(0, int(output_details.get("reasoning_tokens") or 0))
+    cached_input_tokens = _optional_int_mapping(input_details, "cached_tokens")
+    cache_write_tokens = _optional_int_mapping(input_details, "cache_write_tokens")
+    uncached_input_tokens = None
+    if cached_input_tokens is not None and cached_input_tokens <= input_tokens:
+        uncached_input_tokens = input_tokens - cached_input_tokens
     return LLMUsage(
-        input_tokens=int(value.get("input_tokens") or 0),
-        output_tokens=max(0, output_tokens - thoughts_tokens),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         thoughts_tokens=thoughts_tokens,
+        cached_input_tokens=cached_input_tokens,
+        uncached_input_tokens=uncached_input_tokens,
+        cache_write_tokens=cache_write_tokens,
+        cache_capability=(
+            "explicit_key"
+            if cached_input_tokens is not None or cache_write_tokens is not None
+            else "unsupported"
+        ),
+        reported_total_tokens=_optional_int_mapping(value, "total_tokens"),
     )
 
 
-def _chat_usage_from_mapping(value: Any) -> LLMUsage | None:
+def _anthropic_usage_from_mapping(value: Any) -> LLMUsage | None:
+    if not isinstance(value, dict):
+        return None
+    return LLMUsage(
+        input_tokens=max(0, int(value.get("input_tokens") or 0)),
+        output_tokens=max(0, int(value.get("output_tokens") or 0)),
+        cached_input_tokens=_optional_int_mapping(value, "cache_read_input_tokens"),
+        uncached_input_tokens=None,
+        cache_write_tokens=_optional_int_mapping(
+            value,
+            "cache_creation_input_tokens",
+        ),
+        cache_capability=(
+            "explicit_breakpoint"
+            if "cache_read_input_tokens" in value
+            or "cache_creation_input_tokens" in value
+            else "unsupported"
+        ),
+    )
+
+
+def _chat_usage_from_mapping(
+    value: Any,
+    *,
+    provider: str = "",
+) -> LLMUsage | None:
     if not isinstance(value, dict):
         return None
     details = value.get("completion_tokens_details")
     details = details if isinstance(details, dict) else {}
     completion_tokens = int(value.get("completion_tokens") or 0)
     reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+    input_tokens = max(0, int(value.get("prompt_tokens") or 0))
+    cached_input_tokens = None
+    uncached_input_tokens = None
+    cache_capability = "unsupported"
+    if provider == "deepseek":
+        cached_input_tokens = _optional_int_mapping(
+            value,
+            "prompt_cache_hit_tokens",
+        )
+        missed = _optional_int_mapping(value, "prompt_cache_miss_tokens")
+        if cached_input_tokens is not None and cached_input_tokens <= input_tokens:
+            uncached_input_tokens = input_tokens - cached_input_tokens
+        elif missed is not None:
+            uncached_input_tokens = missed
+        if cached_input_tokens is not None or missed is not None:
+            cache_capability = "implicit_kv"
     return LLMUsage(
-        input_tokens=int(value.get("prompt_tokens") or 0),
-        output_tokens=max(0, completion_tokens - reasoning_tokens),
+        input_tokens=input_tokens,
+        output_tokens=max(0, completion_tokens),
         thoughts_tokens=max(0, reasoning_tokens),
+        cached_input_tokens=cached_input_tokens,
+        uncached_input_tokens=uncached_input_tokens,
+        cache_capability=cache_capability,
+        reported_total_tokens=_optional_int_mapping(value, "total_tokens"),
     )
+
+
+def _optional_int_mapping(value: Mapping[str, Any], key: str) -> int | None:
+    if key not in value or value.get(key) is None:
+        return None
+    return max(0, int(value[key]))
 
 
 def _text_only_tool_transcript(
@@ -3536,9 +3795,17 @@ def _text_only_tool_transcript(
 def _openai_tool_input(
     messages: list[dict[str, Any]],
     reverse_aliases: dict[str, str],
+    *,
+    explicit_cache_breakpoint: bool = False,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for message in messages:
+    stable_breakpoint_index: int | None = None
+    if explicit_cache_breakpoint:
+        for index, candidate in enumerate(messages):
+            if str(candidate.get("role") or "") not in {"system", "developer"}:
+                break
+            stable_breakpoint_index = index
+    for message_index, message in enumerate(messages):
         role = str(message.get("role") or "")
         if role == "assistant" and message.get("provider") == "openai":
             provider_items = message.get("provider_items")
@@ -3547,10 +3814,26 @@ def _openai_tool_input(
                     dict(item) for item in provider_items if isinstance(item, dict)
                 )
                 continue
-        if role in {"system", "user", "assistant"}:
+        if role in {"system", "developer", "user", "assistant"}:
             content = message.get("content")
             if isinstance(content, str) and content:
-                items.append({"role": role, "content": content})
+                if message_index == stable_breakpoint_index:
+                    items.append(
+                        {
+                            "role": role,
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": content,
+                                    "prompt_cache_breakpoint": {
+                                        "mode": "explicit"
+                                    },
+                                }
+                            ],
+                        }
+                    )
+                else:
+                    items.append({"role": role, "content": content})
             for call in message.get("tool_calls", []):
                 if not isinstance(call, dict):
                     continue
@@ -3581,6 +3864,18 @@ def _openai_tool_input(
                 }
             )
     return items
+
+
+def _anthropic_cached_system(system_messages: list[str]) -> list[dict[str, Any]]:
+    """Place one cache breakpoint after the stable instruction prefix."""
+
+    return [
+        {
+            "type": "text",
+            "text": "\n\n".join(system_messages),
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
 
 
 def _anthropic_tool_messages(

@@ -24,10 +24,12 @@ from ai_agent_platform.agents.coding.task_shaping import (
     build_evidence_contract,
     classify_task_shape,
     freeze_tool_profile,
+    model_visible_tool_specs,
     update_evidence_progress,
 )
 from ai_agent_platform.agents.coding.text import extract_paths, extract_symbols, unique
 from ai_agent_platform.integrations.permissions import ToolApproval
+from ai_agent_platform.integrations.prompt_cache import prefix_token_estimates
 from ai_agent_platform.integrations.tools import ToolCall
 from ai_agent_platform.token_counting import estimate_text_tokens
 
@@ -303,7 +305,33 @@ class ContextRetrievalNodes:
         task_tool_profile = freeze_tool_profile(
             task_shape,
             self._tools_for_state(state).list_specs(),
+            user_input=state["user_input"],
+            explicit_tool_names=state.get("explicit_requested_tools", []),
+            skill_requested=state.get("explicit_skill_requested", False),
         )
+        profiled_state: CodingAgentState = {
+            **state,
+            "task_tool_profile": task_tool_profile,
+        }
+        if "conversation_id" in profiled_state and "workspace_root" in profiled_state:
+            profiled_specs = self._visible_tool_specs(profiled_state)
+        else:
+            # Focused node tests and legacy checkpoints can omit identity fields;
+            # the frozen pool remains the safe source for schema estimates.
+            profiled_specs = self._tools_for_state(profiled_state).list_specs()
+        model_specs = model_visible_tool_specs(profiled_specs)
+        stable_prefix_tokens, tool_schema_tokens = prefix_token_estimates(
+            [
+                {
+                    "role": "system",
+                    "content": native_system_prompt(
+                        self._max_read_tools_per_round
+                    ),
+                }
+            ],
+            model_specs,
+        )
+        context_shares = self._resolve_context_shares(profiled_state)
         return {
             "intent": intent,
             "intent_reason": str(decision.get("reason") or ""),
@@ -312,6 +340,10 @@ class ContextRetrievalNodes:
             "task_shape": task_shape,
             "evidence_contract": evidence_contract,
             "task_tool_profile": task_tool_profile,
+            "stable_prefix_tokens": stable_prefix_tokens,
+            "tool_schema_tokens": tool_schema_tokens,
+            "visible_tool_count": len(model_specs),
+            "context_shares": context_shares,
             "unresolved_requirements": list(
                 evidence_contract["required_evidence"]
             ),

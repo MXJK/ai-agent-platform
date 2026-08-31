@@ -89,6 +89,61 @@ def _merge_llm_usage(
         int(getattr(previous_metrics, "model_retry_count", 0))
         + usage.retry_count
     )
+    for state_key, metric_key, current in (
+        (
+            "llm_cached_input_tokens",
+            "cached_input_tokens",
+            usage.cached_input_tokens,
+        ),
+        (
+            "llm_uncached_input_tokens",
+            "uncached_input_tokens",
+            usage.uncached_input_tokens,
+        ),
+        (
+            "llm_cache_write_tokens",
+            "cache_write_tokens",
+            usage.cache_write_tokens,
+        ),
+    ):
+        prior = (
+            getattr(previous_metrics, metric_key, None)
+            if previous_metrics is not None
+            else 0
+        )
+        merged[state_key] = (
+            None
+            if prior is None or current is None
+            else max(0, int(prior)) + max(0, int(current))
+        )
+    prior_total = (
+        int(getattr(previous_metrics, "total_tokens", 0))
+        if previous_metrics is not None
+        else 0
+    )
+    merged["llm_provider_total_tokens"] = prior_total + usage.total_tokens
+    prior_provider = str(getattr(previous_metrics, "provider", "") or "")
+    prior_model = str(getattr(previous_metrics, "model", "") or "")
+    prior_provider_models = (
+        [
+            (
+                prior_provider,
+                prior_model,
+                str(
+                    getattr(
+                        previous_metrics,
+                        "cache_capability",
+                        "unsupported",
+                    )
+                ),
+            )
+        ]
+        if previous_metrics is not None and (prior_provider or prior_model)
+        else []
+    )
+    merged["llm_provider_models"] = list(
+        dict.fromkeys(prior_provider_models + usage.provider_models)
+    )
     return merged  # type: ignore[return-value]
 
 
@@ -396,6 +451,21 @@ class CodingAgentRuntime:
             if isinstance(evaluation_metadata, dict)
             else []
         )
+        entrypoint_metadata = (
+            run_context.metadata.entrypoint_metadata
+            if run_context is not None
+            else {}
+        )
+        tool_preference = entrypoint_metadata.get("tool_preference", {})
+        explicit_requested_tools = []
+        if isinstance(tool_preference, dict):
+            preferred_name = str(tool_preference.get("name") or "").strip()
+            if preferred_name:
+                explicit_requested_tools.append(preferred_name)
+        explicit_skill_requested = isinstance(
+            entrypoint_metadata.get("skill_invocation"),
+            dict,
+        )
         self._recorder._save_record(
             run_id=run_id,
             conversation_id=conversation_id,
@@ -423,6 +493,8 @@ class CodingAgentRuntime:
             "enabled_tools": enabled_tools,
             "evaluation_isolated": evaluation_isolated,
             "evaluation_knowledge_base_ids": evaluation_knowledge_base_ids,
+            "explicit_requested_tools": explicit_requested_tools,
+            "explicit_skill_requested": explicit_skill_requested,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [

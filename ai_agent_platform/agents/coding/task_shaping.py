@@ -343,10 +343,55 @@ def build_evidence_contract(
 def freeze_tool_profile(
     task_shape: TaskShape,
     specs: Sequence[ToolSpec],
+    *,
+    user_input: str = "",
+    explicit_tool_names: Sequence[str] = (),
+    skill_requested: bool = False,
 ) -> list[str]:
     """Freeze a stable ordered intersection with the Run's effective pool."""
 
     by_name = {spec.name: spec for spec in specs}
+    explicit = {str(name) for name in explicit_tool_names if str(name)}
+    normalized = normalize_task_text(user_input)
+
+    def dynamic_tool(spec: ToolSpec) -> bool:
+        provider = str(getattr(spec, "provider", "") or "")
+        return spec.name.startswith("mcp.") or provider.startswith("mcp")
+
+    def named_in_request(spec: ToolSpec) -> bool:
+        leaf = re.sub(r"[._-]+", " ", spec.name.split(".")[-1]).strip()
+        return bool(leaf and len(leaf) >= 4 and leaf in normalized)
+
+    external_requested = bool(explicit) or _contains_any(
+        normalized,
+        (
+            "mcp",
+            "external",
+            "plugin",
+            " tool",
+            "tool ",
+            "外部",
+            "联网",
+            "插件",
+            "工具",
+            "http://",
+            "https://",
+        ),
+    ) or any(named_in_request(spec) for spec in specs if dynamic_tool(spec))
+    skill_requested = skill_requested or _contains_any(
+        normalized,
+        ("skill", "技能"),
+    )
+
+    def lazily_visible(spec: ToolSpec) -> bool:
+        if dynamic_tool(spec):
+            return external_requested and (
+                not explicit or spec.name in explicit
+            )
+        if spec.name == "agent.load_skill":
+            return skill_requested
+        return True
+
     if task_shape == "overview":
         preferred = _OVERVIEW_TOOLS
         return [name for name in preferred if name in by_name]
@@ -362,7 +407,6 @@ def freeze_tool_profile(
     elif task_shape == "targeted_read":
         preferred = _TARGETED_REPO_TOOLS + (
             "agent.request_user_input",
-            "agent.load_skill",
         )
         allowed = lambda spec: spec.permission_level == "read_only"
     else:
@@ -373,10 +417,29 @@ def freeze_tool_profile(
         )
         allowed = lambda spec: spec.permission_level == "read_only"
 
-    ordered = [name for name in preferred if name in by_name]
-    for spec in specs:
-        if spec.name not in ordered and allowed(spec):
+    ordered = [
+        name
+        for name in preferred
+        if name in by_name and lazily_visible(by_name[name])
+    ]
+    for spec in sorted(specs, key=lambda item: item.name):
+        if spec.name not in ordered and allowed(spec) and lazily_visible(spec):
             ordered.append(spec.name)
+    return ordered
+
+
+def model_visible_tool_specs(specs: Sequence[ToolSpec]) -> list[ToolSpec]:
+    """Project the frozen profile to the exact schema list sent to the model."""
+
+    ordered = sorted(specs, key=lambda item: item.name)
+    if any(spec.name == "repo.collect_evidence" for spec in ordered):
+        hidden_children = {
+            "repo.find_files",
+            "repo.list_files",
+            "repo.read_file",
+            "repo.search_code",
+        }
+        ordered = [spec for spec in ordered if spec.name not in hidden_children]
     return ordered
 
 

@@ -156,6 +156,17 @@ class AgentRunMetricsResponse(BaseModel):
     output_tokens: int
     thoughts_tokens: int
     total_tokens: int
+    cached_input_tokens: Optional[int] = None
+    uncached_input_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    prompt_cache_hit_ratio: Optional[float] = None
+    stable_prefix_tokens: int = 0
+    tool_schema_tokens: int = 0
+    visible_tool_count: int = 0
+    retained_context_tokens_estimate: int = 0
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    cache_capability: str = "unsupported"
 
 
 class AgentChangeSummaryResponse(BaseModel):
@@ -278,6 +289,19 @@ class AgentRunResponse(BaseModel):
                 output_tokens=result.metrics.output_tokens,
                 thoughts_tokens=result.metrics.thoughts_tokens,
                 total_tokens=result.metrics.total_tokens,
+                cached_input_tokens=result.metrics.cached_input_tokens,
+                uncached_input_tokens=result.metrics.uncached_input_tokens,
+                cache_write_tokens=result.metrics.cache_write_tokens,
+                prompt_cache_hit_ratio=result.metrics.prompt_cache_hit_ratio,
+                stable_prefix_tokens=result.metrics.stable_prefix_tokens,
+                tool_schema_tokens=result.metrics.tool_schema_tokens,
+                visible_tool_count=result.metrics.visible_tool_count,
+                retained_context_tokens_estimate=(
+                    result.metrics.retained_context_tokens_estimate
+                ),
+                provider=result.metrics.provider,
+                model=result.metrics.model,
+                cache_capability=result.metrics.cache_capability,
             ),
             change_summary=AgentChangeSummaryResponse(
                 status=result.change_summary.status,

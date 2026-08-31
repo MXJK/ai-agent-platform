@@ -230,6 +230,7 @@ class InMemorySessionRepository:
         *,
         workspace_id: str | None = None,
         thoughts_tokens: int = 0,
+        total_tokens: int | None = None,
         record_id: str | None = None,
         operation: str = "chat",
         resource_id: str | None = None,
@@ -253,7 +254,11 @@ class InMemorySessionRepository:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 thoughts_tokens=thoughts_tokens,
-                total_tokens=input_tokens + output_tokens + thoughts_tokens,
+                total_tokens=(
+                    total_tokens
+                    if total_tokens is not None
+                    else input_tokens + output_tokens + thoughts_tokens
+                ),
                 created_at=existing.created_at if existing is not None else _now(),
                 operation=operation,
                 resource_id=resource_id,

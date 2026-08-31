@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from time import perf_counter
 from typing import Any, Callable, Optional
 
@@ -197,6 +198,8 @@ def error_from_exception(
             "input_tokens": int(getattr(usage, "input_tokens", 0)),
             "output_tokens": int(getattr(usage, "output_tokens", 0)),
             "thoughts_tokens": int(getattr(usage, "thoughts_tokens", 0)),
+            "total_tokens": int(getattr(usage, "total_tokens", 0)),
+            **_optional_usage_metrics(usage),
         }
     aggregate = getattr(exc, "llm_usage", None)
     if aggregate is not None:
@@ -204,8 +207,26 @@ def error_from_exception(
             "input_tokens": int(getattr(aggregate, "input_tokens", 0)),
             "output_tokens": int(getattr(aggregate, "output_tokens", 0)),
             "thoughts_tokens": int(getattr(aggregate, "thoughts_tokens", 0)),
+            "total_tokens": int(getattr(aggregate, "total_tokens", 0)),
+            **_optional_usage_metrics(aggregate),
         }
     return error
+
+
+def _optional_usage_metrics(usage: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for name in (
+        "cached_input_tokens",
+        "uncached_input_tokens",
+        "cache_write_tokens",
+    ):
+        value = getattr(usage, name, None)
+        if value is not None:
+            values[name] = max(0, int(value))
+    capability = getattr(usage, "cache_capability", None)
+    if capability:
+        values["cache_capability"] = str(capability)
+    return values
 
 
 def append_errors(
@@ -453,6 +474,40 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
         max(0, int(result.get("attempts", 1)) - 1)
         for result in executed_results.values()
     )
+    cached_input_tokens = state.get("llm_cached_input_tokens")
+    uncached_input_tokens = state.get("llm_uncached_input_tokens")
+    cache_write_tokens = state.get("llm_cache_write_tokens")
+    cache_denominator = (
+        int(cached_input_tokens) + int(uncached_input_tokens)
+        if cached_input_tokens is not None and uncached_input_tokens is not None
+        else 0
+    )
+    provider_models = state.get("llm_provider_models", [])
+    provider = None
+    model = None
+    cache_capability = "unsupported"
+    if provider_models:
+        providers = sorted({item[0] for item in provider_models if item[0]})
+        models = sorted({item[1] for item in provider_models if item[1]})
+        capabilities = sorted({item[2] for item in provider_models if item[2]})
+        provider = providers[0] if len(providers) == 1 else "mixed"
+        model = models[0] if len(models) == 1 else "mixed"
+        cache_capability = (
+            capabilities[0] if len(capabilities) == 1 else "mixed"
+        )
+    native_messages = state.get("native_tool_messages", [])
+    retained_context_tokens_estimate = (
+        estimate_text_tokens(
+            json.dumps(
+                native_messages,
+                ensure_ascii=False,
+                default=str,
+                sort_keys=True,
+            )
+        )
+        if native_messages
+        else 0
+    )
     return AgentRunMetrics(
         elapsed_ms=max(0, elapsed_ms),
         node_count=len(state.get("trace", [])),
@@ -472,9 +527,43 @@ def build_run_metrics(state: CodingAgentState) -> AgentRunMetrics:
         input_tokens=max(0, int(state.get("llm_input_tokens", 0))),
         output_tokens=max(0, int(state.get("llm_output_tokens", 0))),
         thoughts_tokens=max(0, int(state.get("llm_thoughts_tokens", 0))),
-        total_tokens=max(0, int(state.get("llm_input_tokens", 0)))
-        + max(0, int(state.get("llm_output_tokens", 0)))
-        + max(0, int(state.get("llm_thoughts_tokens", 0))),
+        total_tokens=max(
+            0,
+            int(
+                state.get(
+                    "llm_provider_total_tokens",
+                    int(state.get("llm_input_tokens", 0))
+                    + int(state.get("llm_output_tokens", 0)),
+                )
+            ),
+        ),
+        cached_input_tokens=(
+            max(0, int(cached_input_tokens))
+            if cached_input_tokens is not None
+            else None
+        ),
+        uncached_input_tokens=(
+            max(0, int(uncached_input_tokens))
+            if uncached_input_tokens is not None
+            else None
+        ),
+        cache_write_tokens=(
+            max(0, int(cache_write_tokens))
+            if cache_write_tokens is not None
+            else None
+        ),
+        prompt_cache_hit_ratio=(
+            max(0.0, min(1.0, int(cached_input_tokens) / cache_denominator))
+            if cache_denominator > 0
+            else None
+        ),
+        stable_prefix_tokens=max(0, int(state.get("stable_prefix_tokens", 0))),
+        tool_schema_tokens=max(0, int(state.get("tool_schema_tokens", 0))),
+        visible_tool_count=max(0, int(state.get("visible_tool_count", 0))),
+        retained_context_tokens_estimate=retained_context_tokens_estimate,
+        provider=provider,
+        model=model,
+        cache_capability=cache_capability,
     )
 
 

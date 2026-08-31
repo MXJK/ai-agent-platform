@@ -43,6 +43,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 )
 from ai_agent_platform.agents.coding.task_shaping import (
     clamp_evidence_call,
+    model_visible_tool_specs,
     task_budget,
     update_evidence_progress,
 )
@@ -108,14 +109,7 @@ class ToolLoopNodes:
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
         visible_tool_specs = self._visible_tool_specs(state)
-        tool_specs = list(visible_tool_specs)
-        if any(spec.name == EVIDENCE_TOOL_NAME for spec in visible_tool_specs):
-            # Standard native runs use one bounded evidence protocol. The
-            # underlying repo tools remain registered for legacy exploration
-            # and for the runtime-owned executor itself.
-            tool_specs = [
-                spec for spec in tool_specs if spec.name not in EVIDENCE_CHILD_TOOLS
-            ]
+        tool_specs = model_visible_tool_specs(visible_tool_specs)
         uses_native = bool(
             getattr(self._planner, "uses_native_tool_calling", False)
         )

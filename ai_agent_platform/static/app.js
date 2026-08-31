@@ -1151,7 +1151,45 @@ function renderResponseMetrics(contentNode, metrics) {
     values.push(["耗时", formatDuration(metrics.elapsed_ms)]);
   }
   if (metrics.input_tokens !== undefined) {
-    values.push(["输入", `${formatTokenCount(metrics.input_tokens)} tokens`]);
+    values.push(["累计输入", `${formatTokenCount(metrics.input_tokens)} tokens`]);
+  }
+  if (metrics.cached_input_tokens !== undefined && metrics.cached_input_tokens !== null) {
+    values.push(["缓存命中输入（仍计入累计）", `${formatTokenCount(metrics.cached_input_tokens)} tokens`]);
+  }
+  if (metrics.uncached_input_tokens !== undefined && metrics.uncached_input_tokens !== null) {
+    values.push(["未缓存输入", `${formatTokenCount(metrics.uncached_input_tokens)} tokens`]);
+  }
+  if (metrics.cache_write_tokens !== undefined && metrics.cache_write_tokens !== null) {
+    values.push(["缓存写入", `${formatTokenCount(metrics.cache_write_tokens)} tokens`]);
+  }
+  if (metrics.prompt_cache_hit_ratio !== undefined && metrics.prompt_cache_hit_ratio !== null) {
+    values.push(["缓存命中率", `${(metrics.prompt_cache_hit_ratio * 100).toFixed(1)}%`]);
+  }
+  if (metrics.retained_context_tokens_estimate !== undefined) {
+    values.push(["当前保留上下文（估算）", `≈ ${formatTokenCount(metrics.retained_context_tokens_estimate)} tokens`]);
+  }
+  if (metrics.stable_prefix_tokens !== undefined) {
+    values.push(["稳定指令前缀（估算）", `≈ ${formatTokenCount(metrics.stable_prefix_tokens)} tokens`]);
+  }
+  if (metrics.tool_schema_tokens !== undefined) {
+    values.push(["工具定义（估算）", `≈ ${formatTokenCount(metrics.tool_schema_tokens)} tokens`]);
+  }
+  if (metrics.visible_tool_count !== undefined) {
+    values.push(["模型可见工具", formatTokenCount(metrics.visible_tool_count)]);
+  }
+  if (metrics.provider || metrics.model) {
+    values.push(["Provider / Model", [metrics.provider, metrics.model].filter(Boolean).join(" / ")]);
+  }
+  if (metrics.cache_capability) {
+    const cacheCapabilityLabels = {
+      unsupported: "不支持 / 未报告",
+      implicit_kv: "隐式 KV Cache",
+      explicit_key: "显式 Cache Key",
+      "explicit_key+breakpoint": "Cache Key + 显式断点",
+      explicit_breakpoint: "显式缓存断点",
+      mixed: "混合能力",
+    };
+    values.push(["缓存能力", cacheCapabilityLabels[metrics.cache_capability] || metrics.cache_capability]);
   }
   if (metrics.output_tokens !== undefined) {
     values.push(["输出", `${formatTokenCount(metrics.output_tokens)} tokens`]);
@@ -1160,7 +1198,7 @@ function renderResponseMetrics(contentNode, metrics) {
     values.push(["思考", `${formatTokenCount(metrics.thoughts_tokens)} tokens`]);
   }
   if (metrics.total_tokens !== undefined) {
-    values.push(["合计", `${formatTokenCount(metrics.total_tokens)} tokens`]);
+    values.push(["Provider 合计", `${formatTokenCount(metrics.total_tokens)} tokens`]);
   }
   if (metrics.node_count !== undefined) {
     values.push(["阶段", formatTokenCount(metrics.node_count)]);
@@ -5884,6 +5922,17 @@ function renderAgentChatResponse(
       output_tokens: result.metrics.output_tokens,
       thoughts_tokens: result.metrics.thoughts_tokens,
       total_tokens: result.metrics.total_tokens,
+      cached_input_tokens: result.metrics.cached_input_tokens,
+      uncached_input_tokens: result.metrics.uncached_input_tokens,
+      cache_write_tokens: result.metrics.cache_write_tokens,
+      prompt_cache_hit_ratio: result.metrics.prompt_cache_hit_ratio,
+      retained_context_tokens_estimate: result.metrics.retained_context_tokens_estimate,
+      stable_prefix_tokens: result.metrics.stable_prefix_tokens,
+      tool_schema_tokens: result.metrics.tool_schema_tokens,
+      visible_tool_count: result.metrics.visible_tool_count,
+      provider: result.metrics.provider,
+      model: result.metrics.model,
+      cache_capability: result.metrics.cache_capability,
     });
   }
   if (!holdAnswer) {

@@ -496,6 +496,11 @@ def native_tool_messages(
     max_parallel_read_calls: int = 1,
 ) -> list[dict[str, Any]]:
     shares = state.get("context_shares") or {}
+    instruction_sources = [
+        source
+        for source in state.get("project_instructions", [])
+        if _model_visible_instruction(source, state)
+    ]
     sources = [
         {
             "kind": source.kind,
@@ -507,7 +512,7 @@ def native_tool_messages(
             "truncated": source.truncated,
         }
         for source in (
-            list(state.get("project_instructions", []))
+            instruction_sources
             + list(state.get("context_sources", []))
         )
     ]
@@ -563,6 +568,20 @@ def native_tool_messages(
             "content": json.dumps(user_payload, ensure_ascii=False),
         },
     ]
+
+
+def _model_visible_instruction(source: Any, state: CodingAgentState) -> bool:
+    kind = str(getattr(source, "kind", "") or "")
+    path = str(getattr(source, "path", "") or "")
+    profile = set(state.get("task_tool_profile", []))
+    if kind == "user_tool_preference":
+        return path.removeprefix("tool://") in profile
+    if kind == "skill_catalog" or path.startswith("skill://"):
+        return bool(
+            state.get("explicit_skill_requested")
+            or "agent.load_skill" in profile
+        )
+    return True
 
 
 def _fit_evidence_to_share(

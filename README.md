@@ -613,8 +613,10 @@ Effective Tool Pool 后从其下一图节点执行。`rollback` 只改变当前�
 建立沙箱，因此恢复的是历史图状态而不是一份隐式的历史文件快照。
 产品记录一旦进入终态便不可被迟到的 running 快照覆盖；恢复异常也会
 保留原始错误并完成沙箱清理。最终指标包括耗时、节点、实际执行工具数量、修改文件、
-模型请求/模型重试、已恢复错误，以及 Provider 上报的输入、输出、思考和总 Token；
-总重试同时包含模型网关重试和工具重试，不再只反映工具层。
+模型请求/模型重试、已恢复错误，以及 Provider 上报的输入、输出、思考和总 Token。支持时
+还会原样采集缓存命中输入、缓存写入输入，并且只在 Provider 的输入口径满足恒等式时计算
+`uncached_input_tokens = input_tokens - cached_input_tokens` 和命中率；总重试同时包含模型
+网关重试和工具重试，不再只反映工具层。
 
 默认探索预算：
 
@@ -685,6 +687,22 @@ LangGraph checkpoint，resume 不重新分类或放宽工具集合。
 保留原有 24/72 ceiling，不受 overview 的小预算影响。overview 的真实执行视图不包含
 write、shell、MCP 或控制工具；其他 Profile 也在执行点按冻结集合复判，而不只依赖模型
 可见 Schema。
+
+同一 task shape 的模型前缀也在这一安全边界冻结：system/developer 指令保持最前且顺序
+稳定，工具按名称排序，input/output JSON Schema 使用规范化键序列化；workspace、运行时
+进度、配置变化和 steering 只追加在旧前缀之后，不把时间戳、随机 ID 或动态计数插入
+可缓存前缀。`overview` 不暴露 write、shell、MCP 或 Skill Schema，`targeted_read` 默认不
+暴露修改工具；只有显式外部工具偏好或明确 Skill 需求才把对应动态能力加入冻结 Profile。
+Profile 在 Run 中途不会为了少量 Schema Token 重新排列。
+
+Provider 缓存能力按协议隔离：OpenAI Responses 使用稳定、不可反推 Workspace ID 的
+`prompt_cache_key`，支持显式 breakpoint 的模型再发送其专属 cache options；Anthropic
+使用自己的 `cache_control` system breakpoint；DeepSeek 只依赖其隐式磁盘 KV Cache，
+不会收到 OpenAI 字段；Google 保持稳定前缀并采集隐式 cached-content usage；其他兼容
+端点不支持时保持原请求语义且不虚构命中率。Agent API/UI 分开显示累计输入、缓存命中
+输入、可靠时的未缓存输入、缓存写入、当前保留上下文估算、稳定指令前缀估算、工具
+Schema 估算和模型可见工具数。缓存命中输入仍属于 Provider 上报的累计输入，不会从
+`input_tokens` 或 `total_tokens` 中扣除。
 
 每个 native 工具观察边界维护 `evidence_coverage`、`new_evidence_count`、
 `coverage_delta`、`unresolved_requirements`、`duplicate_tool_call_count` 和

@@ -54,6 +54,11 @@ class CodingAgentState(TypedDict, total=False):
     task_shape: str
     evidence_contract: dict[str, Any]
     task_tool_profile: list[str]
+    explicit_requested_tools: list[str]
+    explicit_skill_requested: bool
+    stable_prefix_tokens: int
+    tool_schema_tokens: int
+    visible_tool_count: int
     context_route: str
     route_reason: str
     selected_knowledge_base_ids: list[str]
@@ -117,6 +122,11 @@ class CodingAgentState(TypedDict, total=False):
     llm_thoughts_tokens: int
     llm_request_count: int
     llm_retry_count: int
+    llm_cached_input_tokens: int | None
+    llm_uncached_input_tokens: int | None
+    llm_cache_write_tokens: int | None
+    llm_provider_models: list[tuple[str, str, str]]
+    llm_provider_total_tokens: int
     artifacts: list[dict[str, Any]]
     run_artifact_read_enabled: bool
     changed_files: list[str]
@@ -275,6 +285,17 @@ class AgentRunMetrics:
     output_tokens: int = 0
     thoughts_tokens: int = 0
     total_tokens: int = 0
+    cached_input_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    prompt_cache_hit_ratio: float | None = None
+    stable_prefix_tokens: int = 0
+    tool_schema_tokens: int = 0
+    visible_tool_count: int = 0
+    retained_context_tokens_estimate: int = 0
+    provider: str | None = None
+    model: str | None = None
+    cache_capability: str = "unsupported"
 
 
 @dataclass(frozen=True)

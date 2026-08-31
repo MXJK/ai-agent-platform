@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260828-context-ring-r1',
+            '/static/styles.css?v=20260831-prompt-cache-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260830-agent-efficiency-r1',
+            '/static/app.js?v=20260831-prompt-cache-r1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)
@@ -1062,6 +1062,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn('aria-current="step"', script_response.text)
         self.assertIn('aria-live="polite" aria-atomic="true"', script_response.text)
         self.assertIn("renderResponseMetrics", script_response.text)
+        self.assertIn('values.push(["累计输入"', script_response.text)
+        self.assertIn('values.push(["缓存命中输入（仍计入累计）"', script_response.text)
+        self.assertIn('values.push(["未缓存输入"', script_response.text)
+        self.assertIn('values.push(["当前保留上下文（估算）"', script_response.text)
+        self.assertIn('values.push(["Provider 合计"', script_response.text)
         self.assertIn('values.push(["模型请求"', script_response.text)
         self.assertIn('values.push(["模型重试"', script_response.text)
         self.assertIn('values.push(["总重试"', script_response.text)
