@@ -709,6 +709,108 @@ class HashingEmbeddingProvider:
         return [value / norm for value in vector]
 
 
+class SentenceTransformerEmbeddingProvider:
+    """Lazy local semantic embeddings backed by sentence-transformers."""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        device: str = "cpu",
+        usage_ledger=None,
+    ) -> None:
+        model_name = model_name.strip()
+        device = device.strip()
+        if not model_name:
+            raise ValueError("model_name must not be empty")
+        if not device:
+            raise ValueError("device must not be empty")
+        self.model_name = model_name
+        self.device = device
+        self._usage_ledger = usage_ledger
+        self._model = None
+        self._model_lock = Lock()
+        self._load_error: Exception | None = None
+
+    @property
+    def status(self) -> str:
+        if self._model is not None:
+            return "ready"
+        if self._load_error is not None:
+            return "error"
+        return "not_loaded"
+
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
+            if self._load_error is not None:
+                raise RAGProviderError(
+                    "sentence-transformer embedding model failed to load"
+                ) from self._load_error
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                self._model = SentenceTransformer(
+                    self.model_name,
+                    device=self.device,
+                )
+            except ImportError as exc:
+                self._load_error = exc
+                raise RAGConfigurationError(
+                    "sentence-transformers is not installed; install project dependencies"
+                ) from exc
+            except Exception as exc:
+                self._load_error = exc
+                raise RAGProviderError(
+                    "sentence-transformer embedding model failed to load"
+                ) from exc
+        return self._model
+
+    def embed_texts(
+        self,
+        texts: list[str],
+        *,
+        task_type: str = "document",
+    ) -> list[list[float]]:
+        if not texts:
+            return []
+        try:
+            encoded = self._get_model().encode(
+                texts,
+                batch_size=32,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            embeddings = [
+                [float(value) for value in vector]
+                for vector in encoded
+            ]
+        except (RAGConfigurationError, RAGProviderError):
+            raise
+        except Exception as exc:
+            raise RAGProviderError(
+                "sentence-transformer embedding inference failed"
+            ) from exc
+        if len(embeddings) != len(texts):
+            raise RAGProviderError(
+                "sentence-transformer embedding model returned malformed data"
+            )
+        if self._usage_ledger is not None:
+            self._usage_ledger.record(
+                provider="sentence_transformer",
+                model=self.model_name,
+                input_tokens=sum(_embedding_text_tokens(text) for text in texts),
+                output_tokens=0,
+                input_count_method="local_lexical_tokenizer_estimate",
+                context=_embedding_usage_context(),
+            )
+        return embeddings
+
+
 class OpenAIEmbeddingProvider:
     def __init__(
         self,
@@ -1947,6 +2049,7 @@ class RAGService:
         limit: int = 5,
         recall_limit: int | None = None,
         rerank_enabled: bool | None = None,
+        retrieval_mode: str = "hybrid",
     ) -> list[RetrievedDocument]:
         return self.search_with_metadata(
             knowledge_base_id=knowledge_base_id,
@@ -1954,6 +2057,7 @@ class RAGService:
             limit=limit,
             recall_limit=recall_limit,
             rerank_enabled=rerank_enabled,
+            retrieval_mode=retrieval_mode,
         ).results
 
     def reranker_capabilities(self) -> RerankerCapabilities:
@@ -1977,10 +2081,12 @@ class RAGService:
         limit: int = 5,
         recall_limit: int | None = None,
         rerank_enabled: bool | None = None,
+        retrieval_mode: str = "hybrid",
     ) -> RAGSearchResult:
         query = _normalize_text(query)
         if not query:
             raise RAGValidationError("query is empty")
+        retrieval_mode = _normalize_retrieval_mode(retrieval_mode)
         rerank_requested = (
             self._rerank_default_enabled
             if rerank_enabled is None
@@ -1990,36 +2096,41 @@ class RAGService:
             raise RAGRerankerUnavailableError(
                 "reranker is not configured on this server"
             )
-        with model_usage_scope(
-            operation="embedding",
-            resource_id=knowledge_base_id,
-        ):
-            query_embedding = self._embedding_provider.embed_texts(
-                [query],
-                task_type="query",
-            )[0]
         candidate_limit = recall_limit or self._default_recall_limit
         candidate_limit = max(candidate_limit, limit)
-        dense_candidates = self._vector_store.search(
-            knowledge_base_id=knowledge_base_id,
-            query_embedding=query_embedding,
-            limit=candidate_limit,
-        )
+        dense_candidates: list[RetrievedDocument] = []
+        if retrieval_mode != "lexical":
+            with model_usage_scope(
+                operation="embedding",
+                resource_id=knowledge_base_id,
+            ):
+                query_embedding = self._embedding_provider.embed_texts(
+                    [query],
+                    task_type="query",
+                )[0]
+            dense_candidates = self._vector_store.search(
+                knowledge_base_id=knowledge_base_id,
+                query_embedding=query_embedding,
+                limit=candidate_limit,
+            )
         lexical_search = getattr(self._document_store, "search_lexical", None)
-        lexical_candidates = (
-            lexical_search(
-                knowledge_base_id=knowledge_base_id,
-                query=query,
-                limit=candidate_limit,
+        lexical_candidates: list[RetrievedDocument] = []
+        if retrieval_mode != "dense":
+            lexical_candidates = (
+                lexical_search(
+                    knowledge_base_id=knowledge_base_id,
+                    query=query,
+                    limit=candidate_limit,
+                )
+                if callable(lexical_search)
+                else self._memory_metadata_store.search_lexical(
+                    knowledge_base_id=knowledge_base_id,
+                    query=query,
+                    limit=candidate_limit,
+                )
             )
-            if callable(lexical_search)
-            else self._memory_metadata_store.search_lexical(
-                knowledge_base_id=knowledge_base_id,
-                query=query,
-                limit=candidate_limit,
-            )
-        )
-        candidates = _reciprocal_rank_fusion(
+        candidates = _rank_retrieval_candidates(
+            retrieval_mode=retrieval_mode,
             dense_candidates=dense_candidates,
             lexical_candidates=lexical_candidates,
             lexical_weight=self._lexical_weight,
@@ -2048,6 +2159,7 @@ class RAGService:
                 candidate_count=len(candidates),
                 result_count=len(results),
                 rerank_duration_ms=rerank_duration_ms,
+                retrieval_mode=retrieval_mode,
             ),
         )
 
@@ -2063,6 +2175,7 @@ class RAGService:
         limit: int = 5,
         recall_limit: int | None = None,
         rerank_enabled: bool | None = None,
+        retrieval_mode: str = "hybrid",
     ) -> RAGAnswer:
         search_result = self.search_with_metadata(
             knowledge_base_id=knowledge_base_id,
@@ -2070,6 +2183,7 @@ class RAGService:
             limit=limit,
             recall_limit=recall_limit,
             rerank_enabled=rerank_enabled,
+            retrieval_mode=retrieval_mode,
         )
         citations = search_result.results
         messages = self.build_prompt_messages(question=question, citations=citations)
@@ -2098,46 +2212,78 @@ class RAGService:
         question: str,
         citations: list[RetrievedDocument],
     ) -> list[dict[str, str]]:
-        context = self._format_context(citations)
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "你是一个企业知识库问答助手。只能基于参考资料回答；"
-                    "如果参考资料不足，就明确说不知道。回答时保留引用编号。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"用户问题：\n{question}\n\n"
-                    f"参考资料：\n{context or '没有检索到相关资料。'}\n\n"
-                    "请给出简洁答案，并在相关句子后标注引用编号，例如 [1]。"
-                ),
-            },
-        ]
+        return build_rag_prompt_messages(
+            question=question,
+            citations=citations,
+            max_prompt_chars=self._max_prompt_chars,
+        )
 
     def _format_context(self, citations: list[RetrievedDocument]) -> str:
-        parts: list[str] = []
-        used_chars = 0
-        for index, item in enumerate(citations, start=1):
-            header = (
-                f"[{index}] file={item.filename}; "
-                f"document_id={item.document_id}; chunk={item.chunk_index}; "
-                f"{_line_range_label(item)}"
-                f"{_symbols_label(item)}"
-                f"score={item.score:.3f}\n"
-            )
-            body = item.text.strip()
-            block = f"{header}{body}"
-            remaining = self._max_prompt_chars - used_chars
-            if remaining <= 0:
-                break
-            if len(block) > remaining:
-                block = block[:remaining].rstrip()
-            parts.append(block)
-            used_chars += len(block)
-        return "\n\n".join(parts)
+        return _format_rag_context(
+            citations,
+            max_prompt_chars=self._max_prompt_chars,
+        )
+
+
+def build_rag_prompt_messages(
+    *,
+    question: str,
+    citations: list[RetrievedDocument],
+    max_prompt_chars: int = 6000,
+) -> list[dict[str, str]]:
+    """Build the production RAG answer prompt from explicit evidence.
+
+    The pure boundary lets generation evaluations use oracle or adversarial
+    evidence without invoking retrieval a second time.
+    """
+
+    context = _format_rag_context(citations, max_prompt_chars=max_prompt_chars)
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是一个企业知识库问答助手。只能基于参考资料回答；"
+                "如果参考资料不足，就明确说不知道。回答时保留引用编号。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"用户问题：\n{question}\n\n"
+                f"参考资料：\n{context or '没有检索到相关资料。'}\n\n"
+                "请给出简洁答案，并在相关句子后标注引用编号，例如 [1]。"
+            ),
+        },
+    ]
+
+
+def _format_rag_context(
+    citations: list[RetrievedDocument],
+    *,
+    max_prompt_chars: int,
+) -> str:
+    if max_prompt_chars <= 0:
+        raise ValueError("max_prompt_chars must be positive")
+    parts: list[str] = []
+    used_chars = 0
+    for index, item in enumerate(citations, start=1):
+        header = (
+            f"[{index}] file={item.filename}; "
+            f"document_id={item.document_id}; chunk={item.chunk_index}; "
+            f"{_line_range_label(item)}"
+            f"{_symbols_label(item)}"
+            f"score={item.score:.3f}\n"
+        )
+        body = item.text.strip()
+        block = f"{header}{body}"
+        remaining = max_prompt_chars - used_chars
+        if remaining <= 0:
+            break
+        if len(block) > remaining:
+            block = block[:remaining].rstrip()
+        parts.append(block)
+        used_chars += len(block)
+    return "\n\n".join(parts)
 
 
 def _normalize_text(text: str) -> str:
@@ -2431,6 +2577,57 @@ def _reciprocal_rank_fusion(
         reverse=True,
     )
     return fused
+
+
+def _normalize_retrieval_mode(retrieval_mode: str) -> str:
+    normalized = retrieval_mode.strip().lower()
+    if normalized not in {"dense", "lexical", "hybrid"}:
+        raise RAGValidationError(
+            "retrieval_mode must be one of: dense, lexical, hybrid"
+        )
+    return normalized
+
+
+def _rank_retrieval_candidates(
+    *,
+    retrieval_mode: str,
+    dense_candidates: list[RetrievedDocument],
+    lexical_candidates: list[RetrievedDocument],
+    lexical_weight: float,
+    rrf_k: int,
+) -> list[RetrievedDocument]:
+    if retrieval_mode == "dense":
+        return [
+            replace(
+                candidate,
+                dense_rank=rank,
+                recall_score=(
+                    candidate.recall_score
+                    if candidate.recall_score is not None
+                    else candidate.score
+                ),
+            )
+            for rank, candidate in enumerate(dense_candidates, start=1)
+        ]
+    if retrieval_mode == "lexical":
+        return [
+            replace(
+                candidate,
+                lexical_rank=rank,
+                lexical_score=(
+                    candidate.lexical_score
+                    if candidate.lexical_score is not None
+                    else candidate.score
+                ),
+            )
+            for rank, candidate in enumerate(lexical_candidates, start=1)
+        ]
+    return _reciprocal_rank_fusion(
+        dense_candidates=dense_candidates,
+        lexical_candidates=lexical_candidates,
+        lexical_weight=lexical_weight,
+        rrf_k=rrf_k,
+    )
 
 
 def _bm25_rank_chunks(

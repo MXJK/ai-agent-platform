@@ -22,6 +22,7 @@ from ai_agent_platform.integrations.rag.service import (
     QdrantVectorStore,
     RAGService,
     RecursiveCharacterChunker,
+    SentenceTransformerEmbeddingProvider,
     SentenceTransformerCrossEncoderReranker,
     TextDocumentParser,
 )
@@ -50,6 +51,12 @@ def create_rag_service(
         embedding_provider = HashingEmbeddingProvider(
             dimensions=settings.local_embedding_dimensions,
             model=settings.embedding_model,
+            usage_ledger=usage_ledger,
+        )
+    elif settings.embedding_provider == "sentence_transformer":
+        embedding_provider = SentenceTransformerEmbeddingProvider(
+            model_name=settings.embedding_model,
+            device=settings.sentence_transformer_embedding_device,
             usage_ledger=usage_ledger,
         )
     else:

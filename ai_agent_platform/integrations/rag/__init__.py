@@ -46,10 +46,12 @@ from ai_agent_platform.integrations.rag.service import (
     QdrantVectorStore,
     RAGService,
     RecursiveCharacterChunker,
+    SentenceTransformerEmbeddingProvider,
     SentenceTransformerCrossEncoderReranker,
     SUPPORTED_DOCUMENT_EXTENSIONS,
     SUPPORTED_TEXT_EXTENSIONS,
     TextDocumentParser,
+    build_rag_prompt_messages,
 )
 
 __all__ = [
@@ -84,11 +86,13 @@ __all__ = [
     "RetrievedDocument",
     "RetrievalExecution",
     "RetrievalMetrics",
+    "SentenceTransformerEmbeddingProvider",
     "SentenceTransformerCrossEncoderReranker",
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "SUPPORTED_TEXT_EXTENSIONS",
     "TextDocumentParser",
     "VectorStore",
+    "build_rag_prompt_messages",
     "create_rag_service",
     "evaluate_graded_retrieval",
     "evaluate_retrieval",

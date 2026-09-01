@@ -13,6 +13,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertNotIn("@", settings.database_url)
         self.assertEqual(settings.embedding_provider, "local")
+        self.assertEqual(settings.sentence_transformer_embedding_device, "cpu")
         self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
         self.assertEqual(
             settings.sentence_transformer_reranker_model,
@@ -420,6 +421,33 @@ class SettingsTests(unittest.TestCase):
             "sentence_transformer_reranker_device",
         ):
             Settings(sentence_transformer_reranker_device=" ")
+
+    def test_reads_sentence_transformer_embedding_settings(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "EMBEDDING_PROVIDER": "sentence_transformer",
+                "EMBEDDING_MODEL": "BAAI/bge-m3",
+                "SENTENCE_TRANSFORMER_EMBEDDING_DEVICE": "mps",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.embedding_provider, "sentence_transformer")
+        self.assertEqual(settings.embedding_model, "BAAI/bge-m3")
+        self.assertEqual(settings.sentence_transformer_embedding_device, "mps")
+
+    def test_rejects_blank_sentence_transformer_embedding_device(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "sentence_transformer_embedding_device",
+        ):
+            Settings(sentence_transformer_embedding_device=" ")
 
     def test_rejects_invalid_background_task_capacity(self) -> None:
         with self.assertRaisesRegex(ValueError, "background_task_queue_capacity"):

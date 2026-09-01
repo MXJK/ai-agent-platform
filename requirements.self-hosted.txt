@@ -1,6 +1,7 @@
 # Runtime dependencies for the supported single-node Docker product.
-# Compatibility-only backends (Celery/Redis, Chroma, OS keyring and local
-# SentenceTransformer reranking) remain in requirements.txt for development.
+# Compatibility-only backends (Celery/Redis, Chroma and OS keyring) remain in
+# requirements.txt for development. Sentence Transformers is part of the
+# supported image because BGE-M3 is the default self-hosted embedding model.
 alembic>=1.13.0
 fastapi>=0.115.0
 pydantic>=2.8.0
@@ -19,4 +20,5 @@ PyYAML>=6.0.0,<7.0.0
 python-docx>=1.1.0
 python-multipart>=0.0.18
 qdrant-client>=1.16.0,<1.18.0
+sentence-transformers>=3.0.0
 socksio>=1.0.0

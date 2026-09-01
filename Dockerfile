@@ -21,8 +21,8 @@ COPY ai_agent_platform ./ai_agent_platform
 
 RUN groupadd --gid 1000 app \
     && useradd --uid 1000 --gid app --create-home app \
-    && mkdir -p /workspaces /var/lib/ai-agent-platform \
-    && chown -R app:app /app /workspaces /var/lib/ai-agent-platform
+    && mkdir -p /workspaces /var/lib/ai-agent-platform /home/app/.cache/huggingface \
+    && chown -R app:app /app /workspaces /var/lib/ai-agent-platform /home/app/.cache
 
 USER app
 

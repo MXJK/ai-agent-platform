@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "dataset_id": "auroradesk_rag_answer_pilot_v1",
+  "retrieval_dataset_id": "auroradesk_rag_pilot_v1",
+  "evidence_mode": "oracle_plus_adversarial",
+  "description": "Deterministic answer-quality assertions over the 30-case RAG pilot. Relevant evidence is supplied directly; stale and hard-negative evidence is retained to test grounding without conflating generation with retrieval.",
+  "abstention_patterns": [
+    "不知道",
+    "未找到",
+    "无法(?:确认|回答|确定)",
+    "无法(?:从|根据).{0,16}(?:参考资料|资料|上下文).{0,16}(?:确定|回答|得知)",
+    "(?:参考资料|资料|上下文).{0,16}(?:没有|未提供|未提及|不足|不包含)",
+    "没有(?:足够|相关).{0,12}(?:资料|信息)"
+  ],
+  "quality_gates": {
+    "min_case_pass_rate": 0.9,
+    "min_fact_coverage": 0.95,
+    "min_fact_attribution_rate": 0.9,
+    "min_citation_validity_rate": 1.0,
+    "min_abstention_accuracy": 1.0,
+    "max_route_mismatch_rate": 0.0
+  },
+  "cases": [
+    {
+      "id": "exact_retention_code",
+      "required_facts": [
+        {"label": "47-month retention", "patterns": ["47\\s*(?:个)?月", "47\\s*months?"], "sources": ["security/retention-current.md"]}
+      ]
+    },
+    {
+      "id": "exact_refund_window",
+      "required_facts": [
+        {"label": "seven-day window", "patterns": ["(?:7|七)\\s*(?:天|日)", "seven\\s+days?"], "sources": ["policies/refund-current.md"]}
+      ]
+    },
+    {
+      "id": "exact_api_limit",
+      "required_facts": [
+        {"label": "120 requests per minute", "patterns": ["120.{0,16}(?:请求|requests?).{0,12}(?:分钟|minute)", "(?:分钟|minute).{0,12}120.{0,16}(?:请求|requests?)"], "sources": ["api/limits.md"]},
+        {"label": "Retry-After header", "patterns": ["Retry-After"], "sources": ["api/limits.md"]}
+      ]
+    },
+    {
+      "id": "exact_backup_time",
+      "required_facts": [
+        {"label": "02:10 UTC schedule", "patterns": ["02:10\\s*UTC"], "sources": ["operations/backups.md"]}
+      ]
+    },
+    {
+      "id": "exact_webhook_signature",
+      "required_facts": [
+        {"label": "signature header", "patterns": ["X-Aurora-Signature"], "sources": ["integrations/webhooks.md"]},
+        {"label": "HMAC-SHA256 verification", "patterns": ["HMAC-SHA256"], "sources": ["integrations/webhooks.md"]}
+      ]
+    },
+    {
+      "id": "paraphrase_password",
+      "required_facts": [
+        {"label": "20-minute expiry", "patterns": ["(?:20|二十)\\s*(?:分钟|分)", "20\\s*minutes?"], "sources": ["account/recovery.md"]}
+      ]
+    },
+    {
+      "id": "paraphrase_invoice",
+      "required_facts": [
+        {"label": "Billing then Invoices navigation", "patterns": ["Billing.{0,20}Invoices", "账单.{0,20}发票"], "sources": ["billing/invoices.md"]}
+      ]
+    },
+    {
+      "id": "paraphrase_offline",
+      "required_facts": [
+        {"label": "offline read of synchronized tickets", "patterns": ["(?:离线|没网|无网络).{0,24}(?:查看|读取|看).{0,24}(?:同步|工单)", "(?:查看|读取|看).{0,24}(?:同步|工单).{0,24}(?:离线|没网|无网络)", "read.{0,24}(?:synchronized|synced).{0,16}tickets?.{0,16}offline"], "sources": ["mobile/offline.md"]}
+      ]
+    },
+    {
+      "id": "paraphrase_cancel",
+      "required_facts": [
+        {"label": "access through paid cycle", "patterns": ["(?:付费|已付费).{0,16}(?:周期|账期).{0,12}(?:结束|末)", "end of the paid billing cycle"], "sources": ["billing/cancellation.md"]}
+      ]
+    },
+    {
+      "id": "paraphrase_export",
+      "required_facts": [
+        {"label": "prepared within 24 hours", "patterns": ["24\\s*(?:小时|h)", "24\\s*hours?"], "sources": ["data/export.md"]}
+      ]
+    },
+    {
+      "id": "multi_disaster_recovery",
+      "required_facts": [
+        {"label": "application RTO 30 minutes", "patterns": ["(?:应用|服务).{0,24}(?:30|三十)\\s*(?:分钟|分)", "(?:30|thirty)\\s*minutes?.{0,24}(?:application|service)"], "sources": ["operations/disaster-service.md"]},
+        {"label": "database RTO 45 minutes", "patterns": ["(?:数据库|DB).{0,24}(?:45|四十五)\\s*(?:分钟|分)", "(?:45|forty-five)\\s*minutes?.{0,24}(?:database|DB)"], "sources": ["operations/disaster-database.md"]}
+      ]
+    },
+    {
+      "id": "multi_new_employee_access",
+      "required_facts": [
+        {"label": "enroll MFA", "patterns": ["(?:设置|注册|启用|录入).{0,12}MFA", "enrolls?\\s+MFA"], "sources": ["identity/sso-onboarding.md"]},
+        {"label": "store recovery codes", "patterns": ["(?:保存|存储|保管).{0,12}(?:恢复码|恢复代码|recovery codes?)", "recovery codes?.{0,12}(?:保存|存储|保管)"], "sources": ["identity/sso-onboarding.md"]},
+        {"label": "SSO recovery uses identity provider", "patterns": ["(?:SSO.{0,24})?(?:身份提供商|IdP|identity.provider).{0,20}(?:恢复|找回)", "(?:恢复|找回).{0,20}(?:身份提供商|IdP|identity.provider)"], "sources": ["account/recovery.md"]}
+      ]
+    },
+    {
+      "id": "multi_refund_operations",
+      "required_facts": [
+        {"label": "seven-day refund window", "patterns": ["(?:7|七)\\s*(?:天|日)", "seven\\s+days?"], "sources": ["policies/refund-current.md"]},
+        {"label": "internal trace identifier", "patterns": ["(?:内部|internal).{0,12}(?:追踪|跟踪|trace).{0,12}(?:标识|标识符|identifier|ID)", "(?:追踪|跟踪|trace).{0,12}(?:标识|标识符|identifier|ID)"], "sources": ["engineering/refund-events.md"]}
+      ]
+    },
+    {
+      "id": "multi_webhook_failure",
+      "required_facts": [
+        {"label": "HMAC-SHA256 verification", "patterns": ["HMAC-SHA256"], "sources": ["integrations/webhooks.md"]},
+        {"label": "1, 5, 30 minute retry schedule", "patterns": ["(?:1|一)\\s*分钟.{0,24}(?:5|五)\\s*分钟.{0,24}(?:30|三十)\\s*分钟", "1\\s*minute.{0,24}5\\s*minutes?.{0,24}30\\s*minutes?"], "sources": ["integrations/retry-policy.md"]},
+        {"label": "dead-letter queue", "patterns": ["死信队列", "dead-letter queue"], "sources": ["integrations/retry-policy.md"]}
+      ]
+    },
+    {
+      "id": "multi_eu_residency_backup",
+      "required_facts": [
+        {"label": "eu-west primary region", "patterns": ["eu-west.{0,16}(?:主|primary)", "(?:主|primary).{0,16}eu-west"], "sources": ["data/residency.md"]},
+        {"label": "paired EU recovery region", "patterns": ["(?:配对|paired).{0,16}(?:EU|欧盟|欧洲).{0,16}(?:恢复|灾备|recovery)", "(?:EU|欧盟|欧洲).{0,16}(?:配对|paired).{0,16}(?:恢复|灾备|recovery)"], "sources": ["data/residency.md"]},
+        {"label": "02:10 UTC backup", "patterns": ["02:10\\s*UTC"], "sources": ["operations/backups.md"]}
+      ]
+    },
+    {
+      "id": "long_incident_ack",
+      "required_facts": [
+        {"label": "15-minute acknowledgement", "patterns": ["(?:15|十五)\\s*(?:分钟|分)", "15\\s*minutes?"], "sources": ["long/incident-handbook.md"]}
+      ]
+    },
+    {
+      "id": "long_export_archive",
+      "required_facts": [
+        {"label": "2 GB archive limit", "patterns": ["2\\s*GB"], "sources": ["data/export.md"]},
+        {"label": "split into numbered archives", "patterns": ["(?:拆分|分割|分成).{0,20}(?:编号|多个).{0,12}(?:压缩包|归档|文件)", "split.{0,20}numbered archives"], "sources": ["data/export.md"]}
+      ]
+    },
+    {
+      "id": "long_sdk_timeout",
+      "required_facts": [
+        {"label": "30-second default timeout", "patterns": ["(?:30|三十)\\s*(?:秒|s)", "30\\s*seconds?"], "sources": ["long/sdk-guide.md"]}
+      ]
+    },
+    {
+      "id": "long_sla_credit",
+      "required_facts": [
+        {"label": "30-day credit request deadline", "patterns": ["(?:30|三十)\\s*(?:天|日)", "30\\s*days?"], "sources": ["reliability/sla-current.md"]}
+      ]
+    },
+    {
+      "id": "long_legal_hold",
+      "required_facts": [
+        {"label": "hold pauses deletion", "patterns": ["(?:法务|法律|legal).{0,12}(?:冻结|保留|hold).{0,24}(?:暂停|不会|不能|阻止).{0,12}(?:删除|清除)", "legal hold.{0,24}(?:pauses|prevents).{0,12}deletion"], "sources": ["security/retention-current.md"]},
+        {"label": "retain until Legal release", "patterns": ["(?:法务|法律|Legal).{0,16}(?:解除|释放).{0,12}(?:冻结|保留|hold)", "until Legal releases?.{0,12}(?:the )?hold"], "sources": ["security/retention-current.md"]}
+      ]
+    },
+    {
+      "id": "negative_refund_logging",
+      "required_facts": [
+        {"label": "seven-day refund window", "patterns": ["(?:7|七)\\s*(?:天|日)", "seven\\s+days?"], "sources": ["policies/refund-current.md"]}
+      ]
+    },
+    {
+      "id": "negative_account_deletion",
+      "required_facts": [
+        {"label": "active data removed within 30 days", "patterns": ["(?:30|三十)\\s*(?:天|日)", "30\\s*days?"], "sources": ["security/data-deletion.md"]}
+      ]
+    },
+    {
+      "id": "negative_sso_setup",
+      "required_facts": [
+        {"label": "administrator assigns SSO app", "patterns": ["管理员.{0,28}(?:分配|指派|添加).{0,20}SSO", "administrator.{0,24}assigns?.{0,20}SSO"], "sources": ["identity/sso-onboarding.md"]},
+        {"label": "first login MFA and recovery codes", "patterns": ["(?:首次|第一次).{0,20}MFA.{0,24}(?:恢复码|恢复代码|recovery codes?)", "first login.{0,20}MFA.{0,24}recovery codes?"], "sources": ["identity/sso-onboarding.md"]}
+      ]
+    },
+    {
+      "id": "negative_tax_invoice",
+      "required_facts": [
+        {"label": "Billing then Invoices navigation", "patterns": ["Billing.{0,20}Invoices", "账单.{0,20}发票"], "sources": ["billing/invoices.md"]}
+      ]
+    },
+    {
+      "id": "unanswerable_phone_support",
+      "expected_abstain": true,
+      "context_documents": ["account/recovery.md", "billing/invoices.md"],
+      "required_facts": []
+    },
+    {
+      "id": "unanswerable_crypto_payment",
+      "expected_abstain": true,
+      "context_documents": ["billing/invoices.md", "billing/cancellation.md"],
+      "required_facts": []
+    },
+    {
+      "id": "unanswerable_on_premise",
+      "expected_abstain": true,
+      "context_documents": ["operations/disaster-service.md", "operations/disaster-database.md"],
+      "required_facts": []
+    },
+    {
+      "id": "conflict_retention",
+      "required_facts": [
+        {"label": "current 47-month policy", "patterns": ["(?:当前|现行|现在).{0,16}47\\s*(?:个)?月", "47\\s*(?:个)?月.{0,16}(?:当前|现行|有效|authoritative)"], "sources": ["security/retention-current.md"]}
+      ]
+    },
+    {
+      "id": "conflict_sla",
+      "required_facts": [
+        {"label": "current SLA 99.95 percent", "patterns": ["(?:当前|现行|现在).{0,16}99\\.95\\s*%", "99\\.95\\s*%.{0,16}(?:当前|现行|有效|承诺)"], "sources": ["reliability/sla-current.md"]}
+      ]
+    },
+    {
+      "id": "conflict_refund",
+      "required_facts": [
+        {"label": "current seven-day refund", "patterns": ["(?:当前|现行|现在).{0,16}(?:7|七)\\s*(?:天|日)", "(?:7|七)\\s*(?:天|日).{0,16}(?:当前|现行|有效)"], "sources": ["policies/refund-current.md"]}
+      ]
+    }
+  ]
+}

@@ -1,8 +1,9 @@
 # Agent Evals
 
 This directory contains offline regression evals for the coding-agent backend.
-They use the fake LLM provider, local deterministic embeddings, and an in-memory
-vector store, so they do not need API keys or external services.
+They use the fake LLM provider and an in-memory vector store. Default commands
+use deterministic embeddings and need no external services; the explicit BGE-M3
+profile downloads a local model once and does not call an embedding API.
 
 The layered plan these suites belong to is in [DESIGN.md](DESIGN.md). L0 and L1
 are implemented; L2 and L3 are still design only.
@@ -35,6 +36,8 @@ a hard negative, and an empty-knowledge-base/no-evidence case.
 ```bash
 .venv/bin/python evals/run_rag_evals.py
 .venv/bin/python evals/run_rag_evals.py --profile current
+.venv/bin/python evals/run_rag_evals.py --profile bge-m3
+.venv/bin/python evals/run_rag_evals.py --profile bge-m3-rerank --hybrid-only
 ```
 
 `rag_cases.json` is a versioned 30-case pilot for checking the annotation
@@ -45,8 +48,10 @@ AuroraDesk snapshot. Rankings collapse repeated chunks from the same file.
 - Recall, precision, and hit rate treat grades 2–3 as relevant.
 - Core MRR uses the first grade-3 document.
 - NDCG preserves all graded judgements with exponential gain.
+- Dense-only, Lexical-only, and Hybrid (weighted RRF) each receive a complete
+  K=1/3/5/10 metric block from one shared document index.
 - Hard-negative violations, non-empty unanswerable searches, conflict-source
-  preference, and search p50/p95 are reported separately.
+  preference, and per-mode search p50/p95 are reported separately.
 
 The default deterministic profile fixes local hashing, chunk 800/overlap 120,
 recall 20, lexical weight 0.35, RRF k=60, no reranker, and an in-memory index.
@@ -54,6 +59,59 @@ recall 20, lexical weight 0.35, RRF k=60, no reranker, and an in-memory index.
 isolated in-memory index. Draft quality gates are diagnostic unless
 `--enforce-gates` is passed. This corpus is synthetic pilot data, not production
 traffic, a final holdout, Prompt-cost evidence, or answer-quality evidence.
+`--profile bge-m3` fixes `BAAI/bge-m3`, CPU, the same chunk/fusion parameters,
+and no reranker. Model download and cold start are not included in per-query
+search latency. One local CPU pilot run produced Dense/Hybrid K=5 Recall 1.000
+and NDCG 0.979 versus Lexical-only Recall 0.407/NDCG 0.384, but hard-negative
+Top-5 violation was 1.000 and conflict-source preference only 0.333. This is
+evidence to proceed to rerank/threshold experiments, not a claim that retrieval
+is fully tuned.
+
+`bge-m3-rerank` fixes `BAAI/bge-reranker-base` on CPU. Use `--hybrid-only` for
+the product-relevant on/off comparison without also paying CrossEncoder cost for
+Dense-only and Lexical-only diagnostics. `--json-output` persists rankings that
+the answer runner can consume through `--retrieval-report`. In the pilot A/B,
+reranking reduced hard-negative Top-5 violations from 1.000 to 0.500 and raised
+conflict preference from 0.333 to 0.667, while NDCG moved 0.979 to 0.973 and
+search p50 moved about 49.6 ms to 590.8 ms. It therefore remains opt-in.
+
+## RAG answer-quality pilot
+
+Retrieval scores do not prove that the generator used evidence faithfully. The
+answer pilot reuses all 30 queries but injects an explicit evidence set into the
+same prompt builder used by production RAG:
+
+```bash
+docker compose run --rm --no-deps \
+  -v "$PWD:/workspace:ro" -w /workspace app \
+  python evals/run_rag_answer_evals.py
+```
+
+The default requested model is the enabled registry entry
+`deepseek/deepseek-v4-flash`. The runner resolves credentials from the product
+Secret Store, disables fallback, verifies the actual route, and never serializes
+the credential. Answerable cases score atomic fact coverage, nearby attribution
+to the declared source, and citation-index validity. Unanswerable cases score an
+explicit abstention. Hard negatives and lower-grade stale sources remain in the
+context, so a perfect oracle-context score still exercises evidence selection.
+
+Use `--json-output /path/report.json` to preserve per-case answers. If only the
+deterministic annotations change, rescore without another paid call:
+
+```bash
+.venv/bin/python evals/run_rag_answer_evals.py \
+  --replay /path/report.json --diagnostic-only
+```
+
+This is an oracle-plus-adversarial **generation** pilot, not an end-to-end RAG
+score: it intentionally removes retrieval misses from the denominator. Regex
+fact assertions are reproducible but narrower than human semantic review, and
+the synthetic corpus is neither production traffic nor a formal holdout.
+Passing `--retrieval-report report.json` replaces oracle evidence with that
+report's Hybrid ranking. A focused 10-case risk A/B (hard negatives, conflicts,
+and unanswerable queries) scored 10/10 with DeepSeek V4 Flash both before and
+after reranking. The reranked condition used 9,056 input tokens versus 8,354,
+so this pilot found no answer-pass benefit to justify enabling it by default.
 
 ## L1 trajectory evals
 

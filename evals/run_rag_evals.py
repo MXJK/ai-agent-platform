@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import json
 from math import ceil
 from pathlib import Path
@@ -33,6 +33,12 @@ EXPECTED_CATEGORY_QUOTAS = {
     "unanswerable": 3,
     "conflicting_sources": 3,
 }
+RETRIEVAL_MODES = ("dense", "lexical", "hybrid")
+RETRIEVAL_MODE_LABELS = {
+    "dense": "Dense-only",
+    "lexical": "Lexical-only",
+    "hybrid": "Hybrid (weighted RRF)",
+}
 
 
 @dataclass(frozen=True)
@@ -47,11 +53,8 @@ class RAGPilotCaseResult:
 
 
 @dataclass(frozen=True)
-class RAGPilotReport:
-    dataset_id: str
-    snapshot_id: str
-    profile: str
-    profile_settings: dict[str, object]
+class RAGRetrievalModeReport:
+    retrieval_mode: str
     results: tuple[RAGPilotCaseResult, ...]
     metrics_by_k: dict[int, GradedRetrievalMetrics]
     hard_negative_violation_rate: float
@@ -59,6 +62,15 @@ class RAGPilotReport:
     conflict_preferred_rate: float
     latency_p50_ms: float
     latency_p95_ms: float
+
+
+@dataclass(frozen=True)
+class RAGPilotReport:
+    dataset_id: str
+    snapshot_id: str
+    profile: str
+    profile_settings: dict[str, object]
+    mode_reports: dict[str, RAGRetrievalModeReport]
     gate_k: int
     gates_enforced: bool
     gate_failures: tuple[str, ...]
@@ -66,6 +78,41 @@ class RAGPilotReport:
     @property
     def passed(self) -> bool:
         return not self.gate_failures
+
+    @property
+    def hybrid(self) -> RAGRetrievalModeReport:
+        return self.mode_reports["hybrid"]
+
+    @property
+    def results(self) -> tuple[RAGPilotCaseResult, ...]:
+        return self.hybrid.results
+
+    @property
+    def metrics_by_k(self) -> dict[int, GradedRetrievalMetrics]:
+        return self.hybrid.metrics_by_k
+
+    @property
+    def hard_negative_violation_rate(self) -> float:
+        return self.hybrid.hard_negative_violation_rate
+
+    @property
+    def unanswerable_nonempty_rate(self) -> float:
+        return self.hybrid.unanswerable_nonempty_rate
+
+    @property
+    def conflict_preferred_rate(self) -> float:
+        return self.hybrid.conflict_preferred_rate
+
+    @property
+    def latency_p50_ms(self) -> float:
+        return self.hybrid.latency_p50_ms
+
+    @property
+    def latency_p95_ms(self) -> float:
+        return self.hybrid.latency_p95_ms
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def load_rag_eval_suite(path: Path = DEFAULT_CASES_PATH) -> dict[str, Any]:
@@ -181,6 +228,7 @@ def run_rag_eval_suite(
     *,
     profile: str = "deterministic",
     enforce_gates: bool = False,
+    hybrid_only: bool = False,
 ) -> RAGPilotReport:
     validate_rag_eval_suite(suite)
     settings = _settings_for_profile(profile)
@@ -195,46 +243,25 @@ def run_rag_eval_suite(
 
     k_values = [int(value) for value in suite["k_values"]]
     max_k = max(k_values)
-    results: list[RAGPilotCaseResult] = []
-    for case in suite["cases"]:
-        started_at = perf_counter()
-        search = service.search_with_metadata(
+    retrieval_modes = ("hybrid",) if hybrid_only else RETRIEVAL_MODES
+    mode_reports = {
+        retrieval_mode: _evaluate_retrieval_mode(
+            service=service,
+            suite=suite,
             knowledge_base_id=knowledge_base_id,
-            query=str(case["query"]),
-            limit=max_k,
+            retrieval_mode=retrieval_mode,
+            k_values=k_values,
+            max_k=max_k,
         )
-        duration_ms = round((perf_counter() - started_at) * 1000, 3)
-        results.append(
-            RAGPilotCaseResult(
-                case_id=str(case["id"]),
-                category=str(case["category"]),
-                ranking=tuple(_deduplicate(item.filename for item in search.results)),
-                relevance={str(name): int(grade) for name, grade in case["relevance"].items()},
-                must_not_retrieve=tuple(str(item) for item in case["must_not_retrieve"]),
-                answerable=bool(case["answerable"]),
-                duration_ms=duration_ms,
-            )
-        )
-
-    positive_results = [result for result in results if result.answerable]
-    metrics_by_k = {
-        k: evaluate_graded_retrieval(
-            rankings=[list(result.ranking) for result in positive_results],
-            relevance_judgements=[result.relevance for result in positive_results],
-            k=k,
-        )
-        for k in k_values
+        for retrieval_mode in retrieval_modes
     }
     gates = dict(suite["draft_quality_gates"])
     gate_k = int(gates["k"])
-    hard_negative_violation_rate = _hard_negative_violation_rate(results, k=gate_k)
-    unanswerable_nonempty_rate = _unanswerable_nonempty_rate(results, k=gate_k)
-    conflict_preferred_rate = _conflict_preferred_rate(results, k=gate_k)
-    durations = sorted(result.duration_ms for result in results)
+    hybrid = mode_reports["hybrid"]
     all_gate_failures = _quality_gate_failures(
-        metrics_by_k[gate_k],
-        hard_negative_violation_rate=hard_negative_violation_rate,
-        conflict_preferred_rate=conflict_preferred_rate,
+        hybrid.metrics_by_k[gate_k],
+        hard_negative_violation_rate=hybrid.hard_negative_violation_rate,
+        conflict_preferred_rate=hybrid.conflict_preferred_rate,
         gates=gates,
     )
     return RAGPilotReport(
@@ -242,13 +269,7 @@ def run_rag_eval_suite(
         snapshot_id=str(suite["snapshot_id"]),
         profile=profile,
         profile_settings=_profile_settings(settings),
-        results=tuple(results),
-        metrics_by_k=metrics_by_k,
-        hard_negative_violation_rate=hard_negative_violation_rate,
-        unanswerable_nonempty_rate=unanswerable_nonempty_rate,
-        conflict_preferred_rate=conflict_preferred_rate,
-        latency_p50_ms=_percentile(durations, 0.50),
-        latency_p95_ms=_percentile(durations, 0.95),
+        mode_reports=mode_reports,
         gate_k=gate_k,
         gates_enforced=enforce_gates,
         gate_failures=tuple(all_gate_failures if enforce_gates else ()),
@@ -263,33 +284,37 @@ def format_rag_eval_report(report: RAGPilotReport) -> str:
         "Settings: "
         + "; ".join(f"{name}={value}" for name, value in report.profile_settings.items()),
     ]
-    for k, metrics in report.metrics_by_k.items():
-        lines.append(
-            f"K={k}: Recall={metrics.recall_at_k:.3f}; "
-            f"Precision={metrics.precision_at_k:.3f}; "
-            f"CoreMRR={metrics.core_mean_reciprocal_rank:.3f}; "
-            f"NDCG={metrics.ndcg_at_k:.3f}; "
-            f"HitRate={metrics.hit_rate_at_k:.3f}; "
-            f"positive_cases={metrics.evaluated_cases}"
+    for retrieval_mode, mode_report in report.mode_reports.items():
+        lines.append(f"\n[{RETRIEVAL_MODE_LABELS[retrieval_mode]}]")
+        for k, metrics in mode_report.metrics_by_k.items():
+            lines.append(
+                f"K={k}: Recall={metrics.recall_at_k:.3f}; "
+                f"Precision={metrics.precision_at_k:.3f}; "
+                f"CoreMRR={metrics.core_mean_reciprocal_rank:.3f}; "
+                f"NDCG={metrics.ndcg_at_k:.3f}; "
+                f"HitRate={metrics.hit_rate_at_k:.3f}; "
+                f"positive_cases={metrics.evaluated_cases}"
+            )
+        lines.extend(
+            [
+                f"Hard-negative violation@{report.gate_k}: "
+                f"{mode_report.hard_negative_violation_rate:.3f}",
+                f"Unanswerable non-empty@{report.gate_k}: "
+                f"{mode_report.unanswerable_nonempty_rate:.3f} "
+                "(diagnostic; no abstain contract)",
+                f"Conflict preferred@{report.gate_k}: "
+                f"{mode_report.conflict_preferred_rate:.3f}",
+                f"Search latency: p50={mode_report.latency_p50_ms:.3f}ms; "
+                f"p95={mode_report.latency_p95_ms:.3f}ms",
+            ]
         )
-    lines.extend(
-        [
-            f"Hard-negative violation@{report.gate_k}: "
-            f"{report.hard_negative_violation_rate:.3f}",
-            f"Unanswerable non-empty@{report.gate_k}: "
-            f"{report.unanswerable_nonempty_rate:.3f} (diagnostic; no abstain contract)",
-            f"Conflict preferred@{report.gate_k}: {report.conflict_preferred_rate:.3f}",
-            f"Search latency: p50={report.latency_p50_ms:.3f}ms; "
-            f"p95={report.latency_p95_ms:.3f}ms",
-            (
-                "Draft quality gates: enforced"
-                if report.gates_enforced
-                else "Draft quality gates: diagnostic only (use --enforce-gates)"
-            ),
-        ]
+    lines.append(
+        "\nDraft quality gates (Hybrid only): enforced"
+        if report.gates_enforced
+        else "\nDraft quality gates (Hybrid only): diagnostic only (use --enforce-gates)"
     )
     lines.extend(f"- FAIL quality_gate: {failure}" for failure in report.gate_failures)
-    for result in report.results:
+    for result in report.hybrid.results:
         relevant = {name for name, grade in result.relevance.items() if grade >= 2}
         hits = relevant & set(result.ranking[: report.gate_k])
         forbidden = set(result.must_not_retrieve) & set(
@@ -301,6 +326,68 @@ def format_rag_eval_report(report: RAGPilotReport) -> str:
                 f"forbidden={sorted(forbidden)}; top={list(result.ranking[:report.gate_k])}"
             )
     return "\n".join(lines)
+
+
+def _evaluate_retrieval_mode(
+    *,
+    service,
+    suite: dict[str, Any],
+    knowledge_base_id: str,
+    retrieval_mode: str,
+    k_values: list[int],
+    max_k: int,
+) -> RAGRetrievalModeReport:
+    results: list[RAGPilotCaseResult] = []
+    for case in suite["cases"]:
+        started_at = perf_counter()
+        search = service.search_with_metadata(
+            knowledge_base_id=knowledge_base_id,
+            query=str(case["query"]),
+            limit=max_k,
+            retrieval_mode=retrieval_mode,
+        )
+        duration_ms = round((perf_counter() - started_at) * 1000, 3)
+        results.append(
+            RAGPilotCaseResult(
+                case_id=str(case["id"]),
+                category=str(case["category"]),
+                ranking=tuple(_deduplicate(item.filename for item in search.results)),
+                relevance={
+                    str(name): int(grade)
+                    for name, grade in case["relevance"].items()
+                },
+                must_not_retrieve=tuple(
+                    str(item) for item in case["must_not_retrieve"]
+                ),
+                answerable=bool(case["answerable"]),
+                duration_ms=duration_ms,
+            )
+        )
+    positive_results = [result for result in results if result.answerable]
+    metrics_by_k = {
+        k: evaluate_graded_retrieval(
+            rankings=[list(result.ranking) for result in positive_results],
+            relevance_judgements=[result.relevance for result in positive_results],
+            k=k,
+        )
+        for k in k_values
+    }
+    durations = sorted(result.duration_ms for result in results)
+    gate_k = int(suite["draft_quality_gates"]["k"])
+    return RAGRetrievalModeReport(
+        retrieval_mode=retrieval_mode,
+        results=tuple(results),
+        metrics_by_k=metrics_by_k,
+        hard_negative_violation_rate=_hard_negative_violation_rate(
+            results, k=gate_k
+        ),
+        unanswerable_nonempty_rate=_unanswerable_nonempty_rate(
+            results, k=gate_k
+        ),
+        conflict_preferred_rate=_conflict_preferred_rate(results, k=gate_k),
+        latency_p50_ms=_percentile(durations, 0.50),
+        latency_p95_ms=_percentile(durations, 0.95),
+    )
 
 
 def _settings_for_profile(profile: str) -> Settings:
@@ -322,6 +409,40 @@ def _settings_for_profile(profile: str) -> Settings:
         )
     if profile == "current":
         return replace(Settings.from_env(), rag_vector_store="memory")
+    if profile == "bge-m3":
+        return Settings(
+            llm_provider="fake",
+            embedding_provider="sentence_transformer",
+            embedding_model="BAAI/bge-m3",
+            sentence_transformer_embedding_device="cpu",
+            rag_vector_store="memory",
+            rag_chunk_size=800,
+            rag_chunk_overlap=120,
+            rag_recall_limit=20,
+            rag_lexical_weight=0.35,
+            rag_rrf_k=60,
+            rag_reranker_provider="none",
+            rag_rerank_default_enabled=False,
+            rag_max_prompt_chars=6000,
+        )
+    if profile == "bge-m3-rerank":
+        return Settings(
+            llm_provider="fake",
+            embedding_provider="sentence_transformer",
+            embedding_model="BAAI/bge-m3",
+            sentence_transformer_embedding_device="cpu",
+            rag_vector_store="memory",
+            rag_chunk_size=800,
+            rag_chunk_overlap=120,
+            rag_recall_limit=20,
+            rag_lexical_weight=0.35,
+            rag_rrf_k=60,
+            rag_reranker_provider="sentence_transformer",
+            sentence_transformer_reranker_model="BAAI/bge-reranker-base",
+            sentence_transformer_reranker_device="cpu",
+            rag_rerank_default_enabled=True,
+            rag_max_prompt_chars=6000,
+        )
     raise ValueError(f"unknown RAG eval profile: {profile}")
 
 
@@ -329,7 +450,12 @@ def _profile_settings(settings: Settings) -> dict[str, object]:
     return {
         "vector_store": settings.rag_vector_store,
         "embedding": f"{settings.embedding_provider}/{settings.embedding_model}",
-        "dimensions": settings.local_embedding_dimensions,
+        "dimensions": (
+            settings.local_embedding_dimensions
+            if settings.embedding_provider == "local"
+            else "model-defined"
+        ),
+        "embedding_device": settings.sentence_transformer_embedding_device,
         "chunk": f"{settings.rag_chunk_size}/{settings.rag_chunk_overlap}",
         "recall_limit": settings.rag_recall_limit,
         "lexical_weight": settings.rag_lexical_weight,
@@ -427,14 +553,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES_PATH)
     parser.add_argument(
         "--profile",
-        choices=("deterministic", "current"),
+        choices=("deterministic", "current", "bge-m3", "bge-m3-rerank"),
         default="deterministic",
-        help="Use fixed local settings or current retrieval settings with an isolated memory index.",
+        help=(
+            "Use fixed hashing, current environment, BAAI/bge-m3, or BGE-M3 "
+            "plus BAAI/bge-reranker-base with an isolated memory index."
+        ),
     )
     parser.add_argument(
         "--enforce-gates",
         action="store_true",
         help="Fail when draft quality gates are not met.",
+    )
+    parser.add_argument(
+        "--hybrid-only",
+        action="store_true",
+        help=(
+            "Evaluate only Hybrid retrieval. Useful for reranker on/off A/B "
+            "without paying the CrossEncoder cost for diagnostic channels."
+        ),
+    )
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        help="Write the full per-mode rankings and metrics as JSON.",
     )
     args = parser.parse_args(argv)
     try:
@@ -442,11 +584,17 @@ def main(argv: list[str] | None = None) -> int:
             load_rag_eval_suite(args.cases),
             profile=args.profile,
             enforce_gates=args.enforce_gates,
+            hybrid_only=args.hybrid_only,
         )
     except (OSError, ValueError, json.JSONDecodeError, RAGError) as exc:
         print(f"RAG Pilot Eval: ERROR: {exc}", file=sys.stderr)
         return 2
     print(format_rag_eval_report(report))
+    if args.json_output is not None:
+        args.json_output.write_text(
+            json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     return 0 if report.passed else 1
 
 

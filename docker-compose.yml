@@ -106,6 +106,7 @@ services:
       - "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces"
       - "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform"
       - app_state:/var/lib/ai-agent-platform
+      - model_cache:/home/app/.cache/huggingface
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -128,5 +129,6 @@ services:
 
 volumes:
   app_state:
+  model_cache:
   postgres_data:
   qdrant_data:

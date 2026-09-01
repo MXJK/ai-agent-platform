@@ -10,6 +10,7 @@ from ai_agent_platform.integrations.rag import (
     GeminiEmbeddingProvider,
     HashingEmbeddingProvider,
     OpenAIEmbeddingProvider,
+    SentenceTransformerEmbeddingProvider,
 )
 from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.project_memory.extractor import LLMMemoryExtractor
@@ -59,6 +60,12 @@ def create_project_memory_service(
             settings,
             usage_ledger=usage_ledger,
             credential_resolver=credential_resolver,
+        )
+    elif settings.embedding_provider == "sentence_transformer":
+        embedding_provider = SentenceTransformerEmbeddingProvider(
+            model_name=settings.embedding_model,
+            device=settings.sentence_transformer_embedding_device,
+            usage_ledger=usage_ledger,
         )
     else:
         embedding_provider = HashingEmbeddingProvider(

@@ -8,6 +8,7 @@ from evals.run_rag_evals import (
     load_rag_eval_suite,
     run_rag_eval_suite,
     validate_rag_eval_suite,
+    _settings_for_profile,
 )
 
 
@@ -108,13 +109,48 @@ class RAGPilotSuiteTests(unittest.TestCase):
         report = run_rag_eval_suite(load_rag_eval_suite())
 
         self.assertEqual(len(report.results), 30)
+        self.assertEqual(set(report.mode_reports), {"dense", "lexical", "hybrid"})
+        self.assertTrue(
+            all(len(mode_report.results) == 30 for mode_report in report.mode_reports.values())
+        )
         self.assertEqual(set(report.metrics_by_k), {1, 3, 5, 10})
         self.assertEqual(report.metrics_by_k[5].evaluated_cases, 27)
         self.assertGreaterEqual(report.latency_p50_ms, 0.0)
         self.assertGreaterEqual(report.latency_p95_ms, report.latency_p50_ms)
         self.assertFalse(report.gates_enforced)
         self.assertEqual(report.gate_failures, ())
-        self.assertIn("diagnostic only", format_rag_eval_report(report))
+        formatted = format_rag_eval_report(report)
+        self.assertIn("[Dense-only]", formatted)
+        self.assertIn("[Lexical-only]", formatted)
+        self.assertIn("[Hybrid (weighted RRF)]", formatted)
+        self.assertIn("diagnostic only", formatted)
+
+    def test_bge_m3_profile_is_explicit_and_isolated(self) -> None:
+        settings = _settings_for_profile("bge-m3")
+
+        self.assertEqual(settings.embedding_provider, "sentence_transformer")
+        self.assertEqual(settings.embedding_model, "BAAI/bge-m3")
+        self.assertEqual(settings.sentence_transformer_embedding_device, "cpu")
+        self.assertEqual(settings.rag_vector_store, "memory")
+        self.assertEqual(settings.rag_reranker_provider, "none")
+
+    def test_bge_m3_rerank_profile_fixes_both_models(self) -> None:
+        settings = _settings_for_profile("bge-m3-rerank")
+
+        self.assertEqual(settings.embedding_model, "BAAI/bge-m3")
+        self.assertEqual(settings.rag_vector_store, "memory")
+        self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
+        self.assertEqual(
+            settings.sentence_transformer_reranker_model,
+            "BAAI/bge-reranker-base",
+        )
+        self.assertTrue(settings.rag_rerank_default_enabled)
+
+    def test_hybrid_only_skips_diagnostic_retrieval_modes(self) -> None:
+        report = run_rag_eval_suite(load_rag_eval_suite(), hybrid_only=True)
+
+        self.assertEqual(set(report.mode_reports), {"hybrid"})
+        self.assertEqual(len(report.results), 30)
 
     def test_draft_gates_can_be_explicitly_enforced(self) -> None:
         report = run_rag_eval_suite(

@@ -207,6 +207,7 @@ class Settings:
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
+    sentence_transformer_embedding_device: str = "cpu"
     rag_chunk_size: int = 800
     rag_chunk_overlap: int = 120
     rag_recall_limit: int = 20
@@ -347,8 +348,12 @@ class Settings:
         _require_choice(
             "embedding_provider",
             self.embedding_provider,
-            {"gemini", "local", "openai"},
+            {"gemini", "local", "openai", "sentence_transformer"},
         )
+        if not self.sentence_transformer_embedding_device.strip():
+            raise ValueError(
+                "sentence_transformer_embedding_device must not be empty"
+            )
         _require_choice(
             "llm_thinking_level",
             self.llm_thinking_level,
@@ -1295,6 +1300,11 @@ class Settings:
             embedding_model=_env("EMBEDDING_MODEL", cls.embedding_model, dotenv),
             local_embedding_dimensions=_int_env(
                 "LOCAL_EMBEDDING_DIMENSIONS", cls.local_embedding_dimensions, dotenv
+            ),
+            sentence_transformer_embedding_device=_env(
+                "SENTENCE_TRANSFORMER_EMBEDDING_DEVICE",
+                cls.sentence_transformer_embedding_device,
+                dotenv,
             ),
             rag_chunk_size=_int_env("RAG_CHUNK_SIZE", cls.rag_chunk_size, dotenv),
             rag_chunk_overlap=_int_env(

@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "done"
-active_task: "RAG-PILOT-EVAL-CORPUS"
-next_action: "Review the 30 RAG pilot relevance labels, then expand the sanitized corpus to 100-300 queries and freeze a 20 percent holdout."
+status: "active"
+active_task: "RAG-ARCHITECTURE-DIAGRAM"
+next_action: "Repair and visually verify the code-grounded RAG architecture diagram."
 blockers: []
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-01T14:18:31+08:00"
+updated_at: "2026-09-01T21:30:00+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

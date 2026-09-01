@@ -132,6 +132,7 @@ class RetrievalExecution:
     candidate_count: int
     result_count: int
     rerank_duration_ms: float | None = None
+    retrieval_mode: str = "hybrid"
 
 
 @dataclass(frozen=True)

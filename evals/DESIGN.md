@@ -46,7 +46,13 @@ L0 保持现状，不要改动。增量全部在 L1–L3。
 - 门禁：`retrieval_thresholds` 中的 Recall@k / Precision@k / MRR / NDCG@k / HitRate@k
 - RAG 试标诊断：`evals/run_rag_evals.py` + `rag_cases.json` 另行提供 30 条 0–3
   分级检索用例、K=1/3/5/10 指标、负例/冲突诊断和 p50/p95；它不是 L2 最终答案
-  质量集，也不是正式 holdout，草案门槛默认不阻断
+  质量集，也不是正式 holdout，草案门槛默认不阻断；显式 BGE-M3 profile 在同一
+  文档索引上分别输出 Dense-only、Lexical-only 和 weighted-RRF Hybrid 指标
+- RAG 生成试标：`evals/run_rag_answer_evals.py` + `rag_answer_cases.json` 复用这 30 条
+  query，将 oracle evidence 与 hard negative/旧资料直接注入生产 RAG prompt，再用
+  已注册真实模型报告事实覆盖、事实引用归属、引用合法性、拒答、route、Token 和耗时。
+  默认 oracle 口径隔离生成能力；也可消费 retrieval runner 保存的 Hybrid ranking，
+  对风险子集做端到端 A/B。两种口径都不使用模型自评
 - 轨迹快照：`tests/golden/agent_loop_trajectories.json`
   （已有 7 个场景：`read_only`、`native_multi_turn`、`change_repair`、
   `waiting_input_resume`、`controls`、`hard_budget`、`change_set`）

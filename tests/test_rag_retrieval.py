@@ -13,7 +13,9 @@ from ai_agent_platform.integrations.rag import (
     ParsedDocument,
     RAGService,
     RAGRerankerUnavailableError,
+    RAGValidationError,
     RecursiveCharacterChunker,
+    SentenceTransformerEmbeddingProvider,
     SentenceTransformerCrossEncoderReranker,
     TextDocumentParser,
     RetrievedDocument,
@@ -81,6 +83,41 @@ class MutableEmbeddingProvider(ConstantEmbeddingProvider):
         if self.fail and task_type == "document":
             raise RuntimeError("embedding outage")
         return super().embed_texts(texts, task_type=task_type)
+
+
+class CountingEmbeddingProvider(ConstantEmbeddingProvider):
+    def __init__(self) -> None:
+        self.query_calls = 0
+
+    def embed_texts(
+        self,
+        texts: list[str],
+        *,
+        task_type: str = "document",
+    ) -> list[list[float]]:
+        if task_type == "query":
+            self.query_calls += 1
+        return super().embed_texts(texts, task_type=task_type)
+
+
+class CountingVectorStore(InMemoryVectorStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.search_calls = 0
+
+    def search(self, **kwargs) -> list[RetrievedDocument]:
+        self.search_calls += 1
+        return super().search(**kwargs)
+
+
+class CountingDocumentStore(InMemoryRAGMetadataStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lexical_search_calls = 0
+
+    def search_lexical(self, **kwargs) -> list[RetrievedDocument]:
+        self.lexical_search_calls += 1
+        return super().search_lexical(**kwargs)
 
 
 class DenseDistractorVectorStore(InMemoryVectorStore):
@@ -352,6 +389,110 @@ class RAGRetrievalTests(unittest.TestCase):
         self.assertEqual(created_models[0].predict_calls, 2)
         self.assertEqual([item.id for item in first], ["chunk_2", "chunk_1"])
         self.assertEqual(second[0].rerank_score, 2.0)
+
+    def test_sentence_transformer_embedding_loads_lazily_and_normalizes(self) -> None:
+        created_models = []
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str, *, device: str) -> None:
+                self.model_name = model_name
+                self.device = device
+                self.encode_calls = []
+                created_models.append(self)
+
+            def encode(self, texts, **kwargs):
+                self.encode_calls.append((list(texts), kwargs))
+                return [[0.6, 0.8] for _ in texts]
+
+        provider = SentenceTransformerEmbeddingProvider(
+            model_name="BAAI/bge-m3",
+            device=" cpu ",
+        )
+        self.assertEqual(provider.status, "not_loaded")
+
+        with patch.dict(
+            sys.modules,
+            {
+                "sentence_transformers": SimpleNamespace(
+                    SentenceTransformer=FakeSentenceTransformer
+                )
+            },
+        ):
+            first = provider.embed_texts(["中文问题", "English document"])
+            second = provider.embed_texts(["reuse"])
+
+        self.assertEqual(provider.status, "ready")
+        self.assertEqual(len(created_models), 1)
+        self.assertEqual(created_models[0].model_name, "BAAI/bge-m3")
+        self.assertEqual(created_models[0].device, "cpu")
+        self.assertEqual(len(created_models[0].encode_calls), 2)
+        self.assertTrue(
+            created_models[0].encode_calls[0][1]["normalize_embeddings"]
+        )
+        self.assertEqual(first, [[0.6, 0.8], [0.6, 0.8]])
+        self.assertEqual(second, [[0.6, 0.8]])
+
+    def test_retrieval_modes_skip_unused_recall_paths(self) -> None:
+        embedding_provider = CountingEmbeddingProvider()
+        vector_store = CountingVectorStore()
+        document_store = CountingDocumentStore()
+        service = RAGService(
+            parser=TextDocumentParser(),
+            chunker=RecursiveCharacterChunker(chunk_size=500, chunk_overlap=50),
+            embedding_provider=embedding_provider,
+            vector_store=vector_store,
+            document_store=document_store,
+            reranker=NoopReranker(),
+            default_recall_limit=10,
+            max_prompt_chars=2000,
+        )
+        service.ingest_document(
+            knowledge_base_id="docs",
+            filename="guide.md",
+            content="QUASAR multilingual retrieval guide",
+        )
+
+        lexical = service.search_with_metadata(
+            knowledge_base_id="docs",
+            query="QUASAR",
+            retrieval_mode="lexical",
+        )
+        self.assertEqual(embedding_provider.query_calls, 0)
+        self.assertEqual(vector_store.search_calls, 0)
+        self.assertEqual(document_store.lexical_search_calls, 1)
+        self.assertEqual(lexical.retrieval.retrieval_mode, "lexical")
+        self.assertIsNotNone(lexical.results[0].lexical_rank)
+        self.assertIsNone(lexical.results[0].dense_rank)
+
+        dense = service.search_with_metadata(
+            knowledge_base_id="docs",
+            query="QUASAR",
+            retrieval_mode="dense",
+        )
+        self.assertEqual(embedding_provider.query_calls, 1)
+        self.assertEqual(vector_store.search_calls, 1)
+        self.assertEqual(document_store.lexical_search_calls, 1)
+        self.assertEqual(dense.retrieval.retrieval_mode, "dense")
+        self.assertIsNotNone(dense.results[0].dense_rank)
+        self.assertIsNone(dense.results[0].lexical_rank)
+
+        hybrid = service.search_with_metadata(
+            knowledge_base_id="docs",
+            query="QUASAR",
+            retrieval_mode="hybrid",
+        )
+        self.assertEqual(embedding_provider.query_calls, 2)
+        self.assertEqual(vector_store.search_calls, 2)
+        self.assertEqual(document_store.lexical_search_calls, 2)
+        self.assertEqual(hybrid.retrieval.retrieval_mode, "hybrid")
+        self.assertIsNotNone(hybrid.results[0].fusion_score)
+
+        with self.assertRaisesRegex(RAGValidationError, "retrieval_mode"):
+            service.search(
+                knowledge_base_id="docs",
+                query="QUASAR",
+                retrieval_mode="unknown",
+            )
 
     def test_lexical_recall_adds_candidate_missing_from_dense_recall(self) -> None:
         service = RAGService(

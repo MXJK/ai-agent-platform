@@ -66,6 +66,8 @@ def test_application_image_runs_as_a_non_root_user() -> None:
     assert "requirements.self-hosted.txt" in dockerfile
     assert "import ai_agent_platform.api.entrypoint" in dockerfile
     assert "nodejs npm" in dockerfile
+    assert "/home/app/.cache/huggingface" in dockerfile
+    assert "/home/app/.cache" in dockerfile
 
 
 def test_self_hosted_image_omits_compatibility_only_dependencies() -> None:
@@ -81,8 +83,19 @@ def test_self_hosted_image_omits_compatibility_only_dependencies() -> None:
     assert "chromadb" not in requirements.lower()
     assert "keyring" not in requirements.lower()
     assert "cryptography" in requirements.lower()
-    assert "sentence-transformers" not in requirements.lower()
+    assert "sentence-transformers" in requirements.lower()
     assert "pytest" not in requirements.lower()
+
+
+def test_self_hosted_bge_m3_embedding_has_persistent_model_cache() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "EMBEDDING_PROVIDER=sentence_transformer" in example
+    assert "EMBEDDING_MODEL=BAAI/bge-m3" in example
+    assert "SENTENCE_TRANSFORMER_EMBEDDING_DEVICE=cpu" in example
+    assert "model_cache:/home/app/.cache/huggingface" in compose
+    assert "model_cache:" in compose
 
 
 def test_provider_api_keys_are_not_dotenv_configuration() -> None:

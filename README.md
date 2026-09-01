@@ -34,8 +34,8 @@ Docker Compose 运行 App、PostgreSQL 和 Qdrant，并以进程内队列保持�
 FastAPI/Web UI、PostgreSQL 和 Qdrant；Alembic 迁移由一次性 `migrate` 服务执行。后台
 Agent 任务复用进程内有界队列，不启动 Go 网关、Redis、Celery Worker 或 Adminer。
 App 镜像使用 `requirements.self-hosted.txt`，不安装当前拓扑不会加载的 Celery/Redis、
-Chroma、OS keyring 和本地 SentenceTransformer/Torch 依赖；这些 Adapter 仍保留在完整
-开发依赖中。
+Chroma 和 OS keyring；会安装 Sentence Transformers/Torch，因为官方 Compose 的默认
+文档 embedding 是 `BAAI/bge-m3`。
 
 ```bash
 cp -n .env.example .env
@@ -1502,6 +1502,18 @@ curl -X POST http://localhost:8000/api/v1/knowledge-bases/product_docs/documents
 和可选重排分数。`RAG_LEXICAL_WEIGHT` 控制 RRF 通道权重，`RAG_RRF_K` 控制排名
 平滑。
 
+官方 Compose 默认使用真正的中英多语言语义 embedding `BAAI/bge-m3`。模型由
+Sentence Transformers 在第一次文档摄取时延迟下载，并保存在 `model_cache` volume；
+重建 App 镜像不会重复下载，删除该 volume 才会移除缓存。设备默认使用 CPU。切换
+embedding Provider、模型或向量维度后，已有 Qdrant/Chroma 向量不会自动兼容，必须
+重新索引对应知识库；`local/local-hashing` 只保留给确定性测试和轻量开发：
+
+```dotenv
+EMBEDDING_PROVIDER=sentence_transformer
+EMBEDDING_MODEL=BAAI/bge-m3
+SENTENCE_TRANSFORMER_EMBEDDING_DEVICE=cpu
+```
+
 知识库页面以无障碍按下/未按下按钮暴露 CrossEncoder。搜索和问答都接受可选的
 `rerank_enabled`。省略时使用服务端 `RAG_RERANK_DEFAULT_ENABLED`，仓库默认值为
 `false`。响应包含 `retrieval.rerank_requested`、`rerank_applied`、Provider/Model、
@@ -1677,6 +1689,9 @@ git diff --check
 ```bash
 .venv/bin/python evals/run_evals.py
 .venv/bin/python evals/run_rag_evals.py
+.venv/bin/python evals/run_rag_evals.py --profile bge-m3
+.venv/bin/python evals/run_rag_evals.py --profile bge-m3-rerank --hybrid-only
+.venv/bin/python evals/run_rag_answer_evals.py --replay /path/to/prior-report.json
 .venv/bin/python evals/run_trajectory_evals.py
 .venv/bin/python evals/run_memory_evals.py
 ```
@@ -1686,7 +1701,21 @@ git diff --check
 K=1/3/5/10 的 Recall、Precision、Core MRR、NDCG、Hit Rate，以及 hard negative、
 无答案、冲突资料和检索 p50/p95。它默认只诊断，标注复核稳定前不会用草案门槛阻断；
 显式传 `--enforce-gates` 才执行门槛。`--profile current` 会读取当前 chunk、embedding、
-RRF 和 reranker 参数，但强制用临时内存索引，避免污染持久 VectorStore。
+RRF 和 reranker 参数，但强制用临时内存索引，避免污染持久 VectorStore；
+`--profile bge-m3` 固定使用 `BAAI/bge-m3`，在同一次 ingestion 后分别报告真正的
+Dense-only、Lexical-only 和 Hybrid（weighted RRF）三组指标。
+`run_rag_answer_evals.py` 复用同一批 30 条 query，但把标注的 oracle evidence 直接交给
+生产 RAG prompt；hard negative 与低等级旧资料仍保留在上下文中。它使用模型注册表中
+显式启用的真实 Provider/Model，关闭 fallback 并校验实际 route，输出事实覆盖、事实与
+来源引用归属、引用编号合法性、无答案拒答、Token 和生成 p50/p95。该分数只回答
+“拿到这组证据后能否可靠生成”，不能替代 BGE-M3 的检索指标或端到端 RAG 评测；
+`--replay` 可对已保存原始回答离线重评分，避免标注修正重复触发付费调用。
+`bge-m3-rerank` profile 固定使用 `BAAI/bge-reranker-base`；`--hybrid-only` 避免对
+Dense/Lexical 诊断通道重复支付 CrossEncoder 成本，`--json-output` 的 Hybrid 排名可由
+答案 runner 的 `--retrieval-report` 消费。本轮合成 pilot 中，重排把 hard-negative
+Top-5 违规从 `1.000` 降到 `0.500`、冲突首选从 `0.333` 提到 `0.667`，但 NDCG
+`0.979→0.973`、检索 p50 约 `49.6→590.8 ms`；10 条风险集两组 DeepSeek 答案均
+10/10，通过率没有增益且 rerank 组输入 Token 增加，因此产品默认仍不启用重排。
 `run_trajectory_evals.py` 是 L1 轨迹评测，用约束（必须/禁止出现的工具、偏序、
 步数上限）而不是标准答案判定过程。工具调用按 proposed / accepted / executed /
 succeeded / failed / suppressed / denied / pending approval 分层；只有能按 `call_id`
