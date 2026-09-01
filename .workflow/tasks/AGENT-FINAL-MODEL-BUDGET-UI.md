@@ -11,7 +11,8 @@
 - 保留上下文窗口、Usage Ledger 和 Provider 实际能力对最终额度的安全下调。
 - 修复前端收到 completed 事件快照时，因尚无权威 `result.answer` 而覆盖已流式
   输出正文的问题。
-- 增加 Python/Node 回归测试，并同步 README 和静态资源 cache-buster。
+- 增加 Python/Node 回归测试，并同步 README、Interview Notes、事实索引和静态资源
+  cache-buster。
 
 ## Out of scope
 
@@ -42,16 +43,16 @@
 
 - 预算/UI/API 聚焦回归：`.venv/bin/python -m pytest -q
   tests/test_agent_runtime_framework.py tests/test_native_tool_calling.py tests/test_api.py`：
-  `101 passed, 23 subtests passed`（共享工作树）。
+  `101 passed, 23 subtests passed`。
 - 前端消息与终态事件回归：`node --test tests/test_chat_message_ui.mjs`：`16 passed`；
   `node --check ai_agent_platform/static/app.js`：通过。
-- 完整回归：共享工作树 `781 passed, 133 subtests passed`；从 `48f85676` 重建、只含
-  本任务增量的隔离 worktree 为 `757 passed, 125 subtests passed`。
+- 完整回归：`.venv/bin/python -m pytest -q`：`781 passed, 133 subtests passed`。
 - 编译检查：`.venv/bin/python -m compileall ai_agent_platform tests evals`：通过。
 - 文档事实：`.venv/bin/python INTERVIEW_NOTES/validate.py`：校验 24 个 Markdown、
-  46 项 capability，通过；Interview Notes 被仓库忽略，不进入提交。
+  46 项 capability，通过；evidence review warnings 来自共享脏工作树中的既有并发改动，
+  不是校验失败。
 - `git diff --check`：通过。范围审查未发现凭据、部署、迁移或外部写入；静态资源
-  cache-buster 已更新。
+  cache-buster 已更新。Git 提交与推送仅在后续用户明确授权下作为收尾动作执行。
 
 ## Result
 
@@ -63,5 +64,5 @@ fallback 都引用实际模型，而不是 Agent 进程的固定 4096。模型�
 
 前端不再先发布只有 completed 状态、尚无 `result` 的事件快照；即使调用方直接渲染这种
 快照，终态正文也优先使用已归约的 `streamed_answer`。权威 `result.answer` 到达后正常
-替换，只有权威结果和流式正文都确实为空时才显示“没有返回文本内容”。README、
-`.env.example` 和静态 cache-buster 已同步。
+替换，只有权威结果和流式正文都确实为空时才显示“没有返回文本内容”。README、Interview
+Notes、`.env.example` 和静态 cache-buster 已同步。

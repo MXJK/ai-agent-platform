@@ -13,6 +13,7 @@ from ai_agent_platform.integrations.llm import (
     CHAT_COMPLETIONS_PROVIDERS,
     LLMProviderError,
     LLMStreamEvent,
+    _anthropic_usage_from_mapping,
     _chat_usage_from_mapping,
     _json_arguments,
     _usage_from_mapping,
@@ -200,7 +201,11 @@ class NativeStreamAccumulator:
                     provider=self.provider,
                 )
                 if self.provider in CHAT_COMPLETIONS_PROVIDERS
-                else _usage_from_mapping(self.body.get("usage"))
+                else (
+                    _anthropic_usage_from_mapping(self.body.get("usage"))
+                    if self.provider == "anthropic"
+                    else _usage_from_mapping(self.body.get("usage"))
+                )
             )
             raise LLMProviderError(
                 "native tool stream ended before its terminal event",
@@ -213,7 +218,7 @@ class NativeStreamAccumulator:
                 self.blocks[index]["input"] = _json_arguments(
                     arguments,
                     finish_reason=self.body.get("stop_reason"),
-                    usage=_usage_from_mapping(self.body.get("usage")),
+                    usage=_anthropic_usage_from_mapping(self.body.get("usage")),
                 )
             self.body["content"] = [
                 self.blocks[index] for index in sorted(self.blocks)

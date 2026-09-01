@@ -277,6 +277,14 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             self.assertIsNone(dirty["unavailable_reasons"]["direct"])
 
     def test_api_accepts_additional_workspace_ids_not_raw_paths(self) -> None:
+        request = AgentRunRequest(
+            conversation_id="session_1",
+            message="inspect",
+            workspace_id="main",
+            additional_workspace_ids=["extra"],
+        )
+        self.assertEqual(request.additional_workspace_ids, ["extra"])
+
         with self.assertRaisesRegex(
             ValueError,
             "registered Workspace IDs",
