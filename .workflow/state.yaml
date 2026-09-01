@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AGENT-FINAL-MODEL-BUDGET-UI"
-next_action: "Rebuild the local app and confirm the next real Agent final answer uses the selected model limit without a terminal empty-answer flash."
+active_task: "RAG-PILOT-EVAL-CORPUS"
+next_action: "Review the 30 RAG pilot relevance labels, then expand the sanitized corpus to 100-300 queries and freeze a 20 percent holdout."
 blockers: []
-last_verified_commit: "23c8d3b9eabbd54b503067e7470dcc9fe44d56c5"
-updated_at: "2026-09-01T10:07:06+08:00"
+last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
+updated_at: "2026-09-01T14:18:31+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
