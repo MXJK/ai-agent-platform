@@ -1,0 +1,420 @@
+{
+  "schema_version": 1,
+  "dataset_id": "auroradesk_rag_pilot_v1",
+  "snapshot_id": "auroradesk-kb-2026-08-31",
+  "knowledge_base_id": "rag_pilot_docs",
+  "split": "pilot",
+  "description": "Synthetic but user-shaped pilot set for validating graded RAG labels before collecting a real 100-300 query corpus.",
+  "category_quotas": {
+    "exact_keyword": 5,
+    "paraphrase_colloquial": 5,
+    "multi_document": 5,
+    "long_document_multi_chunk": 5,
+    "hard_negative": 4,
+    "unanswerable": 3,
+    "conflicting_sources": 3
+  },
+  "k_values": [1, 3, 5, 10],
+  "draft_quality_gates": {
+    "k": 5,
+    "min_recall_at_k": 0.8,
+    "min_core_mrr": 0.7,
+    "min_ndcg_at_k": 0.75,
+    "min_hit_rate_at_k": 0.9,
+    "max_hard_negative_violation_rate": 0.25,
+    "min_conflict_preferred_rate": 0.67
+  },
+  "fixtures": [
+    {
+      "filename": "security/retention-current.md",
+      "content": "# Current audit retention policy\nPolicy code AURORA_RETENTION_47X is effective from 2026-01-01. Security audit records are retained for 47 months. This policy is authoritative and supersedes all earlier retention notes.\n",
+      "padding": "Operational examples explain how ordinary audit records are classified and exported. These examples do not change the retention duration.\n",
+      "padding_lines": 18,
+      "tail": "## Legal hold exception\nA legal hold pauses scheduled deletion even after the normal 47-month period. Records remain held until Legal releases the hold."
+    },
+    {
+      "filename": "security/retention-legacy.md",
+      "content": "# Archived retention policy\nRETIRED in 2025. This historical document required audit records to be kept for 36 months. Do not use it for current decisions."
+    },
+    {
+      "filename": "policies/refund-current.md",
+      "content": "# Customer refund policy\nCurrent policy: customers may request a refund within seven days after order completion. Support verifies the order owner before approving the request."
+    },
+    {
+      "filename": "policies/refund-legacy.md",
+      "content": "# Archived refund policy\nRETIRED: an older promotion allowed refund requests for fourteen days. It ended in 2025 and is not current policy."
+    },
+    {
+      "filename": "engineering/refund-events.md",
+      "content": "# Refund event logging\nAfter an approved refund enters the payment service, engineers attach an internal trace identifier to refund event delivery logs. This is an observability procedure, not the customer eligibility policy."
+    },
+    {
+      "filename": "operations/disaster-service.md",
+      "content": "# Service disaster recovery\nThe primary application has a recovery time objective of 30 minutes. Traffic fails over to the secondary region using cross-region replicas."
+    },
+    {
+      "filename": "operations/disaster-database.md",
+      "content": "# Database disaster recovery\nThe production database has a recovery time objective of 45 minutes. Recovery restores encrypted snapshots and replays the transaction log."
+    },
+    {
+      "filename": "identity/sso-onboarding.md",
+      "content": "# SSO onboarding\nAn administrator first assigns the employee to the AuroraDesk SSO application. On first login, the employee enrolls MFA and stores recovery codes."
+    },
+    {
+      "filename": "identity/sso-incidents.md",
+      "content": "# SSO outage troubleshooting\nDuring an SSO outage, operators verify identity-provider metadata, certificate expiry and clock skew. This runbook is not the user setup guide."
+    },
+    {
+      "filename": "account/recovery.md",
+      "content": "# Account recovery\nA user who forgot a password selects Forgot password and receives an email recovery link. The link expires after 20 minutes. SSO users should use their identity-provider recovery flow."
+    },
+    {
+      "filename": "integrations/webhooks.md",
+      "content": "# Webhook delivery\nWebhook requests include the X-Aurora-Signature header. Receivers verify the body with HMAC-SHA256 before accepting the event. Failed deliveries enter the retry queue."
+    },
+    {
+      "filename": "integrations/retry-policy.md",
+      "content": "# Integration retry schedule\nFailed webhook deliveries retry after 1 minute, 5 minutes and 30 minutes. A delivery that still fails is placed in the dead-letter queue."
+    },
+    {
+      "filename": "billing/invoices.md",
+      "content": "# Billing invoices\nWorkspace owners download a tax invoice from Billing, then Invoices. The legal name and billing address can be corrected before the monthly invoice closes."
+    },
+    {
+      "filename": "api/invoice-object.md",
+      "content": "# Invoice API object\nFor developers, the invoice JSON object contains id, currency, subtotal and status fields. This reference does not explain how a customer downloads a tax invoice."
+    },
+    {
+      "filename": "billing/cancellation.md",
+      "content": "# Subscription cancellation\nA workspace owner opens Billing, chooses Manage plan and selects Cancel subscription. Access remains active until the end of the paid billing cycle."
+    },
+    {
+      "filename": "mobile/offline.md",
+      "content": "# Mobile offline mode\nThe mobile app can read previously synchronized tickets without a network connection. Editing and sending replies require reconnecting; queued drafts sync when the app is online."
+    },
+    {
+      "filename": "api/limits.md",
+      "content": "# Public API rate limits\nThe standard workspace limit is 120 requests per minute per access token. A 429 response includes the Retry-After header."
+    },
+    {
+      "filename": "operations/backups.md",
+      "content": "# Backup operations\nThe daily encrypted backup begins at 02:10 UTC. Backups are replicated to the paired recovery region and verified before rotation."
+    },
+    {
+      "filename": "data/residency.md",
+      "content": "# Data residency\nEuropean customer data is stored in the eu-west primary region. Disaster-recovery copies remain inside the paired EU recovery region."
+    },
+    {
+      "filename": "security/data-deletion.md",
+      "content": "# Account data deletion\nAfter an owner confirms workspace deletion, active customer data is removed within 30 days. Encrypted backup copies expire under the separate backup lifecycle."
+    },
+    {
+      "filename": "operations/cache-cleanup.md",
+      "content": "# Cache cleanup job\nA maintenance worker removes expired application cache entries every hour. Cache cleanup does not delete customer accounts or authoritative records."
+    },
+    {
+      "filename": "data/export.md",
+      "content": "# Workspace data export\nOwners request an export from Settings, Data controls. The job produces a signed download link.\n",
+      "padding": "The export guide lists progress states, notification behavior and examples for ordinary workspace records.\n",
+      "padding_lines": 20,
+      "tail": "## Delivery limits\nAn export is prepared within 24 hours. Each downloadable archive is limited to 2 GB; larger exports are split into numbered archives."
+    },
+    {
+      "filename": "reliability/sla-current.md",
+      "content": "# Current Enterprise SLA\nEffective 2026, the Enterprise plan monthly uptime commitment is 99.95 percent. This document supersedes the archived SLA.\n",
+      "padding": "Availability measurements exclude customer-controlled networks and announced maintenance windows. Monthly reports show eligible service minutes.\n",
+      "padding_lines": 18,
+      "tail": "## Service credits\nWhen measured uptime falls below 99.95 percent, the workspace owner must submit a service-credit request within 30 days of the incident report."
+    },
+    {
+      "filename": "reliability/sla-legacy.md",
+      "content": "# Archived Enterprise SLA\nRETIRED in 2025. The former monthly uptime commitment was 99.9 percent. It must not be used for current credit decisions."
+    },
+    {
+      "filename": "long/incident-handbook.md",
+      "content": "# Incident response handbook\nThis handbook describes ownership, communication channels and severity review.\n",
+      "padding": "Responders record observations, preserve timestamps and keep the incident channel focused on verified operational facts.\n",
+      "padding_lines": 22,
+      "tail": "## Severity two acknowledgement\nCode ORBIT_SEV2 requires the on-call incident commander to acknowledge the page within 15 minutes."
+    },
+    {
+      "filename": "long/sdk-guide.md",
+      "content": "# Python SDK guide\nThe client supports retries, pagination and idempotency keys for write requests.\n",
+      "padding": "Examples demonstrate typed request objects, response inspection and safe retry behavior for ordinary API operations.\n",
+      "padding_lines": 22,
+      "tail": "## Timeout\nThe Python SDK default request timeout is 30 seconds. Callers may override it per client or per request."
+    }
+  ],
+  "cases": [
+    {
+      "id": "exact_retention_code",
+      "query": "AURORA_RETENTION_47X 要求保留多久？",
+      "category": "exact_keyword",
+      "answerable": true,
+      "relevance": {"security/retention-current.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Rare policy token should be rescued by the lexical channel."
+    },
+    {
+      "id": "exact_refund_window",
+      "query": "customer refund within seven days after order completion",
+      "category": "exact_keyword",
+      "answerable": true,
+      "relevance": {"policies/refund-current.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Exact policy wording."
+    },
+    {
+      "id": "exact_api_limit",
+      "query": "120 requests per minute Retry-After",
+      "category": "exact_keyword",
+      "answerable": true,
+      "relevance": {"api/limits.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Exact numeric API limit."
+    },
+    {
+      "id": "exact_backup_time",
+      "query": "daily encrypted backup 02:10 UTC",
+      "category": "exact_keyword",
+      "answerable": true,
+      "relevance": {"operations/backups.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Exact schedule lookup."
+    },
+    {
+      "id": "exact_webhook_signature",
+      "query": "X-Aurora-Signature HMAC-SHA256",
+      "category": "exact_keyword",
+      "answerable": true,
+      "relevance": {"integrations/webhooks.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Exact header and algorithm."
+    },
+    {
+      "id": "paraphrase_password",
+      "query": "密码想不起来了，邮件里的找回链接能用多久？",
+      "category": "paraphrase_colloquial",
+      "answerable": true,
+      "relevance": {"account/recovery.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Chinese colloquial paraphrase without the English heading."
+    },
+    {
+      "id": "paraphrase_invoice",
+      "query": "公司报销要的税务票据去哪里下载？",
+      "category": "paraphrase_colloquial",
+      "answerable": true,
+      "relevance": {"billing/invoices.md": 3},
+      "must_not_retrieve": [],
+      "notes": "User wording differs from tax invoice documentation."
+    },
+    {
+      "id": "paraphrase_offline",
+      "query": "手机没网的时候还能看之前同步的工单吗？",
+      "category": "paraphrase_colloquial",
+      "answerable": true,
+      "relevance": {"mobile/offline.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Colloquial offline capability question."
+    },
+    {
+      "id": "paraphrase_cancel",
+      "query": "我不续费了，关掉套餐后是不是马上不能用了？",
+      "category": "paraphrase_colloquial",
+      "answerable": true,
+      "relevance": {"billing/cancellation.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Cancellation timing paraphrase."
+    },
+    {
+      "id": "paraphrase_export",
+      "query": "想把工作区资料全部打包带走，大概多久能拿到？",
+      "category": "paraphrase_colloquial",
+      "answerable": true,
+      "relevance": {"data/export.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Export request paraphrase."
+    },
+    {
+      "id": "multi_disaster_recovery",
+      "query": "应用和数据库发生区域故障后各要多久恢复？",
+      "category": "multi_document",
+      "answerable": true,
+      "relevance": {"operations/disaster-service.md": 3, "operations/disaster-database.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Requires both service and database RTO documents."
+    },
+    {
+      "id": "multi_new_employee_access",
+      "query": "新员工第一次用公司 SSO 登录，还要设置哪些账号恢复措施？",
+      "category": "multi_document",
+      "answerable": true,
+      "relevance": {"identity/sso-onboarding.md": 3, "account/recovery.md": 2},
+      "must_not_retrieve": [],
+      "notes": "Combines onboarding and recovery boundaries."
+    },
+    {
+      "id": "multi_refund_operations",
+      "query": "客户退款需要满足什么期限，批准后工程日志还要记录什么？",
+      "category": "multi_document",
+      "answerable": true,
+      "relevance": {"policies/refund-current.md": 3, "engineering/refund-events.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Combines policy eligibility and event observability."
+    },
+    {
+      "id": "multi_webhook_failure",
+      "query": "Webhook 怎么验签，发送失败后会按什么节奏重试？",
+      "category": "multi_document",
+      "answerable": true,
+      "relevance": {"integrations/webhooks.md": 3, "integrations/retry-policy.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Combines delivery authentication and retry schedule."
+    },
+    {
+      "id": "multi_eu_residency_backup",
+      "query": "欧洲客户的主数据和灾备副本分别放在哪个区域，备份几点开始？",
+      "category": "multi_document",
+      "answerable": true,
+      "relevance": {"data/residency.md": 3, "operations/backups.md": 2},
+      "must_not_retrieve": [],
+      "notes": "Combines residency and backup operations."
+    },
+    {
+      "id": "long_incident_ack",
+      "query": "二级事故告警后值班指挥要在几分钟内确认？",
+      "category": "long_document_multi_chunk",
+      "answerable": true,
+      "relevance": {"long/incident-handbook.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Answer is in the tail chunk of a long document."
+    },
+    {
+      "id": "long_export_archive",
+      "query": "一个数据导出压缩包最大多大，超过后怎么办？",
+      "category": "long_document_multi_chunk",
+      "answerable": true,
+      "relevance": {"data/export.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Answer is in a later export-guide chunk."
+    },
+    {
+      "id": "long_sdk_timeout",
+      "query": "Python 客户端默认请求超时是多少秒？",
+      "category": "long_document_multi_chunk",
+      "answerable": true,
+      "relevance": {"long/sdk-guide.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Answer is in the SDK guide tail."
+    },
+    {
+      "id": "long_sla_credit",
+      "query": "企业版可用性没到承诺值时，服务补偿要在多久内申请？",
+      "category": "long_document_multi_chunk",
+      "answerable": true,
+      "relevance": {"reliability/sla-current.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Credit deadline is separated from the headline SLA."
+    },
+    {
+      "id": "long_legal_hold",
+      "query": "到了正常审计保留期限，但记录正被法务冻结时会删除吗？",
+      "category": "long_document_multi_chunk",
+      "answerable": true,
+      "relevance": {"security/retention-current.md": 3},
+      "must_not_retrieve": [],
+      "notes": "Legal-hold exception appears after many ordinary examples."
+    },
+    {
+      "id": "negative_refund_logging",
+      "query": "客户订单完成后几天内可以申请退款？",
+      "category": "hard_negative",
+      "answerable": true,
+      "relevance": {"policies/refund-current.md": 3},
+      "must_not_retrieve": ["engineering/refund-events.md"],
+      "notes": "Near-miss document shares refund vocabulary but cannot answer eligibility."
+    },
+    {
+      "id": "negative_account_deletion",
+      "query": "确认注销工作区后，客户数据多久删除？",
+      "category": "hard_negative",
+      "answerable": true,
+      "relevance": {"security/data-deletion.md": 3},
+      "must_not_retrieve": ["operations/cache-cleanup.md"],
+      "notes": "Cache cleanup is lexically similar but not authoritative deletion."
+    },
+    {
+      "id": "negative_sso_setup",
+      "query": "管理员怎样给新员工开通 SSO 并完成首次登录？",
+      "category": "hard_negative",
+      "answerable": true,
+      "relevance": {"identity/sso-onboarding.md": 3},
+      "must_not_retrieve": ["identity/sso-incidents.md"],
+      "notes": "Outage runbook must not displace onboarding."
+    },
+    {
+      "id": "negative_tax_invoice",
+      "query": "工作区管理员在哪里下载用于报税的发票？",
+      "category": "hard_negative",
+      "answerable": true,
+      "relevance": {"billing/invoices.md": 3},
+      "must_not_retrieve": ["api/invoice-object.md"],
+      "notes": "Developer object reference is not the billing workflow."
+    },
+    {
+      "id": "unanswerable_phone_support",
+      "query": "客服电话号码是多少？",
+      "category": "unanswerable",
+      "answerable": false,
+      "relevance": {},
+      "must_not_retrieve": [],
+      "notes": "The snapshot contains no phone support number; non-empty search is diagnostic until abstention exists."
+    },
+    {
+      "id": "unanswerable_crypto_payment",
+      "query": "可以用比特币支付订阅吗？",
+      "category": "unanswerable",
+      "answerable": false,
+      "relevance": {},
+      "must_not_retrieve": [],
+      "notes": "The snapshot contains no cryptocurrency payment policy."
+    },
+    {
+      "id": "unanswerable_on_premise",
+      "query": "本地部署版最低需要多少台服务器？",
+      "category": "unanswerable",
+      "answerable": false,
+      "relevance": {},
+      "must_not_retrieve": [],
+      "notes": "The snapshot contains no on-premise product."
+    },
+    {
+      "id": "conflict_retention",
+      "query": "现在审计记录究竟保留 36 个月还是 47 个月？",
+      "category": "conflicting_sources",
+      "answerable": true,
+      "relevance": {"security/retention-current.md": 3, "security/retention-legacy.md": 1},
+      "must_not_retrieve": [],
+      "notes": "Current authoritative policy should rank before retired policy."
+    },
+    {
+      "id": "conflict_sla",
+      "query": "当前企业版 SLA 是 99.9% 还是 99.95%？",
+      "category": "conflicting_sources",
+      "answerable": true,
+      "relevance": {"reliability/sla-current.md": 3, "reliability/sla-legacy.md": 1},
+      "must_not_retrieve": [],
+      "notes": "Current SLA should rank before the archived commitment."
+    },
+    {
+      "id": "conflict_refund",
+      "query": "当前退款期限是 7 天还是以前活动里的 14 天？",
+      "category": "conflicting_sources",
+      "answerable": true,
+      "relevance": {"policies/refund-current.md": 3, "policies/refund-legacy.md": 1},
+      "must_not_retrieve": [],
+      "notes": "Current refund policy should outrank the retired promotion."
+    }
+  ]
+}

@@ -1662,18 +1662,26 @@ git diff --check
 
 ```bash
 .venv/bin/python evals/run_evals.py
+.venv/bin/python evals/run_rag_evals.py
 .venv/bin/python evals/run_trajectory_evals.py
 .venv/bin/python evals/run_memory_evals.py
 ```
 
-三个套件分别回答不同问题：`run_evals.py` 是 L0 管道回归与 RAG 检索门槛；
+四个套件分别回答不同问题：`run_evals.py` 是 L0 管道回归与小型 RAG 检索门槛；
+`run_rag_evals.py` 是独立的 30 条分级 RAG 试标集，按文件去重后报告
+K=1/3/5/10 的 Recall、Precision、Core MRR、NDCG、Hit Rate，以及 hard negative、
+无答案、冲突资料和检索 p50/p95。它默认只诊断，标注复核稳定前不会用草案门槛阻断；
+显式传 `--enforce-gates` 才执行门槛。`--profile current` 会读取当前 chunk、embedding、
+RRF 和 reranker 参数，但强制用临时内存索引，避免污染持久 VectorStore。
 `run_trajectory_evals.py` 是 L1 轨迹评测，用约束（必须/禁止出现的工具、偏序、
 步数上限）而不是标准答案判定过程。工具调用按 proposed / accepted / executed /
 succeeded / failed / suppressed / denied / pending approval 分层；只有能按 `call_id`
 关联到真实 `ToolResult` 的调用才算 executed。无效动作率按“实际执行的精确重复 +
 被抑制调用”除以“实际执行 + 被抑制”计算；没有分母时显示 `n/a`。
 `run_memory_evals.py` 是项目记忆质量门槛。
-三者都跑在 fake provider 上，通过率不能当作答案质量证据。
+30 条 RAG pilot 是虚构 AuroraDesk 知识库上的用户风格问题，不是真实生产查询或正式
+holdout；其分数只能作为当前检索设置的起始基线。离线 Agent 套件使用 fake provider，
+通过率不能当作最终答案质量证据。
 
 同一套 L1 还能在应用内对着**已注册的真实模型**跑，入口是前端"评测"页：选一个
 已注册的 Provider + Model 点运行，页面展示调用生命周期、三项引用指标、Token/耗时、

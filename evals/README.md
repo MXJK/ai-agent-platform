@@ -30,6 +30,31 @@ quality gates; a metric below its configured threshold makes the command fail.
 The corpus includes multi-document recall, an exact-token lexical rescue,
 a hard negative, and an empty-knowledge-base/no-evidence case.
 
+## Graded RAG pilot diagnostics
+
+```bash
+.venv/bin/python evals/run_rag_evals.py
+.venv/bin/python evals/run_rag_evals.py --profile current
+```
+
+`rag_cases.json` is a versioned 30-case pilot for checking the annotation
+contract before collecting a 100–300 query dataset from sanitized real usage.
+It uses 0–3 file relevance, exact category quotas, and a fixed synthetic
+AuroraDesk snapshot. Rankings collapse repeated chunks from the same file.
+
+- Recall, precision, and hit rate treat grades 2–3 as relevant.
+- Core MRR uses the first grade-3 document.
+- NDCG preserves all graded judgements with exponential gain.
+- Hard-negative violations, non-empty unanswerable searches, conflict-source
+  preference, and search p50/p95 are reported separately.
+
+The default deterministic profile fixes local hashing, chunk 800/overlap 120,
+recall 20, lexical weight 0.35, RRF k=60, no reranker, and an in-memory index.
+`--profile current` reads the current retrieval settings but still forces an
+isolated in-memory index. Draft quality gates are diagnostic unless
+`--enforce-gates` is passed. This corpus is synthetic pilot data, not production
+traffic, a final holdout, Prompt-cost evidence, or answer-quality evidence.
+
 ## L1 trajectory evals
 
 ```bash

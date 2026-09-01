@@ -12,7 +12,9 @@ from ai_agent_platform.integrations.rag.errors import (
     RAGValidationError,
 )
 from ai_agent_platform.integrations.rag.evaluation import (
+    GradedRetrievalMetrics,
     RetrievalMetrics,
+    evaluate_graded_retrieval,
     evaluate_retrieval,
 )
 from ai_agent_platform.integrations.rag.models import (
@@ -59,6 +61,7 @@ __all__ = [
     "IndexJob",
     "IndexJobStore",
     "GeminiEmbeddingProvider",
+    "GradedRetrievalMetrics",
     "HashingEmbeddingProvider",
     "InMemoryVectorStore",
     "IngestedDocument",
@@ -87,5 +90,6 @@ __all__ = [
     "TextDocumentParser",
     "VectorStore",
     "create_rag_service",
+    "evaluate_graded_retrieval",
     "evaluate_retrieval",
 ]
