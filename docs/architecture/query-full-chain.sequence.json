@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "用户输入 Query 后的完整链路",
+    "locale": "zh-CN",
+    "output": "docs/architecture/query-full-chain.html",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1500, 820]
+  },
+  "participants": [
+    { "id": "user", "type": "external", "label": "用户" },
+    { "id": "frontend", "type": "frontend", "label": "Web UI" },
+    { "id": "api", "type": "backend", "label": "FastAPI" },
+    { "id": "queryService", "type": "backend", "label": "QueryService" },
+    { "id": "store", "type": "database", "label": "状态存储" },
+    { "id": "worker", "type": "messagebus", "label": "队列与 Worker" },
+    { "id": "graph", "type": "backend", "label": "LangGraph" },
+    { "id": "tools", "type": "security", "label": "工具运行时" },
+    { "id": "provider", "type": "cloud", "label": "LLM Provider" }
+  ],
+  "segments": [
+    { "from": 150, "to": 326, "label": "接收 Query 并冻结 Run" },
+    { "from": 340, "to": 570, "label": "后台 Agent 执行" },
+    { "from": 584, "to": 754, "label": "可恢复事件流与交互" }
+  ],
+  "messages": [
+    { "id": "enterQuery", "from": "user", "to": "frontend", "y": 180, "label": "输入 Query 并发送", "variant": "emphasis" },
+    { "id": "createRun", "from": "frontend", "to": "api", "y": 214, "label": "POST /agent/runs", "variant": "emphasis", "note": "携带 conversation、workspace、model、skill 与 focus files" },
+    { "id": "buildParams", "from": "api", "to": "queryService", "y": 248, "label": "QueryParams + QueryCommand.START", "variant": "default" },
+    { "id": "freezeAndPersist", "from": "queryService", "to": "store", "y": 282, "label": "冻结快照与工具池；事务写入 message + queued Run + event", "variant": "security", "note": "固定身份、执行根、受控历史、模型选择、权限与 EffectiveToolPool" },
+    { "id": "enqueueRun", "from": "queryService", "to": "worker", "y": 316, "label": "投递 allowlisted agent_run(run_id)", "variant": "emphasis" },
+    { "id": "accepted", "from": "api", "to": "frontend", "y": 354, "label": "202 + run_id；打开 cursor SSE", "variant": "return" },
+    { "id": "restoreRun", "from": "worker", "to": "store", "y": 388, "label": "读取 Run；校验执行根、工具池与 checkpoint", "variant": "security" },
+    { "id": "invokeGraph", "from": "worker", "to": "graph", "y": 422, "label": "恢复状态并启动 / 续跑 LangGraph", "variant": "emphasis" },
+    { "id": "loadContext", "from": "graph", "to": "tools", "y": 456, "label": "加载 AGENTS；检索 repo / RAG / Memory；执行受控工具", "variant": "security" },
+    { "id": "returnEvidence", "from": "tools", "to": "graph", "y": 490, "label": "证据 + ToolResult / Error / Artifact 回灌", "variant": "return" },
+    { "id": "plan", "from": "graph", "to": "provider", "y": 524, "label": "计量有界上下文后请求分类 / 规划 / 回答", "variant": "emphasis" },
+    { "id": "decide", "from": "provider", "to": "graph", "y": 558, "label": "tool calls 或 final；必要时闭环", "variant": "return" },
+    { "id": "suspend", "from": "graph", "to": "store", "y": 598, "label": "可选：审批 / 追问 / 暂停；从同一 checkpoint 恢复", "variant": "dashed", "note": "approve、continue、steer、pause、cancel 都在安全边界生效" },
+    { "id": "persistFinal", "from": "graph", "to": "store", "y": 632, "label": "追加 answer / usage；保存终态 Run、checkpoint、ChangeSet", "variant": "emphasis" },
+    { "id": "readEvents", "from": "store", "to": "api", "y": 666, "label": "按 sequence 读取 cursor 后的 append-only events", "variant": "return" },
+    { "id": "streamEvents", "from": "api", "to": "frontend", "y": 700, "label": "SSE：activity / tool / answer_delta / usage / final", "variant": "emphasis" },
+    { "id": "renderResult", "from": "frontend", "to": "user", "y": 734, "label": "去重归约并渲染；断流才轮询 Run / events", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "frontend", "from": 174, "to": 748, "type": "frontend" },
+    { "participant": "api", "from": 208, "to": 714, "type": "backend" },
+    { "participant": "queryService", "from": 242, "to": 322, "type": "backend" },
+    { "participant": "worker", "from": 310, "to": 644, "type": "messagebus" },
+    { "participant": "graph", "from": 416, "to": 644, "type": "backend" },
+    { "participant": "tools", "from": 450, "to": 496, "type": "security" },
+    { "participant": "provider", "from": 518, "to": 564, "type": "cloud" },
+    { "participant": "store", "from": 276, "to": 678, "type": "database" }
+  ]
+}
