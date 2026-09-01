@@ -105,6 +105,73 @@ class ProviderModelDiscoveryTests(unittest.TestCase):
         self.assertEqual([item.model for item in google], ["gemini-3.5-flash"])
         self.assertEqual(google[0].context_window_tokens, 1_000_000)
 
+    def test_domestic_provider_catalogs_are_normalized(self) -> None:
+        payloads = {
+            "open.bigmodel.cn": {
+                "data": [
+                    {"id": "glm-4.6"},
+                    {"id": "glm-4.5-air"},
+                    {"id": "cogview-4"},
+                    {"id": "embedding-3"},
+                ]
+            },
+            "api.minimaxi.com": {
+                "data": [
+                    {"id": "MiniMax-M2"},
+                    {"id": "abab6.5s-chat"},
+                    {"id": "speech-02-hd"},
+                ]
+            },
+            "ark.cn-beijing.volces.com": {
+                "data": [
+                    {"id": "Doubao-Seed-Evolving"},
+                    {"id": "doubao-seed-2.1-turbo"},
+                    {"id": "doubao-seed-2.0-lite"},
+                    {"id": "doubao-seed-1-6-250615"},
+                    {"id": "doubao-embedding"},
+                ]
+            },
+        }
+        calls = []
+
+        def get_json(url, headers, params):
+            calls.append((url, headers))
+            return next(value for host, value in payloads.items() if host in url)
+
+        discovery = ProviderModelDiscovery(json_getter=get_json)
+
+        glm = discovery.discover("glm", "secret")
+        minimax = discovery.discover("minimax", "secret")
+        doubao = discovery.discover("doubao", "secret")
+
+        self.assertEqual([item.model for item in glm], ["glm-4.5-air", "glm-4.6"])
+        self.assertEqual(glm[1].display_name, "GLM 4.6")
+        self.assertEqual([item.model for item in minimax], ["abab6.5s-chat", "MiniMax-M2"])
+        self.assertEqual(minimax[1].display_name, "MiniMax M2")
+        self.assertEqual(
+            [item.model for item in doubao],
+            [
+                "doubao-seed-2.0-lite",
+                "doubao-seed-2.1-turbo",
+                "doubao-seed-evolving",
+            ],
+        )
+        self.assertEqual(doubao[0].display_name, "Doubao-Seed-2.0-lite")
+        self.assertEqual(doubao[0].context_window_tokens, 256_000)
+        self.assertEqual(doubao[0].max_output_tokens, 128_000)
+        self.assertEqual(doubao[2].context_window_tokens, 1_024_000)
+        self.assertEqual(doubao[2].max_output_tokens, 256_000)
+        self.assertTrue(all(item.tool_calling for item in doubao))
+        self.assertTrue(all(item.structured_output for item in doubao))
+        for url, headers in calls:
+            self.assertEqual(headers["Authorization"], "Bearer secret")
+        self.assertTrue(
+            all(
+                url.endswith("/models")
+                for url, _ in calls
+            )
+        )
+
     def test_unsupported_provider_error_does_not_echo_api_key(self) -> None:
         with self.assertRaises(ModelDiscoveryError) as raised:
             ProviderModelDiscovery().discover("unknown", "never-echo-this")

@@ -70,6 +70,19 @@ _LLM_TRANSPORT_ERROR_CODES = frozenset(
     }
 )
 
+# Providers speaking the OpenAI chat-completions wire format (SSE streaming,
+# native function tool calls, Bearer auth). DeepSeek shares this layer.
+OPENAI_CHAT_COMPLETION_ENDPOINTS: dict[str, str] = {
+    "deepseek": "https://api.deepseek.com/chat/completions",
+    "glm": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "minimax": "https://api.minimaxi.com/v1/chat/completions",
+    "doubao": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+}
+CHAT_COMPLETIONS_PROVIDERS = frozenset(OPENAI_CHAT_COMPLETION_ENDPOINTS)
+# Providers whose runtime availability depends on a configured credential.
+_CREDENTIAL_GATED_PROVIDERS = frozenset(
+    {"openai", "anthropic", "google"} | CHAT_COMPLETIONS_PROVIDERS
+)
 
 @dataclass(frozen=True)
 class LLMUsage:
@@ -1363,8 +1376,9 @@ class LLMClient:
                 disable_tool_calls=disable_tool_calls,
                 on_delta=on_delta,
             )
-        if candidate.provider == "deepseek":
-            return self._decide_deepseek_tools(
+        if candidate.provider in CHAT_COMPLETIONS_PROVIDERS:
+            return self._decide_chat_completions_tools(
+                candidate.provider,
                 messages,
                 tools,
                 aliases,
@@ -1644,36 +1658,78 @@ class LLMClient:
         disable_tool_calls: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
-        api_key = self._api_key("deepseek")
+        """Preserve the established DeepSeek adapter boundary."""
+        return self._decide_chat_completions_tools(
+            "deepseek",
+            messages,
+            tools,
+            aliases,
+            model,
+            max_output_tokens=max_output_tokens,
+            disable_tool_calls=disable_tool_calls,
+            on_delta=on_delta,
+        )
+
+    def _decide_chat_completions_tools(
+        self,
+        provider: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        aliases: dict[str, str],
+        model: str,
+        *,
+        max_output_tokens: int,
+        disable_tool_calls: bool = False,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> LLMToolDecision:
+        api_key = self._api_key(provider)
         if not api_key:
-            raise LLMProviderError("DeepSeek credential is not configured in model management")
+            raise LLMProviderError(
+                f"{provider} credential is not configured in model management"
+            )
         reverse_aliases = {
             registry_name: alias for alias, registry_name in aliases.items()
         }
         payload: dict[str, Any] = {
             "model": model,
-            "messages": _deepseek_tool_messages(messages, reverse_aliases),
+            "messages": _deepseek_tool_messages(
+                messages,
+                reverse_aliases,
+                provider=provider,
+            ),
             "max_tokens": max_output_tokens,
             "stream": False,
         }
-        if tools:
-            payload.update({
-                "tools": [
+        if provider == "minimax":
+            # MiniMax otherwise embeds private thinking in the public content
+            # field. Its split format keeps reasoning out of answer deltas and
+            # makes the complete assistant message replayable on tool turns.
+            payload["reasoning_split"] = True
+        request_tools = (
+            tools
+            if not disable_tool_calls or provider == "deepseek"
+            else []
+        )
+        if request_tools:
+            payload.update(
                 {
-                    "type": "function",
-                    "function": {
-                        "name": reverse_aliases[spec.name],
-                        "description": spec.description,
-                        "parameters": spec.input_schema,
-                    },
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": reverse_aliases[spec.name],
+                                "description": spec.description,
+                                "parameters": spec.input_schema,
+                            },
+                        }
+                        for spec in request_tools
+                    ],
+                    "tool_choice": "none" if disable_tool_calls else "auto",
                 }
-                for spec in tools
-                ],
-                "tool_choice": "none" if disable_tool_calls else "auto",
-            })
+            )
         body = self._native_tool_response(
-            "deepseek",
-            "https://api.deepseek.com/chat/completions",
+            provider,
+            OPENAI_CHAT_COMPLETION_ENDPOINTS[provider],
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -1688,10 +1744,7 @@ class LLMClient:
         finish_reason = str(
             first.get("finish_reason") or "stop"
         )
-        usage = _chat_usage_from_mapping(
-            body.get("usage"),
-            provider="deepseek",
-        )
+        usage = _chat_usage_from_mapping(body.get("usage"), provider=provider)
         calls: list[ToolCall] = []
         for item in message.get("tool_calls") or []:
             if not isinstance(item, dict):
@@ -1708,12 +1761,12 @@ class LLMClient:
                         finish_reason=finish_reason,
                         usage=usage,
                     ),
-                    source="deepseek_native",
+                    source=f"{provider}_native",
                 )
             )
         content_text = str(message.get("content") or "").strip()
         provider_items = [message] if message else []
-        if not calls:
+        if not calls and provider == "deepseek":
             dsh = _parse_dsh_tool_calls(content_text, aliases)
             if dsh is not None:
                 calls, content_text = dsh
@@ -1728,7 +1781,7 @@ class LLMClient:
             text=content_text,
             tool_calls=calls,
             model=str(body.get("model") or model),
-            provider="deepseek",
+            provider=provider,
             stop_reason=finish_reason,
             usage=usage,
             provider_items=provider_items,
@@ -1920,8 +1973,7 @@ class LLMClient:
                 candidate_trace.rank = None
             if (
                 candidate_trace.eligible
-                and config.provider
-                in {"openai", "deepseek", "anthropic", "google"}
+                and config.provider in _CREDENTIAL_GATED_PROVIDERS
                 and config.provider not in self._provider_adapters
                 and not self._api_key(config.provider)
             ):
@@ -1934,8 +1986,7 @@ class LLMClient:
             if (
                 self._is_model_available(config.provider, config.model)
                 and (
-                    config.provider
-                    not in {"openai", "deepseek", "anthropic", "google"}
+                    config.provider not in _CREDENTIAL_GATED_PROVIDERS
                     or config.provider in self._provider_adapters
                     or bool(self._api_key(config.provider))
                 )
@@ -2251,15 +2302,17 @@ class LLMClient:
                 sort_keys=True,
             )
             return _count_fake_text_tokens(serialized), "fake_lexical_tokenizer"
-        if provider == "deepseek":
-            if not self._api_key("deepseek"):
-                raise LLMProviderError("DeepSeek credential is not configured in model management")
+        if provider in CHAT_COMPLETIONS_PROVIDERS:
+            if not self._api_key(provider):
+                raise LLMProviderError(
+                    f"{provider} credential is not configured in model management"
+                )
             serialized = _join_any_message_text(messages) + json.dumps(
                 [spec.input_schema for spec in tools],
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            return _estimate_tokens(serialized), "deepseek_preflight_estimate"
+            return _estimate_tokens(serialized), f"{provider}_preflight_estimate"
         if provider == "openai":
             api_key = self._api_key("openai")
             if not api_key:
@@ -2497,12 +2550,14 @@ class LLMClient:
                     code="token_count_failed",
                 )
             return max(0, count), "openai_responses_input_tokens"
-        if provider == "deepseek":
-            if not self._api_key("deepseek"):
-                raise LLMProviderError("DeepSeek credential is not configured in model management")
+        if provider in CHAT_COMPLETIONS_PROVIDERS:
+            if not self._api_key(provider):
+                raise LLMProviderError(
+                    f"{provider} credential is not configured in model management"
+                )
             return (
                 _estimate_tokens(_join_message_text(messages)),
-                "deepseek_preflight_estimate",
+                f"{provider}_preflight_estimate",
             )
         if provider == "anthropic":
             api_key = self._api_key("anthropic")
@@ -2767,8 +2822,9 @@ class LLMClient:
                 model,
                 max_output_tokens=max_output_tokens,
             )
-        if provider == "deepseek":
-            return lambda messages: self._stream_deepseek(
+        if provider in CHAT_COMPLETIONS_PROVIDERS:
+            return lambda messages: self._stream_chat_completions(
+                provider,
                 messages,
                 model,
                 max_output_tokens=max_output_tokens,
@@ -2883,31 +2939,41 @@ class LLMClient:
             parser=_parse_anthropic_event,
         )
 
-    def _stream_deepseek(
+    def _stream_chat_completions(
         self,
+        provider: str,
         messages: list[dict[str, str]],
         model: str,
         *,
         max_output_tokens: int,
     ) -> Iterable[LLMStreamEvent]:
-        api_key = self._api_key("deepseek")
+        api_key = self._api_key(provider)
         if not api_key:
-            raise LLMProviderError("DeepSeek credential is not configured in model management")
+            raise LLMProviderError(
+                f"{provider} credential is not configured in model management"
+            )
         payload: dict[str, object] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_output_tokens,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
+        if provider == "minimax":
+            payload["reasoning_split"] = True
+        if provider == "deepseek":
+            payload["stream_options"] = {"include_usage": True}
         yield from self._stream_http_sse(
-            "https://api.deepseek.com/chat/completions",
+            OPENAI_CHAT_COMPLETION_ENDPOINTS[provider],
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             payload=payload,
-            parser=_parse_deepseek_event,
+            parser=lambda event_name, payload: _parse_chat_completion_event(
+                event_name,
+                payload,
+                provider=provider,
+            ),
         )
 
     def _stream_google(
@@ -3349,16 +3415,16 @@ def _parse_anthropic_event(
         raise LLMProviderError(_error_message(payload), retryable=True)
 
 
-def _parse_deepseek_event(
-    event_name: str, payload: dict[str, object]
+def _parse_chat_completion_event(
+    event_name: str,
+    payload: dict[str, object],
+    *,
+    provider: str,
 ) -> Iterable[LLMStreamEvent]:
     error = payload.get("error")
     if error:
         raise LLMProviderError(_error_message(payload), retryable=False)
-    usage = _chat_usage_from_mapping(
-        payload.get("usage"),
-        provider="deepseek",
-    )
+    usage = _chat_usage_from_mapping(payload.get("usage"), provider=provider)
     if usage is not None:
         yield LLMStreamEvent(type="usage", usage=usage)
     choices = payload.get("choices")
@@ -3372,6 +3438,18 @@ def _parse_deepseek_event(
             text = delta.get("content")
             if isinstance(text, str) and text:
                 yield LLMStreamEvent(type="delta", text=text)
+
+
+def _parse_deepseek_event(
+    event_name: str, payload: dict[str, object]
+) -> Iterable[LLMStreamEvent]:
+    """Backward-compatible parser entry point used by focused tests."""
+
+    yield from _parse_chat_completion_event(
+        event_name,
+        payload,
+        provider="deepseek",
+    )
 
 
 def _google_contents(messages: list[dict[str, str]], types: Any) -> list[Any]:
@@ -3968,6 +4046,8 @@ def _anthropic_tool_messages(
 def _deepseek_tool_messages(
     messages: list[dict[str, Any]],
     reverse_aliases: dict[str, str],
+    *,
+    provider: str = "deepseek",
 ) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for message in messages:
@@ -3987,7 +4067,10 @@ def _deepseek_tool_messages(
             continue
         if role not in {"system", "user", "assistant"}:
             continue
-        if role == "assistant" and message.get("provider") == "deepseek":
+        if (
+            role == "assistant"
+            and message.get("provider") == provider
+        ):
             provider_items = message.get("provider_items")
             if isinstance(provider_items, list) and provider_items:
                 converted.extend(
@@ -4019,7 +4102,7 @@ def _deepseek_tool_messages(
             )
         if tool_calls:
             item["tool_calls"] = tool_calls
-            if role == "assistant":
+            if role == "assistant" and provider == "deepseek":
                 # DeepSeek thinking models validate every assistant tool-call
                 # turn in the replayed history. Runtime-synthesized turns have
                 # no private reasoning to preserve, but must still carry the

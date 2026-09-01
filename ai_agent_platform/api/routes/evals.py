@@ -27,7 +27,16 @@ from ai_agent_platform.schemas.evals import (
 
 
 SUPPORTED_PROVIDERS = frozenset(
-    {"anthropic", "deepseek", "fake", "google", "openai"}
+    {
+        "anthropic",
+        "deepseek",
+        "doubao",
+        "fake",
+        "glm",
+        "google",
+        "minimax",
+        "openai",
+    }
 )
 
 

@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any, Callable, Iterable
 
 from ai_agent_platform.integrations.llm import (
+    CHAT_COMPLETIONS_PROVIDERS,
     LLMProviderError,
     LLMStreamEvent,
     _chat_usage_from_mapping,
@@ -48,8 +49,8 @@ class NativeStreamAccumulator:
             self._openai(kind, payload)
         elif self.provider == "anthropic":
             self._anthropic(kind, payload)
-        else:
-            self._deepseek(payload)
+        elif self.provider in CHAT_COMPLETIONS_PROVIDERS:
+            self._chat_completions(payload)
         # The HTTP SSE transport owns framing; this accumulator owns completion.
         return ()
 
@@ -108,7 +109,7 @@ class NativeStreamAccumulator:
         elif kind == "message_stop":
             self.finished = bool(self.body.get("stop_reason"))
 
-    def _deepseek(self, payload: dict[str, Any]) -> None:
+    def _chat_completions(self, payload: dict[str, Any]) -> None:
         if payload.get("model"):
             self.body["model"] = payload["model"]
         if payload.get("usage") is not None:
@@ -127,6 +128,7 @@ class NativeStreamAccumulator:
                     message[field] = message.get(field, "") + text
                     if field == "content":
                         self._text(text)
+            self._reasoning_details(message, delta.get("reasoning_details"))
             for call in delta.get("tool_calls") or []:
                 index = int(call["index"])
                 target = self.blocks.setdefault(
@@ -147,11 +149,57 @@ class NativeStreamAccumulator:
                 self.body["finish_reason"] = choice["finish_reason"]
                 self.finished = True
 
+    @staticmethod
+    def _reasoning_details(message: dict[str, Any], value: Any) -> None:
+        """Merge MiniMax split-reasoning deltas without publishing them."""
+
+        if not isinstance(value, list):
+            return
+        details = message.setdefault("reasoning_details", [])
+        if not isinstance(details, list):
+            details = []
+            message["reasoning_details"] = details
+        for position, raw in enumerate(value):
+            if not isinstance(raw, dict):
+                continue
+            raw_index = raw.get("index", position)
+            target = next(
+                (
+                    item
+                    for item in details
+                    if isinstance(item, dict)
+                    and (
+                        item.get("index") == raw_index
+                        or (
+                            raw.get("id")
+                            and item.get("id") == raw.get("id")
+                        )
+                    )
+                ),
+                None,
+            )
+            if target is None:
+                target = {}
+                details.append(target)
+            for key, item_value in raw.items():
+                if key == "text" and isinstance(item_value, str):
+                    current = str(target.get("text") or "")
+                    target["text"] = (
+                        item_value
+                        if item_value.startswith(current)
+                        else current + item_value
+                    )
+                else:
+                    target[key] = deepcopy(item_value)
+
     def result(self) -> dict[str, Any]:
         if not self.finished:
             usage = (
-                _chat_usage_from_mapping(self.body.get("usage"))
-                if self.provider == "deepseek"
+                _chat_usage_from_mapping(
+                    self.body.get("usage"),
+                    provider=self.provider,
+                )
+                if self.provider in CHAT_COMPLETIONS_PROVIDERS
                 else _usage_from_mapping(self.body.get("usage"))
             )
             raise LLMProviderError(
@@ -170,7 +218,7 @@ class NativeStreamAccumulator:
             self.body["content"] = [
                 self.blocks[index] for index in sorted(self.blocks)
             ]
-        elif self.provider == "deepseek":
+        elif self.provider in CHAT_COMPLETIONS_PROVIDERS:
             message = self.body.pop("message", {})
             if self.blocks:
                 message["tool_calls"] = [

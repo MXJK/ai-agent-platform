@@ -333,7 +333,16 @@ class Settings:
         _require_choice(
             "llm_provider",
             self.llm_provider,
-            {"anthropic", "deepseek", "fake", "google", "openai"},
+            {
+                "anthropic",
+                "deepseek",
+                "doubao",
+                "fake",
+                "glm",
+                "google",
+                "minimax",
+                "openai",
+            },
         )
         _require_choice(
             "embedding_provider",
@@ -387,7 +396,16 @@ class Settings:
             _require_choice(
                 "token_budget_fallback_provider",
                 self.token_budget_fallback_provider,
-                {"anthropic", "deepseek", "fake", "google", "openai"},
+                {
+                    "anthropic",
+                    "deepseek",
+                    "doubao",
+                    "fake",
+                    "glm",
+                    "google",
+                    "minimax",
+                    "openai",
+                },
             )
         for name, value in (
             ("session_repository", self.session_repository),

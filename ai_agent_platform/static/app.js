@@ -3379,6 +3379,9 @@ const MODEL_PROVIDERS = [
   ["deepseek", "DeepSeek"],
   ["anthropic", "Anthropic"],
   ["google", "Google"],
+  ["glm", "智谱 GLM"],
+  ["minimax", "MiniMax"],
+  ["doubao", "豆包 · 火山方舟"],
 ];
 
 const ROUTING_POLICY_LABELS = {
@@ -4228,14 +4231,21 @@ function selectedDiscoveredModel() {
 function renderDiscoveredModels() {
   const select = $("discovered-model-select");
   const summary = $("discovered-model-summary");
+  const manualInput = $("manual-model-id-input");
   const models = state.modelDiscovery.models || [];
+  const doubaoRestricted = state.modelDiscovery.provider === "doubao";
+  manualInput.placeholder = doubaoRestricted
+    ? "仅支持 doubao-seed-evolving / doubao-seed-2.1-turbo / doubao-seed-2.0-lite"
+    : "例如 gpt-5-mini";
   const selectable = models.filter((item) => !item.already_registered);
   select.disabled = state.modelDiscovery.loading || !selectable.length;
   select.innerHTML = state.modelDiscovery.loading
     ? '<option value="">正在发现模型…</option>'
     : models.length
       ? models.map((item) => `<option value="${escapeHtml(item.model)}" ${item.already_registered ? "disabled" : ""}>${escapeHtml(item.display_name)} · ${escapeHtml(item.model)}${item.already_registered ? " · 已注册" : ""}</option>`).join("")
-      : '<option value="">暂无已发现模型，可使用下方手动兜底</option>';
+      : doubaoRestricted
+        ? '<option value="">未发现受支持的豆包模型，可手动填写白名单模型 ID</option>'
+        : '<option value="">暂无已发现模型，可使用下方手动兜底</option>';
   if (selectable.length) select.value = selectable[0].model;
   const selected = selectedDiscoveredModel();
   if (!selected) {
@@ -4277,8 +4287,9 @@ function resetRegisteredModelForm() {
   $("manual-model-id-input").value = "";
   $("registered-model-enabled-input").checked = true;
   $("registered-model-auto-input").checked = true;
+  const provider = $("registered-model-provider-input").value;
   $("registered-model-output-limit-input").value = (
-    $("registered-model-provider-input").value === "deepseek" ? "8192" : "16384"
+    provider === "deepseek" || provider === "glm" ? "8192" : "16384"
   );
 }
 

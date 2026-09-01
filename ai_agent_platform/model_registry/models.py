@@ -7,11 +7,20 @@ from datetime import datetime
 from typing import Literal
 
 
-ProviderKind = Literal["anthropic", "deepseek", "fake", "google", "openai"]
+ProviderKind = Literal[
+    "anthropic",
+    "deepseek",
+    "doubao",
+    "fake",
+    "glm",
+    "google",
+    "minimax",
+    "openai",
+]
 SelectionMode = Literal["auto", "manual"]
 SelectionPolicy = Literal["smart", "quality", "cost", "latency"]
 
-REAL_PROVIDERS = {"anthropic", "deepseek", "google", "openai"}
+REAL_PROVIDERS = {"anthropic", "deepseek", "doubao", "glm", "google", "minimax", "openai"}
 SUPPORTED_PROVIDERS = REAL_PROVIDERS | {"fake"}
 
 

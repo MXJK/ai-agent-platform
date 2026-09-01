@@ -540,6 +540,186 @@ class NativeProviderMappingTests(unittest.TestCase):
 
         self.assertEqual(payloads[0]["max_tokens"], 3_072)
 
+    def test_glm_native_tool_decision_uses_chat_completions_layer(self) -> None:
+        router = ModelRouter(
+            [
+                ModelConfig(
+                    provider="glm",
+                    model="glm-4.6",
+                    context_window_tokens=128_000,
+                    max_output_tokens=8_192,
+                    capabilities=ModelCapabilities(
+                        tool_calling=True,
+                        structured_output=True,
+                    ),
+                )
+            ]
+        )
+        client = LLMClient(
+            Settings(llm_provider="glm", llm_model="glm-4.6"),
+            model_router=router,
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "glm" else None
+            ),
+        )
+        requests: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+        def fake_post(url, *, headers, payload):
+            requests.append((url, headers, payload))
+            return {
+                "model": "glm-4.6",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "glm_call_1",
+                                    "function": {
+                                        "name": "repo_read_file",
+                                        "arguments": '{"path": "README.md"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 12},
+            }
+
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            decision = client.decide_tools(
+                [{"role": "user", "content": "read the readme"}],
+                [_tool_spec("repo.read_file")],
+                max_output_tokens=8_192,
+            )
+
+        self.assertEqual(decision.provider, "glm")
+        self.assertEqual(decision.model, "glm-4.6")
+        self.assertEqual(decision.stop_reason, "tool_calls")
+        self.assertEqual(len(requests), 1)
+        url, headers, payload = requests[0]
+        self.assertEqual(
+            url, "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        )
+        self.assertEqual(headers["Authorization"], "Bearer test-key")
+        self.assertEqual(payload["model"], "glm-4.6")
+        call = decision.tool_calls[0]
+        self.assertEqual(call.call_id, "glm_call_1")
+        self.assertEqual(call.name, "repo.read_file")
+        self.assertEqual(call.arguments, {"path": "README.md"})
+        self.assertEqual(call.source, "glm_native")
+        assert decision.usage is not None
+        self.assertEqual(decision.usage.input_tokens, 30)
+        self.assertEqual(decision.usage.output_tokens, 12)
+        # The replayed assistant turn keeps the raw chat-completions message.
+        replayed = _deepseek_tool_messages(
+            [
+                {"role": "user", "content": "read the readme"},
+                {
+                    "role": "assistant",
+                    "provider": "glm",
+                    "content": decision.text,
+                    "tool_calls": [
+                        {
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        }
+                    ],
+                    "provider_items": decision.provider_items,
+                },
+                {
+                    "role": "tool",
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "content": {"ok": True},
+                },
+            ],
+            {"repo.read_file": "repo_read_file"},
+            provider="glm",
+        )
+        self.assertEqual(replayed[1]["tool_calls"][0]["id"], "glm_call_1")
+        self.assertEqual(replayed[1]["tool_calls"][0]["function"]["name"], "repo_read_file")
+        self.assertEqual(replayed[-1]["tool_call_id"], "glm_call_1")
+
+    def test_domestic_finalize_omits_unsupported_tool_choice_none(self) -> None:
+        for provider in ("glm", "minimax", "doubao"):
+            with self.subTest(provider=provider):
+                client = LLMClient(
+                    Settings(llm_provider=provider, llm_model=f"{provider}-test"),
+                    credential_resolver=lambda item, expected=provider: (
+                        "test-key" if item == expected else None
+                    ),
+                )
+                with patch.object(
+                    client,
+                    "_native_tool_response",
+                    return_value={
+                        "model": f"{provider}-test",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {"content": "done"},
+                            }
+                        ],
+                    },
+                ) as request:
+                    decision = client._decide_chat_completions_tools(
+                        provider,
+                        [{"role": "user", "content": "finish"}],
+                        [_tool_spec("repo.read_file")],
+                        {"repo_read_file": "repo.read_file"},
+                        f"{provider}-test",
+                        max_output_tokens=1_024,
+                        disable_tool_calls=True,
+                    )
+
+                self.assertEqual(decision.text, "done")
+                payload = request.call_args.kwargs["payload"]
+                self.assertNotIn("tools", payload)
+                self.assertNotIn("tool_choice", payload)
+                if provider == "minimax":
+                    self.assertIs(payload["reasoning_split"], True)
+
+    def test_chat_completion_history_does_not_leak_provider_private_fields(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "provider": "minimax",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "call_id": "call_1",
+                        "name": "repo.read_file",
+                        "arguments": {"path": "README.md"},
+                    }
+                ],
+                "provider_items": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_details": [{"text": "private"}],
+                        "tool_calls": [],
+                    }
+                ],
+            }
+        ]
+        aliases = {"repo.read_file": "repo_read_file"}
+
+        minimax = _deepseek_tool_messages(
+            messages,
+            aliases,
+            provider="minimax",
+        )
+        glm = _deepseek_tool_messages(messages, aliases, provider="glm")
+
+        self.assertIn("reasoning_details", minimax[0])
+        self.assertNotIn("reasoning_details", glm[0])
+        self.assertNotIn("reasoning_content", glm[0])
+        self.assertEqual(glm[0]["tool_calls"][0]["id"], "call_1")
+
     def test_google_converts_foreign_tool_history_to_text_without_signatures(self) -> None:
         contents = _google_tool_contents(
             [
@@ -1825,6 +2005,66 @@ class NativeAnswerStreamingTests(unittest.TestCase):
                 self.assertEqual(decision.tool_calls[0].name, "repo.read_file")
                 self.assertEqual(decision.tool_calls[0].arguments, {"path": "README.md"})
                 self.assertIn("opaque" if provider != "deepseek" else "private", json.dumps(decision.provider_items))
+
+    def test_minimax_native_stream_keeps_split_reasoning_private_and_replayable(self):
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "private ",
+                            "reasoning_details": [
+                                {
+                                    "type": "reasoning.text",
+                                    "id": "reasoning-1",
+                                    "index": 0,
+                                    "text": "private ",
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "thought",
+                            "reasoning_details": [
+                                {
+                                    "id": "reasoning-1",
+                                    "index": 0,
+                                    "text": "thought",
+                                }
+                            ],
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c1",
+                                    "function": {
+                                        "name": "repo_read_file",
+                                        "arguments": '{"path":"README.md"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ]
+
+        decision, deltas, payload = self._http_turn("minimax", events)
+
+        self.assertEqual(deltas, [])
+        self.assertIs(payload["reasoning_split"], True)
+        message = decision.provider_items[0]
+        self.assertEqual(message["reasoning_content"], "private thought")
+        self.assertEqual(
+            message["reasoning_details"][0]["text"],
+            "private thought",
+        )
+        self.assertEqual(decision.tool_calls[0].call_id, "c1")
 
     def test_partial_stream_failure_is_not_retried_or_switched(self):
         client = self._client("deepseek")

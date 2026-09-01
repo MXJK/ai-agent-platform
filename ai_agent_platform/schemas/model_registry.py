@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
-ProviderName = Literal["openai", "deepseek", "anthropic", "google"]
+ProviderName = Literal["openai", "deepseek", "anthropic", "google", "glm", "minimax", "doubao"]
 RoutingPolicyName = Literal["smart", "quality", "cost", "latency"]
 
 

@@ -22,6 +22,34 @@ class DiscoveredModel:
     structured_output: bool | None = None
 
 
+DOUBAO_MODEL_CATALOG = {
+    "doubao-seed-evolving": DiscoveredModel(
+        model="doubao-seed-evolving",
+        display_name="Doubao-Seed-Evolving",
+        context_window_tokens=1_024_000,
+        max_output_tokens=256_000,
+        tool_calling=True,
+        structured_output=True,
+    ),
+    "doubao-seed-2.1-turbo": DiscoveredModel(
+        model="doubao-seed-2.1-turbo",
+        display_name="Doubao-Seed-2.1-turbo",
+        context_window_tokens=256_000,
+        max_output_tokens=256_000,
+        tool_calling=True,
+        structured_output=True,
+    ),
+    "doubao-seed-2.0-lite": DiscoveredModel(
+        model="doubao-seed-2.0-lite",
+        display_name="Doubao-Seed-2.0-lite",
+        context_window_tokens=256_000,
+        max_output_tokens=128_000,
+        tool_calling=True,
+        structured_output=True,
+    ),
+}
+
+
 JsonGetter = Callable[
     [str, Mapping[str, str], Mapping[str, str | int]],
     Mapping[str, Any],
@@ -59,6 +87,27 @@ class ProviderModelDiscovery:
         elif provider == "deepseek":
             payload = self._json_getter(
                 "https://api.deepseek.com/models",
+                {"Authorization": f"Bearer {api_key}"},
+                {},
+            )
+            models = _parse_openai_compatible_models(payload, provider=provider)
+        elif provider == "glm":
+            payload = self._json_getter(
+                "https://open.bigmodel.cn/api/paas/v4/models",
+                {"Authorization": f"Bearer {api_key}"},
+                {},
+            )
+            models = _parse_openai_compatible_models(payload, provider=provider)
+        elif provider == "minimax":
+            payload = self._json_getter(
+                "https://api.minimaxi.com/v1/models",
+                {"Authorization": f"Bearer {api_key}"},
+                {},
+            )
+            models = _parse_openai_compatible_models(payload, provider=provider)
+        elif provider == "doubao":
+            payload = self._json_getter(
+                "https://ark.cn-beijing.volces.com/api/v3/models",
                 {"Authorization": f"Bearer {api_key}"},
                 {},
             )
@@ -134,6 +183,9 @@ def _parse_openai_compatible_models(
             continue
         model_id = str(raw.get("id", "")).strip()
         if not model_id or not _is_text_generation_model(provider, model_id):
+            continue
+        if provider == "doubao":
+            models.append(DOUBAO_MODEL_CATALOG[model_id.lower()])
             continue
         models.append(
             DiscoveredModel(
@@ -215,9 +267,15 @@ def _parse_google_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, .
 def _is_text_generation_model(provider: str, model_id: str) -> bool:
     if _has_non_text_marker(model_id):
         return False
-    if provider == "deepseek":
-        return model_id.lower().startswith("deepseek-")
     value = model_id.lower()
+    if provider == "deepseek":
+        return value.startswith("deepseek-")
+    if provider == "glm":
+        return value.startswith("glm-")
+    if provider == "doubao":
+        return value in DOUBAO_MODEL_CATALOG
+    if provider == "minimax":
+        return value.startswith(("minimax-", "abab"))
     if value.startswith("ft:"):
         value = value[3:]
     return value.startswith(("chatgpt-", "codex-", "gpt-")) or (
@@ -249,7 +307,10 @@ def _humanize_model_id(model_id: str) -> str:
     aliases = {
         "ai": "AI",
         "api": "API",
+        "glm": "GLM",
         "gpt": "GPT",
+        "minimax": "MiniMax",
+        "doubao": "Doubao",
         "tts": "TTS",
     }
     return " ".join(aliases.get(word.lower(), word.title()) for word in words)

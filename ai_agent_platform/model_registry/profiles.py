@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .discovery import DiscoveredModel, _humanize_model_id
+from .discovery import DOUBAO_MODEL_CATALOG, DiscoveredModel, _humanize_model_id
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,9 @@ _PROVIDER_PRIORS = {
     "deepseek": (128_000, 8_192, 0.30, 1.20, 0.76, 1_000),
     "anthropic": (200_000, 16_384, 3.0, 15.0, 0.82, 1_300),
     "google": (1_000_000, 16_384, 0.50, 3.0, 0.78, 900),
+    "glm": (200_000, 8_192, 0.60, 2.20, 0.78, 1_100),
+    "minimax": (200_000, 16_384, 0.30, 1.20, 0.76, 1_000),
+    "doubao": (128_000, 16_384, 0.15, 0.60, 0.74, 900),
     "fake": (128_000, 4_096, 0.0, 0.0, 0.50, 10),
 }
 
@@ -39,6 +42,8 @@ def build_registration_profile(
     model: str,
     discovered: DiscoveredModel | None = None,
 ) -> ModelRegistrationProfile:
+    if discovered is None and provider == "doubao":
+        discovered = DOUBAO_MODEL_CATALOG.get(model)
     context, max_output, input_cost, output_cost, quality, latency = _PROVIDER_PRIORS.get(
         provider,
         (128_000, 8_192, 1.0, 4.0, 0.70, 1_200),
@@ -47,7 +52,7 @@ def build_registration_profile(
     quality_tier = "balanced"
     cost_tier = "standard"
 
-    if any(token in value for token in ("nano", "lite", "haiku")):
+    if any(token in value for token in ("nano", "lite", "haiku", "air")):
         quality = max(0.50, quality - 0.16)
         latency = max(350, int(latency * 0.55))
         input_cost *= 0.25

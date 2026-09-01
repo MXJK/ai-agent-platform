@@ -27,6 +27,7 @@ from .models import (
     SessionModelPreference,
 )
 from .discovery import (
+    DOUBAO_MODEL_CATALOG,
     DiscoveredModel,
     ModelDiscovery,
     ModelDiscoveryError,
@@ -138,23 +139,42 @@ class ModelRegistryService:
         existing = self._repository.get_connection(provider)
         secret_ref = existing.secret_ref if existing else None
         previous_secret_ref = secret_ref
-        if api_key is not None:
-            if not api_key.strip():
-                raise ValueError("API key must not be blank")
-            secret_ref = f"model-provider:{provider}"
-            normalized_api_key = api_key.strip()
-            self._secret_store.set(secret_ref, normalized_api_key)
-            if self._secret_store.get(secret_ref) != normalized_api_key:
-                raise SecretStoreError("stored API key could not be read back")
-        connection = ProviderConnection(
-            provider=provider,
-            display_name=display_name.strip() or _default_provider_name(provider),
-            secret_ref=secret_ref,
-            enabled=enabled,
-            created_at=existing.created_at if existing else now,
-            updated_at=now,
-        )
-        stored = self._repository.upsert_connection(connection)
+        secret_rollback: tuple[str, str | None] | None = None
+        try:
+            if api_key is not None:
+                if not api_key.strip():
+                    raise ValueError("API key must not be blank")
+                secret_ref = f"model-provider:{provider}"
+                normalized_api_key = api_key.strip()
+                secret_rollback = (
+                    secret_ref,
+                    self._secret_store.get(secret_ref),
+                )
+                self._secret_store.set(secret_ref, normalized_api_key)
+                if self._secret_store.get(secret_ref) != normalized_api_key:
+                    raise SecretStoreError("stored API key could not be read back")
+            connection = ProviderConnection(
+                provider=provider,
+                display_name=display_name.strip() or _default_provider_name(provider),
+                secret_ref=secret_ref,
+                enabled=enabled,
+                created_at=existing.created_at if existing else now,
+                updated_at=now,
+            )
+            stored = self._repository.upsert_connection(connection)
+        except Exception:
+            if secret_rollback is not None:
+                rollback_ref, previous_secret = secret_rollback
+                try:
+                    if previous_secret is None:
+                        self._secret_store.delete(rollback_ref)
+                    else:
+                        self._secret_store.set(rollback_ref, previous_secret)
+                except Exception as rollback_exc:
+                    raise SecretStoreError(
+                        "provider connection failed and API key rollback failed"
+                    ) from rollback_exc
+            raise
         if (
             api_key is not None
             and previous_secret_ref
@@ -226,6 +246,8 @@ class ModelRegistryService:
             raise ModelRegistryNotFoundError(provider)
         if not model:
             raise ValueError("model ID must not be blank")
+        if provider == "doubao" and model not in DOUBAO_MODEL_CATALOG:
+            raise ValueError(f"unsupported doubao model: {model}")
         discovered = self._discovered_models.get(provider, {}).get(model)
         profile = build_registration_profile(provider, model, discovered)
         return self.create_model(
@@ -1071,8 +1093,11 @@ def _default_provider_name(provider: str) -> str:
     return {
         "anthropic": "Anthropic",
         "deepseek": "DeepSeek",
+        "doubao": "Doubao",
         "fake": "Local Fake",
+        "glm": "Zhipu GLM",
         "google": "Google",
+        "minimax": "MiniMax",
         "openai": "OpenAI",
     }.get(provider, provider.title())
 

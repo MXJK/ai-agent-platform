@@ -85,6 +85,17 @@ class _RegisteredProviderAdapter:
         raise AssertionError("tool selection is not used by this chat test")
 
 
+class _FailingConnectionRepository(InMemoryModelRegistryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_connection_writes = False
+
+    def upsert_connection(self, connection: ProviderConnection) -> ProviderConnection:
+        if self.fail_connection_writes:
+            raise RuntimeError("database write failed")
+        return super().upsert_connection(connection)
+
+
 class ProviderSecretStoreTests(unittest.TestCase):
     def test_encrypted_file_store_survives_recreation_without_plaintext(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -213,8 +224,65 @@ class ModelRegistryServiceTests(unittest.TestCase):
         )
         self.assertEqual(created["status"], "unknown")
 
+    def test_new_provider_secret_is_removed_when_connection_write_fails(self) -> None:
+        repository = _FailingConnectionRepository()
+        repository.fail_connection_writes = True
+        service = ModelRegistryService(
+            repository,
+            self.secrets,
+            initial_models=[],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "database write failed"):
+            service.upsert_connection(
+                provider="glm",
+                display_name="Zhipu GLM",
+                api_key="new-secret",
+                enabled=True,
+            )
+
+        self.assertIsNone(self.secrets.get("model-provider:glm"))
+        self.assertIsNone(repository.get_connection("glm"))
+
+    def test_previous_provider_secret_is_restored_when_update_fails(self) -> None:
+        repository = _FailingConnectionRepository()
+        service = ModelRegistryService(
+            repository,
+            self.secrets,
+            initial_models=[],
+        )
+        service.upsert_connection(
+            provider="glm",
+            display_name="Zhipu GLM",
+            api_key="old-secret",
+            enabled=True,
+        )
+        repository.fail_connection_writes = True
+
+        with self.assertRaisesRegex(RuntimeError, "database write failed"):
+            service.upsert_connection(
+                provider="glm",
+                display_name="Zhipu GLM",
+                api_key="replacement-secret",
+                enabled=True,
+            )
+
+        self.assertEqual(
+            self.secrets.get("model-provider:glm"),
+            "old-secret",
+        )
+        self.assertEqual(repository.get_connection("glm").display_name, "Zhipu GLM")
+
     def test_all_real_provider_credentials_share_the_global_registry(self) -> None:
-        for provider in ("openai", "deepseek", "anthropic", "google"):
+        for provider in (
+            "openai",
+            "deepseek",
+            "anthropic",
+            "google",
+            "glm",
+            "minimax",
+            "doubao",
+        ):
             with self.subTest(provider=provider):
                 connection = self.service.upsert_connection(
                     provider=provider,
@@ -231,8 +299,92 @@ class ModelRegistryServiceTests(unittest.TestCase):
             if item["credential_configured"]
         }
         self.assertTrue(
-            {"openai", "deepseek", "anthropic", "google"}.issubset(configured)
+            {
+                "openai",
+                "deepseek",
+                "anthropic",
+                "google",
+                "glm",
+                "minimax",
+                "doubao",
+            }.issubset(configured)
         )
+
+    def test_domestic_provider_models_get_backend_priors(self) -> None:
+        for provider in ("glm", "minimax"):
+            with self.subTest(provider=provider):
+                self.service.upsert_connection(
+                    provider=provider,
+                    display_name=provider.title(),
+                    api_key=f"{provider}-secret",
+                    enabled=True,
+                )
+                created = self.service.register_model(
+                    provider=provider,
+                    model=f"{provider}-flagship",
+                )
+
+                self.assertTrue(created["enabled"])
+                self.assertTrue(created["capabilities"]["tool_calling"])
+                self.assertGreater(created["context_window_tokens"], 0)
+                self.assertGreater(created["input_cost_per_million"], 0)
+                self.assertGreater(created["configured_latency_ms"], 0)
+
+        glm_air = self.service.register_model(
+            provider="glm",
+            model="glm-4.5-air",
+        )
+        glm_flagship = next(
+            item
+            for item in self.service.list_models()
+            if item["provider"] == "glm" and item["model"] == "glm-flagship"
+        )
+        self.assertEqual(
+            glm_air["routing_metadata"]["quality_tier"], "efficient"
+        )
+        self.assertLess(
+            glm_air["quality_score"],
+            glm_flagship["quality_score"],
+        )
+        self.assertLess(
+            glm_air["input_cost_per_million"],
+            glm_flagship["input_cost_per_million"],
+        )
+
+    def test_doubao_registration_is_restricted_to_supported_aliases(self) -> None:
+        self.service.upsert_connection(
+            provider="doubao",
+            display_name="Doubao",
+            api_key="doubao-secret",
+            enabled=True,
+        )
+
+        evolving = self.service.register_model(
+            provider="doubao",
+            model="doubao-seed-evolving",
+        )
+        turbo = self.service.register_model(
+            provider="doubao",
+            model="doubao-seed-2.1-turbo",
+        )
+        lite = self.service.register_model(
+            provider="doubao",
+            model="doubao-seed-2.0-lite",
+        )
+
+        self.assertEqual(evolving["display_name"], "Doubao-Seed-Evolving")
+        self.assertEqual(evolving["context_window_tokens"], 1_024_000)
+        self.assertEqual(evolving["max_output_tokens"], 256_000)
+        self.assertEqual(turbo["context_window_tokens"], 256_000)
+        self.assertEqual(turbo["max_output_tokens"], 256_000)
+        self.assertEqual(lite["context_window_tokens"], 256_000)
+        self.assertEqual(lite["max_output_tokens"], 128_000)
+
+        with self.assertRaisesRegex(ValueError, "unsupported doubao model"):
+            self.service.register_model(
+                provider="doubao",
+                model="doubao-seed-1-6-250615",
+            )
 
     def test_manual_preference_fallback_and_agent_snapshot_are_stable(self) -> None:
         self.service.upsert_connection(

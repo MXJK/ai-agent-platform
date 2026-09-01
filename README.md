@@ -286,7 +286,8 @@ Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；�
 Chat 使用模型提供方的 SSE 用量；Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
 输入、输出、思考和总 Token。Agent 在执行源头实时追加 `node_started`、
 `node_completed`、`reasoning_summary`、工具生命周期和回答事件；OpenAI、Anthropic、
-DeepSeek 与 Google 的原生工具调用正文在 Provider 生成时即写入 `answer_delta`，cursor
+DeepSeek、Google 与国产 Provider（智谱 GLM、MiniMax、豆包）的原生工具调用正文在
+Provider 生成时即写入 `answer_delta`，cursor
 SSE 直接驱动当前阶段、工具结果和回答正文，只在终态读取一次完整 Run 快照，断流时才
 回退轮询。如果同一模型轮次随后选择工具，`answer_reset` 会清除临时前言，避免污染工具
 执行后的最终回答。`reasoning_summary` 是面向用户的结构化进度摘要，不包含 Provider
@@ -393,7 +394,8 @@ Agent 执行都会返回 `409`。
 ### 全局模型注册中心
 
 这是一个本地单用户应用，所有工作区共享同一个全局模型注册中心。模型管理页可以
-统一配置 OpenAI、DeepSeek、Anthropic 和 Google，再为每个 Provider 注册多个模型。
+统一配置 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、MiniMax 和豆包（火山方舟），再为每个
+Provider 注册多个模型。
 API Key 只能写入：PostgreSQL 仅保存 secret reference，密钥值进入选定的 Secret Store。
 原生本机运行使用操作系统钥匙串；官方 Compose 使用私有持久卷中的 Fernet 密文与
 `0600` 随机本机密钥。Provider 环境变量和 `.env` 不再作为启动凭据，密钥绝不会由
@@ -403,7 +405,9 @@ API 返回。升级后若连接仍是遗留 `env:*` 引用，页面会要求重�
 API Key 可用的文本生成模型供用户选择，并标记已经注册的条目。注册只需要选择
 Provider/模型、模型最大输出 token 以及是否启用、是否参与自动路由；显示名称、上下文、
 能力和冷启动路由画像由 Provider 元数据与后端先验合成。发现接口暂时没有目标模型时仍可手动
-填写模型 ID，但不再要求用户填写质量、价格或延迟。
+填写模型 ID，但不再要求用户填写质量、价格或延迟。豆包是显式白名单例外：发现与手动注册
+都只接受 `doubao-seed-evolving`、`doubao-seed-2.1-turbo` 和
+`doubao-seed-2.0-lite`，避免把方舟目录中的历史、内部或其他模态条目暴露为 Chat 模型。
 
 统一输入框会暴露供 Chat、整次代码 Agent 运行（包括恢复执行）和 RAG Ask 使用的
 会话偏好：
@@ -571,8 +575,8 @@ TOKEN_BUDGET_FALLBACK_MODEL=gpt-5-nano
 跨 Provider 回退会为新候选重复执行对应 Provider 的计数与授权，并且仍仅限于首个
 delta 之前。
 
-OpenAI、Anthropic 和 Google 使用各自的计数 API；DeepSeek 目前在预检阶段采用保守
-估算，最终仍以 Provider 返回的实际用量写入账本。
+OpenAI、Anthropic 和 Google 使用各自的计数 API；DeepSeek 与国产 Provider（智谱 GLM、
+MiniMax、豆包）在预检阶段采用保守估算，最终仍以 Provider 返回的实际用量写入账本。
 
 ## 代码 Agent 流程
 
@@ -637,7 +641,8 @@ Effective Tool Pool 后从其下一图节点执行。`rollback` 只改变当前�
 
 ### 原生工具调用循环
 
-OpenAI、DeepSeek、Anthropic 和 Google 适配器会通过各 Provider 原生的 Function/Tool Calling
+OpenAI、DeepSeek、Anthropic、Google 以及国产 Provider（智谱 GLM、MiniMax、豆包，均走
+OpenAI chat-completions 兼容层）的适配器会通过各 Provider 原生的 Function/Tool Calling
 API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具计划。Provider
 特有的函数调用会被标准化为 `LLMToolDecision`，其中包含稳定的 tool-call ID；带点号
 的注册名会转换为 Provider 安全别名，并在执行前映射回原名。Fake Provider 保留

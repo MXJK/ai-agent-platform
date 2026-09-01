@@ -66,7 +66,16 @@ class SessionsResponse(BaseModel):
 class SessionConfigurationPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["fake", "openai", "deepseek", "anthropic", "google"] | None = None
+    provider: Literal[
+        "fake",
+        "openai",
+        "deepseek",
+        "anthropic",
+        "google",
+        "glm",
+        "minimax",
+        "doubao",
+    ] | None = None
     model: str | None = Field(default=None, min_length=1, max_length=128)
     thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
     workspace_id: str | None = Field(
@@ -123,7 +132,14 @@ class UserPreferencesPatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default_provider: Literal[
-        "fake", "openai", "deepseek", "anthropic", "google"
+        "fake",
+        "openai",
+        "deepseek",
+        "anthropic",
+        "google",
+        "glm",
+        "minimax",
+        "doubao",
     ] | None = None
     default_model: str | None = Field(default=None, min_length=1, max_length=128)
     default_thinking_level: Literal["minimal", "low", "medium", "high"] | None = None

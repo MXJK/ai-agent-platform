@@ -5,7 +5,16 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-LLMProviderName = Literal["fake", "openai", "deepseek", "anthropic", "google"]
+LLMProviderName = Literal[
+    "fake",
+    "openai",
+    "deepseek",
+    "anthropic",
+    "google",
+    "glm",
+    "minimax",
+    "doubao",
+]
 LLMThinkingLevel = Literal["minimal", "low", "medium", "high"]
 LLMRoutingPolicy = Literal["smart", "quality", "cost", "latency"]
 

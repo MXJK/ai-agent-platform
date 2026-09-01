@@ -18,6 +18,7 @@ from ai_agent_platform.integrations.llm import (
     LLMClient,
     LLMProviderError,
     LLMStreamEvent,
+    OPENAI_CHAT_COMPLETION_ENDPOINTS,
     _retry_after_seconds_from_headers,
     collect_llm_usage,
 )
@@ -355,6 +356,85 @@ class OpenAIStreamingTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "llm_provider_not_allowed")
+
+
+class ChatCompletionsStreamingTests(unittest.TestCase):
+    def _client(self, provider: str) -> LLMClient:
+        return LLMClient(
+            Settings(llm_provider=provider, llm_model="glm-4.6"),
+            credential_resolver=lambda item: (
+                "test-key" if item == provider else None
+            ),
+        )
+
+    def test_glm_streams_against_bigmodel_endpoint(self) -> None:
+        client = self._client("glm")
+        with patch.object(
+            client,
+            "_stream_http_sse",
+            return_value=iter([LLMStreamEvent(type="done")]),
+        ) as stream:
+            events = list(
+                client._stream_chat_completions(
+                    "glm",
+                    [{"role": "user", "content": "你好"}],
+                    "glm-4.6",
+                    max_output_tokens=4_096,
+                )
+            )
+
+        self.assertEqual([event.type for event in events], ["done"])
+        self.assertEqual(
+            stream.call_args.args[0],
+            OPENAI_CHAT_COMPLETION_ENDPOINTS["glm"],
+        )
+        headers = stream.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer test-key")
+        payload = stream.call_args.kwargs["payload"]
+        self.assertEqual(payload["model"], "glm-4.6")
+        self.assertEqual(payload["max_tokens"], 4_096)
+        self.assertTrue(payload["stream"])
+        # stream_options stays DeepSeek-specific until every domestic
+        # provider is confirmed to accept it.
+        self.assertNotIn("stream_options", payload)
+
+    def test_minimax_stream_separates_private_reasoning(self) -> None:
+        client = self._client("minimax")
+        with patch.object(
+            client,
+            "_stream_http_sse",
+            return_value=iter([LLMStreamEvent(type="done")]),
+        ) as stream:
+            list(
+                client._stream_chat_completions(
+                    "minimax",
+                    [{"role": "user", "content": "你好"}],
+                    "MiniMax-M2",
+                    max_output_tokens=4_096,
+                )
+            )
+
+        payload = stream.call_args.kwargs["payload"]
+        self.assertIs(payload["reasoning_split"], True)
+
+    def test_missing_credential_is_reported_before_any_request(self) -> None:
+        client = LLMClient(
+            Settings(llm_provider="minimax", llm_model="MiniMax-M2"),
+            credential_resolver=lambda provider: None,
+        )
+        with patch.object(client, "_stream_http_sse") as stream:
+            with self.assertRaises(LLMProviderError) as raised:
+                list(
+                    client._stream_chat_completions(
+                        "minimax",
+                        [{"role": "user", "content": "hi"}],
+                        "MiniMax-M2",
+                        max_output_tokens=1_024,
+                    )
+                )
+
+        self.assertIn("minimax credential is not configured", str(raised.exception))
+        stream.assert_not_called()
 
 
 class RetryAfterTests(unittest.TestCase):
