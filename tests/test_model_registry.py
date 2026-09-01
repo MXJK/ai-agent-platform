@@ -19,6 +19,7 @@ from ai_agent_platform.integrations import (
     RoutingRequirements,
 )
 from ai_agent_platform.integrations.llm import (
+    LLMProviderError,
     LLMStreamEvent,
     _parse_deepseek_event,
     _parse_dsh_tool_calls,
@@ -1199,6 +1200,81 @@ class DeepSeekProtocolTests(unittest.TestCase):
                 {"repo.read_file": "repo.read_file"},
             )
         )
+
+    def test_parse_dsh_tool_calls_supports_fullwidth_protocol_variants(self) -> None:
+        for delimiter in ("｜DSML｜", "｜｜DSML｜｜"):
+            with self.subTest(delimiter=delimiter):
+                content = (
+                    "I inspected the project.\n"
+                    f"<{delimiter}tool_calls>"
+                    f'<{delimiter}invoke name="repo_read_file">'
+                    f'<{delimiter}parameter name="path" string="true">README.md'
+                    f'</{delimiter}parameter>'
+                    f'</{delimiter}invoke>'
+                    f'</{delimiter}tool_calls>'
+                )
+                tool = ToolSpec(
+                    name="repo.read_file",
+                    description="Read a file",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                    output_schema={"type": "object"},
+                    provider="local",
+                )
+
+                calls, leftover = _parse_dsh_tool_calls(
+                    content,
+                    {"repo_read_file": "repo.read_file"},
+                    tool_specs=[tool],
+                )
+
+                self.assertEqual(calls[0].name, "repo.read_file")
+                self.assertEqual(calls[0].arguments, {"path": "README.md"})
+                self.assertEqual(leftover, "I inspected the project.")
+
+    def test_parse_dsh_tool_calls_fails_closed_for_malformed_or_unknown_calls(self) -> None:
+        tool = ToolSpec(
+            name="repo.read_file",
+            description="Read a file",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object"},
+            provider="local",
+        )
+        malformed = (
+            '<｜DSML｜tool_calls><｜DSML｜invoke name="repo_read_file">'
+            '<｜DSML｜parameter name="path" string="true">README.md'
+        )
+        unknown = (
+            '<｜DSML｜tool_calls><｜DSML｜invoke name="sandbox_write_file">'
+            '</｜DSML｜invoke></｜DSML｜tool_calls>'
+        )
+
+        with self.assertRaises(LLMProviderError) as malformed_error:
+            _parse_dsh_tool_calls(
+                malformed,
+                {"repo_read_file": "repo.read_file"},
+                tool_specs=[tool],
+            )
+        self.assertEqual(
+            malformed_error.exception.code,
+            "llm_malformed_tool_protocol",
+        )
+        with self.assertRaises(LLMProviderError) as unknown_error:
+            _parse_dsh_tool_calls(
+                unknown,
+                {"sandbox_write_file": "sandbox.write_file"},
+                tool_specs=[tool],
+            )
+        self.assertEqual(unknown_error.exception.code, "llm_unknown_tool_call")
 
     def test_dsh_xml_content_is_parsed_as_deepseek_tool_calls(self) -> None:
         client = LLMClient(

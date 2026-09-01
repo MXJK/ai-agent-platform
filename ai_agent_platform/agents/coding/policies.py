@@ -19,18 +19,10 @@ from ai_agent_platform.agents.coding.task_shaping import (
     evidence_contract_satisfied,
     task_budget,
 )
+from ai_agent_platform.integrations.llm import contains_tool_protocol_text
 
 
 ANSWER_EVENT_CHUNK_CHARS = 512
-
-_TOOL_CALL_TEXT_OPENERS = (
-    "<tool_calls",
-    "<invoke",
-    "<function_call",
-    "<tool_call",
-    "<antml:invoke",
-)
-
 
 def _looks_like_tool_call(text: str) -> bool:
     """Detect a model answer that is actually an unexecuted tool-call block.
@@ -40,10 +32,7 @@ def _looks_like_tool_call(text: str) -> bool:
     leaks the raw block to the user, so answers shaped this way are replaced by
     the deterministic grounded renderer.
     """
-    stripped = str(text or "").lstrip()
-    if not stripped:
-        return False
-    return stripped.lower().startswith(_TOOL_CALL_TEXT_OPENERS)
+    return contains_tool_protocol_text(str(text or ""))
 
 
 class AnswerEventStream:
@@ -277,7 +266,10 @@ class CompletionPolicy:
             not allow_text or state.get("evaluation_isolated", False)
             or "on_delta" not in inspect.signature(decide).parameters
         ):
-            return decide(*args, **kwargs)
+            decision = decide(*args, **kwargs)
+            if not decision.tool_calls and _looks_like_tool_call(decision.text):
+                raise ValueError("model returned tool protocol as public answer text")
+            return decision
         stream = AnswerEventStream(
             str(state.get("run_id") or ""),
             self._event_sink,
@@ -285,6 +277,9 @@ class CompletionPolicy:
         )
         try:
             decision = decide(*args, on_delta=stream.emit, **kwargs)
+            if not decision.tool_calls and _looks_like_tool_call(decision.text):
+                stream.discard()
+                raise ValueError("model returned tool protocol as public answer text")
             if (
                 decision.tool_calls
                 or "".join(stream.parts).strip() != decision.text.strip()

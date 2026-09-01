@@ -1971,6 +1971,29 @@ class NativeAnswerStreamingTests(unittest.TestCase):
                     if finalize:
                         self.assertEqual(payload["tool_choice"], {"type": "none"} if provider == "anthropic" else "none")
 
+    def test_deepseek_split_dsml_never_streams_protocol_text(self):
+        raw = (
+            "Inspecting. "
+            '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="repo_read_file">'
+            '<｜｜DSML｜｜parameter name="path" string="true">README.md'
+            '</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>'
+            '</｜｜DSML｜｜tool_calls>'
+        )
+        events = [
+            {"choices": [{"index": 0, "delta": {"content": char}}]}
+            for char in raw
+        ] + [
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 20}},
+        ]
+
+        decision, deltas, _ = self._http_turn("deepseek", events)
+
+        self.assertEqual("".join(deltas), "Inspecting. ")
+        self.assertNotIn("DSML", "".join(deltas))
+        self.assertEqual(decision.tool_calls[0].name, "repo.read_file")
+        self.assertEqual(decision.tool_calls[0].arguments, {"path": "README.md"})
+
     def test_native_tool_stream_keeps_arguments_and_signed_private_blocks(self):
         fixtures = {
             "openai": [

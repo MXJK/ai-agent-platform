@@ -51,6 +51,9 @@ class CodingAgentState(TypedDict, total=False):
     intent_reason: str
     intent_confidence: float
     planner_source: str
+    request_mode: str
+    mutation_authorized: bool
+    mutation_authority_reason: str
     task_shape: str
     evidence_contract: dict[str, Any]
     task_tool_profile: list[str]

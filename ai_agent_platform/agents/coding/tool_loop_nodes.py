@@ -57,6 +57,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.task_shaping import (
     clamp_evidence_call,
     model_visible_tool_specs,
+    mutation_authorized_for_state,
     task_budget,
     update_evidence_progress,
 )
@@ -615,7 +616,7 @@ class ToolLoopNodes:
             decision = self._completion_policy.stream_decision(
                 state, decide, request_messages, tool_specs,
                 allow_text=(
-                    state.get("intent") != "change_planning"
+                    not mutation_authorized_for_state(state)
                     or _has_successful_native_mutation(state)
                 ),
                 **decide_kwargs,
@@ -672,7 +673,7 @@ class ToolLoopNodes:
                 decision = self._completion_policy.stream_decision(
                     state, decide, request_messages, tool_specs,
                     allow_text=(
-                        state.get("intent") != "change_planning"
+                        not mutation_authorized_for_state(state)
                         or _has_successful_native_mutation(state)
                     ),
                     **decide_kwargs,
@@ -906,7 +907,7 @@ class ToolLoopNodes:
             0,
         )
         change_requires_mutation = (
-            state.get("intent") == "change_planning"
+            mutation_authorized_for_state(state)
             and not _has_successful_native_mutation(state)
         )
         if not all_proposed_calls and change_requires_mutation:
@@ -2300,7 +2301,7 @@ def _native_output_budget(
     plan_tokens: int,
     mutation_tokens: int,
 ) -> int:
-    if state.get("intent") != "change_planning":
+    if not mutation_authorized_for_state(state):
         return plan_tokens
     mutation_phase_started = any(
         result.get("ok")

@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from ai_agent_platform.agents.coding.models import ContextSource
 from ai_agent_platform.agents.coding.text import extract_paths
@@ -20,6 +20,8 @@ TaskShape = Literal[
     "investigation",
     "broad_review",
 ]
+
+RequestMode = Literal["answer", "diagnose", "plan", "change"]
 
 TASK_SHAPES: tuple[TaskShape, ...] = (
     "overview",
@@ -132,6 +134,40 @@ _CONTINUATION_MARKERS = (
     "keep reading",
     "until the hard budget",
     "until hard budget",
+)
+
+_PLAIN_CONTINUATIONS = frozenset(
+    {
+        "继续",
+        "继续吧",
+        "继续执行",
+        "接着做",
+        "继续处理",
+        "continue",
+        "continue please",
+        "keep going",
+        "go ahead",
+    }
+)
+
+_DIRECT_MUTATION_RE = re.compile(
+    r"^(?:请|请你|帮我|替我|麻烦|直接|现在)?\s*"
+    r"(?:修改|新增|添加|实现|修复|重构|删除|创建|写入|更新|接入|落地|改成|加上)"
+    r"|^(?:please\s+)?(?:change|modify|add|implement|fix|refactor|delete|create|update)\b"
+    r"|^(?:全部|都)?\s*(?:请|请你|帮我|替我|麻烦).{0,24}"
+    r"(?:修改|新增|添加|实现|修复|重构|删除|创建|写入|更新|接入|落地|改掉|修掉|加上)"
+    r"|(?:并|然后|接着)\s*(?:直接|实际)?\s*"
+    r"(?:修改|新增|添加|实现|修复|重构|删除|创建|写入|更新|接入|落地)"
+    r"|(?:再|后).{0,8}(?:修改|新增|添加|实现|修复|重构|删除|创建|写入|更新|接入|落地)"
+    r"|\b(?:and|then)\s+(?:change|modify|add|implement|fix|repair|refactor|delete|create|update)\b",
+    re.IGNORECASE,
+)
+
+_ADVISORY_PREFIX_RE = re.compile(
+    r"^(?:(?:请|请你|帮我|麻烦)\s*)?"
+    r"(?:建议|推荐|分析|解释|说明|评估|看看|告诉我|如何|怎么|为什么|是否|要不要|哪些|什么)"
+    r"|^(?:please\s+)?(?:how\s+to|how\s+would|what\s+(?:should|could)|why|recommend|suggest|explain|review|assess)\b",
+    re.IGNORECASE,
 )
 
 _CONTRACTS: dict[TaskShape, dict[str, Any]] = {
@@ -260,6 +296,61 @@ def normalize_task_text(text: str) -> str:
     return re.sub(r"[，。！？、；：,.!?;:]+$", "", normalized).strip()
 
 
+def classify_request_authority(
+    user_input: str,
+    *,
+    intent: str = "repository_question",
+    prior_user_inputs: Sequence[str] = (),
+) -> tuple[RequestMode, bool, str]:
+    """Resolve action authority without allowing an LLM intent to grant writes.
+
+    The model-owned ``intent`` still selects semantic routing. Workspace mutation
+    requires a high-precision, server-owned signal in the current user request.
+    A plain continuation may inherit only the nearest prior explicit mutation.
+    """
+
+    normalized = normalize_task_text(user_input)
+    inherited = False
+    candidate = normalized
+    if normalized in _PLAIN_CONTINUATIONS:
+        for prior in reversed(tuple(prior_user_inputs)):
+            prior_normalized = normalize_task_text(prior)
+            if prior_normalized:
+                candidate = prior_normalized
+                inherited = True
+                break
+
+    mutation_authorized = bool(_DIRECT_MUTATION_RE.search(candidate))
+    if _ADVISORY_PREFIX_RE.search(candidate) and not re.search(
+        r"(?:并|然后|接着)\s*(?:直接|实际)?\s*"
+        r"(?:修改|新增|添加|实现|修复|重构|删除|创建|写入|更新|接入|落地)"
+        r"|\b(?:and|then)\s+(?:change|modify|add|implement|fix|refactor|delete|create|update)\b",
+        candidate,
+        re.IGNORECASE,
+    ):
+        mutation_authorized = False
+
+    if mutation_authorized:
+        return (
+            "change",
+            True,
+            "inherited explicit mutation request" if inherited else "explicit mutation request",
+        )
+    if intent == "bug_investigation":
+        return "diagnose", False, "diagnosis does not authorize workspace mutation"
+    if intent in {"change_planning", "test_strategy"}:
+        return "plan", False, "planning does not authorize workspace mutation"
+    return "answer", False, "no explicit workspace mutation request"
+
+
+def mutation_authorized_for_state(state: Mapping[str, Any]) -> bool:
+    """Read the new authority bit while preserving legacy checkpoint behavior."""
+
+    if "mutation_authorized" in state:
+        return bool(state.get("mutation_authorized"))
+    return state.get("intent") == "change_planning"
+
+
 def classify_task_shape(
     user_input: str,
     *,
@@ -267,11 +358,16 @@ def classify_task_shape(
     symbols: Sequence[str] = (),
     intent: str = "repository_question",
     context_route: str = "repo",
+    mutation_authorized: bool | None = None,
 ) -> TaskShape:
     """Combine normalized language signals with extracted targets and routing."""
 
     normalized = normalize_task_text(user_input)
-    has_change = intent == "change_planning" or _contains_any(normalized, _CHANGE_MARKERS)
+    has_change = (
+        bool(mutation_authorized)
+        if mutation_authorized is not None
+        else intent == "change_planning" or _contains_any(normalized, _CHANGE_MARKERS)
+    )
     has_investigation = (
         intent == "bug_investigation"
         or _contains_any(normalized, _INVESTIGATION_MARKERS)
@@ -347,6 +443,7 @@ def freeze_tool_profile(
     user_input: str = "",
     explicit_tool_names: Sequence[str] = (),
     skill_requested: bool = False,
+    mutation_authorized: bool | None = None,
 ) -> list[str]:
     """Freeze a stable ordered intersection with the Run's effective pool."""
 
@@ -425,6 +522,12 @@ def freeze_tool_profile(
     for spec in sorted(specs, key=lambda item: item.name):
         if spec.name not in ordered and allowed(spec) and lazily_visible(spec):
             ordered.append(spec.name)
+    if mutation_authorized is False:
+        ordered = [
+            name
+            for name in ordered
+            if name not in {"sandbox.apply_patch", "sandbox.write_file"}
+        ]
     return ordered
 
 

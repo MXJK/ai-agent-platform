@@ -7,6 +7,7 @@ from ai_agent_platform.agents.coding.policies import BudgetPolicy
 from ai_agent_platform.agents.coding.task_shaping import (
     build_evidence_contract,
     clamp_evidence_call,
+    classify_request_authority,
     classify_task_shape,
     evidence_contract_satisfied,
     freeze_tool_profile,
@@ -31,6 +32,58 @@ def _budget_policy() -> BudgetPolicy:
 
 
 class TaskShapeTests(unittest.TestCase):
+    def test_recommendation_and_explicit_change_have_separate_authority(self) -> None:
+        recommendation = classify_request_authority(
+            "这个项目还建议添加什么小游戏？",
+            intent="change_planning",
+        )
+        how_to = classify_request_authority(
+            "如何添加扫雷？",
+            intent="change_planning",
+        )
+        explicit = classify_request_authority(
+            "请直接添加扫雷并修改代码",
+            intent="change_planning",
+        )
+
+        self.assertEqual(recommendation[:2], ("plan", False))
+        self.assertEqual(how_to[:2], ("plan", False))
+        self.assertEqual(explicit[:2], ("change", True))
+        self.assertEqual(
+            classify_task_shape(
+                "这个项目还建议添加什么小游戏？",
+                intent="change_planning",
+                mutation_authorized=False,
+            ),
+            "broad_review",
+        )
+        self.assertEqual(
+            classify_task_shape(
+                "请直接添加扫雷并修改代码",
+                intent="change_planning",
+                mutation_authorized=True,
+            ),
+            "bounded_change",
+        )
+
+    def test_plain_continuation_inherits_only_explicit_prior_mutation(self) -> None:
+        self.assertEqual(
+            classify_request_authority(
+                "继续",
+                intent="change_planning",
+                prior_user_inputs=["请修改代码并运行测试"],
+            )[:2],
+            ("change", True),
+        )
+        self.assertEqual(
+            classify_request_authority(
+                "继续",
+                intent="change_planning",
+                prior_user_inputs=["请解释应该怎么修改"],
+            )[:2],
+            ("plan", False),
+        )
+
     def test_overview_synonyms_are_normalized_and_stable(self) -> None:
         phrases = [
             "分析下当前项目",
@@ -107,6 +160,19 @@ class TaskShapeTests(unittest.TestCase):
             ],
         )
         self.assertFalse(any("write" in name or "run_command" in name for name in first))
+
+    def test_mutation_tools_are_removed_without_server_authority(self) -> None:
+        specs = create_coding_tool_registry().list_specs()
+        profile = freeze_tool_profile(
+            "bounded_change",
+            specs,
+            user_input="这个项目还建议添加什么小游戏？",
+            mutation_authorized=False,
+        )
+
+        self.assertNotIn("sandbox.write_file", profile)
+        self.assertNotIn("sandbox.apply_patch", profile)
+        self.assertIn("repo.read_file", profile)
 
     def test_evidence_call_is_clamped_to_contract_tokens_and_child_budget(self) -> None:
         call = clamp_evidence_call(
@@ -407,7 +473,56 @@ class _CheckpointPlanner(_OverviewPlanner):
         )
 
 
+class _AdvicePlanner(_OverviewPlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visible_tools: list[str] = []
+
+    def classify_intent(self, user_input):
+        del user_input
+        return {
+            "intent": "change_planning",
+            "reason": "model over-classified a recommendation",
+            "confidence": 1.0,
+            "source": "test",
+        }
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del messages
+        self.visible_tools = [spec.name for spec in tool_specs]
+        self.model_requests += 1
+        return LLMToolDecision(
+            text="建议添加扫雷，但本次只提供建议，没有修改代码。",
+            tool_calls=[],
+            model="test",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class OverviewRegressionTests(unittest.TestCase):
+    def test_recommendation_run_cannot_inherit_write_tools_from_llm_intent(self) -> None:
+        planner = _AdvicePlanner()
+        with TemporaryDirectory() as root:
+            runtime = CodingAgentRuntime(planner=planner)
+            result = runtime.run(
+                conversation_id="advice-no-write",
+                user_input="这个项目还建议添加什么小游戏？",
+                history=[],
+                workspace_id="workspace-main",
+                workspace_root=root,
+            )
+            state = runtime._checkpoint_coordinator.snapshot_for(
+                runtime._checkpoint_coordinator.config(result.thread_id)
+            ).values
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(state["request_mode"], "plan")
+        self.assertFalse(state["mutation_authorized"])
+        self.assertNotIn("applied_change", state["evidence_contract"]["required_evidence"])
+        self.assertNotIn("sandbox.write_file", planner.visible_tools)
+        self.assertNotIn("sandbox.apply_patch", planner.visible_tools)
+
     def test_scripted_small_and_large_overviews_stay_within_gates(self) -> None:
         for module_count, tool_limit, model_limit in ((2, 10, 4), (40, 12, 5)):
             with self.subTest(module_count=module_count), TemporaryDirectory() as root:

@@ -15,7 +15,9 @@ from ai_agent_platform.integrations.llm import (
     LLMStreamEvent,
     _anthropic_usage_from_mapping,
     _chat_usage_from_mapping,
+    _could_start_tool_protocol,
     _json_arguments,
+    _starts_tool_protocol,
     _usage_from_mapping,
 )
 
@@ -28,6 +30,8 @@ class NativeStreamAccumulator:
         self.blocks: dict[int, dict[str, Any]] = {}
         self.arguments: dict[int, str] = {}
         self.finished = False
+        self.deepseek_text_pending = ""
+        self.deepseek_protocol_detected = False
 
     def parse(
         self,
@@ -58,6 +62,42 @@ class NativeStreamAccumulator:
     def _text(self, text: Any) -> None:
         if isinstance(text, str) and text:
             self.on_delta(text)
+
+    def _deepseek_text(self, text: str) -> None:
+        """Publish ordinary text while withholding split tool-protocol prefixes."""
+
+        if self.deepseek_protocol_detected or not text:
+            return
+        self.deepseek_text_pending += text
+        while self.deepseek_text_pending:
+            marker = self.deepseek_text_pending.find("<")
+            if marker < 0:
+                self._text(self.deepseek_text_pending)
+                self.deepseek_text_pending = ""
+                return
+            if marker > 0:
+                self._text(self.deepseek_text_pending[:marker])
+                self.deepseek_text_pending = self.deepseek_text_pending[marker:]
+                continue
+            if _starts_tool_protocol(self.deepseek_text_pending):
+                self.deepseek_protocol_detected = True
+                self.deepseek_text_pending = ""
+                return
+            if _could_start_tool_protocol(self.deepseek_text_pending):
+                return
+            self._text("<")
+            self.deepseek_text_pending = self.deepseek_text_pending[1:]
+
+    def _finish_deepseek_text(self) -> None:
+        if self.provider != "deepseek" or self.deepseek_protocol_detected:
+            self.deepseek_text_pending = ""
+            return
+        if _could_start_tool_protocol(self.deepseek_text_pending):
+            self.deepseek_protocol_detected = True
+            self.deepseek_text_pending = ""
+            return
+        self._text(self.deepseek_text_pending)
+        self.deepseek_text_pending = ""
 
     def _openai(self, kind: str, payload: dict[str, Any]) -> None:
         if kind in {"response.output_text.delta", "response.refusal.delta"}:
@@ -128,7 +168,10 @@ class NativeStreamAccumulator:
                 if isinstance(text, str):
                     message[field] = message.get(field, "") + text
                     if field == "content":
-                        self._text(text)
+                        if self.provider == "deepseek":
+                            self._deepseek_text(text)
+                        else:
+                            self._text(text)
             self._reasoning_details(message, delta.get("reasoning_details"))
             for call in delta.get("tool_calls") or []:
                 index = int(call["index"])
@@ -149,6 +192,7 @@ class NativeStreamAccumulator:
             if choice.get("finish_reason"):
                 self.body["finish_reason"] = choice["finish_reason"]
                 self.finished = True
+                self._finish_deepseek_text()
 
     @staticmethod
     def _reasoning_details(message: dict[str, Any], value: Any) -> None:
@@ -213,6 +257,7 @@ class NativeStreamAccumulator:
                 retryable=True,
                 usage=usage,
             )
+        self._finish_deepseek_text()
         if self.provider == "anthropic":
             for index, arguments in self.arguments.items():
                 self.blocks[index]["input"] = _json_arguments(

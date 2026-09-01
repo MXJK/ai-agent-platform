@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
+from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.integrations.permissions import (
     PermissionRequest,
@@ -232,6 +233,42 @@ class PermissionResolverMatrixTests(unittest.TestCase):
 
 
 class ToolRegistryPermissionTests(unittest.TestCase):
+    def test_task_authority_filters_mutation_before_permission_resolution(self) -> None:
+        registry = create_coding_tool_registry(
+            permission_resolver=PermissionResolver()
+        )
+        access = ToolAccessCoordinator(
+            tools=registry,
+            default_approval_policy="on_request",
+        )
+        state = {
+            "conversation_id": "session_scope",
+            "workspace_id": "workspace_scope",
+            "workspace_root": "/tmp/workspace_scope",
+            "authorized_workspace_root": "/tmp/workspace_scope",
+            "workspace_role": "editor",
+            "approval_policy": "auto_approve",
+            "mutation_authorized": False,
+            "task_tool_profile": [
+                "repo.read_file",
+                "sandbox.write_file",
+                "sandbox.apply_patch",
+            ],
+        }
+        tools = access.tools_for_state(state)
+        decision = tools.resolve_permission(
+            ToolCall(
+                name="sandbox.write_file",
+                arguments={"path": "game.html", "content": "unsafe"},
+            ),
+            access.tool_use_context(state),
+            phase="execute",
+        )
+
+        self.assertNotIn("sandbox.write_file", tools.allowed_names)
+        self.assertEqual(decision.effect, "deny")
+        self.assertEqual(decision.matched_rule, "project.tool_selection")
+
     def test_always_policy_interrupts_before_read_only_repository_exploration(self) -> None:
         with TemporaryDirectory() as temp_dir:
             Path(temp_dir, "README.md").write_text("demo", encoding="utf-8")

@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Protocol
 from uuid import uuid4
 
 import httpx
+from jsonschema import Draft202012Validator
 
 from ai_agent_platform.core import Settings, parse_llm_retry_policy_json
 from ai_agent_platform.integrations.model_router import (
@@ -1767,7 +1768,11 @@ class LLMClient:
         content_text = str(message.get("content") or "").strip()
         provider_items = [message] if message else []
         if not calls and provider == "deepseek":
-            dsh = _parse_dsh_tool_calls(content_text, aliases)
+            dsh = _parse_dsh_tool_calls(
+                content_text,
+                aliases,
+                tool_specs=tools,
+            )
             if dsh is not None:
                 calls, content_text = dsh
                 finish_reason = "tool_calls"
@@ -4114,6 +4119,67 @@ def _deepseek_tool_messages(
     return converted
 
 
+_TOOL_PROTOCOL_OPENERS = (
+    "<tool_calls",
+    "<invoke",
+    "<parameter",
+    "<function_call",
+    "<tool_call",
+    "<antml:invoke",
+    "<｜dsml｜tool_calls",
+    "<｜dsml｜invoke",
+    "<｜dsml｜parameter",
+    "<｜｜dsml｜｜tool_calls",
+    "<｜｜dsml｜｜invoke",
+    "<｜｜dsml｜｜parameter",
+    "<|dsml|tool_calls",
+    "<|dsml|invoke",
+    "<|dsml|parameter",
+    "<||dsml||tool_calls",
+    "<||dsml||invoke",
+    "<||dsml||parameter",
+)
+
+_DSH_PREFIX_RE = re.compile(
+    r"(<\s*/?\s*)(?:[|｜]{1,2}\s*dsml\s*[|｜]{1,2})\s*",
+    re.IGNORECASE,
+)
+
+
+def _could_start_tool_protocol(text: str) -> bool:
+    """Return whether a fragment beginning with ``<`` may be a tool envelope."""
+
+    folded = str(text or "").casefold()
+    return bool(folded) and any(
+        opener.startswith(folded) for opener in _TOOL_PROTOCOL_OPENERS
+    )
+
+
+def _starts_tool_protocol(text: str) -> bool:
+    folded = str(text or "").casefold()
+    return any(folded.startswith(opener) for opener in _TOOL_PROTOCOL_OPENERS)
+
+
+def contains_tool_protocol_text(text: str) -> bool:
+    """Detect complete or truncated model-native tool markup anywhere in text."""
+
+    value = str(text or "")
+    folded = value.casefold()
+    if any(opener in folded for opener in _TOOL_PROTOCOL_OPENERS):
+        return True
+    return any(
+        _could_start_tool_protocol(value[index:])
+        for index, char in enumerate(value)
+        if char == "<"
+    )
+
+
+def _canonicalize_dsh_markup(text: str) -> str:
+    """Remove only the DeepSeek DSML tag namespace, preserving parameter values."""
+
+    return _DSH_PREFIX_RE.sub(r"\1", str(text or ""))
+
+
 _DSH_INVOKE_RE = re.compile(
     r"<invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</invoke\s*>",
     re.IGNORECASE | re.DOTALL,
@@ -4131,6 +4197,8 @@ _DSH_WRAPPER_RE = re.compile(
 def _parse_dsh_tool_calls(
     content: str,
     aliases: Mapping[str, str],
+    *,
+    tool_specs: Iterable[ToolSpec] | None = None,
 ) -> tuple[list[ToolCall], str] | None:
     """Extract DeepSeek-Harness XML tool calls from assistant text content.
 
@@ -4139,41 +4207,116 @@ def _parse_dsh_tool_calls(
     This parser is deliberately deepseek-only: other providers never reach it,
     and it is only consulted when no native ``tool_calls`` were returned.
     """
-    text = str(content or "")
-    if "<invoke" not in text:
+    original = str(content or "")
+    if not contains_tool_protocol_text(original):
         return None
+    text = _canonicalize_dsh_markup(original)
+    folded = text.casefold()
+    namespaced = bool(_DSH_PREFIX_RE.search(original))
+    if namespaced and not re.search(
+        r"<\s*(?:tool_calls|antml:tool_calls)\s*>.*"
+        r"</\s*(?:tool_calls|antml:tool_calls)\s*>",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        raise LLMProviderError(
+            "DeepSeek DSML tool envelope is incomplete",
+            code="llm_malformed_tool_protocol",
+        )
+    invoke_matches = list(_DSH_INVOKE_RE.finditer(text))
+    invoke_open_count = len(re.findall(r"<\s*invoke\b", folded))
+    invoke_close_count = len(re.findall(r"</\s*invoke\s*>", folded))
+    if (
+        not invoke_matches
+        or invoke_open_count != len(invoke_matches)
+        or invoke_close_count != len(invoke_matches)
+    ):
+        raise LLMProviderError(
+            "DeepSeek tool invocation is incomplete",
+            code="llm_malformed_tool_protocol",
+        )
+    specs_by_name = (
+        {spec.name: spec for spec in tool_specs}
+        if tool_specs is not None
+        else None
+    )
     calls: list[ToolCall] = []
     spans: list[tuple[int, int]] = []
-    for match in _DSH_INVOKE_RE.finditer(text):
+    for match in invoke_matches:
         tool_name = _dsh_attr_value(match.group("attrs"), "name")
         if not tool_name:
-            continue
+            raise LLMProviderError(
+                "DeepSeek tool invocation has no name",
+                code="llm_malformed_tool_protocol",
+            )
+        resolved_name = aliases.get(tool_name, tool_name)
+        if specs_by_name is not None and resolved_name not in specs_by_name:
+            raise LLMProviderError(
+                "DeepSeek requested a tool outside the active tool set",
+                code="llm_unknown_tool_call",
+            )
         arguments: dict[str, Any] = {}
-        for parameter in _DSH_PARAMETER_RE.finditer(match.group("body")):
+        body = match.group("body")
+        parameter_matches = list(_DSH_PARAMETER_RE.finditer(body))
+        parameter_open_count = len(
+            re.findall(r"<\s*parameter\b", body, re.IGNORECASE)
+        )
+        parameter_close_count = len(
+            re.findall(r"</\s*parameter\s*>", body, re.IGNORECASE)
+        )
+        if (
+            parameter_open_count != len(parameter_matches)
+            or parameter_close_count != len(parameter_matches)
+        ):
+            raise LLMProviderError(
+                "DeepSeek tool parameter is incomplete",
+                code="llm_malformed_tool_protocol",
+            )
+        for parameter in parameter_matches:
             parameter_name = _dsh_attr_value(parameter.group("attrs"), "name")
             if not parameter_name:
-                continue
+                raise LLMProviderError(
+                    "DeepSeek tool parameter has no name",
+                    code="llm_malformed_tool_protocol",
+                )
+            if parameter_name in arguments:
+                raise LLMProviderError(
+                    "DeepSeek tool invocation repeats a parameter",
+                    code="llm_malformed_tool_protocol",
+                )
             raw_value = html.unescape(parameter.group("body")).strip()
             string_flag = _dsh_attr_value(parameter.group("attrs"), "string")
             arguments[parameter_name] = _dsh_parameter_value(
                 raw_value,
                 string_flag,
             )
+        if specs_by_name is not None:
+            validator = Draft202012Validator(
+                specs_by_name[resolved_name].input_schema
+            )
+            if next(validator.iter_errors(arguments), None) is not None:
+                raise LLMProviderError(
+                    "DeepSeek tool arguments do not match the active schema",
+                    code="llm_invalid_tool_arguments",
+                )
         calls.append(
             ToolCall(
-                name=aliases.get(tool_name, tool_name),
+                name=resolved_name,
                 arguments=arguments,
                 source="deepseek_dsh_xml",
             )
         )
         spans.append((match.start(), match.end()))
-    if not calls:
-        return None
     spans.extend(
         (wrapper.start(), wrapper.end())
         for wrapper in _DSH_WRAPPER_RE.finditer(text)
     )
     leftover = _dsh_remove_spans(text, spans).strip()
+    if contains_tool_protocol_text(leftover):
+        raise LLMProviderError(
+            "DeepSeek tool envelope contains unparsed protocol markup",
+            code="llm_malformed_tool_protocol",
+        )
     return calls, leftover
 
 

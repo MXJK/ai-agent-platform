@@ -22,6 +22,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 )
 from ai_agent_platform.agents.coding.task_shaping import (
     build_evidence_contract,
+    classify_request_authority,
     classify_task_shape,
     freeze_tool_profile,
     model_visible_tool_specs,
@@ -289,6 +290,18 @@ class ContextRetrievalNodes:
             }
         intent = str(decision.get("intent") or "repository_question")
         context_route = str(decision.get("context_route") or "repo")
+        prior_user_inputs = [
+            str(message.get("content") or "")
+            for message in state.get("history", [])
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        request_mode, mutation_authorized, mutation_authority_reason = (
+            classify_request_authority(
+                state["user_input"],
+                intent=intent,
+                prior_user_inputs=prior_user_inputs,
+            )
+        )
         task_shape = classify_task_shape(
             state["user_input"],
             paths=unique(
@@ -297,6 +310,7 @@ class ContextRetrievalNodes:
             symbols=extract_symbols(state["user_input"]),
             intent=intent,
             context_route=context_route,
+            mutation_authorized=mutation_authorized,
         )
         evidence_contract = build_evidence_contract(
             task_shape,
@@ -308,10 +322,12 @@ class ContextRetrievalNodes:
             user_input=state["user_input"],
             explicit_tool_names=state.get("explicit_requested_tools", []),
             skill_requested=state.get("explicit_skill_requested", False),
+            mutation_authorized=mutation_authorized,
         )
         profiled_state: CodingAgentState = {
             **state,
             "task_tool_profile": task_tool_profile,
+            "mutation_authorized": mutation_authorized,
         }
         if "conversation_id" in profiled_state and "workspace_root" in profiled_state:
             profiled_specs = self._visible_tool_specs(profiled_state)
@@ -337,6 +353,9 @@ class ContextRetrievalNodes:
             "intent_reason": str(decision.get("reason") or ""),
             "intent_confidence": bounded_confidence(decision.get("confidence")),
             "planner_source": str(decision.get("source") or "unknown"),
+            "request_mode": request_mode,
+            "mutation_authorized": mutation_authorized,
+            "mutation_authority_reason": mutation_authority_reason,
             "task_shape": task_shape,
             "evidence_contract": evidence_contract,
             "task_tool_profile": task_tool_profile,
@@ -361,6 +380,9 @@ class ContextRetrievalNodes:
                 summary="分类任务意图并提出上下文来源。",
                 output={
                     "intent": intent,
+                    "request_mode": request_mode,
+                    "mutation_authorized": mutation_authorized,
+                    "mutation_authority_reason": mutation_authority_reason,
                     "task_shape": task_shape,
                     "evidence_contract": evidence_contract,
                     "task_tool_profile": task_tool_profile,

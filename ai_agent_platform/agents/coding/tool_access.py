@@ -22,6 +22,11 @@ from ai_agent_platform.integrations.tools import (
 from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder, ToolPoolRestoreError
 
 
+_WORKSPACE_MUTATION_TOOLS = frozenset(
+    {"sandbox.apply_patch", "sandbox.write_file"}
+)
+
+
 class ToolAccessCoordinator:
     """Build the immutable per-run tool view and authorization context."""
 
@@ -100,10 +105,18 @@ class ToolAccessCoordinator:
     @staticmethod
     def _task_profile_view(tools: Any, state: CodingAgentState):
         profile = tuple(state.get("task_tool_profile", []))
-        if not profile:
+        mutation_authorized = state.get("mutation_authorized")
+        if not profile and mutation_authorized is not False:
             return tools
         available = set(tools.allowed_names)
-        return tools.select(tuple(name for name in profile if name in available))
+        selected = tuple(name for name in profile if name in available) if profile else tuple(
+            name for name in tools.allowed_names if name in available
+        )
+        if mutation_authorized is False:
+            selected = tuple(
+                name for name in selected if name not in _WORKSPACE_MUTATION_TOOLS
+            )
+        return tools.select(selected)
 
     def tool_use_context(self, state: CodingAgentState) -> ToolUseContext:
         approvals = tuple(

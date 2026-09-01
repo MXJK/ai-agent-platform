@@ -329,7 +329,7 @@ class AgentLoopCharacterizationTests(unittest.TestCase):
             runtime = CodingAgentRuntime(planner=planner)
             waiting = runtime.run(
                 conversation_id="golden_input",
-                user_input="change an endpoint",
+                user_input="explain an endpoint using the input tool",
                 history=[],
                 workspace_id="workspace_main",
                 workspace_root=str(root),

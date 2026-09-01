@@ -389,7 +389,10 @@ def request_classification_prompt(
         "live source code, rag for managed business/reference documentation, "
         "hybrid when both are needed, and none for small talk. Select at most "
         "three IDs and only from the supplied knowledge_bases. A code change, "
-        "bug investigation, or test task must include repo.\n"
+        "bug investigation, or test task must include repo. Use change_planning "
+        "only when the user explicitly asks the agent to implement or modify the "
+        "workspace. Requests for recommendations, options, explanations, or a "
+        "hypothetical implementation plan do not authorize changes.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
 
@@ -535,6 +538,8 @@ def native_tool_messages(
     user_payload = {
         "task": state["user_input"],
         "intent": state.get("intent"),
+        "request_mode": state.get("request_mode", "answer"),
+        "mutation_authorized": state.get("mutation_authorized", False),
         "task_shape": state.get("task_shape"),
         "evidence_contract": compact_contract,
         "evidence_progress": {

@@ -294,6 +294,13 @@ SSE 直接驱动当前阶段、工具结果和回答正文，只在终态读取�
 私有 chain-of-thought；工具参数和私有思考也不会作为回答 delta 推送。快速任务仍使用
 有界短暂回放保持阶段顺序。
 
+DeepSeek 兼容端点如果把工具调用编码到正文，adapter 会在 Provider 边界识别 ASCII
+`<tool_calls>`、标准全角 `<｜DSML｜tool_calls>` 和双全角分隔符变体，将完整闭合且通过
+本轮 ToolSpec/参数 Schema 校验的 envelope 转成结构化调用。流式聚合器会跨 chunk 暂存
+可能的协议前缀，只公开确定的普通正文；截断、未知工具或未解析残留 fail closed。文本
+finalization 中的任何工具协议只触发 `answer_reset` 与确定性回答回退，不会执行或进入
+最终消息。
+
 所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
 Ask 和嵌入调用都会记录：
 
@@ -681,6 +688,13 @@ Evidence Executor 之上还有一层确定性的任务整形。分类节点结�
 归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
 LangGraph checkpoint，resume 不重新分类或放宽工具集合。
 
+语义 intent 与动作授权分开保存为 `request_mode` 和服务端确定的
+`mutation_authorized`。LLM 即使把“这个项目还建议添加什么小游戏”分类为
+`change_planning`，也不能据此获得写权限：建议、解释、诊断和方案请求保持只读，不要求
+`applied_change`；只有当前用户消息明确要求实施/修改，或“继续”继承最近一次明确变更请求，
+才冻结 `bounded_change` 和 Sandbox mutation 工具。执行点还会从 Run 工具视图再次移除
+未获授权的 `sandbox.write_file`/`sandbox.apply_patch`，审批和自动审批不能扩大这项任务授权。
+
 | task shape | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `overview` | 5 | 2 / 3 | 8 / 12 | 12,000 | repository list/find/search/read + `repo.collect_evidence` |
@@ -722,7 +736,7 @@ Provider 的工具集合始终为空。
 `sandbox.apply_patch`；目录盘点使用 `repo.list_files`。`sandbox.run_command` 的模型
 可见契约列出允许的 executable basename，并定位为变更后的验证工具。变更前失败的
 诊断命令只作为可观察错误回灌，不会触发 artifact 收尾或产生空 ChangeSet。
-`change_planning` 还有运行时完成门：没有成功的 Sandbox mutation 时，模型的文本终答
+获服务端修改授权的 Run 还有运行时完成门：没有成功的 Sandbox mutation 时，模型的文本终答
 会被退回并附带明确重规划要求；连续三次仍不执行变更则进入 `blocked`，不会把零文件
 结果标成 `completed`。
 Google Developer API 的工具调用 Token 预检把 system instruction 与工具 Schema 作为

@@ -305,6 +305,62 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertFalse(_looks_like_tool_call(""))
         self.assertFalse(_looks_like_tool_call("   \n  "))
 
+    def test_fullwidth_dsml_after_prose_is_rejected_and_stream_reset(self) -> None:
+        events = []
+        raw = (
+            "Creating the new HTML page first:\n"
+            '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="sandbox.write_file">'
+            '<｜｜DSML｜｜parameter name="path" string="true">minesweeper.html'
+            '</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>'
+            '</｜｜DSML｜｜tool_calls>'
+        )
+
+        class ProtocolPlanner(SteeringPlanner):
+            def finalize_tool_session(
+                self,
+                messages,
+                *,
+                reason,
+                tool_specs,
+                max_output_tokens=None,
+                use_model_max_output_tokens=False,
+                on_delta=None,
+            ):
+                del messages, reason, tool_specs, max_output_tokens
+                del use_model_max_output_tokens
+                if on_delta:
+                    on_delta(raw)
+                return LLMToolDecision(
+                    text=raw,
+                    tool_calls=[],
+                    model="deepseek-v4-flash",
+                    provider="deepseek",
+                    stop_reason="stop",
+                )
+
+        policy = CompletionPolicy(
+            planner=ProtocolPlanner(),
+            visible_tool_specs=lambda _: [],
+            final_max_output_tokens=100,
+        )
+        policy.set_event_sink(lambda **event: events.append(event))
+        answer, _, errors = policy.finalize_native_session(
+            {
+                "run_id": "fullwidth_guard",
+                "workspace_id": "workspace",
+                "context_route": "repo",
+                "context_sources": [],
+                "trace": [],
+            },
+            [],
+            reason="soft_budget",
+        )
+
+        self.assertNotIn("DSML", answer)
+        self.assertNotIn("sandbox.write_file", answer)
+        self.assertTrue(errors)
+        self.assertEqual(events[-1]["event_type"], "answer_reset")
+
     def test_tool_call_shaped_native_answer_is_replaced_by_grounded_fallback(self) -> None:
         events = []
         policy = CompletionPolicy(
