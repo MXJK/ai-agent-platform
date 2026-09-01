@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "RAG 系统架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/MXJK/ai-agent-platform",
+      "revision": "1d63ef5f37b210ab73383bdc92743c5a7094c133"
+    },
+    "views": [
+      {
+        "id": "indexing",
+        "label": "文档索引",
+        "focus": ["kb-api", "rag-service", "parse-chunk", "embedder", "vector-store", "document-store"],
+        "note": "解析、分块、文档嵌入与向量写入由 IndexJob 跟踪，随后保存元数据和分块。"
+      },
+      {
+        "id": "retrieval-answer",
+        "label": "检索与回答",
+        "focus": ["web-ui", "kb-api", "rag-service", "embedder", "vector-store", "document-store", "reranker", "llm-provider"],
+        "note": "Dense 与 Lexical 独立召回，经 weighted RRF 融合后按请求选择是否重排，再生成带引用回答。"
+      },
+      {
+        "id": "agent-context",
+        "label": "Agent 证据注入",
+        "focus": ["coding-agent", "rag-service", "vector-store", "document-store"],
+        "note": "Coding Agent 通过进程内 KnowledgeContextProvider 检索知识库，并按上下文预算裁剪证据。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "web-ui",
+      "type": "frontend",
+      "label": "Web 前端",
+      "sublabel": "上传 · 检索 · 提问",
+      "pos": [30, 300],
+      "size": [140, 64],
+      "sources": [
+        { "path": "ai_agent_platform/static/app.js", "line": 7359, "label": "检索请求" }
+      ]
+    },
+    {
+      "id": "coding-agent",
+      "type": "backend",
+      "label": "Coding Agent",
+      "sublabel": "retrieve_knowledge 节点",
+      "pos": [220, 500],
+      "size": [170, 68],
+      "sources": [
+        { "path": "ai_agent_platform/agents/coding/context_nodes.py", "line": 478, "label": "知识检索节点" }
+      ]
+    },
+    {
+      "id": "kb-api",
+      "type": "backend",
+      "label": "Knowledge Base API",
+      "sublabel": "/knowledge-bases",
+      "pos": [220, 300],
+      "size": [170, 68],
+      "sources": [
+        { "path": "ai_agent_platform/api/routes/knowledge_bases.py", "line": 465, "label": "search 与 ask" }
+      ]
+    },
+    {
+      "id": "rag-service",
+      "type": "backend",
+      "label": "RAGService",
+      "sublabel": "索引 · 检索 · 回答编排",
+      "tag": "核心编排",
+      "pos": [540, 280],
+      "size": [190, 108],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 1639, "label": "服务入口" },
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 2089, "label": "混合检索" }
+      ]
+    },
+    {
+      "id": "parse-chunk",
+      "type": "backend",
+      "label": "解析与分块",
+      "sublabel": "Parser · Chunker",
+      "pos": [540, 70],
+      "size": [210, 74],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 382, "label": "文档解析" },
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 478, "label": "递归分块" }
+      ]
+    },
+    {
+      "id": "embedder",
+      "type": "backend",
+      "label": "EmbeddingProvider",
+      "sublabel": "OpenAI · Gemini · ST · hashing",
+      "pos": [780, 70],
+      "size": [190, 74],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/factory.py", "line": 31, "label": "配置组合" }
+      ]
+    },
+    {
+      "id": "vector-store",
+      "type": "database",
+      "label": "VectorStore",
+      "sublabel": "Qdrant · Chroma · memory",
+      "pos": [1060, 70],
+      "size": [180, 74],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/factory.py", "line": 62, "label": "向量存储适配" }
+      ]
+    },
+    {
+      "id": "document-store",
+      "type": "database",
+      "label": "DocumentStore",
+      "sublabel": "PostgreSQL FTS · memory BM25",
+      "pos": [780, 500],
+      "size": [200, 74],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/models.py", "line": 202, "label": "文档存储协议" },
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 2118, "label": "Lexical 召回" }
+      ]
+    },
+    {
+      "id": "reranker",
+      "type": "backend",
+      "label": "Reranker",
+      "sublabel": "可选 CrossEncoder · 默认 Noop",
+      "pos": [1060, 500],
+      "size": [190, 74],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 2137, "label": "按请求重排" }
+      ]
+    },
+    {
+      "id": "llm-provider",
+      "type": "external",
+      "label": "LLM Provider",
+      "sublabel": "stream_chat · 引用生成",
+      "pos": [1060, 300],
+      "size": [180, 68],
+      "sources": [
+        { "path": "ai_agent_platform/integrations/rag/service.py", "line": 2166, "label": "回答生成" }
+      ]
+    }
+  ],
+  "connections": [
+    { "id": "web-api", "from": "web-ui", "to": "kb-api", "label": "REST" },
+    { "id": "api-rag", "from": "kb-api", "to": "rag-service", "label": "上传 · search · ask", "variant": "emphasis" },
+    { "id": "agent-rag", "from": "coding-agent", "to": "rag-service", "label": "进程内 search" },
+    { "id": "rag-parse", "from": "rag-service", "to": "parse-chunk", "label": "IndexJob：解析与分块", "fromSide": "top", "toSide": "bottom" },
+    { "id": "parse-embed", "from": "parse-chunk", "to": "embedder", "label": "文档分块", "labelAt": [765, 158] },
+    { "id": "embed-vector", "from": "embedder", "to": "vector-store", "label": "向量 upsert" },
+    { "id": "rag-embed-query", "from": "rag-service", "to": "embedder", "label": "查询嵌入", "toSide": "bottom" },
+    { "id": "rag-document", "from": "rag-service", "to": "document-store", "label": "元数据/分块写入 · Lexical 召回" },
+    { "id": "rag-reranker", "from": "rag-service", "to": "reranker", "label": "weighted RRF 候选 · 可选重排" },
+    { "id": "rag-llm", "from": "rag-service", "to": "llm-provider", "label": "引用上下文 · stream_chat", "variant": "emphasis", "labelAt": [990, 290] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "索引一致性",
+      "items": [
+        "IndexJob：pending → parsing → embedding → vector_written → active",
+        "先写向量，再保存文档元数据与分块；失败时恢复或删除向量快照"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "检索与消费边界",
+      "items": [
+        "Dense 与 Lexical 独立召回，weighted RRF 融合；CrossEncoder 仅在显式启用时重排",
+        "ask 调用外部 LLM；Coding Agent 只复用检索结果并按上下文预算裁剪"
+      ]
+    }
+  ]
+}

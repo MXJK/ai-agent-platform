@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
-status: "active"
+status: "done"
 active_task: "RAG-ARCHITECTURE-DIAGRAM"
-next_action: "Repair and visually verify the code-grounded RAG architecture diagram."
+next_action: "Use the verified RAG architecture diagram as the canonical visual reference."
 blockers: []
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-01T21:30:00+08:00"
+updated_at: "2026-09-01T21:45:33+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
