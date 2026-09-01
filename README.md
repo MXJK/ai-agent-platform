@@ -534,11 +534,12 @@ PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
 注册、启用和停用状态立即影响运行时目录，无需重启。
 
 模型注册记录分别保存上下文窗口和最大输出 token；后者可在模型管理页调整。普通 Chat
-默认请求 `LLM_MAX_OUTPUT_TOKENS`，代码 Agent 则按规划、变更、最终回答三个阶段分别请求
-`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384` 和
-`AGENT_FINAL_MAX_OUTPUT_TOKENS=4096`。真正发给 Provider 的额度取阶段请求、模型能力上限、
-上下文剩余空间和 Usage Ledger 授权结果的最小值。因此 16K 是变更阶段预算，不是要求每个
-模型都生成 16K，也不会越过注册的模型能力。
+默认请求 `LLM_MAX_OUTPUT_TOKENS`；代码 Agent 的规划和变更阶段分别请求
+`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384`，最终
+text-only 回答则在路由选出实际候选后请求该注册模型的 `max_output_tokens`。模型未声明
+上限时回退 `LLM_MAX_OUTPUT_TOKENS`；上下文剩余空间和 Usage Ledger 仍可进一步安全下调。
+`AGENT_FINAL_MAX_OUTPUT_TOKENS` 仅保留为旧自定义 planner 的兼容 fallback。因此 16K 是
+变更阶段预算，不是要求每个模型都生成 16K，也不会越过注册的模型能力。
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
@@ -779,8 +780,10 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 `completed`。相关进程配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
-`AGENT_MAX_CONSECUTIVE_FAILURES`。阶段输出预算由 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、
-`AGENT_MUTATION_MAX_OUTPUT_TOKENS` 和 `AGENT_FINAL_MAX_OUTPUT_TOKENS` 控制。工具会话超过
+`AGENT_MAX_CONSECUTIVE_FAILURES`。规划和变更阶段输出预算由
+`AGENT_PLAN_MAX_OUTPUT_TOKENS`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS` 控制；内置最终回答
+使用实际候选模型的注册输出上限，`AGENT_FINAL_MAX_OUTPUT_TOKENS` 仅兼容旧自定义 planner。
+工具会话超过
 `AGENT_TOOL_RESULT_MAX_TOKENS`（默认 2000，最小 64）的单次结果会在进入模型转录前，无条件替换为
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
 `tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
@@ -1126,7 +1129,9 @@ POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patc
 静默重试或切换模型。稳定 event key 让 Worker 重投与终态投影不会重复同一执行事实。
 浏览器按事件类型归约当前节点、实时活动和回答正文；代码 Agent 的消息内卡片只呈现实时
 活动，并依据 `node_completed`、`tool_result` / `tool_error` 停止对应进行中标识。在终态
-读取一次完整 Run 快照；连接失败或提前结束时回退到状态轮询。`run.read_artifact` 继续复用无正文的 observability
+先读取一次完整 Run 快照再发布 completed UI；事件快照尚无权威 `result.answer` 时保留
+已归约的 `streamed_answer`，不会用空答案占位覆盖正文。连接失败或提前结束时回退到状态
+轮询。`run.read_artifact` 继续复用无正文的 observability
 投影，保留 artifact 身份、读取范围与完整性元数据而不泄漏正文。审批恢复在重新入队前
 追加含操作者与原始请求的 `approval_decided`。因此审计页不依赖瞬时前端状态，也能按
 sequence 复盘执行事实；Provider 私有 chain-of-thought 不进入事件协议。

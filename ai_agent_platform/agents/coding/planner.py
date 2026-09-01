@@ -229,16 +229,17 @@ class LLMStructuredAgentPlanner:
         reason: str,
         tool_specs: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        use_model_max_output_tokens: bool = False,
         on_delta=None,
     ) -> LLMToolDecision:
         finalize = getattr(self._llm_client, "finalize_tools", None)
         if not callable(finalize):
             raise RuntimeError("LLM client does not support tool-session finalization")
-        kwargs = (
-            {"max_output_tokens": max_output_tokens}
-            if max_output_tokens is not None
-            else {}
-        )
+        kwargs: dict[str, Any] = {
+            "use_model_max_output_tokens": use_model_max_output_tokens,
+        }
+        if max_output_tokens is not None:
+            kwargs["max_output_tokens"] = max_output_tokens
         if on_delta is not None and "on_delta" in inspect.signature(finalize).parameters:
             kwargs["on_delta"] = on_delta
         return finalize(

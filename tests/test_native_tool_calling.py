@@ -444,6 +444,102 @@ class NativeProviderMappingTests(unittest.TestCase):
         self.assertEqual(usage.request_count, 2)
         self.assertEqual(usage.retry_count, 1)
 
+    def test_finalization_uses_selected_models_declared_output_limit(self) -> None:
+        router = ModelRouter(
+            [
+                ModelConfig(
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                    context_window_tokens=128_000,
+                    max_output_tokens=8_192,
+                    capabilities=ModelCapabilities(tool_calling=True),
+                )
+            ]
+        )
+        client = LLMClient(
+            Settings(
+                llm_provider="deepseek",
+                llm_model="deepseek-v4-flash",
+                llm_max_output_tokens=2_048,
+            ),
+            model_router=router,
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "deepseek" else None
+            ),
+        )
+        payloads: list[dict[str, object]] = []
+
+        def fake_post(url, *, headers, payload):
+            del url, headers
+            payloads.append(payload)
+            return {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "完整最终回答"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8},
+            }
+
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            decision = client.finalize_tools(
+                [{"role": "user", "content": "summarize the result"}],
+                reason="completed",
+                use_model_max_output_tokens=True,
+            )
+
+        self.assertEqual(decision.text, "完整最终回答")
+        self.assertEqual(payloads[0]["max_tokens"], 8_192)
+
+    def test_finalization_falls_back_to_default_when_model_has_no_output_limit(self) -> None:
+        router = ModelRouter(
+            [
+                ModelConfig(
+                    provider="deepseek",
+                    model="deepseek-chat",
+                    context_window_tokens=128_000,
+                    capabilities=ModelCapabilities(tool_calling=True),
+                )
+            ]
+        )
+        client = LLMClient(
+            Settings(
+                llm_provider="deepseek",
+                llm_model="deepseek-chat",
+                llm_max_output_tokens=3_072,
+            ),
+            model_router=router,
+            credential_resolver=lambda provider: (
+                "test-key" if provider == "deepseek" else None
+            ),
+        )
+        payloads: list[dict[str, object]] = []
+
+        def fake_post(url, *, headers, payload):
+            del url, headers
+            payloads.append(payload)
+            return {
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": "完成"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+            }
+
+        with patch.object(client, "_post_json", side_effect=fake_post):
+            client.finalize_tools(
+                [{"role": "user", "content": "summarize"}],
+                reason="completed",
+                use_model_max_output_tokens=True,
+            )
+
+        self.assertEqual(payloads[0]["max_tokens"], 3_072)
+
     def test_google_converts_foreign_tool_history_to_text_without_signatures(self) -> None:
         contents = _google_tool_contents(
             [

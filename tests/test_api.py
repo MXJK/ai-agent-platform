@@ -804,7 +804,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260831-context-compact-r1',
+            '/static/app.js?v=20260901-final-model-budget-r1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)

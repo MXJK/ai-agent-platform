@@ -5947,8 +5947,9 @@ function renderAgentChatResponse(
   if (!holdAnswer && actualStatus === "cancelled") {
     contentNode.innerHTML = "<p><em>Agent 运行已停止。</em></p>";
   } else if (!holdAnswer && ["completed", "partial", "blocked"].includes(actualStatus)) {
-    contentNode.innerHTML = result.answer
-      ? renderMarkdown(result.answer)
+    const terminalAnswer = String(result.answer || streamedAnswer || "");
+    contentNode.innerHTML = terminalAnswer
+      ? renderMarkdown(terminalAnswer)
       : "<p>Agent 已完成，但没有返回文本内容。</p>";
   } else if (!holdAnswer && actualStatus === "waiting_approval") {
     contentNode.innerHTML = "<p>Agent 已在执行前暂停。请检查下方计划并决定是否继续。</p>";
@@ -6976,7 +6977,6 @@ async function watchRunUntilTerminal(options = {}) {
         cursor = Math.max(cursor, sequence);
         streamedEvents.push(event);
         const progressBody = renderStreamedAgentProgress(streamedEvents, runId);
-        publishProgress(progressBody);
         if (FINAL_RUN_STATUSES.has(progressBody.status)) {
           latestBody = {
             ...await refreshRun(runId, { conversationId }),
@@ -6987,6 +6987,7 @@ async function watchRunUntilTerminal(options = {}) {
           stopped = true;
           break;
         }
+        publishProgress(progressBody);
       }
       if (stopped) break;
     }

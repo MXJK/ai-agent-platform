@@ -568,6 +568,7 @@ class LLMClient:
         min_context_tokens: int = 0,
         alias_tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        use_model_max_output_tokens: bool = False,
         disable_tool_calls: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
@@ -587,12 +588,12 @@ class LLMClient:
                 provider or self._settings.llm_provider,
                 model or self._settings.llm_model,
             )
-        requested_output_tokens = (
+        routing_output_tokens = (
             max_output_tokens
             if max_output_tokens is not None
             else self._settings.llm_max_output_tokens
         )
-        if requested_output_tokens <= 0:
+        if routing_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
         estimated_input_tokens = _estimate_tokens(_join_any_message_text(messages))
         complexity, complexity_reasons = _assess_task_complexity(
@@ -609,7 +610,7 @@ class LLMClient:
                 estimated_input_tokens + 1,
             ),
             estimated_input_tokens=estimated_input_tokens,
-            expected_output_tokens=requested_output_tokens,
+            expected_output_tokens=routing_output_tokens,
             task_complexity=complexity,
             complexity_reasons=complexity_reasons,
         )
@@ -640,7 +641,8 @@ class LLMClient:
                     candidate=routed_candidate,
                     requirements=requirements,
                     trace=trace,
-                    requested_max_output_tokens=requested_output_tokens,
+                    requested_max_output_tokens=routing_output_tokens,
+                    use_model_max_output_tokens=use_model_max_output_tokens,
                 )
             except LLMProviderError as exc:
                 if exc.code == "token_budget_exceeded":
@@ -683,7 +685,8 @@ class LLMClient:
                             candidate=candidate,
                             requirements=requirements,
                             trace=trace,
-                            requested_max_output_tokens=requested_output_tokens,
+                            requested_max_output_tokens=routing_output_tokens,
+                            use_model_max_output_tokens=use_model_max_output_tokens,
                         )
                         trace = request_plan.route_trace or trace
                         candidate = request_plan.candidate or candidate
@@ -1072,6 +1075,7 @@ class LLMClient:
         reason: str,
         tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
+        use_model_max_output_tokens: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         """Produce one final, text-only turn over the complete tool transcript.
@@ -1101,6 +1105,7 @@ class LLMClient:
             final_tools,
             alias_tools=final_tools,
             max_output_tokens=max_output_tokens,
+            use_model_max_output_tokens=use_model_max_output_tokens,
             disable_tool_calls=True,
             **({"on_delta": on_delta} if on_delta is not None else {}),
         )
@@ -2032,6 +2037,7 @@ class LLMClient:
         requirements: RoutingRequirements,
         trace: ModelRouteTrace,
         requested_max_output_tokens: int,
+        use_model_max_output_tokens: bool = False,
     ) -> LLMRequestPlan:
         return self._authorize_candidate(
             candidate=candidate,
@@ -2039,6 +2045,7 @@ class LLMClient:
             trace=trace,
             fallback_candidates=(),
             requested_max_output_tokens=requested_max_output_tokens,
+            use_model_max_output_tokens=use_model_max_output_tokens,
             count_tokens=lambda provider, model: self._count_tool_input_tokens(
                 messages,
                 tools,
@@ -2058,6 +2065,7 @@ class LLMClient:
         count_tokens: Callable[[str, str], tuple[int, str]],
         usage_context: Any = None,
         requested_max_output_tokens: int | None = None,
+        use_model_max_output_tokens: bool = False,
     ) -> LLMRequestPlan:
         usage_context = usage_context or current_model_usage_context()
         self._require_model_available(candidate.provider, candidate.model)
@@ -2066,10 +2074,15 @@ class LLMClient:
             candidate.model,
         )
         actual_candidate = candidate
-        requested_output_tokens = (
+        configured_output_tokens = (
             requested_max_output_tokens
             if requested_max_output_tokens is not None
             else self._settings.llm_max_output_tokens
+        )
+        requested_output_tokens = (
+            candidate.max_output_tokens or configured_output_tokens
+            if use_model_max_output_tokens
+            else configured_output_tokens
         )
         max_output_tokens = _effective_model_output_limit(
             candidate,
@@ -2125,7 +2138,12 @@ class LLMClient:
                 target_max_output_tokens = _effective_model_output_limit(
                     target_candidate,
                     input_tokens=input_tokens,
-                    requested_output_tokens=requested_output_tokens,
+                    requested_output_tokens=(
+                        target_candidate.max_output_tokens
+                        or configured_output_tokens
+                        if use_model_max_output_tokens
+                        else configured_output_tokens
+                    ),
                 )
                 try:
                     authorization = self._usage_ledger.authorize(

@@ -331,12 +331,27 @@ test("Agent answer deltas render while running and resets remove tool preambles"
     events.push({ type: "answer_delta", sequence: 5, status: "running", output: { text: "，第二段" } });
     renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
     testEvents.push(contentNode.innerHTML);
+    events.push({ type: "run_completed", sequence: 6, status: "completed", output: {} });
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
     renderAgentChatResponse(contentNode, {
       ...agentProgressBodyFromEvents(events), status: "completed", result: { answer: "第一段，第二段" },
     }, 0);
     testEvents.push(contentNode.innerHTML);
+    renderAgentChatResponse(contentNode, {
+      status: "completed", result: { answer: "" },
+    }, 0);
+    testEvents.push(contentNode.innerHTML);
   `, context);
-  assert.deepEqual(context.testEvents, ["temporary tool preamble", "", "第一段", "第一段，第二段", "第一段，第二段"]);
+  assert.deepEqual(context.testEvents, [
+    "temporary tool preamble",
+    "",
+    "第一段",
+    "第一段，第二段",
+    "第一段，第二段",
+    "第一段，第二段",
+    "<p>Agent 已完成，但没有返回文本内容。</p>",
+  ]);
 });
 
 test("only unfinished Agent activities are marked active", () => {
@@ -567,7 +582,7 @@ test("resume event stream continues past a historical approval boundary", async 
     { type: "tool_result", sequence: 4, status: "running", output: { call_id: "c1", name: "sandbox.write_file", result: { ok: true } } },
     { type: "run_completed", sequence: 5, status: "completed", node: "compose_answer", output: {} },
   ];
-  const { context, pollCalls } = loadWatchRunHarness({
+  const { context, captured, pollCalls } = loadWatchRunHarness({
     events,
     refreshStatus: "completed",
   });
@@ -583,6 +598,9 @@ test("resume event stream continues past a historical approval boundary", async 
       (event) => event.type === "tool_result" && event.output?.name === "sandbox.write_file",
     ),
   );
+  const completedUpdates = captured.filter((body) => body.status === "completed");
+  assert.equal(completedUpdates.length, 1);
+  assert.ok(Object.hasOwn(completedUpdates[0], "result"));
   assert.equal(pollCalls.length, 1);
   assert.equal(pollCalls[0].initialBody.stream_events.length, 5);
 });

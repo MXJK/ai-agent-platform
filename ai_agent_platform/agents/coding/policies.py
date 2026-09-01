@@ -315,7 +315,10 @@ class CompletionPolicy:
                         # Final-answer requests are a separate, text-only phase.
                         "tool_specs": [],
                     }
-                    if "max_output_tokens" in inspect.signature(finalize).parameters:
+                    finalize_parameters = inspect.signature(finalize).parameters
+                    if "use_model_max_output_tokens" in finalize_parameters:
+                        kwargs["use_model_max_output_tokens"] = True
+                    elif "max_output_tokens" in finalize_parameters:
                         kwargs["max_output_tokens"] = self._final_max_output_tokens
                     decision = self.stream_decision(
                         state,

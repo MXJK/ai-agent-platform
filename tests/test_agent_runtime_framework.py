@@ -236,8 +236,22 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
 
     def test_streamed_tool_preamble_is_reset_and_finalization_is_not_duplicated(self) -> None:
         events = []
+        finalization_kwargs = {}
         class Planner(SteeringPlanner):
-            def finalize_tool_session(self, messages, *, reason, tool_specs, max_output_tokens, on_delta=None):
+            def finalize_tool_session(
+                self,
+                messages,
+                *,
+                reason,
+                tool_specs,
+                max_output_tokens=None,
+                use_model_max_output_tokens=False,
+                on_delta=None,
+            ):
+                finalization_kwargs.update(
+                    max_output_tokens=max_output_tokens,
+                    use_model_max_output_tokens=use_model_max_output_tokens,
+                )
                 on_delta("最终")
                 self_test.assertTrue(any(e["event_type"] == "answer_delta" for e in events))
                 on_delta("答案")
@@ -253,6 +267,13 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertEqual(decision.answer_delta_count, 0)
         self.assertEqual(events[-1]["event_type"], "answer_reset")
         answer, message, errors = policy.finalize_native_session(state, [], reason="budget")
+        self.assertEqual(
+            finalization_kwargs,
+            {
+                "max_output_tokens": None,
+                "use_model_max_output_tokens": True,
+            },
+        )
         self.assertFalse(errors)
         count_before = sum(e["event_type"] == "answer_delta" for e in events)
         result = policy.compose_answer({**state, "native_tool_answer": answer, "native_tool_messages": [message]})
