@@ -105,5 +105,7 @@ DeepSeek V4 Flash 在本轮保存的 30 条 oracle 回答和 10 条检索风险�
 在当前 pilot 上继续调规则后把它称为 holdout。
 
 并发的 `AGENT-DEEPSEEK-TOOL-BOUNDARY` 完成并释放工作流状态后，已由工作流控制器登记
-本任务为 `done`。工作树包含两轮 RAG 与该并发任务的未提交改动，因此没有填写
-`verified-head`；本任务未提交或推送。
+本任务为 `done`。两轮 RAG 改动已形成独立功能提交，并从该提交导出的隔离快照再次通过
+完整 pytest（`805 passed, 135 subtests passed`）与 compileall。验证完成时工作流已被并发
+`RAG-ARCHITECTURE-DIAGRAM` 接管，且共享工作树包含其未提交产物，因此不覆盖当前
+`active_task`，也不使用 `verified-head`；远端状态以本轮实际推送结果为准。

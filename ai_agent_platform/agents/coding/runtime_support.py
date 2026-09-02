@@ -306,6 +306,24 @@ def route_after_repair_review(state: CodingAgentState) -> RepairReviewRoute:
     return "execute_changes" if decision.get("approved") else "collect_artifacts"
 
 
+def route_after_artifact_collection(state: CodingAgentState) -> PlanRoute:
+    if state.get("terminal_status"):
+        return "compose_answer"
+    if state.get("native_tool_loop_active"):
+        return "plan_tools"
+    contract = state.get("change_completion_contract")
+    if (
+        isinstance(contract, dict)
+        and contract.get("applicable")
+        and contract.get("compatibility_mode") != "legacy_phase1"
+        and not contract.get("completion_contract_satisfied")
+    ):
+        return "plan_tools"
+    if state.get("change_status") == "changes_ready":
+        return "plan_tools"
+    return "compose_answer"
+
+
 def route_after_answer_composition(state: CodingAgentState) -> AnswerRoute:
     return "handle_error" if unresolved_errors(state) else "end"
 

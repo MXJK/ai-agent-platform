@@ -140,6 +140,7 @@ class AgentChangeLoopTests(unittest.TestCase):
                     "execute_exploration",
                     "assess_context",
                     "merge_evidence",
+                    "define_completion_contract",
                     "plan_tools",
                     "review_tool_plan",
                     "inspect_repository",
@@ -208,7 +209,7 @@ class AgentChangeLoopTests(unittest.TestCase):
 
             initial_wait = runtime.run(
                 conversation_id="sess_3",
-                user_input="验证失败后拒绝修复",
+                user_input="修改 app.py，验证失败后拒绝修复",
                 history=[],
                 workspace_id="workspace_main",
                 workspace_root=str(root),
@@ -220,7 +221,8 @@ class AgentChangeLoopTests(unittest.TestCase):
                 feedback="不要继续修改",
             )
 
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.terminal_reason, "repair_rejected")
             self.assertEqual(result.change_summary.status, "repair_rejected")
             self.assertEqual(result.change_summary.iteration_count, 1)
             self.assertFalse(result.change_summary.validation_passed)

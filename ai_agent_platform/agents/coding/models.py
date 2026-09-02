@@ -54,6 +54,7 @@ class CodingAgentState(TypedDict, total=False):
     request_mode: str
     mutation_authorized: bool
     mutation_authority_reason: str
+    workspace_completion_required: bool
     task_shape: str
     evidence_contract: dict[str, Any]
     task_tool_profile: list[str]
@@ -109,6 +110,10 @@ class CodingAgentState(TypedDict, total=False):
     evidence_extension_rounds: int
     evidence_rounds_completed: int
     evidence_contract_satisfied: bool
+    change_completion_contract: dict[str, Any]
+    completion_contract_satisfied: bool
+    completion_unresolved_rounds: int
+    validation_missing_rounds: int
     native_unfulfilled_change_rounds: int
     native_consecutive_failures: int
     native_context_compactions: int
@@ -300,6 +305,8 @@ class AgentRunResult:
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+    terminal_reason: str = ""
+    completion_contract: dict[str, Any] = field(default_factory=dict)
     errors: list[dict[str, Any]] = field(default_factory=list)
     metrics: AgentRunMetrics = field(default_factory=AgentRunMetrics)
     change_summary: AgentChangeSummary = field(default_factory=AgentChangeSummary)

@@ -682,7 +682,7 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
 
 Evidence Executor 之上还有一层确定性的任务整形。分类节点结合规范化后的中英文请求、
-显式路径/符号、intent、context route，以及是否明确要求修改、验证或调查，冻结本 Run 的
+显式路径/符号、intent、context route，以及是否明确要求修改或调查，冻结本 Run 的
 `task_shape`、`evidence_contract` 和有序工具 Profile；`分析下当前项目`、`看看当前项目`、
 `summarize this project` 等无具体目标请求归为 `overview`，但“分析当前项目的登录故障”
 归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
@@ -694,6 +694,32 @@ LangGraph checkpoint，resume 不重新分类或放宽工具集合。
 `applied_change`；只有当前用户消息明确要求实施/修改，或“继续”继承最近一次明确变更请求，
 才冻结 `bounded_change` 和 Sandbox mutation 工具。执行点还会从 Run 工具视图再次移除
 未获授权的 `sandbox.write_file`/`sandbox.apply_patch`，审批和自动审批不能扩大这项任务授权。
+
+所有 `bounded_change` 的证据契约都包含 `validation_result`。成功的
+`sandbox.write_file`/`sandbox.apply_patch` 只证明 `applied_change`，不会同时冒充修改前的
+`current_behavior`；只有修改后的验证命令实际执行且全部以 exit code 0 成功，Change Run
+才允许进入 `completed`。已产生 Diff 但缺少验证时，Runtime 会把明确的补验证提示回灌同一
+Native 会话；验证失败则保留 test report，并在预算内进入修复/复验。hard budget 或有界
+重试耗尽后分别以 `partial / validation_missing` 或 `partial / validation_failed` 收敛，
+拒绝修复等外部阻塞保持 `blocked`。`AgentRunResponse.terminal_reason` 和终态 Run event
+公开这一原因，且 `change_summary.validation_passed`、`change_status`、Run status 与最终回答
+使用同一验证事实，不会由 `compose_answer` 兜底升级。
+
+第二阶段把“证据足够”和“用户要求全部完成”拆成两个合同。`bounded_change` 在
+`merge_evidence` 之后、第一次 workspace mutation 之前由服务端冻结独立的
+`ChangeCompletionContract`：每个 required change 具有稳定 ID、精确相对路径、
+create/update/delete、当前请求或 live repository evidence 来源和单调状态；required
+validation 另存验证类别与对应 ToolResult。成功写 CSS 只能满足 CSS 项，不会连带满足 JS；
+`git diff --check` 只属于 Diff 格式证据，不能单独满足功能验证。只有全部 change、第一阶段
+验证门禁、逐项 validation，以及最终 workspace status、Diff 和目标文件状态同时满足，
+BudgetPolicy 才以 `completion_contract_satisfied` 完成。模型提前给终答时，Runtime 把有界
+unresolved checklist 回灌继续执行；hard budget 后保留部分结果并以
+`partial / completion_requirements_unresolved` 收敛。无法从当前请求或 live evidence
+可靠得到目标时以 `completion_contract_unavailable` fail closed。冻结后的新 HTML read
+证据只能追加合同并递增 revision/trace，不能删除旧项；旧 checkpoint 没有合同 channel 时
+显式走 `legacy_phase1` 适配并继续保留修改后验证门禁。Run response、ChangeSet 验证摘要、
+trace 和 events 分别公开 evidence satisfied、mutation applied、validation passed 与
+completion contract satisfied 的有界状态。
 
 | task shape | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -790,7 +816,9 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 `checkpoint_coordinator` 负责 invoke/resume 和 checkpoint 查询。
 `CodingAgentRuntime` 保留为兼容 facade；API、Worker、Service 和 Repository 只交换
 `RunContextSnapshot`、`AgentRunRecord` 与 `AgentRunResult`，不接触 LangGraph state。
-拆分由稳定轨迹 golden tests 约束，节点名、边、审批、预算、工具顺序和终态语义不变。
+拆分由稳定轨迹 golden tests 约束，审批、预算和工具顺序保持兼容；Change Run 在
+`merge_evidence` 与 `plan_tools` 之间新增 `define_completion_contract` 节点，并保留修改后
+验证成功门禁，未完成交付项、未验证或验证失败都不再标记为完成。
 
 12 轮/36 次 soft 与 24 轮/72 次 hard 现在是进程级 ceiling 和 `bounded_change` 默认值；
 实际 Run 使用上表任务契约，并另有 900 秒和连续三次失败保护。证据契约把 native

@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from langgraph.types import interrupt
 
 from ai_agent_platform.agents.coding.context import load_project_instructions
+from ai_agent_platform.agents.coding.completion_contract import (
+    completion_contract_summary,
+    define_completion_contract,
+)
 from ai_agent_platform.agents.coding.models import CodingAgentState, ContextSource
 from ai_agent_platform.agents.coding.planner import (
     bounded_confidence,
@@ -312,13 +317,19 @@ class ContextRetrievalNodes:
             context_route=context_route,
             mutation_authorized=mutation_authorized,
         )
+        available_specs = self._tools_for_state(state).list_specs()
+        workspace_completion_required = not _external_tool_action_requested(
+            state["user_input"], available_specs
+        )
         evidence_contract = build_evidence_contract(
-            task_shape,
+            "targeted_read"
+            if task_shape == "bounded_change" and not workspace_completion_required
+            else task_shape,
             user_input=state["user_input"],
         )
         task_tool_profile = freeze_tool_profile(
             task_shape,
-            self._tools_for_state(state).list_specs(),
+            available_specs,
             user_input=state["user_input"],
             explicit_tool_names=state.get("explicit_requested_tools", []),
             skill_requested=state.get("explicit_skill_requested", False),
@@ -356,6 +367,7 @@ class ContextRetrievalNodes:
             "request_mode": request_mode,
             "mutation_authorized": mutation_authorized,
             "mutation_authority_reason": mutation_authority_reason,
+            "workspace_completion_required": workspace_completion_required,
             "task_shape": task_shape,
             "evidence_contract": evidence_contract,
             "task_tool_profile": task_tool_profile,
@@ -383,6 +395,7 @@ class ContextRetrievalNodes:
                     "request_mode": request_mode,
                     "mutation_authorized": mutation_authorized,
                     "mutation_authority_reason": mutation_authority_reason,
+                    "workspace_completion_required": workspace_completion_required,
                     "task_shape": task_shape,
                     "evidence_contract": evidence_contract,
                     "task_tool_profile": task_tool_profile,
@@ -1120,6 +1133,39 @@ class ContextRetrievalNodes:
             ),
         }
 
+    def _define_completion_contract(
+        self, state: CodingAgentState
+    ) -> CodingAgentState:
+        contract = define_completion_contract(state)
+        invalid = contract.get("generation_status") == "invalid"
+        return {
+            "change_completion_contract": contract,
+            "completion_contract_satisfied": bool(
+                contract.get("completion_contract_satisfied")
+            ),
+            "terminal_status": "partial" if invalid else state.get("terminal_status", ""),
+            "terminal_reason": (
+                "completion_contract_unavailable"
+                if invalid
+                else state.get("terminal_reason", "")
+            ),
+            "trace": _append_trace(
+                state,
+                node="define_completion_contract",
+                summary=(
+                    "在第一次工作区写入前定义并冻结 ChangeCompletionContract。"
+                    if not invalid
+                    else "无法可靠定义 ChangeCompletionContract，按 fail-closed 停止。"
+                ),
+                output={
+                    "evidence_contract_satisfied": bool(
+                        state.get("evidence_contract_satisfied")
+                    ),
+                    "completion_contract": completion_contract_summary(contract),
+                },
+            ),
+        }
+
 
 def _validate_relative_workspace_path(path: str, root: Path) -> None:
     candidate = Path(path)
@@ -1128,6 +1174,22 @@ def _validate_relative_workspace_path(path: str, root: Path) -> None:
     resolved = (root / candidate).resolve()
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"focus file escapes workspace root: {path}")
+
+
+def _external_tool_action_requested(
+    user_input: str, specs: list[Any]
+) -> bool:
+    normalized = re.sub(r"[._-]+", " ", user_input.casefold())
+    for spec in specs:
+        provider = str(getattr(spec, "provider", "") or "")
+        if not (spec.name.startswith("mcp.") or provider.startswith("mcp")):
+            continue
+        if getattr(spec, "permission_level", "read_only") == "read_only":
+            continue
+        leaf = re.sub(r"[._-]+", " ", spec.name.split(".")[-1]).strip().casefold()
+        if leaf and len(leaf) >= 4 and leaf in normalized:
+            return True
+    return False
 
 
 def _exploration_call_key(call: ToolCall) -> str:

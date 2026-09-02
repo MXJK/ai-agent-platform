@@ -424,12 +424,10 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 conversation_id="gate_stream", user_input="implement a new file", history=[],
                 workspace_id="workspace_main", workspace_root=root,
             )
-        self.assertEqual(result.status, "blocked")
-        # The completion gate withheld live callbacks for all unverified turns.
-        # compose_answer may still publish the final blocked explanation afterward.
-        self.assertGreaterEqual(len(planner.delta_callbacks), 2)
-        self.assertTrue(all(callback is None for callback in planner.delta_callbacks[:-1]))
-        self.assertTrue(callable(planner.delta_callbacks[-1]))
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.terminal_reason, "completion_contract_unavailable")
+        self.assertIn("could not be frozen", result.answer)
+        self.assertEqual(planner.delta_callbacks, [])
 
     def test_node_progress_events_are_persisted_before_run_completion(self) -> None:
         planner = BlockingClassificationPlanner()
@@ -931,6 +929,9 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                 "native_context_compactions",
                 "native_context_reduction_stages",
                 "context_shares",
+                "change_completion_contract",
+                "completion_contract_satisfied",
+                "completion_unresolved_rounds",
             ):
                 checkpoint["channel_values"].pop(channel, None)
             legacy_thread = "run_legacy_checkpoint"
@@ -954,6 +955,9 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
                     "native_context_compactions",
                     "native_context_reduction_stages",
                     "context_shares",
+                    "change_completion_contract",
+                    "completion_contract_satisfied",
+                    "completion_unresolved_rounds",
                 }:
                     continue
                 writes_by_task[str(task_id)].append((str(channel), value))
@@ -993,6 +997,9 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertEqual(branch_snapshot.values["native_context_compactions"], 0)
         self.assertEqual(branch_snapshot.values["native_context_reduction_stages"], [])
         self.assertEqual(branch_snapshot.values["context_shares"], {})
+        self.assertEqual(branch_snapshot.values["change_completion_contract"], {})
+        self.assertFalse(branch_snapshot.values["completion_contract_satisfied"])
+        self.assertEqual(branch_snapshot.values["completion_unresolved_rounds"], 0)
 
     def test_checkpoint_clone_preserves_compaction_count_and_stages(self) -> None:
         with TemporaryDirectory() as temp_dir:

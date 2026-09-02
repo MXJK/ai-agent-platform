@@ -199,7 +199,11 @@ _CONTRACTS: dict[TaskShape, dict[str, Any]] = {
         "max_extension_rounds": 1,
     },
     "bounded_change": {
-        "required_evidence": ["current_behavior", "applied_change"],
+        "required_evidence": [
+            "current_behavior",
+            "applied_change",
+            "validation_result",
+        ],
         "allowed_tool_families": ["search", "read", "patch", "test"],
         "max_model_requests": 26,
         "soft_tool_rounds": 12,
@@ -425,7 +429,7 @@ def build_evidence_contract(
         if "cross_target_evidence" not in required:
             required.append("cross_target_evidence")
         contract["required_evidence"] = required
-    if task_shape in {"bounded_change", "investigation"} and _contains_any(
+    if task_shape == "investigation" and _contains_any(
         normalized, _VALIDATION_MARKERS
     ):
         required = list(contract["required_evidence"])
@@ -577,6 +581,40 @@ def evidence_contract_satisfied(state: dict[str, Any]) -> bool:
     return bool(required) and required.issubset(coverage)
 
 
+def change_validation_state(state: dict[str, Any]) -> str:
+    """Return the completion-gate state for a bounded workspace change."""
+
+    if state.get("task_shape") != "bounded_change":
+        return "not_required"
+    artifacts_collected = any(
+        isinstance(item, dict) and item.get("type") == "code_diff"
+        for item in state.get("artifacts", [])
+    )
+    if artifacts_collected:
+        changed = bool(state.get("changed_files", []))
+    else:
+        changed = any(
+            result.get("ok")
+            and result.get("name") in {"sandbox.apply_patch", "sandbox.write_file"}
+            for result in state.get("tool_results", [])
+        )
+    if not changed:
+        return "not_required"
+    validations = list(state.get("validation_results", []))
+    if not validations:
+        return "missing"
+    if all(_validation_result_passed(result) for result in validations):
+        return "passed"
+    return "failed"
+
+
+def _validation_result_passed(result: dict[str, Any]) -> bool:
+    if not result.get("ok"):
+        return False
+    output = result.get("result")
+    return isinstance(output, dict) and output.get("exit_code") == 0
+
+
 def update_evidence_progress(
     state: dict[str, Any],
     *,
@@ -723,7 +761,7 @@ def _semantic_coverage(
     ):
         observed.add("technology_stack")
 
-    if has_read:
+    if has_read or has_inventory:
         observed.update({"target_location", "current_behavior", "symptom_context"})
     if full_file_sources or "repo.read_file" in result_names:
         observed.update({"target_behavior", "representative_evidence"})
@@ -749,7 +787,7 @@ def _semantic_coverage(
     ):
         observed.add("cross_target_evidence")
     if result_names.intersection({"sandbox.apply_patch", "sandbox.write_file"}):
-        observed.update({"applied_change", "current_behavior"})
+        observed.add("applied_change")
     if "sandbox.run_command" in result_names:
         observed.add("validation_result")
     if state.get("change_iteration", 0) > 0:
@@ -780,6 +818,7 @@ __all__ = [
     "TASK_SHAPES",
     "TaskShape",
     "build_evidence_contract",
+    "change_validation_state",
     "clamp_evidence_call",
     "classify_task_shape",
     "evidence_contract_satisfied",

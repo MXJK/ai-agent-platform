@@ -2710,7 +2710,7 @@ class NativeToolLoopTests(unittest.TestCase):
 
             waiting = runtime.run(
                 conversation_id="sess_change_completion_gate",
-                user_input="create a snake game in this empty workspace",
+                user_input="create a snake game in index.html in this empty workspace",
                 history=[],
                 workspace_id="workspace_main",
                 workspace_root=str(root),
@@ -2738,7 +2738,7 @@ class NativeToolLoopTests(unittest.TestCase):
 
             first_approval = runtime.run(
                 conversation_id="sess_empty_workspace_recovery",
-                user_input="create a snake game in this empty workspace",
+                user_input="create a snake game in index.html in this empty workspace",
                 history=[],
                 workspace_id="workspace_main",
                 workspace_root=str(root),

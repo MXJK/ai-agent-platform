@@ -13,6 +13,7 @@ from langgraph.graph import END, StateGraph
 
 from ai_agent_platform.agents.coding.models import CodingAgentState
 from ai_agent_platform.agents.coding.runtime_support import (
+    route_after_artifact_collection,
     route_after_change_execution,
     route_after_inspection,
     route_after_repair_review,
@@ -38,6 +39,7 @@ class CodingAgentNodes(Protocol):
     assess_context: Node
     route_after_context: Route
     merge_evidence: Node
+    define_completion_contract: Node
     plan_tools: Node
     review_tool_plan: Node
     inspect_repository: Node
@@ -62,6 +64,7 @@ def build_coding_agent_graph(*, nodes: CodingAgentNodes, checkpointer: Any):
     workflow.add_node("execute_exploration", nodes.execute_exploration)
     workflow.add_node("assess_context", nodes.assess_context)
     workflow.add_node("merge_evidence", nodes.merge_evidence)
+    workflow.add_node("define_completion_contract", nodes.define_completion_contract)
     workflow.add_node("plan_tools", nodes.plan_tools)
     workflow.add_node("review_tool_plan", nodes.review_tool_plan)
     workflow.add_node("inspect_repository", nodes.inspect_repository)
@@ -111,9 +114,24 @@ def build_coding_agent_graph(*, nodes: CodingAgentNodes, checkpointer: Any):
     workflow.add_conditional_edges(
         "merge_evidence",
         lambda state: (
-            "plan_tools"
+            "define_completion_contract"
+            if state.get("task_shape") == "bounded_change"
+            else "plan_tools"
             if state.get("context_route") in {"repo", "hybrid"}
             else "compose_answer"
+        ),
+        {
+            "define_completion_contract": "define_completion_contract",
+            "plan_tools": "plan_tools",
+            "compose_answer": "compose_answer",
+        },
+    )
+    workflow.add_conditional_edges(
+        "define_completion_contract",
+        lambda state: (
+            "compose_answer"
+            if state.get("terminal_reason") == "completion_contract_unavailable"
+            else "plan_tools"
         ),
         {
             "plan_tools": "plan_tools",
@@ -176,12 +194,7 @@ def build_coding_agent_graph(*, nodes: CodingAgentNodes, checkpointer: Any):
     )
     workflow.add_conditional_edges(
         "collect_artifacts",
-        lambda state: (
-            "plan_tools"
-            if state.get("native_tool_loop_active")
-            and not state.get("terminal_status")
-            else "compose_answer"
-        ),
+        route_after_artifact_collection,
         {
             "plan_tools": "plan_tools",
             "compose_answer": "compose_answer",

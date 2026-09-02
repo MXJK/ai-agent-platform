@@ -14,6 +14,9 @@ from ai_agent_platform.agents.coding.models import (
     LLMCompletionClient,
 )
 from ai_agent_platform.agents.coding.change_loop import SANDBOX_MUTATION_TOOLS
+from ai_agent_platform.agents.coding.completion_contract import (
+    completion_contract_summary,
+)
 from ai_agent_platform.agents.coding.runtime_support import (
     recent_conversation_context,
 )
@@ -59,7 +62,9 @@ def native_system_prompt(max_parallel_read_calls: int = 1) -> str:
         "an identical tool call, and do not claim an action succeeded unless its "
         "tool result reports success. The task's evidence_contract is authoritative: "
         "finish as soon as its required evidence is covered, and use a limited "
-        "extension only for the listed unresolved requirements. You may emit up to "
+        "extension only for the listed unresolved requirements. For bounded changes, "
+        "obey the frozen change_completion_contract: never shrink it or mistake a "
+        "Diff-format check for delivery. You may emit up to "
         f"{max(1, max_parallel_read_calls)} independent, idempotent, approval-free "
         "read-only tool calls in one turn when they can safely run in parallel. "
         "Do not mix such reads with a mutation, validation, approval-requiring "
@@ -564,6 +569,11 @@ def native_tool_messages(
         "evidence": sources,
         "context_warnings": state.get("context_warnings", []),
     }
+    completion_contract = completion_contract_summary(
+        state.get("change_completion_contract")
+    )
+    if completion_contract.get("applicable"):
+        user_payload["change_completion_contract"] = completion_contract
     return [
         {
             "role": "system",

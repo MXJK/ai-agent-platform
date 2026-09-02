@@ -8,6 +8,9 @@ from time import perf_counter
 from typing import Any, Callable
 
 from ai_agent_platform.agents.coding.formatting import format_error_answer
+from ai_agent_platform.agents.coding.completion_contract import (
+    completion_contract_state,
+)
 from ai_agent_platform.agents.coding.models import AgentRunStatus, CodingAgentState
 from ai_agent_platform.agents.coding.planner import RuleBasedAgentPlanner
 from ai_agent_platform.agents.coding.runtime_support import (
@@ -16,6 +19,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
     error_from_exception as _error_from_exception,
 )
 from ai_agent_platform.agents.coding.task_shaping import (
+    change_validation_state,
     evidence_contract_satisfied,
     task_budget,
 )
@@ -188,6 +192,58 @@ class BudgetPolicy:
             >= self.max_consecutive_failures
         ):
             return "max_consecutive_tool_failures", "blocked"
+        contract_state = completion_contract_state(state)
+        if contract_state == "invalid":
+            return "completion_contract_unavailable", "partial"
+        if (
+            contract_state == "unresolved"
+            and state.get("completion_unresolved_rounds", 0)
+            >= self.no_progress_rounds
+            and change_validation_state(state) not in {"missing", "failed"}
+        ):
+            return "completion_requirements_unresolved", "partial"
+        validation_state = change_validation_state(state)
+        validation_incomplete = validation_state in {"missing", "failed"}
+        if (
+            validation_incomplete
+            and state.get("validation_missing_rounds", 0) >= self.no_progress_rounds
+        ):
+            return f"validation_{validation_state}", "partial"
+        started_at = state.get("started_at")
+        elapsed_budget_reached = isinstance(started_at, (int, float)) and (
+            perf_counter() - started_at >= self.max_elapsed_seconds
+        )
+        max_model_requests = task_budget(
+            state, "max_model_requests", self.max_tool_rounds + 2
+        )
+        hard_budget_reached = (
+            elapsed_budget_reached
+            or state.get("task_model_request_count", 0)
+            >= max(0, max_model_requests - 1)
+            or state.get("native_tool_round", 0)
+            >= task_budget(state, "max_tool_rounds", self.max_tool_rounds)
+            or state.get("native_tool_call_count", 0)
+            >= task_budget(state, "max_tool_calls", self.max_tool_calls)
+        )
+        if validation_incomplete and hard_budget_reached:
+            return f"validation_{validation_state}", "partial"
+        if (
+            contract_state == "unresolved"
+            and hard_budget_reached
+        ):
+            return "completion_requirements_unresolved", "partial"
+        if (
+            contract_state == "satisfied"
+            and validation_state == "passed"
+            and evidence_contract_satisfied(state)
+        ):
+            return "completion_contract_satisfied", "completed"
+        if contract_state == "unresolved":
+            return "", "completed"
+        if validation_state == "passed" and evidence_contract_satisfied(state):
+            return "evidence_contract_satisfied", "completed"
+        if validation_incomplete:
+            return "", "completed"
         if evidence_contract_satisfied(state):
             return "evidence_contract_satisfied", "completed"
         if (
@@ -206,14 +262,8 @@ class BudgetPolicy:
             >= self.no_progress_rounds
         ):
             return "change_not_applied", "blocked"
-        started_at = state.get("started_at")
-        if isinstance(started_at, (int, float)) and (
-            perf_counter() - started_at >= self.max_elapsed_seconds
-        ):
+        if elapsed_budget_reached:
             return "max_elapsed_time", "partial"
-        max_model_requests = task_budget(
-            state, "max_model_requests", self.max_tool_rounds + 2
-        )
         if state.get("task_model_request_count", 0) >= max(0, max_model_requests - 1):
             return "hard_model_request_budget", "partial"
         if state.get("native_tool_round", 0) >= task_budget(
@@ -428,6 +478,89 @@ class CompletionPolicy:
                     max_attempts=1,
                 )
             ]
+        composed_answer = str(answer or "")
+        validation_state = change_validation_state(state)
+        terminal_status = (
+            "failed"
+            if errors and not answer
+            else state.get("terminal_status") or "completed"
+        )
+        terminal_reason = (
+            "answer_composition_failed"
+            if errors and not answer
+            else state.get("terminal_reason") or "model_completed"
+        )
+        change_status = state.get("change_status", "not_requested")
+        contract_state = completion_contract_state(state)
+        if contract_state == "invalid":
+            terminal_status = "partial"
+            terminal_reason = "completion_contract_unavailable"
+            contract = state.get("change_completion_contract", {})
+            answer = (
+                "The bounded change did not run because a reliable "
+                "ChangeCompletionContract could not be frozen. Required input: "
+                + str(contract.get("generation_error") or "an explicit workspace target")
+            )
+        elif contract_state == "unresolved" and (
+            state.get("change_completion_contract", {}).get("unresolved_changes")
+            or validation_state not in {"missing", "failed"}
+        ):
+            terminal_status = "partial"
+            terminal_reason = "completion_requirements_unresolved"
+            contract = state.get("change_completion_contract", {})
+            unresolved_changes = [
+                f"{item.get('operation')} {item.get('target')}"
+                for item in contract.get("required_changes", [])
+                if item.get("status") != "satisfied"
+            ]
+            unresolved_validations = [
+                f"{item.get('category')} ({item.get('target')})"
+                for item in contract.get("required_validations", [])
+                if item.get("status") != "satisfied"
+            ]
+            answer = (
+                "This Run is partial because the frozen completion contract is "
+                "not satisfied. Unresolved changes: "
+                + (", ".join(unresolved_changes) or "none")
+                + ". Unresolved validations: "
+                + (", ".join(unresolved_validations) or "none")
+                + ". The completed items, failed validation evidence, workspace "
+                "status, and Diff were preserved."
+            )
+        elif validation_state in {"missing", "failed"}:
+            if terminal_status == "completed":
+                terminal_status = "partial"
+                terminal_reason = f"validation_{validation_state}"
+            if change_status not in {"repair_rejected", "execution_failed"}:
+                change_status = (
+                    "changes_ready"
+                    if validation_state == "missing"
+                    else "validation_failed"
+                )
+            changed_files = list(state.get("changed_files", []))
+            file_summary = ", ".join(changed_files) if changed_files else "the workspace"
+            if validation_state == "missing":
+                answer = (
+                    f"Workspace changes were produced for {file_summary}, but no "
+                    "post-change validation command completed. This Run is not "
+                    "completed; review the diff and run an appropriate validation."
+                )
+            else:
+                answer = (
+                    f"Workspace changes were produced for {file_summary}, but "
+                    "post-change validation failed. This Run is not completed; the "
+                    "failed validation evidence and diff were preserved."
+                )
+                feedback = str(
+                    (state.get("repair_review_decision") or {}).get("feedback") or ""
+                ).strip()
+                if feedback:
+                    answer += f" Repair stopped after reviewer feedback: {feedback}"
+        if str(answer or "") != composed_answer:
+            stream.discard()
+            prior_delta_count = 0
+            stream.emit(str(answer or ""))
+            stream.flush()
         if answer and run_id and self._event_sink is not None:
             self._event_sink(
                 run_id=run_id,
@@ -443,16 +576,9 @@ class CompletionPolicy:
         return {
             "answer": answer,
             "errors": _append_errors(state, errors),
-            "terminal_status": (
-                "failed"
-                if errors and not answer
-                else state.get("terminal_status") or "completed"
-            ),
-            "terminal_reason": (
-                "answer_composition_failed"
-                if errors and not answer
-                else state.get("terminal_reason") or "model_completed"
-            ),
+            "terminal_status": terminal_status,
+            "terminal_reason": terminal_reason,
+            "change_status": change_status,
             "trace": _append_trace(
                 state,
                 node="compose_answer",

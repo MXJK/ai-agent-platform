@@ -19,6 +19,13 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_VALIDATION_TOOLS,
     partition_tool_calls,
 )
+from ai_agent_platform.agents.coding.completion_contract import (
+    advance_completion_contract,
+    completion_contract_prompt,
+    completion_contract_state,
+    ensure_completion_contract,
+    extend_completion_contract_from_results,
+)
 from ai_agent_platform.agents.coding.evidence_executor import (
     EVIDENCE_CHILD_TOOLS,
     EVIDENCE_TOOL_NAME,
@@ -55,6 +62,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
     build_tool_plan_approval_request as _build_tool_plan_approval_request,
 )
 from ai_agent_platform.agents.coding.task_shaping import (
+    change_validation_state,
     clamp_evidence_call,
     model_visible_tool_specs,
     mutation_authorized_for_state,
@@ -130,6 +138,15 @@ class ToolLoopNodes:
         )
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
+        if state.get("task_shape") == "bounded_change":
+            contract = ensure_completion_contract(state)
+            state = {
+                **state,
+                "change_completion_contract": contract,
+                "completion_contract_satisfied": bool(
+                    contract.get("completion_contract_satisfied")
+                ),
+            }
         visible_tool_specs = self._visible_tool_specs(state)
         tool_specs = model_visible_tool_specs(visible_tool_specs)
         uses_native = bool(
@@ -535,6 +552,8 @@ class ToolLoopNodes:
         if self._budget_policy.soft_limit_reached(state):
             soft_warned = True
             unresolved = list(state.get("unresolved_requirements", []))
+            completion_state = completion_contract_state(state)
+            completion_unresolved = completion_state in {"unresolved", "invalid"}
             max_extensions = task_budget(state, "max_extension_rounds", 0)
             if unresolved and extension_rounds < max_extensions:
                 extension_rounds += 1
@@ -553,8 +572,13 @@ class ToolLoopNodes:
                     "native tool loop entered its single limited evidence extension"
                 )
             else:
+                validation_state = change_validation_state(state)
                 reason = (
-                    "evidence_extension_exhausted"
+                    f"validation_{validation_state}"
+                    if validation_state in {"missing", "failed"}
+                    else "completion_requirements_unresolved"
+                    if completion_unresolved
+                    else "evidence_extension_exhausted"
                     if unresolved
                     else "soft_budget_completion"
                 )
@@ -570,7 +594,13 @@ class ToolLoopNodes:
                     state,
                     native_messages=native_messages,
                     answer=answer,
-                    status="partial" if unresolved else "completed",
+                    status=(
+                        "partial"
+                        if unresolved
+                        or completion_unresolved
+                        or reason.startswith("validation_")
+                        else "completed"
+                    ),
                     reason=reason,
                     compactions=compactions,
                     context_chars=_native_messages_chars(native_messages),
@@ -583,6 +613,36 @@ class ToolLoopNodes:
                 terminal["evidence_extension_rounds"] = extension_rounds
                 return terminal
 
+        validation_state = change_validation_state(state)
+        if validation_state in {"missing", "failed"}:
+            reminder = (
+                "The bounded workspace change cannot complete yet because no "
+                "post-change validation command has run. Call sandbox.run_command "
+                "with a focused command appropriate for the changed files now."
+                if validation_state == "missing"
+                else "The bounded workspace change cannot complete because the latest "
+                "post-change validation failed. Inspect the failed result, make the "
+                "smallest repair when possible, then rerun sandbox.run_command."
+            )
+            if not (
+                native_messages
+                and native_messages[-1].get("role") == "system"
+                and native_messages[-1].get("content") == reminder
+            ):
+                native_messages.append({"role": "system", "content": reminder})
+        contract_state = completion_contract_state(state)
+        if contract_state == "unresolved":
+            completion_reminder = completion_contract_prompt(
+                state.get("change_completion_contract", {})
+            )
+            if not (
+                native_messages
+                and native_messages[-1].get("role") == "system"
+                and native_messages[-1].get("content") == completion_reminder
+            ):
+                native_messages.append(
+                    {"role": "system", "content": completion_reminder}
+                )
         decide = self._planner.decide_tool_calls
         snip_blocks = []
         request_messages = native_messages
@@ -908,6 +968,7 @@ class ToolLoopNodes:
         )
         change_requires_mutation = (
             mutation_authorized_for_state(state)
+            and state.get("workspace_completion_required", True)
             and not _has_successful_native_mutation(state)
         )
         if not all_proposed_calls and change_requires_mutation:
@@ -928,6 +989,27 @@ class ToolLoopNodes:
                         "mutation tool now, then validate and inspect the resulting diff."
                     ),
                 }
+            )
+        validation_missing_rounds = state.get("validation_missing_rounds", 0)
+        validation_state = change_validation_state(state)
+        if not all_proposed_calls and validation_state in {"missing", "failed"}:
+            validation_missing_rounds += 1
+            no_progress += 1
+            native_answer = ""
+            stop_reason = "no_progress_retry"
+            warnings.append(
+                f"change task attempted to finish with validation {validation_state}"
+            )
+        completion_unresolved_rounds = state.get(
+            "completion_unresolved_rounds", 0
+        )
+        if not all_proposed_calls and contract_state in {"unresolved", "invalid"}:
+            completion_unresolved_rounds += 1
+            no_progress += 1
+            native_answer = ""
+            stop_reason = "no_progress_retry"
+            warnings.append(
+                "change task attempted to finish with unresolved completion requirements"
             )
         native_signatures = list(previous_signatures)
         native_call_count = state.get("native_tool_call_count", 0) + len(tool_calls)
@@ -961,6 +1043,12 @@ class ToolLoopNodes:
         terminal_status = "completed" if not all_proposed_calls else ""
         terminal_reason = "model_completed" if not all_proposed_calls else ""
         if change_requires_mutation and not all_proposed_calls:
+            terminal_status = ""
+            terminal_reason = ""
+        if validation_state in {"missing", "failed"} and not all_proposed_calls:
+            terminal_status = ""
+            terminal_reason = ""
+        if contract_state in {"unresolved", "invalid"} and not all_proposed_calls:
             terminal_status = ""
             terminal_reason = ""
         final_errors: list[dict[str, Any]] = []
@@ -1007,6 +1095,14 @@ class ToolLoopNodes:
             "evidence_extension_rounds": extension_rounds,
             "native_no_progress_rounds": no_progress,
             "native_unfulfilled_change_rounds": unfulfilled_change_rounds,
+            "validation_missing_rounds": validation_missing_rounds,
+            "completion_unresolved_rounds": completion_unresolved_rounds,
+            "change_completion_contract": state.get(
+                "change_completion_contract", {}
+            ),
+            "completion_contract_satisfied": bool(
+                state.get("completion_contract_satisfied", False)
+            ),
             "native_context_compactions": compactions,
             "native_auto_compactions": auto_compactions,
             "native_compaction_failures": compaction_failures,
@@ -1590,6 +1686,9 @@ class ToolLoopNodes:
                         "results": validation_results,
                     }
                 )
+            validation_missing_rounds = state.get("validation_missing_rounds", 0)
+            if successful_mutation or validation_results:
+                validation_missing_rounds = 0
             successful_new_result = any(
                 result.get("ok") and not result.get("durable_replay")
                 for result in results
@@ -1608,11 +1707,46 @@ class ToolLoopNodes:
                 bundles=evidence_bundles,
                 completed_round=True,
             )
+            if progress.get("evidence_contract_satisfied"):
+                event_sink = getattr(self._change_loop, "_event_sink", None)
+                if state.get("run_id") and event_sink is not None:
+                    event_sink(
+                        run_id=state["run_id"],
+                        event_type="evidence_satisfied",
+                        node="inspect_repository",
+                        summary="The evidence contract is satisfied.",
+                        output={"evidence_contract_satisfied": True},
+                        event_key="evidence-contract-satisfied",
+                    )
             actual_call_count = (
                 state.get("native_tool_call_count", 0)
                 + len(results)
                 - len(calls)
             )
+            expanded_contract = extend_completion_contract_from_results(
+                state, results=results
+            )
+            contract = advance_completion_contract(
+                {**state, "change_completion_contract": expanded_contract},
+                results=results,
+            )
+            prior_unresolved = set(
+                state.get("change_completion_contract", {}).get(
+                    "unresolved_changes", []
+                )
+            ) | set(
+                state.get("change_completion_contract", {}).get(
+                    "unresolved_validations", []
+                )
+            )
+            current_unresolved = set(contract.get("unresolved_changes", [])) | set(
+                contract.get("unresolved_validations", [])
+            )
+            completion_unresolved_rounds = state.get(
+                "completion_unresolved_rounds", 0
+            )
+            if current_unresolved < prior_unresolved:
+                completion_unresolved_rounds = 0
             return {
                 "tool_results": list(state.get("tool_results", [])) + results,
                 "artifacts": merged_artifacts,
@@ -1630,6 +1764,12 @@ class ToolLoopNodes:
                 "validation_tool_calls": [],
                 "validation_results": validation_results,
                 "validation_history": validation_history,
+                "validation_missing_rounds": validation_missing_rounds,
+                "change_completion_contract": contract,
+                "completion_contract_satisfied": bool(
+                    contract.get("completion_contract_satisfied")
+                ),
+                "completion_unresolved_rounds": completion_unresolved_rounds,
                 "change_iteration": (
                     state.get("change_iteration", 0) + 1
                     if successful_mutation
@@ -1672,6 +1812,15 @@ class ToolLoopNodes:
                         "unresolved_requirements": progress[
                             "unresolved_requirements"
                         ],
+                        "completion_contract_satisfied": bool(
+                            contract.get("completion_contract_satisfied")
+                        ),
+                        "unresolved_changes": contract.get(
+                            "unresolved_changes", []
+                        ),
+                        "unresolved_validations": contract.get(
+                            "unresolved_validations", []
+                        ),
                         "artifact_reads": [
                             artifact_read_trace(result)
                             for result in results

@@ -176,6 +176,9 @@ class _RuntimeGraphNodes:
         self.assess_context = instrument("assess_context", context._assess_context)
         self.route_after_context = context._route_after_context
         self.merge_evidence = instrument("merge_evidence", context._merge_evidence)
+        self.define_completion_contract = instrument(
+            "define_completion_contract", context._define_completion_contract
+        )
         tool_loop = runtime._tool_loop_nodes
         self.plan_tools = instrument("plan_tools", tool_loop._plan_tools)
         self.review_tool_plan = instrument("review_tool_plan", tool_loop._review_tool_plan)
@@ -523,6 +526,7 @@ class CodingAgentRuntime:
             "evaluation_knowledge_base_ids": evaluation_knowledge_base_ids,
             "explicit_requested_tools": explicit_requested_tools,
             "explicit_skill_requested": explicit_skill_requested,
+            "workspace_completion_required": True,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],
             "history": [
@@ -572,6 +576,10 @@ class CodingAgentRuntime:
             "evidence_extension_rounds": 0,
             "evidence_rounds_completed": 0,
             "evidence_contract_satisfied": False,
+            "change_completion_contract": {},
+            "completion_contract_satisfied": False,
+            "completion_unresolved_rounds": 0,
+            "validation_missing_rounds": 0,
             "native_unfulfilled_change_rounds": 0,
             "native_consecutive_failures": 0,
             "native_context_compactions": 0,
@@ -1016,6 +1024,18 @@ class CodingAgentRuntime:
                 # assembly layers use the documented static fallback ceilings.
                 "context_shares": dict(
                     selected.values.get("context_shares", {})
+                ),
+                # Completion-contract channels were added after Phase 1. An empty
+                # contract is intentional: plan_tools will choose the explicit
+                # legacy_phase1 adapter when a restored checkpoint already mutated.
+                "change_completion_contract": dict(
+                    selected.values.get("change_completion_contract", {})
+                ),
+                "completion_contract_satisfied": bool(
+                    selected.values.get("completion_contract_satisfied", False)
+                ),
+                "completion_unresolved_rounds": int(
+                    selected.values.get("completion_unresolved_rounds", 0)
                 ),
                 "trace": _checkpoint_branch_trace(
                     selected.values.get("trace", []),

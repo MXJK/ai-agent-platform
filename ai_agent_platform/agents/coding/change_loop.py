@@ -14,6 +14,10 @@ from ai_agent_platform.agents.coding.models import (
     AgentToolExecution,
     CodingAgentState,
 )
+from ai_agent_platform.agents.coding.completion_contract import (
+    advance_completion_contract,
+    completion_contract_state,
+)
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.integrations.tools import (
     ToolCall,
@@ -30,6 +34,7 @@ from ai_agent_platform.integrations.permissions import (
 
 
 MAX_CHANGE_ITERATIONS = 2
+MAX_VALIDATION_MISSING_ROUNDS = 2
 SANDBOX_MUTATION_TOOLS = {"sandbox.apply_patch", "sandbox.write_file"}
 SANDBOX_VALIDATION_TOOLS = {"sandbox.run_command"}
 SANDBOX_ARTIFACT_TOOLS = {"sandbox.git_diff", "sandbox.workspace_status"}
@@ -86,6 +91,12 @@ class ChangeLoopExecutor:
                 if event_type == "tool_started"
                 else f"Tool completed: {tool_call.name}."
                 if event_type == "tool_result"
+                else "A workspace mutation was applied."
+                if event_type == "mutation_applied"
+                else "A post-change validation passed."
+                if event_type == "validation_passed"
+                else "A post-change validation failed."
+                if event_type == "validation_failed"
                 else f"Tool failed: {tool_call.name}."
             ),
             output=output,
@@ -99,12 +110,17 @@ class ChangeLoopExecutor:
             state.get("change_tool_calls", []) if iteration == 0 else []
         )
         results = self.execute_tool_calls(state, change_calls)
+        contract = advance_completion_contract(state, results=results)
         next_iteration = iteration + 1 if change_calls else iteration
         return {
             "tool_results": list(state.get("tool_results", [])) + results,
             "repair_tool_calls": [],
             "repair_approval_tool_calls": [],
             "change_iteration": next_iteration,
+            "change_completion_contract": contract,
+            "completion_contract_satisfied": bool(
+                contract.get("completion_contract_satisfied")
+            ),
             "trace": _append_trace(
                 state,
                 node="execute_changes",
@@ -135,6 +151,7 @@ class ChangeLoopExecutor:
             state,
             validation_calls,
         )
+        contract = advance_completion_contract(state, results=validation_results)
         validation_history = list(state.get("validation_history", []))
         validation_history.append(
             {
@@ -221,6 +238,10 @@ class ChangeLoopExecutor:
                 else state.get("validation_tool_calls", [])
             ),
             "approval_required_tools": approval_required_tools,
+            "change_completion_contract": contract,
+            "completion_contract_satisfied": bool(
+                contract.get("completion_contract_satisfied")
+            ),
             "trace": _append_trace(
                 state,
                 node="validate_changes",
@@ -328,12 +349,74 @@ class ChangeLoopExecutor:
             validation_results=state.get("validation_results", []),
             diff_result=diff_result,
         )
+        contract = advance_completion_contract(
+            state,
+            results=artifact_results,
+            changed_files=changed_files,
+            final_workspace_status_collected=bool(status_result.get("ok")),
+            final_diff_collected=bool(diff_result.get("ok")),
+            diff_text=str(diff_output.get("diff") or ""),
+        )
+        if (
+            contract.get("completion_contract_satisfied")
+            and state.get("run_id")
+            and self._event_sink is not None
+        ):
+            self._event_sink(
+                run_id=state["run_id"],
+                event_type="completion_contract_satisfied",
+                node="collect_artifacts",
+                summary="The ChangeCompletionContract is satisfied.",
+                output={
+                    "revision": contract.get("revision", 0),
+                    "completion_contract_satisfied": True,
+                },
+                event_key="completion-contract-satisfied",
+            )
+        native_loop = bool(state.get("native_tool_loop_active"))
+        validation_missing_rounds = state.get("validation_missing_rounds", 0)
+        terminal_status = state.get("terminal_status", "")
+        terminal_reason = state.get("terminal_reason", "")
+        if final_status == "changes_ready":
+            validation_missing_rounds += 1
+            if (
+                not native_loop
+                and validation_missing_rounds >= MAX_VALIDATION_MISSING_ROUNDS
+            ):
+                terminal_status = "partial"
+                terminal_reason = "validation_missing"
+        elif final_status == "validation_failed" and not native_loop:
+            terminal_status = "partial"
+            terminal_reason = "validation_failed"
+        elif final_status in {"repair_rejected", "execution_failed"}:
+            terminal_status = "blocked"
+            terminal_reason = final_status
+        elif (
+            final_status == "validated"
+            and completion_contract_state(
+                {**state, "change_completion_contract": contract}
+            ) in {"satisfied", "legacy_phase1"}
+            and not native_loop
+        ):
+            terminal_status = terminal_status or "completed"
+            terminal_reason = terminal_reason or (
+                "completion_contract_satisfied"
+                if contract.get("completion_contract_satisfied")
+                else "validation_passed"
+            )
         return {
             "tool_results": list(state.get("tool_results", []))
             + artifact_results,
             "artifacts": artifacts,
             "changed_files": changed_files,
             "change_status": final_status,
+            "validation_missing_rounds": validation_missing_rounds,
+            "terminal_status": terminal_status,
+            "terminal_reason": terminal_reason,
+            "change_completion_contract": contract,
+            "completion_contract_satisfied": bool(
+                contract.get("completion_contract_satisfied")
+            ),
             "trace": _append_trace(
                 state,
                 node="collect_artifacts",
@@ -345,6 +428,13 @@ class ChangeLoopExecutor:
                     "changed_files": changed_files,
                     "artifact_types": [item["type"] for item in artifacts],
                     "diff_truncated": bool(diff_output.get("truncated", False)),
+                    "completion_contract_satisfied": bool(
+                        contract.get("completion_contract_satisfied")
+                    ),
+                    "unresolved_changes": contract.get("unresolved_changes", []),
+                    "unresolved_validations": contract.get(
+                        "unresolved_validations", []
+                    ),
                 },
             ),
         }
@@ -427,6 +517,23 @@ class ChangeLoopExecutor:
                 output=response,
                 event_key=f"tool-result:{tool_call.call_id}",
             )
+            if response.get("ok") and tool_call.name in SANDBOX_MUTATION_TOOLS:
+                self._emit_tool_event(
+                    run_id=run_id,
+                    event_type="mutation_applied",
+                    tool_call=tool_call,
+                    output={"call_id": tool_call.call_id, "name": tool_call.name},
+                    event_key=f"mutation-applied:{tool_call.call_id}",
+                )
+            if tool_call.name in SANDBOX_VALIDATION_TOOLS:
+                passed = is_validation_success(response)
+                self._emit_tool_event(
+                    run_id=run_id,
+                    event_type="validation_passed" if passed else "validation_failed",
+                    tool_call=tool_call,
+                    output={"call_id": tool_call.call_id, "passed": passed},
+                    event_key=f"validation:{tool_call.call_id}",
+                )
             return response
 
         arguments_hash = hashlib.sha256(

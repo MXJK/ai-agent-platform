@@ -6,6 +6,9 @@ from dataclasses import replace
 from typing import Any, Optional
 
 from ai_agent_platform.agents.coding.change_loop import is_validation_success
+from ai_agent_platform.agents.coding.completion_contract import (
+    completion_contract_summary,
+)
 from ai_agent_platform.agents.coding.models import (
     CODING_AGENT_OBJECTIVE,
     CODING_AGENT_ROLE,
@@ -182,6 +185,95 @@ class RunRecorder:
                 output=event_output,
                 event_key=f"tool-result:{call_id}",
             )
+            if result.get("ok") and tool_name in {
+                "sandbox.write_file",
+                "sandbox.apply_patch",
+            }:
+                self.emit_event(
+                    run_id=run_id,
+                    event_type="mutation_applied",
+                    node=node,
+                    summary="A workspace mutation was applied.",
+                    output={"call_id": call_id, "name": tool_name},
+                    event_key=f"mutation-applied:{call_id}",
+                )
+            if tool_name == "sandbox.run_command":
+                passed = is_validation_success(result)
+                self.emit_event(
+                    run_id=run_id,
+                    event_type="validation_passed" if passed else "validation_failed",
+                    node=node,
+                    summary=(
+                        "A post-change validation passed."
+                        if passed
+                        else "A post-change validation failed."
+                    ),
+                    output={"call_id": call_id, "passed": passed},
+                    event_key=f"validation:{call_id}",
+                )
+        merged_evidence_satisfied = bool(
+            update.get(
+                "evidence_contract_satisfied",
+                state.get("evidence_contract_satisfied"),
+            )
+        )
+        if merged_evidence_satisfied:
+            self.emit_event(
+                run_id=run_id,
+                event_type="evidence_satisfied",
+                node=node,
+                summary="The evidence contract is satisfied.",
+                output={"evidence_contract_satisfied": True},
+                event_key="evidence-contract-satisfied",
+            )
+        prior_contract = state.get("change_completion_contract", {})
+        current_contract = update.get("change_completion_contract", prior_contract)
+        if isinstance(current_contract, dict) and current_contract:
+            prior_revision = int(prior_contract.get("revision", 0)) if isinstance(prior_contract, dict) else 0
+            current_revision = int(current_contract.get("revision", 0))
+            prior_unresolved = (
+                list(prior_contract.get("unresolved_changes", []))
+                + list(prior_contract.get("unresolved_validations", []))
+                if isinstance(prior_contract, dict)
+                else []
+            )
+            current_unresolved = list(current_contract.get("unresolved_changes", [])) + list(
+                current_contract.get("unresolved_validations", [])
+            )
+            if current_revision > prior_revision or current_unresolved != prior_unresolved:
+                self.emit_event(
+                    run_id=run_id,
+                    event_type=(
+                        "completion_contract_frozen"
+                        if current_revision > prior_revision and prior_revision == 0
+                        else "completion_contract_advanced"
+                    ),
+                    node=node,
+                    summary="The ChangeCompletionContract state changed.",
+                    output=completion_contract_summary(current_contract),
+                    event_key=(
+                        f"completion-contract:{current_revision}:"
+                        + ",".join(current_unresolved)
+                    ),
+                )
+            if (
+                current_contract.get("completion_contract_satisfied")
+                and not (
+                    isinstance(prior_contract, dict)
+                    and prior_contract.get("completion_contract_satisfied")
+                )
+            ):
+                self.emit_event(
+                    run_id=run_id,
+                    event_type="completion_contract_satisfied",
+                    node=node,
+                    summary="The ChangeCompletionContract is satisfied.",
+                    output={
+                        "revision": current_revision,
+                        "completion_contract_satisfied": True,
+                    },
+                    event_key="completion-contract-satisfied",
+                )
         self.emit_event(
             run_id=run_id,
             event_type="reasoning_summary",
@@ -328,6 +420,9 @@ class RunRecorder:
                     and all(is_validation_success(item) for item in validation_results),
                     "command_count": len(validation_results),
                     "iteration_count": state.get("change_iteration", 0),
+                    "completion_contract": completion_contract_summary(
+                        state.get("change_completion_contract")
+                    ),
                 },
             )
         except Exception as exc:
@@ -464,6 +559,10 @@ class RunRecorder:
             conversation_id=conversation_id,
             workspace_id=workspace_id,
             status=status,
+            terminal_reason=str(state.get("terminal_reason") or ""),
+            completion_contract=completion_contract_summary(
+                state.get("change_completion_contract")
+            ),
             checkpoint_id=checkpoint_id,
             role=CODING_AGENT_ROLE,
             objective=CODING_AGENT_OBJECTIVE,

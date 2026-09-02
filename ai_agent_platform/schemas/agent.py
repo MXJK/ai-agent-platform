@@ -214,6 +214,8 @@ class AgentRunResponse(BaseModel):
     conversation_id: str
     workspace_id: str
     status: str
+    terminal_reason: str = ""
+    completion_contract: dict[str, Any] = Field(default_factory=dict)
     checkpoint_id: Optional[str]
     role: str
     objective: str
@@ -245,6 +247,8 @@ class AgentRunResponse(BaseModel):
             conversation_id=result.conversation_id,
             workspace_id=result.workspace_id,
             status=result.status,
+            terminal_reason=result.terminal_reason,
+            completion_contract=result.completion_contract,
             checkpoint_id=result.checkpoint_id,
             role=result.role,
             objective=result.objective,
@@ -580,6 +584,11 @@ class AgentRunEventsResponse(BaseModel):
                     summary=f"Agent run ended with status {record.status}.",
                     output={
                         "answer_chars": len(answer),
+                        "terminal_reason": (
+                            record.result.terminal_reason
+                            if record.result is not None
+                            else ""
+                        ),
                         "change_status": (
                             change_summary.status if change_summary is not None else None
                         ),
@@ -587,6 +596,11 @@ class AgentRunEventsResponse(BaseModel):
                             change_summary.changed_files
                             if change_summary is not None
                             else []
+                        ),
+                        "completion_contract": (
+                            record.result.completion_contract
+                            if record.result is not None
+                            else {}
                         ),
                     },
                 )
