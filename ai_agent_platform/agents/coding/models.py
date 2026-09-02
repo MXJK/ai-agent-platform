@@ -51,9 +51,14 @@ class CodingAgentState(TypedDict, total=False):
     intent_reason: str
     intent_confidence: float
     planner_source: str
+    model_action: str
+    model_target_hints: list[str]
     request_mode: str
     mutation_authorized: bool
     mutation_authority_reason: str
+    autonomous_mutation_enabled: bool
+    run_budget_mode: str
+    graph_slice_count: int
     workspace_completion_required: bool
     task_shape: str
     evidence_contract: dict[str, Any]
@@ -457,6 +462,9 @@ class AgentPlanner(Protocol):
         self,
         user_input: str,
         knowledge_bases: list[dict[str, Any]],
+        *,
+        history: list[dict[str, str]] | None = None,
+        focus_files: list[str] | None = None,
     ) -> dict[str, Any]:
         ...
 

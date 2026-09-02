@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Any, Optional
 
 from langgraph.checkpoint.base import create_checkpoint
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 
 from ai_agent_platform.agents.coding.models import AgentRunRecord, CodingAgentState
@@ -21,10 +22,12 @@ class CheckpointResumeCoordinator:
         graph: Any,
         recursion_limit: int,
         checkpointer: Any,
+        continue_on_recursion: bool = False,
     ) -> None:
         self._graph = graph
         self._recursion_limit = recursion_limit
         self._checkpointer = checkpointer
+        self._continue_on_recursion = continue_on_recursion
 
     def config(self, thread_id: str) -> dict[str, Any]:
         return {
@@ -39,10 +42,11 @@ class CheckpointResumeCoordinator:
     ) -> tuple[CodingAgentState, Any]:
         with collect_llm_usage() as usage:
             try:
-                state = self._graph.invoke(initial_state, config)
+                state, slice_count = self._invoke_slices(initial_state, config)
             except Exception as exc:
                 setattr(exc, "llm_usage", usage)
                 raise
+        state = {**state, "graph_slice_count": slice_count}
         return state, usage
 
     def resume(
@@ -56,7 +60,7 @@ class CheckpointResumeCoordinator:
         config = self.config(record.thread_id)
         with collect_llm_usage() as usage:
             try:
-                state = self._graph.invoke(
+                state, slice_count = self._invoke_slices(
                     Command(
                         resume={
                             "approved": approved,
@@ -71,6 +75,7 @@ class CheckpointResumeCoordinator:
             except Exception as exc:
                 setattr(exc, "llm_usage", usage)
                 raise
+        state = {**state, "graph_slice_count": slice_count}
         return state, usage, config
 
     def snapshot_for(self, config: dict[str, Any]):
@@ -145,8 +150,36 @@ class CheckpointResumeCoordinator:
     ) -> tuple[CodingAgentState, Any]:
         with collect_llm_usage() as usage:
             try:
-                state = self._graph.invoke(None, config)
+                state, slice_count = self._invoke_slices(None, config)
             except Exception as exc:
                 setattr(exc, "llm_usage", usage)
                 raise
+        state = {**state, "graph_slice_count": slice_count}
         return state, usage
+
+    def _invoke_slices(
+        self,
+        value: Any,
+        config: dict[str, Any],
+    ) -> tuple[CodingAgentState, int]:
+        """Continue a checkpointed graph after each finite recursion slice.
+
+        LangGraph requires a finite ``recursion_limit``. In unbounded Run mode
+        that value is an execution slice size, not a semantic task limit: a
+        recursion exception is resumable only when the durable snapshot exposes
+        pending nodes. Other exceptions and non-resumable snapshots still fail.
+        """
+
+        slice_count = 0
+        current = value
+        while True:
+            slice_count += 1
+            try:
+                return self._graph.invoke(current, config), slice_count
+            except GraphRecursionError:
+                if not self._continue_on_recursion:
+                    raise
+                snapshot = self.snapshot_for(config)
+                if snapshot is None or not tuple(snapshot.next or ()):
+                    raise
+                current = None

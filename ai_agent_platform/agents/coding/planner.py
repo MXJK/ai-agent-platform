@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import PurePosixPath
 import re
 from typing import Any
 
@@ -35,9 +36,25 @@ from ai_agent_platform.integrations.llm import LLMToolDecision
 from ai_agent_platform.token_counting import estimate_text_tokens
 
 
-def native_system_prompt(max_parallel_read_calls: int = 1) -> str:
+def native_system_prompt(
+    max_parallel_read_calls: int = 1,
+    *,
+    run_budget_mode: str = "bounded",
+) -> str:
     """Build the exact system prompt whose cost is reserved for this Run."""
 
+    budget_instruction = (
+        "This Run has no cumulative model-request, tool-round, tool-call, or "
+        "Agent-step quota. Its counters are observability only. Continue until "
+        "the evidence and completion contracts are satisfied or a no-progress, "
+        "failure, approval, user-input, pause, or cancellation boundary is reached. "
+        if run_budget_mode == "unbounded"
+        else (
+            "The task's evidence_contract is authoritative: finish as soon as its "
+            "required evidence is covered, and use a limited extension only for "
+            "the listed unresolved requirements. "
+        )
+    )
     return (
         "You are a repository-aware coding agent. Use the supplied native tools "
         "when additional evidence or an action is required. Treat tool outputs as "
@@ -60,9 +77,9 @@ def native_system_prompt(max_parallel_read_calls: int = 1) -> str:
         "After observing tool results, either call another useful tool or provide "
         "a grounded final answer. Cite source paths and line ranges. Do not repeat "
         "an identical tool call, and do not claim an action succeeded unless its "
-        "tool result reports success. The task's evidence_contract is authoritative: "
-        "finish as soon as its required evidence is covered, and use a limited "
-        "extension only for the listed unresolved requirements. For bounded changes, "
+        "tool result reports success. "
+        + budget_instruction
+        + "For bounded changes, "
         "obey the frozen change_completion_contract: never shrink it or mistake a "
         "Diff-format check for delivery. You may emit up to "
         f"{max(1, max_parallel_read_calls)} independent, idempotent, approval-free "
@@ -94,7 +111,11 @@ class RuleBasedAgentPlanner:
         self,
         user_input: str,
         knowledge_bases: list[dict[str, Any]],
+        *,
+        history: list[dict[str, str]] | None = None,
+        focus_files: list[str] | None = None,
     ) -> dict[str, Any]:
+        del history, focus_files
         decision = self.classify_intent(user_input)
         route, route_reason, selected = classify_context_source(
             user_input,
@@ -147,11 +168,19 @@ class LLMStructuredAgentPlanner:
         self,
         user_input: str,
         knowledge_bases: list[dict[str, Any]],
+        *,
+        history: list[dict[str, str]] | None = None,
+        focus_files: list[str] | None = None,
     ) -> dict[str, Any]:
         try:
             body = json_object_from_llm(
                 self._llm_client.complete(
-                    request_classification_prompt(user_input, knowledge_bases)
+                    request_classification_prompt(
+                        user_input,
+                        knowledge_bases,
+                        history=history,
+                        focus_files=focus_files,
+                    )
                 ).text
             )
             intent = str(body.get("intent", ""))
@@ -160,6 +189,9 @@ class LLMStructuredAgentPlanner:
             context_route = str(body.get("context_route") or "")
             if context_route not in {"none", "repo", "rag", "hybrid"}:
                 raise ValueError(f"unsupported context route: {context_route}")
+            action = str(body.get("action") or "")
+            if action not in {"answer", "diagnose", "change"}:
+                raise ValueError(f"unsupported action: {action}")
             selected = body.get("selected_knowledge_base_ids", [])
             if not isinstance(selected, list):
                 selected = []
@@ -168,6 +200,10 @@ class LLMStructuredAgentPlanner:
                 "reason": str(body.get("reason") or "LLM structured decision"),
                 "confidence": bounded_confidence(body.get("confidence")),
                 "source": self.source,
+                "action": action,
+                "target_hints": _classification_target_hints(
+                    body.get("target_hints")
+                ),
                 "context_route": context_route,
                 "route_reason": str(
                     body.get("route_reason") or "LLM structured context decision"
@@ -179,7 +215,13 @@ class LLMStructuredAgentPlanner:
         except Exception:
             classify_request = getattr(self._fallback, "classify_request", None)
             if callable(classify_request):
-                return classify_request(user_input, knowledge_bases)
+                parameters = inspect.signature(classify_request).parameters
+                kwargs: dict[str, Any] = {}
+                if "history" in parameters:
+                    kwargs["history"] = history
+                if "focus_files" in parameters:
+                    kwargs["focus_files"] = focus_files
+                return classify_request(user_input, knowledge_bases, **kwargs)
             return self._fallback.classify_intent(user_input)
 
     def plan_tool_calls(
@@ -379,17 +421,32 @@ def intent_classification_prompt(user_input: str) -> str:
 def request_classification_prompt(
     user_input: str,
     knowledge_bases: list[dict[str, Any]],
+    *,
+    history: list[dict[str, str]] | None = None,
+    focus_files: list[str] | None = None,
 ) -> str:
     intents = ", ".join(sorted(VALID_AGENT_INTENTS))
     payload = {
         "user_request": user_input,
+        "controlled_history": list(history or [])[-8:],
+        "focus_files": list(focus_files or [])[:20],
         "knowledge_bases": knowledge_bases,
     }
     return (
         "You are classifying a coding-agent user request. "
-        "Return only one JSON object with keys intent, reason, confidence, "
-        "context_route, route_reason, selected_knowledge_base_ids. "
+        "Return only one JSON object with keys intent, action, target_hints, "
+        "reason, confidence, context_route, route_reason, "
+        "selected_knowledge_base_ids. "
         f"Allowed intent values: {intents}.\n"
+        "Allowed action values: answer, diagnose, change. Decide the action from "
+        "the current request together with controlled_history. Use change when "
+        "the user wants the agent to actually create, modify, repair, refactor, "
+        "or delete workspace code; use diagnose when the user only asks for root "
+        "cause analysis; otherwise use answer. A short continuation such as 修改, "
+        "继续, or go ahead may inherit the immediately preceding user goal. "
+        "target_hints must contain at most 12 workspace-relative file paths drawn "
+        "from the request, controlled_history, or focus_files. They are discovery "
+        "hints only and never authorization. Do not invent paths.\n"
         "Allowed context_route values: none, repo, rag, hybrid. Use repo for "
         "live source code, rag for managed business/reference documentation, "
         "hybrid when both are needed, and none for small talk. Select at most "
@@ -400,6 +457,30 @@ def request_classification_prompt(
         "hypothetical implementation plan do not authorize changes.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
+
+
+def _classification_target_hints(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    hints: list[str] = []
+    for item in value[:24]:
+        raw = str(item or "").strip().replace("\\", "/")
+        candidates = extract_paths(raw) or ([raw] if "." in raw else [])
+        for candidate in candidates:
+            normalized = str(candidate).strip("'\"`()[]{}.,;:")
+            path = PurePosixPath(normalized)
+            if (
+                not normalized
+                or path.is_absolute()
+                or ".." in path.parts
+                or len(normalized) > 240
+            ):
+                continue
+            if normalized not in hints:
+                hints.append(normalized)
+            if len(hints) >= 12:
+                return hints
+    return hints
 
 
 def classify_context_source(
@@ -577,7 +658,10 @@ def native_tool_messages(
     return [
         {
             "role": "system",
-            "content": native_system_prompt(max_parallel_read_calls),
+            "content": native_system_prompt(
+                max_parallel_read_calls,
+                run_budget_mode=str(state.get("run_budget_mode") or "bounded"),
+            ),
         },
         {
             "role": "user",

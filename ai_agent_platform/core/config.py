@@ -274,8 +274,11 @@ class Settings:
         "tox",
         "uv",
     )
+    agent_autonomous_mutation_enabled: bool = True
+    agent_run_budget_mode: str = "unbounded"
     agent_max_exploration_rounds: int = 4
     agent_max_read_tools_per_round: int = 6
+    agent_max_parallel_tools_per_step: int = 10
     agent_max_context_files: int = 12
     agent_max_context_chars: int = 32000
     agent_max_instruction_chars: int = 16000
@@ -368,6 +371,11 @@ class Settings:
             "agent_approval_policy",
             self.agent_approval_policy,
             {"always", "on_request", "never"},
+        )
+        _require_choice(
+            "agent_run_budget_mode",
+            self.agent_run_budget_mode,
+            {"bounded", "unbounded"},
         )
         if self.llm_model_catalog_json:
             _validate_model_catalog_json(self.llm_model_catalog_json)
@@ -689,6 +697,10 @@ class Settings:
                 "agent_max_read_tools_per_round",
                 self.agent_max_read_tools_per_round,
             ),
+            (
+                "agent_max_parallel_tools_per_step",
+                self.agent_max_parallel_tools_per_step,
+            ),
             ("agent_max_context_files", self.agent_max_context_files),
             ("agent_max_context_chars", self.agent_max_context_chars),
             ("agent_max_instruction_chars", self.agent_max_instruction_chars),
@@ -744,6 +756,10 @@ class Settings:
             _require_positive(name, value)
         if self.agent_tool_result_max_tokens < 64:
             raise ValueError("agent_tool_result_max_tokens must be at least 64")
+        if self.agent_max_parallel_tools_per_step > 10:
+            raise ValueError(
+                "agent_max_parallel_tools_per_step must not exceed 10"
+            )
         if not 0 < self.agent_snip_pressure_ratio < 1:
             raise ValueError("agent_snip_pressure_ratio must be between 0 and 1")
         if self.agent_soft_tool_rounds > self.agent_max_tool_rounds:
@@ -1432,6 +1448,16 @@ class Settings:
                 cls.sandbox_allowed_commands,
                 dotenv,
             ),
+            agent_autonomous_mutation_enabled=_bool_env(
+                "AGENT_AUTONOMOUS_MUTATION_ENABLED",
+                cls.agent_autonomous_mutation_enabled,
+                dotenv,
+            ),
+            agent_run_budget_mode=_env(
+                "AGENT_RUN_BUDGET_MODE",
+                cls.agent_run_budget_mode,
+                dotenv,
+            ),
             agent_max_exploration_rounds=_int_env(
                 "AGENT_MAX_EXPLORATION_ROUNDS",
                 cls.agent_max_exploration_rounds,
@@ -1440,6 +1466,11 @@ class Settings:
             agent_max_read_tools_per_round=_int_env(
                 "AGENT_MAX_READ_TOOLS_PER_ROUND",
                 cls.agent_max_read_tools_per_round,
+                dotenv,
+            ),
+            agent_max_parallel_tools_per_step=_int_env(
+                "AGENT_MAX_PARALLEL_TOOLS_PER_STEP",
+                cls.agent_max_parallel_tools_per_step,
                 dotenv,
             ),
             agent_max_context_files=_int_env(

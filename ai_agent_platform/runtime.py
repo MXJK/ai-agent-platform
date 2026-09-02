@@ -1105,8 +1105,15 @@ class ApplicationFactory:
             run_store=run_store,
             checkpointer=checkpointer,
             planner=LLMStructuredAgentPlanner(llm_client),
+            autonomous_mutation_enabled=(
+                settings.agent_autonomous_mutation_enabled
+            ),
+            run_budget_mode=settings.agent_run_budget_mode,
             max_exploration_rounds=settings.agent_max_exploration_rounds,
             max_read_tools_per_round=settings.agent_max_read_tools_per_round,
+            max_parallel_tools_per_step=(
+                settings.agent_max_parallel_tools_per_step
+            ),
             max_context_files=settings.agent_max_context_files,
             max_context_chars=settings.agent_max_context_chars,
             max_instruction_chars=settings.agent_max_instruction_chars,

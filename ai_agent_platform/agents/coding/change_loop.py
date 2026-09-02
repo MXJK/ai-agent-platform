@@ -19,6 +19,7 @@ from ai_agent_platform.agents.coding.completion_contract import (
     completion_contract_state,
 )
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
+from ai_agent_platform.agents.coding.task_shaping import run_is_unbounded
 from ai_agent_platform.integrations.tools import (
     ToolCall,
     ToolExecutionContext,
@@ -164,7 +165,10 @@ class ChangeLoopExecutor:
         )
         repair_calls: list[ToolCall] = []
         next_validation_calls: list[ToolCall] = []
-        if not passed and state.get("change_iteration", 0) < MAX_CHANGE_ITERATIONS:
+        if not passed and (
+            run_is_unbounded(state)
+            or state.get("change_iteration", 0) < MAX_CHANGE_ITERATIONS
+        ):
             repair_state = dict(state)
             repair_state["validation_results"] = validation_results
             repair_state["validation_history"] = validation_history
@@ -256,7 +260,9 @@ class ChangeLoopExecutor:
                         if not is_validation_success(item)
                     ],
                     "repair_planned_tools": [call.name for call in repair_calls],
-                    "max_iterations": MAX_CHANGE_ITERATIONS,
+                    "max_iterations": (
+                        None if run_is_unbounded(state) else MAX_CHANGE_ITERATIONS
+                    ),
                 },
             ),
         }
@@ -450,7 +456,7 @@ class ChangeLoopExecutor:
         tools = self._tools_for_state(state)
         if parallel_read_only and self._is_parallel_read_batch(tool_calls, tools):
             with ThreadPoolExecutor(
-                max_workers=len(tool_calls),
+                max_workers=min(10, len(tool_calls)),
                 thread_name_prefix="agent-read",
             ) as executor:
                 futures = [

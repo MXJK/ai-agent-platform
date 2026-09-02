@@ -27,6 +27,10 @@ class SettingsTests(unittest.TestCase):
             (str(Path.home().resolve()),),
         )
         self.assertEqual(settings.agent_soft_tool_rounds, 12)
+        self.assertTrue(settings.agent_autonomous_mutation_enabled)
+        self.assertEqual(settings.agent_run_budget_mode, "unbounded")
+        self.assertEqual(settings.agent_max_read_tools_per_round, 6)
+        self.assertEqual(settings.agent_max_parallel_tools_per_step, 10)
         self.assertEqual(settings.agent_max_tool_rounds, 24)
         self.assertEqual(settings.agent_soft_tool_calls, 36)
         self.assertEqual(settings.agent_max_tool_calls, 72)
@@ -65,6 +69,32 @@ class SettingsTests(unittest.TestCase):
             Settings(model_probe_interval_seconds=30)
         with self.assertRaisesRegex(ValueError, "greater than or equal to 0"):
             Settings(model_probe_interval_seconds=-1)
+
+    def test_reads_agent_autonomy_and_budget_mode_from_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AGENT_AUTONOMOUS_MUTATION_ENABLED": "false",
+                "AGENT_RUN_BUDGET_MODE": "bounded",
+                "AGENT_MAX_PARALLEL_TOOLS_PER_STEP": "7",
+                "LLM_MODEL_CATALOG_JSON": "",
+            },
+            clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
+        ):
+            settings = Settings.from_env()
+
+        self.assertFalse(settings.agent_autonomous_mutation_enabled)
+        self.assertEqual(settings.agent_run_budget_mode, "bounded")
+        self.assertEqual(settings.agent_max_parallel_tools_per_step, 7)
+        with self.assertRaisesRegex(ValueError, "agent_run_budget_mode"):
+            Settings(agent_run_budget_mode="forever")
+        with self.assertRaisesRegex(
+            ValueError, "agent_max_parallel_tools_per_step"
+        ):
+            Settings(agent_max_parallel_tools_per_step=11)
 
     def test_reads_unified_context_share_ratios_from_environment(self) -> None:
         with patch.dict(

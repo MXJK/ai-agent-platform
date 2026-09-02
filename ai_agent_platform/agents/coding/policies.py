@@ -21,6 +21,7 @@ from ai_agent_platform.agents.coding.runtime_support import (
 from ai_agent_platform.agents.coding.task_shaping import (
     change_validation_state,
     evidence_contract_satisfied,
+    run_is_unbounded,
     task_budget,
 )
 from ai_agent_platform.integrations.llm import contains_tool_protocol_text
@@ -187,6 +188,7 @@ class BudgetPolicy:
         self.max_consecutive_failures = max_consecutive_failures
 
     def stop(self, state: CodingAgentState) -> tuple[str, AgentRunStatus]:
+        unbounded = run_is_unbounded(state)
         if (
             state.get("native_consecutive_failures", 0)
             >= self.max_consecutive_failures
@@ -210,13 +212,15 @@ class BudgetPolicy:
         ):
             return f"validation_{validation_state}", "partial"
         started_at = state.get("started_at")
-        elapsed_budget_reached = isinstance(started_at, (int, float)) and (
-            perf_counter() - started_at >= self.max_elapsed_seconds
+        elapsed_budget_reached = (
+            not unbounded
+            and isinstance(started_at, (int, float))
+            and perf_counter() - started_at >= self.max_elapsed_seconds
         )
         max_model_requests = task_budget(
             state, "max_model_requests", self.max_tool_rounds + 2
         )
-        hard_budget_reached = (
+        hard_budget_reached = not unbounded and (
             elapsed_budget_reached
             or state.get("task_model_request_count", 0)
             >= max(0, max_model_requests - 1)
@@ -262,21 +266,25 @@ class BudgetPolicy:
             >= self.no_progress_rounds
         ):
             return "change_not_applied", "blocked"
-        if elapsed_budget_reached:
+        if not unbounded and elapsed_budget_reached:
             return "max_elapsed_time", "partial"
-        if state.get("task_model_request_count", 0) >= max(0, max_model_requests - 1):
+        if not unbounded and state.get("task_model_request_count", 0) >= max(
+            0, max_model_requests - 1
+        ):
             return "hard_model_request_budget", "partial"
-        if state.get("native_tool_round", 0) >= task_budget(
+        if not unbounded and state.get("native_tool_round", 0) >= task_budget(
             state, "max_tool_rounds", self.max_tool_rounds
         ):
             return "hard_tool_round_budget", "partial"
-        if state.get("native_tool_call_count", 0) >= task_budget(
+        if not unbounded and state.get("native_tool_call_count", 0) >= task_budget(
             state, "max_tool_calls", self.max_tool_calls
         ):
             return "hard_tool_call_budget", "partial"
         return "", "completed"
 
     def soft_limit_reached(self, state: CodingAgentState) -> bool:
+        if run_is_unbounded(state):
+            return False
         return (
             state.get("native_tool_round", 0)
             >= task_budget(state, "soft_tool_rounds", self.soft_tool_rounds)

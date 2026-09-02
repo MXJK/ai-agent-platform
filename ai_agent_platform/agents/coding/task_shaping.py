@@ -22,6 +22,7 @@ TaskShape = Literal[
 ]
 
 RequestMode = Literal["answer", "diagnose", "plan", "change"]
+RunBudgetMode = Literal["bounded", "unbounded"]
 
 TASK_SHAPES: tuple[TaskShape, ...] = (
     "overview",
@@ -251,6 +252,14 @@ _STOP_CONDITIONS = [
     "final_answer_tools_empty",
 ]
 
+_UNBOUNDED_STOP_CONDITIONS = [
+    "required_evidence_satisfied",
+    "one_round_without_new_evidence",
+    "duplicate_equivalent_tool_call",
+    "no_progress_or_failure_safety_stop",
+    "final_answer_tools_empty",
+]
+
 _OVERVIEW_TOOLS = (
     "repo.list_files",
     "repo.find_files",
@@ -408,6 +417,7 @@ def build_evidence_contract(
     task_shape: TaskShape,
     *,
     user_input: str = "",
+    budget_mode: RunBudgetMode = "bounded",
 ) -> dict[str, Any]:
     contract = {
         key: list(value) if isinstance(value, list) else value
@@ -436,7 +446,21 @@ def build_evidence_contract(
         if "validation_result" not in required:
             required.append("validation_result")
         contract["required_evidence"] = required
-    contract["stop_conditions"] = list(_STOP_CONDITIONS)
+    if budget_mode == "unbounded":
+        for name in (
+            "max_model_requests",
+            "soft_tool_rounds",
+            "max_tool_rounds",
+            "soft_tool_calls",
+            "max_tool_calls",
+            "max_extension_rounds",
+        ):
+            contract.pop(name, None)
+        contract["stop_conditions"] = list(_UNBOUNDED_STOP_CONDITIONS)
+        contract["run_budget_mode"] = "unbounded"
+    else:
+        contract["stop_conditions"] = list(_STOP_CONDITIONS)
+        contract["run_budget_mode"] = "bounded"
     return contract
 
 
@@ -570,6 +594,12 @@ def task_budget(
     }:
         return min(int(value), int(fallback))
     return int(value)
+
+
+def run_is_unbounded(state: Mapping[str, Any]) -> bool:
+    """Return the frozen Run budget mode; legacy checkpoints stay bounded."""
+
+    return str(state.get("run_budget_mode") or "bounded") == "unbounded"
 
 
 def evidence_contract_satisfied(state: dict[str, Any]) -> bool:
@@ -824,6 +854,7 @@ __all__ = [
     "evidence_contract_satisfied",
     "freeze_tool_profile",
     "normalize_task_text",
+    "run_is_unbounded",
     "task_budget",
     "update_evidence_progress",
 ]

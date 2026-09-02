@@ -123,6 +123,33 @@ def define_completion_contract(state: CodingAgentState) -> dict[str, Any]:
             },
         )
 
+    # Autonomous classification may recover a target mentioned by the user in
+    # controlled conversation history. The hint is never sufficient by itself:
+    # it becomes a contract item only after the exact path was read from the live
+    # execution workspace during this Run.
+    for target in state.get("model_target_hints", []):
+        safe = _safe_relative_path(str(target), root)
+        if safe is None or safe not in evidence_paths:
+            continue
+        if safe in referenced_by and any(
+            referenced not in evidence_paths for referenced in referenced_by[safe]
+        ):
+            continue
+        _add_change(
+            changes,
+            target=safe,
+            operation="update" if (root / safe).exists() else "create",
+            description=(
+                f"Update {safe}, recovered from controlled user history and "
+                "confirmed by live repository evidence."
+            ),
+            source={
+                "kind": "live_repository_evidence",
+                "path": safe,
+                "detail": "controlled-history target confirmed by live file read",
+            },
+        )
+
     if not changes:
         requested_symbols = {
             item.casefold() for item in extract_symbols(str(state.get("user_input") or ""))

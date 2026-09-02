@@ -66,6 +66,7 @@ from ai_agent_platform.agents.coding.task_shaping import (
     clamp_evidence_call,
     model_visible_tool_specs,
     mutation_authorized_for_state,
+    run_is_unbounded,
     task_budget,
     update_evidence_progress,
 )
@@ -88,7 +89,7 @@ class ToolLoopNodes:
     def __init__(self, runtime: Any) -> None:
         self._planner = runtime._planner
         self._change_loop = runtime._change_loop
-        self._max_read_tools_per_round = runtime._max_read_tools_per_round
+        self._max_parallel_tools_per_step = runtime._max_parallel_tools_per_step
         self._max_tool_rounds = runtime._max_tool_rounds
         self._max_tool_calls = runtime._max_tool_calls
         self._native_context_max_chars = runtime._native_context_max_chars
@@ -138,6 +139,7 @@ class ToolLoopNodes:
         )
 
     def _plan_tools(self, state: CodingAgentState) -> CodingAgentState:
+        unbounded = run_is_unbounded(state)
         if state.get("task_shape") == "bounded_change":
             contract = ensure_completion_contract(state)
             state = {
@@ -246,7 +248,7 @@ class ToolLoopNodes:
         if not native_messages:
             native_messages = native_tool_messages(
                 state,
-                max_parallel_read_calls=self._max_read_tools_per_round,
+                max_parallel_read_calls=self._max_parallel_tools_per_step,
             )
         native_messages = self._control_policy.consume_steering(state, native_messages)
         control_action = self._control_policy.consume_action(state)
@@ -311,6 +313,11 @@ class ToolLoopNodes:
         context_stages: list[dict[str, Any]] = []
         compactions = state.get("native_context_compactions", 0)
         auto_compactions = state.get("native_auto_compactions", 0)
+        effective_compaction_limit = (
+            max(self._native_max_compactions, compactions + 1, auto_compactions + 1)
+            if unbounded
+            else self._native_max_compactions
+        )
         compaction_failures = state.get("native_compaction_failures", 0)
         model_compaction_disabled = bool(
             state.get("native_model_compaction_disabled", False)
@@ -380,7 +387,7 @@ class ToolLoopNodes:
             if (
                 should_summarize
                 and not model_compaction_disabled
-                and auto_compactions < self._native_max_compactions
+                and auto_compactions < effective_compaction_limit
             ):
                 auto_attempted = True
                 compact_started_at = time.perf_counter()
@@ -393,7 +400,7 @@ class ToolLoopNodes:
                     seed_messages=_compaction_seed_messages(
                         state,
                         artifacts=artifacts,
-                        max_parallel_read_calls=self._max_read_tools_per_round,
+                        max_parallel_read_calls=self._max_parallel_tools_per_step,
                     ),
                 )
                 # The pre-compaction transcript Artifact is durable even when the
@@ -450,7 +457,7 @@ class ToolLoopNodes:
             keep_messages=self._native_context_keep_messages,
             tool_result_keep_recent=self._tool_result_keep_recent,
             previous_compactions=compactions,
-            max_compactions=self._native_max_compactions,
+            max_compactions=effective_compaction_limit,
             compressor=None,
             force=auto_attempted and not full_compaction_changed,
             artifacts=artifacts,
@@ -701,7 +708,7 @@ class ToolLoopNodes:
                 keep_messages=self._native_context_keep_messages,
                 tool_result_keep_recent=self._tool_result_keep_recent,
                 previous_compactions=compactions,
-                max_compactions=self._native_max_compactions,
+                max_compactions=effective_compaction_limit,
                 compressor=None,
                 force=True,
                 require_progress=seed_stage is None,
@@ -771,12 +778,19 @@ class ToolLoopNodes:
         native_round = state.get("native_tool_round", 0) + 1
         task_model_request_count = state.get("task_model_request_count", 0) + 1
         stop_reason = decision.stop_reason
-        effective_max_calls = task_budget(
-            state, "max_tool_calls", self._max_tool_calls
+        effective_max_calls = (
+            None
+            if unbounded
+            else task_budget(state, "max_tool_calls", self._max_tool_calls)
         )
-        remaining_actual_calls = max(
-            0,
-            effective_max_calls - state.get("native_tool_call_count", 0),
+        remaining_actual_calls = (
+            self._max_parallel_tools_per_step
+            if unbounded
+            else max(
+                0,
+                int(effective_max_calls or 0)
+                - state.get("native_tool_call_count", 0),
+            )
         )
         evidence_token_limit = task_budget(
             state, "max_evidence_tokens", 12000
@@ -789,9 +803,14 @@ class ToolLoopNodes:
             )
             for call in decision.tool_calls
         ]
-        remaining_calls = max(
-            0,
-            effective_max_calls - state.get("native_tool_call_count", 0),
+        remaining_calls = (
+            len(all_proposed_calls)
+            if unbounded
+            else max(
+                0,
+                int(effective_max_calls or 0)
+                - state.get("native_tool_call_count", 0),
+            )
         )
         tools_for_state = self._tools_for_state(state)
         permission_context = self._tool_use_context(state)
@@ -838,24 +857,32 @@ class ToolLoopNodes:
             )
 
         budgeted_calls = all_proposed_calls[:remaining_calls]
-        hard_budget_dropped = all_proposed_calls[remaining_calls:]
+        hard_budget_dropped = (
+            [] if unbounded else all_proposed_calls[remaining_calls:]
+        )
         serialize_turn = bool(
             getattr(self._planner, "single_tool_per_turn", False)
         )
-        if serialize_turn and budgeted_calls:
+        if budgeted_calls:
             if is_parallel_read(budgeted_calls[0]):
                 proposed_calls = []
                 for call in budgeted_calls:
                     if (
-                        len(proposed_calls) >= self._max_read_tools_per_round
+                        len(proposed_calls) >= self._max_parallel_tools_per_step
                         or not is_parallel_read(call)
                     ):
                         break
                     proposed_calls.append(call)
-            else:
+            elif serialize_turn:
+                # Mutation, validation, approval and user-input calls always
+                # form a one-call step for the production structured planner.
                 proposed_calls = budgeted_calls[:1]
+            else:
+                # Legacy/test planners may emit a sequential batch; the executor
+                # never treats non-read calls as a parallel batch.
+                proposed_calls = budgeted_calls
         else:
-            proposed_calls = budgeted_calls
+            proposed_calls = []
         turn_dropped = budgeted_calls[len(proposed_calls):]
         seeded_signatures = (
             _seeded_native_tool_signatures(state)
@@ -877,15 +904,14 @@ class ToolLoopNodes:
             previous_signatures.add(signature)
             tool_calls.append(call)
         for call in turn_dropped:
-            reason = (
-                "read_batch_limit"
-                if (
-                    proposed_calls
-                    and len(proposed_calls) >= self._max_read_tools_per_round
-                    and is_parallel_read(call)
-                )
-                else "single_tool_turn"
+            read_limit_reached = bool(
+                proposed_calls
+                and len(proposed_calls) >= self._max_parallel_tools_per_step
+                and is_parallel_read(call)
             )
+            reason = (
+                "step_tool_limit" if unbounded else "read_batch_limit"
+            ) if read_limit_reached else "single_tool_turn"
             suppressed_calls.append((call, reason))
         suppressed_calls.extend(
             (call, "hard_tool_call_budget") for call in hard_budget_dropped
@@ -909,7 +935,7 @@ class ToolLoopNodes:
         if all_proposed_calls and not tool_calls and duplicate_increment:
             duplicate_stop_reason = (
                 "hard_tool_round_budget"
-                if native_round
+                if not unbounded and native_round
                 >= task_budget(state, "max_tool_rounds", self._max_tool_rounds)
                 else "duplicate_equivalent_tool_call"
             )
@@ -1144,11 +1170,12 @@ class ToolLoopNodes:
                     "round": native_round,
                     "stop_reason": stop_reason,
                     "soft_limit_warned": soft_warned,
-                    "hard_round_limit": task_budget(
+                    "run_budget_mode": state.get("run_budget_mode", "bounded"),
+                    "hard_round_limit": None if unbounded else task_budget(
                         state, "max_tool_rounds", self._max_tool_rounds
                     ),
                     "hard_call_limit": effective_max_calls,
-                    "max_model_requests": task_budget(
+                    "max_model_requests": None if unbounded else task_budget(
                         state,
                         "max_model_requests",
                         self._max_tool_rounds + 2,
@@ -1258,7 +1285,7 @@ class ToolLoopNodes:
         shares["history_tokens"] = max(0, history_tokens)
         rebuilt = native_tool_messages(
             {**state, "context_shares": shares},
-            max_parallel_read_calls=self._max_read_tools_per_round,
+            max_parallel_read_calls=self._max_parallel_tools_per_step,
         )
         if _native_messages_tokens(rebuilt) >= seed_tokens:
             return messages, None
@@ -1315,8 +1342,16 @@ class ToolLoopNodes:
                     "Agent stopped before the next model request because the native "
                     "tool transcript still exceeded the context budget after ordered "
                     "tool-result eviction, folding, and drop/truncate recovery. "
-                    f"It stopped at stage {last_stage} with {compactions}/"
-                    f"{self._native_max_compactions} allowed folds used."
+                    f"It stopped at stage {last_stage} after {compactions} folds; "
+                    "another fold could not reclaim enough context safely."
+                    if run_is_unbounded(state)
+                    else (
+                        "Agent stopped before the next model request because the native "
+                        "tool transcript still exceeded the context budget after ordered "
+                        "tool-result eviction, folding, and drop/truncate recovery. "
+                        f"It stopped at stage {last_stage} with {compactions}/"
+                        f"{self._native_max_compactions} allowed folds used."
+                    )
                 )
                 reason = "context_compaction_exhausted"
         return self._native_terminal_plan(

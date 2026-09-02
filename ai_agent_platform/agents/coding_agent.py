@@ -230,8 +230,11 @@ class CodingAgentRuntime:
         run_store: Optional[AgentRunStore] = None,
         checkpointer: Any = None,
         planner: AgentPlanner | None = None,
+        autonomous_mutation_enabled: bool = False,
+        run_budget_mode: str = "bounded",
         max_exploration_rounds: int = 4,
         max_read_tools_per_round: int = 6,
+        max_parallel_tools_per_step: int | None = None,
         max_context_files: int = 12,
         max_context_chars: int = 32000,
         max_instruction_chars: int = 16000,
@@ -276,8 +279,20 @@ class CodingAgentRuntime:
         self._checkpointer = checkpointer or InMemorySaver()
         self._run_store = run_store or InMemoryAgentRunStore()
         self._planner = planner or RuleBasedAgentPlanner()
+        if run_budget_mode not in {"bounded", "unbounded"}:
+            raise ValueError("run_budget_mode must be bounded or unbounded")
+        self._autonomous_mutation_enabled = bool(autonomous_mutation_enabled)
+        self._run_budget_mode = run_budget_mode
         self._max_exploration_rounds = max_exploration_rounds
         self._max_read_tools_per_round = max_read_tools_per_round
+        parallel_step_limit = (
+            max_read_tools_per_round
+            if max_parallel_tools_per_step is None
+            else max_parallel_tools_per_step
+        )
+        self._max_parallel_tools_per_step = max(
+            1, min(parallel_step_limit, 10)
+        )
         self._max_context_files = max_context_files
         self._max_context_chars = max_context_chars
         self._max_instruction_chars = max_instruction_chars
@@ -373,6 +388,7 @@ class CodingAgentRuntime:
             graph=self._graph,
             recursion_limit=self._graph_recursion_limit,
             checkpointer=self._checkpointer,
+            continue_on_recursion=self._run_budget_mode == "unbounded",
         )
         self._recorder = RunRecorder(self)
         self._change_loop.set_event_sink(self._recorder.emit_event)
@@ -526,6 +542,9 @@ class CodingAgentRuntime:
             "evaluation_knowledge_base_ids": evaluation_knowledge_base_ids,
             "explicit_requested_tools": explicit_requested_tools,
             "explicit_skill_requested": explicit_skill_requested,
+            "autonomous_mutation_enabled": self._autonomous_mutation_enabled,
+            "run_budget_mode": self._run_budget_mode,
+            "graph_slice_count": 0,
             "workspace_completion_required": True,
             "instructions_snapshotted": run_context is not None,
             "focus_files": focus_files or [],

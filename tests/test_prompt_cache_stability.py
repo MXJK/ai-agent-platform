@@ -365,7 +365,7 @@ class _MeasuredOverviewProvider:
         del messages, thinking_level
         body = (
             '{"intent":"repository_question","reason":"fixed benchmark",'
-            '"confidence":1,"context_route":"repo",'
+            '"action":"answer","target_hints":[],"confidence":1,"context_route":"repo",'
             '"route_reason":"repository overview",'
             '"selected_knowledge_base_ids":[]}'
         )

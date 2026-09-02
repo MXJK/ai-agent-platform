@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -31,6 +32,7 @@ from ai_agent_platform.agents.coding.task_shaping import (
     classify_task_shape,
     freeze_tool_profile,
     model_visible_tool_specs,
+    run_is_unbounded,
     update_evidence_progress,
 )
 from ai_agent_platform.agents.coding.text import extract_paths, extract_symbols, unique
@@ -118,12 +120,15 @@ class ContextRetrievalNodes:
         self._context_history_ratio = runtime._context_history_ratio
         self._max_exploration_rounds = runtime._max_exploration_rounds
         self._max_read_tools_per_round = runtime._max_read_tools_per_round
+        self._max_parallel_tools_per_step = runtime._max_parallel_tools_per_step
         self._max_context_files = runtime._max_context_files
         self._max_context_chars = runtime._max_context_chars
         self._tools_for_state = runtime._tools_for_state
         self._tool_use_context = runtime._tool_use_context
         self._visible_tool_specs = runtime._visible_tool_specs
         self._execution_workspace_runtime = runtime._execution_workspace_runtime
+        self._autonomous_mutation_enabled = runtime._autonomous_mutation_enabled
+        self._run_budget_mode = runtime._run_budget_mode
 
     def _setup_workspace(self, state: CodingAgentState) -> CodingAgentState:
         source_root = Path(state["workspace_root"]).resolve()
@@ -182,7 +187,11 @@ class ContextRetrievalNodes:
                         {
                             "role": "system",
                             "content": native_system_prompt(
-                                self._max_read_tools_per_round
+                                self._max_parallel_tools_per_step,
+                                run_budget_mode=str(
+                                    state.get("run_budget_mode")
+                                    or self._run_budget_mode
+                                ),
                             ),
                         }
                     ],
@@ -263,7 +272,17 @@ class ContextRetrievalNodes:
                 warnings.append(f"knowledge base catalog unavailable: {exc}")
         classify_request = getattr(self._planner, "classify_request", None)
         if callable(classify_request):
-            decision = classify_request(state["user_input"], catalog)
+            parameters = inspect.signature(classify_request).parameters
+            classify_kwargs: dict[str, Any] = {}
+            if "history" in parameters:
+                classify_kwargs["history"] = list(state.get("history", []))[-8:]
+            if "focus_files" in parameters:
+                classify_kwargs["focus_files"] = list(
+                    state.get("focus_files", [])
+                )[:20]
+            decision = classify_request(
+                state["user_input"], catalog, **classify_kwargs
+            )
         else:
             decision = self._planner.classify_intent(state["user_input"])
             route, route_reason, selected = classify_context_source(
@@ -300,17 +319,49 @@ class ContextRetrievalNodes:
             for message in state.get("history", [])
             if isinstance(message, dict) and message.get("role") == "user"
         ]
-        request_mode, mutation_authorized, mutation_authority_reason = (
-            classify_request_authority(
-                state["user_input"],
-                intent=intent,
-                prior_user_inputs=prior_user_inputs,
+        model_action = str(decision.get("action") or "")
+        if self._autonomous_mutation_enabled and model_action in {
+            "answer",
+            "diagnose",
+            "change",
+        }:
+            request_mode = model_action
+            mutation_authorized = model_action == "change"
+            mutation_authority_reason = (
+                "model selected workspace change from the current request and "
+                "controlled conversation context"
+                if mutation_authorized
+                else f"model selected {model_action}; workspace mutation not authorized"
             )
-        )
+        else:
+            request_mode, mutation_authorized, mutation_authority_reason = (
+                classify_request_authority(
+                    state["user_input"],
+                    intent=intent,
+                    prior_user_inputs=prior_user_inputs,
+                )
+            )
+            if self._autonomous_mutation_enabled and request_mode == "plan":
+                request_mode = "answer"
+                mutation_authority_reason = (
+                    "autonomous mode treats advisory planning as a read-only answer"
+                )
+        target_hint_sources = [state["user_input"], *prior_user_inputs]
+        target_hint_sources.extend(str(item) for item in state.get("focus_files", []))
+        target_hint_text = "\n".join(target_hint_sources).replace("\\", "/")
+        model_target_hints = unique(
+            [
+                str(item).replace("\\", "/")
+                for item in decision.get("target_hints", [])
+                if str(item) and str(item).replace("\\", "/") in target_hint_text
+            ]
+        )[:12]
         task_shape = classify_task_shape(
             state["user_input"],
             paths=unique(
-                state.get("focus_files", []) + extract_paths(state["user_input"])
+                state.get("focus_files", [])
+                + extract_paths(state["user_input"])
+                + model_target_hints
             ),
             symbols=extract_symbols(state["user_input"]),
             intent=intent,
@@ -326,6 +377,7 @@ class ContextRetrievalNodes:
             if task_shape == "bounded_change" and not workspace_completion_required
             else task_shape,
             user_input=state["user_input"],
+            budget_mode=self._run_budget_mode,
         )
         task_tool_profile = freeze_tool_profile(
             task_shape,
@@ -352,7 +404,8 @@ class ContextRetrievalNodes:
                 {
                     "role": "system",
                     "content": native_system_prompt(
-                        self._max_read_tools_per_round
+                        self._max_parallel_tools_per_step,
+                        run_budget_mode=self._run_budget_mode,
                     ),
                 }
             ],
@@ -364,6 +417,8 @@ class ContextRetrievalNodes:
             "intent_reason": str(decision.get("reason") or ""),
             "intent_confidence": bounded_confidence(decision.get("confidence")),
             "planner_source": str(decision.get("source") or "unknown"),
+            "model_action": model_action,
+            "model_target_hints": model_target_hints,
             "request_mode": request_mode,
             "mutation_authorized": mutation_authorized,
             "mutation_authority_reason": mutation_authority_reason,
@@ -393,6 +448,9 @@ class ContextRetrievalNodes:
                 output={
                     "intent": intent,
                     "request_mode": request_mode,
+                    "model_action": model_action,
+                    "model_target_hints": model_target_hints,
+                    "run_budget_mode": self._run_budget_mode,
                     "mutation_authorized": mutation_authorized,
                     "mutation_authority_reason": mutation_authority_reason,
                     "workspace_completion_required": workspace_completion_required,
@@ -763,6 +821,7 @@ class ContextRetrievalNodes:
         candidates = unique(
             state.get("focus_files", [])
             + extract_paths(state["user_input"])
+            + state.get("model_target_hints", [])
             + discovered
         )
         calls = [
@@ -975,9 +1034,9 @@ class ContextRetrievalNodes:
                 content_hashes.add(source.content_hash)
                 chars += len(source.text)
         round_number = state.get("exploration_round", 0)
-        budget_exhausted = (
-            round_number >= self._max_exploration_rounds
-            or len(context_files) >= self._max_context_files
+        unbounded = run_is_unbounded(state)
+        capacity_exhausted = (
+            len(context_files) >= self._max_context_files
             or chars >= self._max_context_chars
         )
         unread = [
@@ -993,9 +1052,6 @@ class ContextRetrievalNodes:
             and round_number >= native_seed_limit
             and has_repo_evidence
         )
-        sufficient = has_repo_evidence and (
-            budget_exhausted or native_seed_complete or not unread
-        )
         failed_count = sum(
             1
             for result in state.get("exploration_results", [])
@@ -1008,7 +1064,26 @@ class ContextRetrievalNodes:
             and isinstance(result.get("result"), dict)
             and result["result"].get("count") == 0
         )
-        if budget_exhausted:
+        stalled = bool(
+            unbounded
+            and round_number >= 2
+            and not has_repo_evidence
+            and (
+                not state.get("analysis_tool_calls", [])
+                or failed_count + zero_result_count >= round_number
+            )
+        )
+        budget_exhausted = bool(
+            capacity_exhausted
+            or stalled
+            or (not unbounded and round_number >= self._max_exploration_rounds)
+        )
+        sufficient = has_repo_evidence and (
+            budget_exhausted or native_seed_complete or not unread
+        )
+        if stalled:
+            stop_reason = "exploration_stalled"
+        elif budget_exhausted:
             stop_reason = "budget_exhausted"
         elif native_seed_complete:
             stop_reason = "native_seed_sufficient"
@@ -1026,7 +1101,11 @@ class ContextRetrievalNodes:
             stop_reason = "evidence_incomplete"
         warnings = list(state.get("context_warnings", []))
         if budget_exhausted and not has_repo_evidence:
-            warning = "live repository exploration exhausted without evidence"
+            warning = (
+                "live repository exploration stalled without new evidence"
+                if stalled
+                else "live repository exploration exhausted without evidence"
+            )
             if warning not in warnings:
                 warnings.append(warning)
         sources.sort(
@@ -1060,6 +1139,8 @@ class ContextRetrievalNodes:
                     "unread_candidates": len(unread),
                     "sufficient": sufficient,
                     "budget_exhausted": budget_exhausted,
+                    "run_budget_mode": state.get("run_budget_mode", "bounded"),
+                    "stalled": stalled,
                     "native_seed_complete": native_seed_complete,
                     "stop_reason": stop_reason,
                     "failed_tools": failed_count,

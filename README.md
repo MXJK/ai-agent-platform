@@ -630,20 +630,25 @@ Effective Tool Pool 后从其下一图节点执行。`rollback` 只改变当前�
 `uncached_input_tokens = input_tokens - cached_input_tokens` 和命中率；总重试同时包含模型
 网关重试和工具重试，不再只反映工具层。
 
-默认探索预算：
+默认新 Run 使用自主、无累计配额模式：
 
-- 4 轮探索；
-- 每轮 6 个只读工具；
+- `AGENT_AUTONOMOUS_MUTATION_ENABLED=true`，分类模型结合当前请求、受控历史与 focus files
+  选择 `answer / diagnose / change`，不再生成新的 `plan` 模式；
+- `AGENT_RUN_BUDGET_MODE=unbounded`，累计模型请求、工具轮次、工具调用与 Agent graph steps
+  只做观测，不作为终止条件；
+- 每个模型 step 最多 10 个安全只读工具并发；
 - 12 个不同源码文件；
 - 32,000 个源码证据字符；
 - 16,000 个项目指令字符。
 
 探索采用 `targeted_search → broaden_file_inventory → read_discovered_entries` 等可审计
 策略：零命中、工具错误或尚有未读候选都会继续观察并换策略；空计划本身不代表证据
-充分。只有取得相关仓库证据或明确耗尽轮数/文件/字符预算才会离开探索循环。重复工具
+充分。无累计配额模式只有取得相关仓库证据、达到文件/字符容量，或连续探索没有新证据
+时才会离开探索循环；`AGENT_MAX_EXPLORATION_ROUNDS=4` 只用于 `bounded` 兼容模式。重复工具
 调用、相同行区间和重复内容不会再次消耗证据预算；预算耗尽且仍无证据时会记录明确
 警告，回答必须标注不确定性。原生工具可用时，这一阶段只是种子探索，取得证据后最多
-运行两轮；非原生规划器仍保留完整配置预算。通用“仓库有哪些文件/说明项目结构”会按
+运行两轮，且每轮由 `AGENT_MAX_READ_TOOLS_PER_ROUND=6` 约束确定性种子读取；它与模型
+step 的 10 路并发上限相互独立。非原生规划器仍保留完整配置预算。通用“仓库有哪些文件/说明项目结构”会按
 项目概览处理，优先形成目录与入口文件证据。
 
 ### 原生工具调用循环
@@ -655,7 +660,7 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 的注册名会转换为 Provider 安全别名，并在执行前映射回原名。Fake Provider 保留
 确定性规则规划，用于离线测试。
 
-原生模型采用统一、有界的“观察—决策—执行”循环。读文件、写 Sandbox、运行验证、
+原生模型采用统一、受契约与安全门禁约束的“观察—决策—执行”循环。读文件、写 Sandbox、运行验证、
 获取状态与 Diff 都由同一次模型会话按原顺序选择，不再把读、写、验证拆成彼此看不到
 结果的固定阶段：
 
@@ -681,26 +686,28 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 数量和截断状态。部分失败不丢弃成功证据；checkpoint 重放通过稳定子调用身份复用已完成
 结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
 
-Evidence Executor 之上还有一层确定性的任务整形。分类节点结合规范化后的中英文请求、
-显式路径/符号、intent、context route，以及是否明确要求修改或调查，冻结本 Run 的
+Evidence Executor 之上还有一层确定性的任务整形。分类模型结合当前请求、最近八条受控
+历史、focus files、知识库目录与 context route，输出 `answer / diagnose / change` 行动和
+最多 12 个目标提示，再冻结本 Run 的
 `task_shape`、`evidence_contract` 和有序工具 Profile；`分析下当前项目`、`看看当前项目`、
 `summarize this project` 等无具体目标请求归为 `overview`，但“分析当前项目的登录故障”
 归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
 LangGraph checkpoint，resume 不重新分类或放宽工具集合。
 
-语义 intent 与动作授权分开保存为 `request_mode` 和服务端确定的
-`mutation_authorized`。LLM 即使把“这个项目还建议添加什么小游戏”分类为
-`change_planning`，也不能据此获得写权限：建议、解释、诊断和方案请求保持只读，不要求
-`applied_change`；只有当前用户消息明确要求实施/修改，或“继续”继承最近一次明确变更请求，
-才冻结 `bounded_change` 和 Sandbox mutation 工具。执行点还会从 Run 工具视图再次移除
-未获授权的 `sandbox.write_file`/`sandbox.apply_patch`，审批和自动审批不能扩大这项任务授权。
+语义 intent 与模型行动分别保存为 `intent`、`model_action` 和 `request_mode`。默认自主模式
+不再把 `change_planning` 二次降级成 `plan`：模型判断用户要实际创建、修改、修复、重构或
+删除代码时选择 `change` 并冻结 `bounded_change`；诊断与建议仍为只读。短指令“修改”或
+“继续”可以从受控历史恢复用户已经给出的路径，但模型目标只是探索提示，必须在本 Run
+读取相同 live repository path 后才能进入 `ChangeCompletionContract`，模型不能凭空扩大
+交付范围。服务端仍在工具可见性和执行点复判 Workspace root、角色、进程 deny、审批、
+Sandbox、路径、修改后验证与 Completion Contract；自主决策不等于自动批准。
 
 所有 `bounded_change` 的证据契约都包含 `validation_result`。成功的
 `sandbox.write_file`/`sandbox.apply_patch` 只证明 `applied_change`，不会同时冒充修改前的
 `current_behavior`；只有修改后的验证命令实际执行且全部以 exit code 0 成功，Change Run
 才允许进入 `completed`。已产生 Diff 但缺少验证时，Runtime 会把明确的补验证提示回灌同一
-Native 会话；验证失败则保留 test report，并在预算内进入修复/复验。hard budget 或有界
-重试耗尽后分别以 `partial / validation_missing` 或 `partial / validation_failed` 收敛，
+Native 会话；验证失败则保留 test report，并继续修复/复验。只有连续无进展、连续失败或
+外部控制边界才会以 `partial`/`blocked` 收敛，
 拒绝修复等外部阻塞保持 `blocked`。`AgentRunResponse.terminal_reason` 和终态 Run event
 公开这一原因，且 `change_summary.validation_passed`、`change_status`、Run status 与最终回答
 使用同一验证事实，不会由 `compose_answer` 兜底升级。
@@ -712,16 +719,19 @@ create/update/delete、当前请求或 live repository evidence 来源和单调�
 validation 另存验证类别与对应 ToolResult。成功写 CSS 只能满足 CSS 项，不会连带满足 JS；
 `git diff --check` 只属于 Diff 格式证据，不能单独满足功能验证。只有全部 change、第一阶段
 验证门禁、逐项 validation，以及最终 workspace status、Diff 和目标文件状态同时满足，
-BudgetPolicy 才以 `completion_contract_satisfied` 完成。模型提前给终答时，Runtime 把有界
-unresolved checklist 回灌继续执行；hard budget 后保留部分结果并以
-`partial / completion_requirements_unresolved` 收敛。无法从当前请求或 live evidence
+BudgetPolicy 才以 `completion_contract_satisfied` 完成。模型提前给终答时，Runtime 把
+unresolved checklist 回灌继续执行；连续无法推进后才以
+`partial / completion_requirements_unresolved` 收敛。无法从当前请求、受控历史目标或 live evidence
 可靠得到目标时以 `completion_contract_unavailable` fail closed。冻结后的新 HTML read
 证据只能追加合同并递增 revision/trace，不能删除旧项；旧 checkpoint 没有合同 channel 时
 显式走 `legacy_phase1` 适配并继续保留修改后验证门禁。Run response、ChangeSet 验证摘要、
 trace 和 events 分别公开 evidence satisfied、mutation applied、validation passed 与
 completion contract satisfied 的有界状态。
 
-| task shape | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
+下表累计配额只在 `AGENT_RUN_BUDGET_MODE=bounded` 的旧 checkpoint/兼容运行中生效；默认
+`unbounded` Run 保留 Evidence Token 和工具 Profile，但移除模型请求、工具轮次与工具调用总量上限。
+
+| task shape（bounded 兼容） | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `overview` | 5 | 2 / 3 | 8 / 12 | 12,000 | repository list/find/search/read + `repo.collect_evidence` |
 | `targeted_read` | 8 | 4 / 6 | 12 / 20 | 16,000 | search/read/collect evidence |
@@ -729,8 +739,8 @@ completion contract satisfied 的有界状态。
 | `investigation` | 20 | 10 / 18 | 30 / 54 | 24,000 | search/read/log/test |
 | `broad_review` | 12 | 6 / 10 | 20 / 32 | 20,000 | 较宽但仍只读的审查工具 |
 
-任务预算只会收紧进程级安全上限：显式配置得更小的 runtime 上限仍优先，复杂修改继续
-保留原有 24/72 ceiling，不受 overview 的小预算影响。overview 的真实执行视图不包含
+bounded 兼容预算只会收紧进程级旧上限。默认 unbounded 模式不读取这些累计 ceiling；
+工具调用计数与模型请求计数仍进入 Run metrics。overview 的真实执行视图不包含
 write、shell、MCP 或控制工具；其他 Profile 也在执行点按冻结集合复判，而不只依赖模型
 可见 Schema。
 
@@ -753,9 +763,9 @@ Schema 估算和模型可见工具数。缓存命中输入仍属于 Provider 上
 每个 native 工具观察边界维护 `evidence_coverage`、`new_evidence_count`、
 `coverage_delta`、`unresolved_requirements`、`duplicate_tool_call_count` 和
 `evidence_extension_rounds`。必需证据齐全后立即进入文本终答；一轮没有有效新证据，或
-模型再次提出等价/已由种子满足的调用时停止且不执行重复调用。达到 soft 预算后只在有
-明确 unresolved requirement 时开放一次、受 hard 差额约束的扩展；否则优先完成答案。
-hard 预算仍返回既有 `partial`/`blocked` 语义。最终回答是独立的 text-only 请求，传给
+模型再次提出等价/已由种子满足的调用时停止且不执行重复调用。默认 unbounded 模式不再
+进入 soft/hard 累计预算分支；bounded 兼容模式仍保留原有一次扩展与 `partial` 语义。
+最终回答是独立的 text-only 请求，传给
 Provider 的工具集合始终为空。
 
 创建/修改任务在空工作区也必须继续调用 `sandbox.write_file` 或
@@ -780,11 +790,12 @@ Google Developer API 的工具调用 Token 预检把 system instruction 与工�
 凭据脱敏与长度裁剪再进入 Run 错误，便于定位协议问题而不返回请求正文。
 
 生产规划器允许每轮接受一组连续、独立、幂等、无需审批的 `read_only` 调用，批次受
-`AGENT_MAX_READ_TOOLS_PER_ROUND` 和剩余硬调用预算共同限制；执行器并发运行这组读取，
+`AGENT_MAX_PARALLEL_TOOLS_PER_STEP` 限制，默认且执行时硬封顶为 10；执行器并发运行这组读取，
 但按模型提议顺序回灌结果。OpenAI 启用 `parallel_tool_calls`，Anthropic 允许并行
 `tool_use`；Harness 仍会校验 ToolSpec 与本轮权限，所以写入、验证、需审批工具、用户输入
 以及读写混合计划每轮只接受一个，其余调用回灌 `single_tool_turn`，超过读取批次上限的
-调用回灌 `read_batch_limit`。变更 Prompt 继续要求一次只修改一个文件并优先使用小
+调用在默认 unbounded 模式回灌 `step_tool_limit`，让模型在后续 step 重提；bounded 兼容
+模式仍使用 `read_batch_limit`。变更 Prompt 继续要求一次只修改一个文件并优先使用小
 `sandbox.apply_patch`，避免把多个完整文件塞进一个 JSON 参数。当前仍使用各 Provider 的
 结构化工具参数协议，没有假装 DeepSeek/Anthropic/Google 已支持 OpenAI 的 freeform
 `apply_patch` custom tool。
@@ -820,11 +831,10 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 `merge_evidence` 与 `plan_tools` 之间新增 `define_completion_contract` 节点，并保留修改后
 验证成功门禁，未完成交付项、未验证或验证失败都不再标记为完成。
 
-12 轮/36 次 soft 与 24 轮/72 次 hard 现在是进程级 ceiling 和 `bounded_change` 默认值；
-实际 Run 使用上表任务契约，并另有 900 秒和连续三次失败保护。证据契约把 native
-无进展收紧为一轮，同时失败诊断本身仍是可观察的新证据，可继续进入恢复计划。硬停止会
-保留一次工具集合为空的文本最终总结并返回 `partial`/`blocked`，不会把预算耗尽误报为
-`completed`。相关进程配置为
+默认 `AGENT_RUN_BUDGET_MODE=unbounded` 不再用 12/36 soft、24/72 hard、900 秒或模型请求数
+决定单个 Run 的终态；这些累计计数保留为观测数据。`bounded` 兼容模式仍使用原有任务表和
+进程 ceiling。两种模式都保留证据/完成合同、连续三次失败、无进展、重复调用、暂停、取消、
+审批、用户输入与部署队列的基础设施超时。相关兼容配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。规划和变更阶段输出预算由
@@ -863,7 +873,8 @@ checkpoint state 实际继承、由自身创建且标为 model-readable 的 Arti
 套 Artifact；trace/SSE/metrics 只记录 ID、call/tool、字符范围、字符/Token 数、哈希与错误码，
 不记录正文。pause/resume、rollback 和 fork 始终以被选择 checkpoint 的 Artifact state 为准。
 
-成功全量重写最多执行 `AGENT_NATIVE_MAX_COMPACTIONS`（默认 3）次；模型压缩连续失败三次后
+unbounded Run 可按上下文压力重复执行全量重写，不再受累计
+`AGENT_NATIVE_MAX_COMPACTIONS` 次数终止；bounded 兼容模式默认最多 3 次。模型压缩连续失败三次后
 熔断，只保留 pair-safe eviction/fold/drop/truncate 确定性兜底。压缩后仍无法收敛，或已没有
 可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束。Provider 返回
 “上下文长度超限”时统一映射为 `context_overflow`：
@@ -872,8 +883,10 @@ Harness 只允许一次强制压缩和一次重试，第二次同类错误立即
 `auto_compact`、`compaction_fallback` 与 `compaction_failed`；output 只含 Token 前后值、
 释放量、块数、Artifact ID、耗时/触发原因和
 `fits`；checkpoint 分支继承的历史阶段额外标记 `replayed` 及来源 Run/checkpoint，避免被
-误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。图的独立保险仍由
-`AGENT_GRAPH_RECURSION_LIMIT` 控制。
+误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。
+`AGENT_GRAPH_RECURSION_LIMIT` 在 unbounded 模式只定义一次 checkpoint 执行切片的节点数；
+达到后从 durable checkpoint 自动续跑，不再是单任务最大 Agent steps。bounded 兼容模式
+仍把它视为图递归保险。
 
 手动 `/compact [关注点]` 通过
 `POST /api/v1/agent/runs/{run_id}/compact` 与 `QueryCommand.COMPACT` 控制当前 Run，不写会话

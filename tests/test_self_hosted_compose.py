@@ -49,6 +49,15 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["LIVE_WORKSPACE_WRITES_ENABLED"] == "true"
     assert environment["AGENT_WORKSPACE_DEFAULT_MODE"] == "direct"
     assert environment["AGENT_WORKSPACE_ALLOWED_MODES"] == "direct"
+    assert environment["AGENT_AUTONOMOUS_MUTATION_ENABLED"] == (
+        "${AGENT_AUTONOMOUS_MUTATION_ENABLED:-true}"
+    )
+    assert environment["AGENT_RUN_BUDGET_MODE"] == (
+        "${AGENT_RUN_BUDGET_MODE:-unbounded}"
+    )
+    assert environment["AGENT_MAX_PARALLEL_TOOLS_PER_STEP"] == (
+        "${AGENT_MAX_PARALLEL_TOOLS_PER_STEP:-10}"
+    )
     assert environment["MCP_ENABLED"] == "true"
     assert environment["MCP_CONFIG_PATH"] == "/home/app/.ai-agent-platform/mcp.json"
     assert environment["SKILLS_ENABLED"] == "true"
