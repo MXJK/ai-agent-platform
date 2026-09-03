@@ -800,11 +800,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260831-prompt-cache-r1',
+            '/static/styles.css?v=20260903-structured-questions-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260901-doubao-catalog-r1',
+            '/static/app.js?v=20260903-structured-questions-r1',
             response.text,
         )
         self.assertIn('id="composer-mode-input"', response.text)

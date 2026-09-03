@@ -21,6 +21,9 @@ from ai_agent_platform.agents.coding.completion_contract import (
 from ai_agent_platform.agents.coding.runtime_support import (
     recent_conversation_context,
 )
+from ai_agent_platform.agents.coding.task_shaping import (
+    classify_request_authority,
+)
 from ai_agent_platform.agents.coding.text import (
     extract_paths,
     extract_symbols,
@@ -201,6 +204,9 @@ class LLMStructuredAgentPlanner:
                 "confidence": bounded_confidence(body.get("confidence")),
                 "source": self.source,
                 "action": action,
+                "target_terms": _classification_target_terms(
+                    body.get("target_terms")
+                ),
                 "target_hints": _classification_target_hints(
                     body.get("target_hints")
                 ),
@@ -320,6 +326,19 @@ class LLMStructuredAgentPlanner:
         fallback = getattr(self._fallback, "plan_repair_tool_calls", None)
         return fallback(state, tool_specs) if callable(fallback) else []
 
+    def resolve_change_targets(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Select existing candidates; the server validates any returned paths."""
+
+        body = json_object_from_llm(
+            self._llm_client.complete(target_resolution_prompt(payload)).text
+        )
+        return {
+            "selected_paths": _classification_target_hints(
+                body.get("selected_paths")
+            ),
+            "reason": str(body.get("reason") or "model target selection"),
+        }
+
     def compose_answer(
         self,
         state: CodingAgentState,
@@ -381,6 +400,8 @@ def classify_intent(text: str) -> tuple[str, str]:
         return "small_talk", "greeting matched"
     if re.search(r"(帮我|需要|请|新增|修改|改成|支持|接入).{0,12}实现", normalized):
         return "change_planning", "implementation planning phrase matched"
+    if classify_request_authority(text)[1]:
+        return "change_planning", "explicit workspace mutation request matched"
     rules: list[tuple[str, tuple[str, ...], str]] = [
         (
             "bug_investigation",
@@ -434,7 +455,8 @@ def request_classification_prompt(
     }
     return (
         "You are classifying a coding-agent user request. "
-        "Return only one JSON object with keys intent, action, target_hints, "
+        "Return only one JSON object with keys intent, action, target_terms, "
+        "target_hints, "
         "reason, confidence, context_route, route_reason, "
         "selected_knowledge_base_ids. "
         f"Allowed intent values: {intents}.\n"
@@ -444,7 +466,11 @@ def request_classification_prompt(
         "or delete workspace code; use diagnose when the user only asks for root "
         "cause analysis; otherwise use answer. A short continuation such as 修改, "
         "继续, or go ahead may inherit the immediately preceding user goal. "
-        "target_hints must contain at most 12 workspace-relative file paths drawn "
+        "target_terms must contain at most 12 short natural-language names or "
+        "symbols copied from the request, controlled_history, or focus_files. "
+        "They are read-only repository discovery clues, never paths authorized "
+        "for mutation. target_hints must contain at most 12 workspace-relative "
+        "file paths drawn "
         "from the request, controlled_history, or focus_files. They are discovery "
         "hints only and never authorization. Do not invent paths.\n"
         "Allowed context_route values: none, repo, rag, hybrid. Use repo for "
@@ -457,6 +483,33 @@ def request_classification_prompt(
         "hypothetical implementation plan do not authorize changes.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
+
+
+def target_resolution_prompt(payload: dict[str, Any]) -> str:
+    return (
+        "Resolve a coding change target only from the supplied live-read existing "
+        "candidate_paths. Return one JSON object with keys selected_paths and "
+        "reason. selected_paths must be a subset of candidate_paths; return an "
+        "empty list when the evidence is ambiguous. Never select or invent a path "
+        "from missing_local_references: creation authority is decided only by the "
+        "server. Do not infer workspace, permission, approval, or sandbox scope.\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def _classification_target_terms(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    terms: list[str] = []
+    for item in value[:24]:
+        normalized = " ".join(str(item or "").strip().split())
+        normalized = normalized.strip("'\"`()[]{}.,;:")
+        if not normalized or len(normalized) > 80 or normalized in terms:
+            continue
+        terms.append(normalized)
+        if len(terms) >= 12:
+            break
+    return terms
 
 
 def _classification_target_hints(value: Any) -> list[str]:
@@ -655,6 +708,8 @@ def native_tool_messages(
     )
     if completion_contract.get("applicable"):
         user_payload["change_completion_contract"] = completion_contract
+    if state.get("user_question_result"):
+        user_payload["user_question_result"] = state["user_question_result"]
     return [
         {
             "role": "system",

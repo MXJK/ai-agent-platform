@@ -39,6 +39,7 @@ class CodingAgentNodes(Protocol):
     assess_context: Node
     route_after_context: Route
     merge_evidence: Node
+    resolve_change_targets: Node
     define_completion_contract: Node
     plan_tools: Node
     review_tool_plan: Node
@@ -64,6 +65,7 @@ def build_coding_agent_graph(*, nodes: CodingAgentNodes, checkpointer: Any):
     workflow.add_node("execute_exploration", nodes.execute_exploration)
     workflow.add_node("assess_context", nodes.assess_context)
     workflow.add_node("merge_evidence", nodes.merge_evidence)
+    workflow.add_node("resolve_change_targets", nodes.resolve_change_targets)
     workflow.add_node("define_completion_contract", nodes.define_completion_contract)
     workflow.add_node("plan_tools", nodes.plan_tools)
     workflow.add_node("review_tool_plan", nodes.review_tool_plan)
@@ -114,15 +116,28 @@ def build_coding_agent_graph(*, nodes: CodingAgentNodes, checkpointer: Any):
     workflow.add_conditional_edges(
         "merge_evidence",
         lambda state: (
-            "define_completion_contract"
+            "resolve_change_targets"
             if state.get("task_shape") == "bounded_change"
+            and state.get("workspace_completion_required", True)
             else "plan_tools"
             if state.get("context_route") in {"repo", "hybrid"}
             else "compose_answer"
         ),
         {
-            "define_completion_contract": "define_completion_contract",
+            "resolve_change_targets": "resolve_change_targets",
             "plan_tools": "plan_tools",
+            "compose_answer": "compose_answer",
+        },
+    )
+    workflow.add_conditional_edges(
+        "resolve_change_targets",
+        lambda state: (
+            "compose_answer"
+            if state.get("terminal_reason") == "target_selection_skipped"
+            else "define_completion_contract"
+        ),
+        {
+            "define_completion_contract": "define_completion_contract",
             "compose_answer": "compose_answer",
         },
     )

@@ -4,6 +4,10 @@ import unittest
 
 from ai_agent_platform.agents.coding.models import CodingAgentState
 from ai_agent_platform.agents.coding.policies import BudgetPolicy
+from ai_agent_platform.agents.coding.tool_loop_nodes import (
+    _artifact_read_progressed,
+    _change_action_tool_specs,
+)
 from ai_agent_platform.agents.coding.task_shaping import (
     build_evidence_contract,
     clamp_evidence_call,
@@ -82,6 +86,29 @@ class TaskShapeTests(unittest.TestCase):
                 prior_user_inputs=["请解释应该怎么修改"],
             )[:2],
             ("plan", False),
+        )
+
+    def test_incomplete_work_continuation_is_an_explicit_change(self) -> None:
+        self.assertEqual(
+            classify_request_authority(
+                "项目里的扫雷游戏没完成，继续做",
+                intent="repository_question",
+            )[:2],
+            ("change", True),
+        )
+        self.assertEqual(
+            classify_request_authority(
+                "这个功能没完成，为什么继续做会失败？",
+                intent="repository_question",
+            )[:2],
+            ("answer", False),
+        )
+        self.assertEqual(
+            classify_request_authority(
+                "这个功能没完成，是否继续做？",
+                intent="repository_question",
+            )[:2],
+            ("answer", False),
         )
 
     def test_overview_synonyms_are_normalized_and_stable(self) -> None:
@@ -289,6 +316,25 @@ class _RepeatedPlanner:
         return "fallback"
 
 
+class _DistinctReadPlanner(_RepeatedPlanner):
+    def decide_tool_calls(self, messages, tool_specs):
+        del messages, tool_specs
+        self.decisions += 1
+        return LLMToolDecision(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    call_id=f"distinct-{self.decisions}",
+                    name="demo.lookup",
+                    arguments={"query": f"page-{self.decisions}"},
+                )
+            ],
+            model="test",
+            provider="test",
+            stop_reason="tool_use",
+        )
+
+
 def _direct_state() -> CodingAgentState:
     contract = build_evidence_contract("broad_review")
     return {
@@ -339,6 +385,132 @@ def _direct_state() -> CodingAgentState:
 
 
 class NativeContractLoopTests(unittest.TestCase):
+    def test_artifact_read_progress_requires_forward_cursor_movement(self) -> None:
+        def read(start: int, end: int) -> dict[str, object]:
+            return {
+                "name": "run.read_artifact",
+                "ok": True,
+                "result": {
+                    "artifact_id": "tool_result_0123456789abcdef0123",
+                    "ranges": [{"start_char": start, "end_char": end}],
+                },
+            }
+
+        state: CodingAgentState = {"tool_results": [read(100, 200)]}
+
+        self.assertFalse(_artifact_read_progressed(state, [read(0, 100)]))
+        self.assertTrue(_artifact_read_progressed(state, [read(200, 300)]))
+
+    def test_successful_read_advances_unresolved_contract_stall_counter(self) -> None:
+        registry = ToolRegistry()
+        registry.register("demo.lookup", lambda query: {"query": query})
+        planner = _DistinctReadPlanner()
+        runtime = CodingAgentRuntime(tool_registry=registry, planner=planner)
+        state = _direct_state()
+        state.update(
+            {
+                "task_shape": "bounded_change",
+                "intent": "change_planning",
+                "mutation_authorized": True,
+                "workspace_completion_required": True,
+                "evidence_contract": build_evidence_contract("bounded_change"),
+                "unresolved_requirements": [
+                    "applied_change",
+                    "validation_result",
+                ],
+                "completion_unresolved_rounds": 0,
+                "change_completion_contract": {
+                    "schema_version": 1,
+                    "applicable": True,
+                    "compatibility_mode": "strict",
+                    "generation_status": "frozen",
+                    "frozen": True,
+                    "required_changes": [
+                        {
+                            "id": "change:create:app.py",
+                            "target": "app.py",
+                            "operation": "create",
+                            "status": "pending",
+                        }
+                    ],
+                    "required_validations": [],
+                    "unresolved_changes": ["change:create:app.py"],
+                    "unresolved_validations": [],
+                    "completion_contract_satisfied": False,
+                },
+            }
+        )
+
+        state = {**state, **runtime._tool_loop_nodes._plan_tools(state)}
+        state = {**state, **runtime._tool_loop_nodes._inspect_repository(state)}
+
+        self.assertEqual(state["completion_unresolved_rounds"], 1)
+        self.assertEqual(state["native_no_progress_rounds"], 1)
+        self.assertFalse(state["trace"][-1]["output"]["semantic_progress"])
+
+    def test_distinct_successful_reads_do_not_mask_semantic_stagnation(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            "demo.lookup",
+            lambda query: {"query": query, "value": 42},
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        )
+        planner = _DistinctReadPlanner()
+        runtime = CodingAgentRuntime(tool_registry=registry, planner=planner)
+        state = _direct_state()
+        state["run_budget_mode"] = "unbounded"
+
+        for expected_rounds in range(1, 4):
+            state = {**state, **runtime._tool_loop_nodes._plan_tools(state)}
+            state = {**state, **runtime._tool_loop_nodes._inspect_repository(state)}
+            self.assertEqual(state["native_no_progress_rounds"], expected_rounds)
+            self.assertEqual(state["coverage_delta"], 0)
+
+        terminal = runtime._tool_loop_nodes._plan_tools(state)
+
+        self.assertEqual(planner.decisions, 3)
+        self.assertEqual(terminal["terminal_reason"], "no_progress")
+        self.assertEqual(terminal["terminal_status"], "partial")
+        self.assertEqual(planner.final_tool_names, [])
+
+    def test_change_action_phase_hides_only_exploratory_read_tools(self) -> None:
+        specs = create_coding_tool_registry().list_specs()
+        visible, suppressed = _change_action_tool_specs(
+            {
+                "task_shape": "bounded_change",
+                "mutation_authorized": True,
+                "native_no_progress_rounds": 2,
+                "unresolved_requirements": [
+                    "applied_change",
+                    "validation_result",
+                ],
+                "change_completion_contract": {
+                    "applicable": True,
+                    "generation_status": "frozen",
+                    "compatibility_mode": "strict",
+                    "completion_contract_satisfied": False,
+                },
+            },
+            specs,
+            no_progress_rounds=3,
+        )
+        visible_names = {spec.name for spec in visible}
+
+        self.assertIn("repo.collect_evidence", suppressed)
+        self.assertIn("repo.read_file", suppressed)
+        self.assertNotIn("repo.collect_evidence", visible_names)
+        self.assertNotIn("repo.read_file", visible_names)
+        self.assertIn("agent.request_user_input", visible_names)
+        self.assertIn("test_designer", visible_names)
+        self.assertIn("change_planner", visible_names)
+        self.assertIn("sandbox.write_file", visible_names)
+        self.assertIn("sandbox.run_command", visible_names)
+
     def test_equivalent_call_is_blocked_and_finalization_has_no_tools(self) -> None:
         registry = ToolRegistry()
         registry.register(

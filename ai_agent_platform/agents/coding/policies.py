@@ -256,10 +256,7 @@ class BudgetPolicy:
             and state.get("new_evidence_count", 0) <= 0
         ):
             return "no_new_evidence", "partial"
-        if (
-            not state.get("evidence_contract")
-            and state.get("native_no_progress_rounds", 0) >= self.no_progress_rounds
-        ):
+        if state.get("native_no_progress_rounds", 0) >= self.no_progress_rounds:
             return "no_progress", "partial"
         if (
             state.get("native_unfulfilled_change_rounds", 0)

@@ -50,22 +50,74 @@ def create_coding_tool_registry(
         "agent.request_user_input",
         request_user_input_tool,
         description=(
-            "Pause the active run and ask the user one concise question when a "
-            "material choice cannot be inferred safely."
+            "Ask one to three concise structured questions only for user-owned "
+            "choices or material ambiguity that repository inspection cannot "
+            "resolve. Give every question a stable id and explicit options when "
+            "the choices are known."
         ),
         input_schema={
             "type": "object",
             "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "question"],
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+                            "header": {"type": "string", "maxLength": 80},
+                            "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+                            "detail": {"type": "string", "maxLength": 2000},
+                            "options": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "object",
+                                    "required": ["label"],
+                                    "properties": {
+                                        "label": {"type": "string", "minLength": 1, "maxLength": 1000},
+                                        "description": {"type": "string", "maxLength": 1000},
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "multi_select": {"type": "boolean"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                # Legacy fields remain accepted for restored v1/v2 checkpoints.
                 "question": {"type": "string", "minLength": 1, "maxLength": 1000},
                 "context": {"type": "string", "maxLength": 2000},
             },
-            "required": ["question"],
+            "anyOf": [
+                {"required": ["questions"]},
+                {"required": ["question"]},
+            ],
             "additionalProperties": False,
         },
         output_schema={
             "type": "object",
-            "properties": {"answer": {"type": "string"}},
-            "required": ["answer"],
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["id", "selected"],
+                        "properties": {
+                            "id": {"type": "string"},
+                            "selected": {"type": "array", "items": {"type": "string"}},
+                            "custom": {"type": "string"},
+                            "skipped": {"type": "boolean"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "answer": {"type": "string"},
+            },
+            "required": ["answers"],
             "additionalProperties": False,
         },
         # "context" here is a model-supplied string, not the execution context;
@@ -208,8 +260,13 @@ def create_coding_tool_registry(
     return registry
 
 
-def request_user_input_tool(*, question: str, context: str = "") -> dict[str, Any]:
-    del question, context
+def request_user_input_tool(
+    *,
+    questions: list[dict[str, Any]] | None = None,
+    question: str = "",
+    context: str = "",
+) -> dict[str, Any]:
+    del questions, question, context
     raise RuntimeError(
         "agent.request_user_input must be handled by the Agent checkpoint runtime"
     )

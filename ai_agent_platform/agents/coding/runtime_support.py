@@ -24,7 +24,7 @@ from ai_agent_platform.agents.coding.change_loop import (
     SANDBOX_MUTATION_TOOLS,
     SANDBOX_VALIDATION_TOOLS,
 )
-from ai_agent_platform.agents.coding.text import snippet
+from ai_agent_platform.agents.coding.text import extract_paths, extract_symbols, snippet
 from ai_agent_platform.token_counting import estimate_text_tokens
 
 MAX_AGENT_HISTORY_MESSAGES = 6
@@ -337,6 +337,43 @@ def build_workspace_query(state: CodingAgentState) -> str:
     if conversation_context:
         parts.append("最近会话上下文:\n" + conversation_context)
     return "\n".join(parts)
+
+
+def build_repository_discovery_queries(state: CodingAgentState) -> list[str]:
+    """Build isolated repository searches from user-controlled discovery input.
+
+    Model answer context may include system summaries and assistant messages, but
+    repository search must never inherit those roles as search terms.
+    """
+
+    candidates: list[str] = []
+    candidates.extend(str(item) for item in state.get("model_target_terms", []))
+    candidates.extend(str(item) for item in state.get("focus_files", []))
+    candidates.extend(extract_paths(str(state.get("user_input") or "")))
+    candidates.extend(extract_symbols(str(state.get("user_input") or "")))
+    current = " ".join(str(state.get("user_input") or "").split())
+    if current:
+        candidates.append(current)
+    for message in reversed(state.get("history", [])):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = " ".join(str(message.get("content") or "").split())
+        if content:
+            candidates.append(content)
+        if len(candidates) >= 24:
+            break
+    queries: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = candidate.strip()[:240]
+        key = normalized.casefold()
+        if len(normalized) < 2 or key in seen:
+            continue
+        seen.add(key)
+        queries.append(normalized)
+        if len(queries) >= 12:
+            break
+    return queries
 
 
 def recent_conversation_context(

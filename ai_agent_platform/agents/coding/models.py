@@ -52,6 +52,7 @@ class CodingAgentState(TypedDict, total=False):
     intent_confidence: float
     planner_source: str
     model_action: str
+    model_target_terms: list[str]
     model_target_hints: list[str]
     request_mode: str
     mutation_authorized: bool
@@ -86,6 +87,12 @@ class CodingAgentState(TypedDict, total=False):
     context_stop_reason: str
     context_chars: int
     context_files: list[str]
+    target_resolution_status: str
+    resolved_change_targets: list[dict[str, Any]]
+    target_resolution_reason: str
+    target_candidate_paths: list[str]
+    missing_local_references: list[dict[str, Any]]
+    user_question_result: dict[str, Any]
     seen_context_keys: list[str]
     tool_calls: list[ToolCall]
     analysis_tool_calls: list[ToolCall]
@@ -480,6 +487,9 @@ class AgentPlanner(Protocol):
         state: CodingAgentState,
         tool_specs: list[ToolSpec],
     ) -> list[ToolCall]:
+        ...
+
+    def resolve_change_targets(self, payload: dict[str, Any]) -> dict[str, Any]:
         ...
 
     def compose_answer(self, state: CodingAgentState) -> str:

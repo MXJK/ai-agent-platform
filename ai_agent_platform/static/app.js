@@ -451,6 +451,7 @@ function humanizeAgentNode(value) {
     assess_context: "评估上下文",
     assemble_context: "装配上下文预算",
     merge_evidence: "合并证据",
+    resolve_change_targets: "解析修改目标",
     plan_tools: "规划工具调用",
     review_tool_plan: "等待工具审批",
     inspect_repository: "检查代码仓库",
@@ -514,6 +515,7 @@ const AGENT_CONTEXT_ACTIVITY_NODES = new Set([
   "retrieve_project_memory",
   "assess_context",
   "merge_evidence",
+  "resolve_change_targets",
 ]);
 
 function agentToolLabel(name) {
@@ -732,6 +734,7 @@ function agentContextInjectionTitle(node) {
     retrieve_project_memory: "注入项目记忆",
     assess_context: "装配上下文",
     merge_evidence: "合并上下文证据",
+    resolve_change_targets: "解析修改目标",
   };
   return titles[node] || humanizeAgentNode(node);
 }
@@ -800,6 +803,16 @@ function agentContextInjectionSummary(node, output = {}) {
       if (output.knowledge_source_count) parts.push(`知识库 ${output.knowledge_source_count} 份`);
       if (output.memory_source_count) parts.push(`记忆 ${output.memory_source_count} 份`);
       return parts.length ? `合并证据：${parts.join("、")}` : "合并证据";
+    }
+    case "resolve_change_targets": {
+      const candidates = Array.isArray(output.candidate_paths)
+        ? output.candidate_paths
+        : [];
+      const targets = Array.isArray(output.resolved_targets)
+        ? output.resolved_targets
+        : [];
+      const status = output.status || "unresolved";
+      return `目标${status} · ${candidates.length} 个候选 · ${targets.length} 个已解析`;
     }
     default:
       return output.summary || "";
@@ -5245,9 +5258,95 @@ function chatContentForRun(runId) {
 function setInlineCheckpointBusy(card, busy) {
   card.classList.toggle("is-busy", busy);
   card.setAttribute("aria-busy", String(busy));
-  card.querySelectorAll("button, textarea").forEach((control) => {
+  card.querySelectorAll("button, textarea, input").forEach((control) => {
     control.disabled = busy;
   });
+}
+
+function structuredPendingQuestions(pending = {}) {
+  const rawQuestions = Array.isArray(pending.questions) && pending.questions.length
+    ? pending.questions
+    : [{
+        id: pending.call_id || "user-input",
+        header: "需要你的输入",
+        question: pending.question || "Agent 需要你补充信息后才能继续。",
+        detail: pending.context || "",
+        options: (pending.candidate_paths || []).map((path) => ({
+          label: path,
+          description: "使用此工作区相对路径继续。",
+        })),
+        multi_select: false,
+      }];
+  return rawQuestions.slice(0, 3).map((question, index) => ({
+    id: String(question?.id || `user-input-${index + 1}`),
+    header: String(question?.header || "需要你的输入"),
+    question: String(question?.question || "Agent 需要你补充信息后才能继续。"),
+    detail: String(question?.detail || question?.context || ""),
+    options: (Array.isArray(question?.options) ? question.options : []).slice(0, 20)
+      .map((option) => typeof option === "string"
+        ? { label: option, description: "" }
+        : {
+            label: String(option?.label || ""),
+            description: String(option?.description || ""),
+          })
+      .filter((option) => option.label),
+    multiSelect: question?.multi_select === true || question?.multiSelect === true,
+  }));
+}
+
+function renderInlineQuestion(question, index) {
+  const inputType = question.multiSelect ? "checkbox" : "radio";
+  const options = question.options.map((option, optionIndex) => `
+    <label class="inline-question-option">
+      <input
+        type="${inputType}"
+        name="inline-question-${index}"
+        value="${escapeHtml(option.label)}"
+        data-inline-question-option
+      >
+      <span class="inline-question-option-index">${optionIndex + 1}</span>
+      <span class="inline-question-option-copy">
+        <strong>${escapeHtml(option.label)}</strong>
+        ${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}
+      </span>
+    </label>
+  `).join("");
+  return `
+    <fieldset class="inline-user-question" data-inline-question data-question-id="${escapeHtml(question.id)}">
+      <legend>${escapeHtml(question.header)}</legend>
+      <h4>${escapeHtml(question.question)}</h4>
+      ${question.detail ? `<p>${escapeHtml(question.detail)}</p>` : ""}
+      ${options ? `<div class="inline-question-options">${options}</div>` : ""}
+      <label class="inline-checkpoint-feedback inline-question-custom">
+        <span>${options ? "其他答案" : "回复 Agent"} <small>${options ? "可选" : "必填"}</small></span>
+        <textarea
+          rows="2"
+          maxlength="4000"
+          data-inline-question-custom
+          placeholder="${options ? "输入候选项之外的补充说明" : escapeHtml(question.question)}"
+        ></textarea>
+      </label>
+    </fieldset>
+  `;
+}
+
+function collectInlineQuestionAnswers(card) {
+  return Array.from(card.querySelectorAll("[data-inline-question]")).map((node) => ({
+    id: node.dataset.questionId,
+    selected: Array.from(node.querySelectorAll("[data-inline-question-option]:checked"))
+      .map((input) => input.value),
+    custom: node.querySelector("[data-inline-question-custom]")?.value.trim() || "",
+  }));
+}
+
+function inlineQuestionAnswersComplete(answers) {
+  return answers.length > 0
+    && answers.every((answer) => answer.selected.length > 0 || answer.custom !== "");
+}
+
+function updateInlineQuestionSubmit(card) {
+  const submit = card.querySelector('[data-inline-agent-action="continue"]');
+  if (submit) submit.disabled = !inlineQuestionAnswersComplete(collectInlineQuestionAnswers(card));
 }
 
 function inlineApprovalTools(approval) {
@@ -5283,8 +5382,11 @@ function renderInlineAgentCheckpoint(contentNode, body) {
     const decision = card.dataset.decision;
     const previousStatus = card.dataset.status;
     const rejected = decision === "reject";
+    const skipped = decision === "skip-input";
     const resolvedTitle = rejected
       ? "已拒绝执行"
+      : skipped
+        ? "已跳过问题"
       : previousStatus === "waiting_input"
         ? "已提交补充信息"
         : previousStatus === "paused"
@@ -5348,7 +5450,8 @@ function renderInlineAgentCheckpoint(contentNode, body) {
       </div>
     `;
   } else {
-    const question = pending.question || "Agent 需要你补充信息后才能继续。";
+    const questions = structuredPendingQuestions(pending);
+    const question = questions[0]?.question || "Agent 需要你补充信息后才能继续。";
     card.setAttribute("aria-label", "Agent 等待输入");
     card.innerHTML = `
       <div class="inline-checkpoint-heading">
@@ -5359,14 +5462,14 @@ function renderInlineAgentCheckpoint(contentNode, body) {
         </div>
         <code>${escapeHtml(agentRunId(body))}</code>
       </div>
-      <label class="inline-checkpoint-feedback">
-        <span>回复 Agent</span>
-        <textarea rows="3" maxlength="4000" placeholder="${escapeHtml(question)}"></textarea>
-      </label>
-      <p class="inline-checkpoint-error" role="alert" hidden></p>
+      <div class="inline-user-questions">
+        ${questions.map(renderInlineQuestion).join("")}
+      </div>
+      <p class="inline-checkpoint-error" role="alert" ${pending.validation_error ? "" : "hidden"}>${escapeHtml(pending.validation_error || "")}</p>
       <div class="inline-checkpoint-actions">
         <button class="button danger" type="button" data-inline-run-action="cancel">取消 Run</button>
-        <button class="button primary" type="button" data-inline-agent-action="continue">继续运行</button>
+        <button class="button ghost" type="button" data-inline-agent-action="skip-input">跳过</button>
+        <button class="button primary" type="button" data-inline-agent-action="continue" disabled>提交并继续</button>
       </div>
     `;
   }
@@ -5380,6 +5483,10 @@ function renderInlineAgentCheckpoint(contentNode, body) {
     button.addEventListener("click", () => {
       handleInlineRunControl(contentNode, body, button.dataset.inlineRunAction, card);
     });
+  });
+  card.querySelectorAll("[data-inline-question-option], [data-inline-question-custom]").forEach((control) => {
+    control.addEventListener("input", () => updateInlineQuestionSubmit(card));
+    control.addEventListener("change", () => updateInlineQuestionSubmit(card));
   });
   if (shouldFocusCheckpoint) {
     window.requestAnimationFrame(() => {
@@ -5704,12 +5811,31 @@ async function handleInlineAgentAction(contentNode, body, action, card) {
     showToast("这条审批不属于当前会话，请重新打开对应会话", "warning");
     return;
   }
-  const feedback = card.querySelector("textarea")?.value.trim() || "";
+  const isApproval = action === "approve" || action === "reject";
+  const feedback = isApproval
+    ? card.querySelector(".inline-checkpoint-feedback textarea")?.value.trim() || ""
+    : "";
   const errorNode = card.querySelector(".inline-checkpoint-error");
+  let questionAnswers = [];
+  if (!isApproval) {
+    questionAnswers = collectInlineQuestionAnswers(card);
+    if (action === "skip-input") {
+      questionAnswers = questionAnswers.map((answer) => ({
+        id: answer.id,
+        selected: [],
+        skipped: true,
+      }));
+    } else if (!inlineQuestionAnswersComplete(questionAnswers)) {
+      if (errorNode) {
+        errorNode.textContent = "请先选择一个候选项或填写答案；如不回答，请明确点击“跳过”。";
+        errorNode.hidden = false;
+      }
+      return;
+    }
+  }
   setInlineCheckpointBusy(card, true);
   if (errorNode) errorNode.hidden = true;
   try {
-    const isApproval = action === "approve" || action === "reject";
     const nextBody = await fetchJson(
       isApproval
         ? `/agent/runs/${encodeURIComponent(runId)}/resume`
@@ -5723,7 +5849,7 @@ async function handleInlineAgentAction(contentNode, body, action, card) {
                 ? "用户已在对话中确认执行计划"
                 : "用户已在对话中拒绝执行计划"),
             }
-          : { message: feedback }),
+          : { answers: questionAnswers }),
       },
     );
     if (

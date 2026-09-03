@@ -107,7 +107,11 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.write_file",
         toolkit.write_file,
-        description="Write a UTF-8 file inside the current Run execution workspace.",
+        description=(
+            "Create or replace a UTF-8 file inside the current Run execution "
+            "workspace. Read an existing target first and pass its latest "
+            "content_hash as expected_sha256."
+        ),
         input_schema={
             "type": "object",
             "required": ["path", "content"],
@@ -132,7 +136,10 @@ def register_sandbox_tools(
     registry.register(
         "sandbox.apply_patch",
         toolkit.apply_patch,
-        description="Apply a unified diff inside the current Run execution workspace.",
+        description=(
+            "Apply a unified diff inside the current Run execution workspace. "
+            "Every existing patch target must have been read in this Run first."
+        ),
         input_schema={
             "type": "object",
             "required": ["patch"],

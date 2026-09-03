@@ -21,6 +21,10 @@ from ai_agent_platform.agents.coding.models import (
     AgentCheckpointNotFoundError,
     AgentCheckpointRestoreError,
 )
+from ai_agent_platform.agents.coding.user_questions import (
+    normalize_questions,
+    parse_question_response,
+)
 from ai_agent_platform.core import (
     InProcessTaskQueue,
     MetricsRegistry,
@@ -536,6 +540,7 @@ class QueryService:
         run_id: str | None = None,
         approved: bool = True,
         message: str = "",
+        answers: list[dict[str, Any]] | None = None,
         actor_user_id: str | None = None,
     ) -> AgentRunRecord:
         resolved = QueryCommand(command)
@@ -556,6 +561,7 @@ class QueryService:
             return self.continue_run(
                 run_id=run_id,
                 message=message,
+                answers=answers,
                 actor_user_id=actor_user_id,
             )
         if resolved is QueryCommand.COMPACT:
@@ -948,10 +954,52 @@ class QueryService:
         *,
         run_id: str,
         message: str = "",
+        answers: list[dict[str, Any]] | None = None,
         actor_user_id: str | None = None,
     ) -> AgentRunRecord:
         record = self.get_run_for_actor(run_id, actor_user_id)
         self._assert_command(QueryCommand.CONTINUE, record)
+        input_response: dict[str, Any] | None = None
+        if record.status == "waiting_input":
+            pending = record.pending_approval or {}
+            if pending.get("questions"):
+                questions = normalize_questions(pending)
+                input_response = parse_question_response(
+                    {"answers": list(answers or [])},
+                    questions,
+                )
+            else:
+                # Restored legacy checkpoints have no structured batch. Keep
+                # their text response path isolated from all newly emitted UI.
+                legacy_message = message.strip()
+                if not legacy_message:
+                    raise ValueError("waiting input requires a non-empty answer")
+                input_response = {"legacy": True, "message": legacy_message}
+            try:
+                self._event_store.append(
+                    run_id,
+                    AgentRunEvent(
+                        sequence=0,
+                        type="user_question_answered",
+                        status=record.status,
+                        node=record.latest_node,
+                        summary="Structured user-question answer submitted.",
+                        output={
+                            "request": pending,
+                            "response": input_response,
+                            "actor_user_id": actor_user_id,
+                        },
+                    ),
+                )
+            except RuntimeError as exc:
+                if str(exc) != "Agent runtime EventStore is not writable":
+                    raise
+                logger.info(
+                    "agent question audit event store unavailable",
+                    extra={"run_id": run_id},
+                )
+        elif answers:
+            raise ValueError("structured answers are only valid while waiting for input")
         selection = self._selection_for_record(record)
         mark_resume_queued = getattr(self._runtime, "mark_resume_queued", None)
         queued_record = (
@@ -964,6 +1012,7 @@ class QueryService:
                 run_id=run_id,
                 approved=True,
                 feedback=message,
+                input_response=input_response,
                 actor_user_id=actor_user_id,
                 model_selection=(
                     selection.__dict__ if record.context_snapshot is None else None
@@ -1269,6 +1318,7 @@ class QueryService:
         run_id: str,
         approved: bool,
         feedback: Optional[str],
+        input_response: dict[str, Any] | None = None,
         actor_user_id: str | None = None,
         model_selection: dict | None = None,
         broker_redelivered: bool = False,
@@ -1351,6 +1401,7 @@ class QueryService:
                             run_id=run_id,
                             approved=approved,
                             feedback=feedback,
+                            input_response=input_response,
                             approved_by=actor_user_id,
                         )
             except ToolPoolRestoreError:

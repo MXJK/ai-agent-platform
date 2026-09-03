@@ -70,6 +70,13 @@ from ai_agent_platform.agents.coding.task_shaping import (
     task_budget,
     update_evidence_progress,
 )
+from ai_agent_platform.agents.coding.user_questions import (
+    UserQuestionResponseError,
+    first_answer_text,
+    normalize_questions,
+    parse_question_response,
+    structured_input_request,
+)
 from ai_agent_platform.integrations.llm import LLMProviderError
 from ai_agent_platform.integrations.tools import ToolCall
 from ai_agent_platform.token_counting import estimate_text_tokens
@@ -80,6 +87,11 @@ READ_ONLY_REPOSITORY_TOOLS = {
     "repo.list_files",
     "repo.read_file",
     "repo.search_code",
+}
+
+_CHANGE_ACTION_READ_ONLY_HELPERS = {
+    "agent.request_user_input",
+    "test_designer",
 }
 
 
@@ -149,12 +161,28 @@ class ToolLoopNodes:
                     contract.get("completion_contract_satisfied")
                 ),
             }
-        visible_tool_specs = self._visible_tool_specs(state)
-        tool_specs = model_visible_tool_specs(visible_tool_specs)
         uses_native = bool(
             getattr(self._planner, "uses_native_tool_calling", False)
         )
+        visible_tool_specs = self._visible_tool_specs(state)
+        action_phase_suppressed_tools: list[str] = []
+        if uses_native:
+            visible_tool_specs, action_phase_suppressed_tools = (
+                _change_action_tool_specs(
+                    state,
+                    visible_tool_specs,
+                    no_progress_rounds=self._budget_policy.no_progress_rounds,
+                )
+            )
+        tool_specs = model_visible_tool_specs(visible_tool_specs)
         warnings = list(state.get("context_warnings", []))
+        if action_phase_suppressed_tools:
+            action_phase_warning = (
+                "change action phase hid read-only exploration tools after "
+                "semantic progress stalled"
+            )
+            if action_phase_warning not in warnings:
+                warnings.append(action_phase_warning)
         if not uses_native:
             planned_tool_calls = [
                 call
@@ -1183,6 +1211,9 @@ class ToolLoopNodes:
                     "evidence_extension_rounds": extension_rounds,
                     "duplicate_tool_call_count": duplicate_tool_call_count,
                     "parallel_read_batch": parallel_read_batch,
+                    "action_phase_suppressed_tools": (
+                        action_phase_suppressed_tools
+                    ),
                     "context_compactions": compactions,
                     "context_reduction_stages": context_stages,
                 },
@@ -1537,30 +1568,38 @@ class ToolLoopNodes:
             else:
                 for call in calls:
                     if call.name == "agent.request_user_input":
-                        response = interrupt(
-                            {
-                                "type": "input_required",
-                                "question": str(call.arguments.get("question") or ""),
-                                "context": str(call.arguments.get("context") or ""),
-                                "call_id": call.call_id,
-                            }
+                        questions = normalize_questions(
+                            call.arguments,
+                            default_id=call.call_id,
                         )
-                        if isinstance(response, dict):
-                            answer = str(
-                                response.get("message")
-                                or response.get("feedback")
-                                or response.get("answer")
-                                or ""
-                            ).strip()
-                        else:
-                            answer = str(response or "").strip()
+                        request = structured_input_request(
+                            questions,
+                            call_id=call.call_id,
+                            context=str(call.arguments.get("context") or ""),
+                        )
+                        while True:
+                            raw_response = interrupt(request)
+                            try:
+                                answer_result = parse_question_response(
+                                    raw_response,
+                                    questions,
+                                    allow_legacy_message=bool(
+                                        isinstance(raw_response, dict)
+                                        and raw_response.get("legacy")
+                                    ),
+                                )
+                            except UserQuestionResponseError as exc:
+                                request = {**request, "validation_error": str(exc)}
+                                continue
+                            break
+                        answer = first_answer_text(answer_result)
                         response = {
                                 "call_id": call.call_id,
                                 "name": call.name,
-                                "ok": bool(answer),
-                                "result": {"answer": answer},
-                                "error": None if answer else "user supplied no answer",
-                                "error_code": None if answer else "empty_user_input",
+                                "ok": True,
+                                "result": {**answer_result, "answer": answer},
+                                "error": None,
+                                "error_code": None,
                                 "provider": "runtime",
                                 "permission_level": "read_only",
                                 "requires_approval": False,
@@ -1733,8 +1772,6 @@ class ToolLoopNodes:
                 consecutive_failures += len(results)
             elif successful_new_result:
                 consecutive_failures = 0
-            no_progress = state.get("native_no_progress_rounds", 0)
-            no_progress = 0 if successful_new_result else no_progress + 1
             progress = update_evidence_progress(
                 state,
                 context_sources=state.get("context_sources", []),
@@ -1777,11 +1814,28 @@ class ToolLoopNodes:
             current_unresolved = set(contract.get("unresolved_changes", [])) | set(
                 contract.get("unresolved_validations", [])
             )
+            completion_progressed = bool(
+                prior_unresolved and current_unresolved < prior_unresolved
+            )
+            artifact_read_progressed = _artifact_read_progressed(state, results)
+            semantic_progress = bool(
+                progress.get("coverage_delta", 0) > 0
+                or completion_progressed
+                or artifact_read_progressed
+                or successful_mutation
+                or validation_results
+            )
+            if not state.get("evidence_contract") and not prior_unresolved:
+                semantic_progress = semantic_progress or successful_new_result
+            no_progress = state.get("native_no_progress_rounds", 0)
+            no_progress = 0 if semantic_progress else no_progress + 1
             completion_unresolved_rounds = state.get(
                 "completion_unresolved_rounds", 0
             )
-            if current_unresolved < prior_unresolved:
+            if not current_unresolved or completion_progressed:
                 completion_unresolved_rounds = 0
+            elif prior_unresolved:
+                completion_unresolved_rounds += 1
             return {
                 "tool_results": list(state.get("tool_results", [])) + results,
                 "artifacts": merged_artifacts,
@@ -1841,6 +1895,8 @@ class ToolLoopNodes:
                         ],
                         "consecutive_failures": consecutive_failures,
                         "no_progress_rounds": no_progress,
+                        "semantic_progress": semantic_progress,
+                        "artifact_read_progressed": artifact_read_progressed,
                         "new_evidence_count": progress["new_evidence_count"],
                         "coverage_delta": progress["coverage_delta"],
                         "evidence_coverage": progress["evidence_coverage"],
@@ -2477,6 +2533,81 @@ def _has_successful_native_mutation(state: CodingAgentState) -> bool:
         result.get("ok") and result.get("name") in SANDBOX_MUTATION_TOOLS
         for result in state.get("tool_results", [])
     )
+
+
+def _change_action_tool_specs(
+    state: CodingAgentState,
+    tool_specs: Sequence[Any],
+    *,
+    no_progress_rounds: int,
+) -> tuple[list[Any], list[str]]:
+    """Hide exploratory reads once a change Run only lacks action evidence."""
+
+    unresolved = {
+        str(item) for item in state.get("unresolved_requirements", []) if item
+    }
+    exploration_requirements = unresolved.difference(
+        {"applied_change", "validation_result"}
+    )
+    action_phase = bool(
+        mutation_authorized_for_state(state)
+        and completion_contract_state(state) == "unresolved"
+        and not exploration_requirements
+        and state.get("native_no_progress_rounds", 0)
+        >= max(1, no_progress_rounds - 1)
+    )
+    if not action_phase:
+        return list(tool_specs), []
+
+    suppressed = [
+        spec.name
+        for spec in tool_specs
+        if spec.permission_level == "read_only"
+        and spec.name not in _CHANGE_ACTION_READ_ONLY_HELPERS
+    ]
+    suppressed_names = set(suppressed)
+    return (
+        [spec for spec in tool_specs if spec.name not in suppressed_names],
+        suppressed,
+    )
+
+
+def _artifact_read_progressed(
+    state: CodingAgentState,
+    results: Sequence[dict[str, Any]],
+) -> bool:
+    """Return whether a paged read moved beyond the furthest observed character."""
+
+    furthest_end_by_artifact: dict[str, int] = {}
+
+    def record(read_results: Sequence[dict[str, Any]], *, detect: bool) -> bool:
+        progressed = False
+        for item in read_results:
+            if not item.get("ok") or item.get("name") != RUN_ARTIFACT_TOOL_NAME:
+                continue
+            payload = item.get("result")
+            if not isinstance(payload, dict):
+                continue
+            artifact_id = str(payload.get("artifact_id") or "")
+            ranges = payload.get("ranges")
+            if not artifact_id or not isinstance(ranges, list):
+                continue
+            prior_end = furthest_end_by_artifact.get(artifact_id, 0)
+            current_end = prior_end
+            for read_range in ranges:
+                if not isinstance(read_range, dict):
+                    continue
+                try:
+                    current_end = max(current_end, int(read_range.get("end_char", 0)))
+                except (TypeError, ValueError):
+                    continue
+            if detect and current_end > prior_end:
+                progressed = True
+            furthest_end_by_artifact[artifact_id] = current_end
+        return progressed
+
+    record(state.get("tool_results", []), detect=False)
+    return record(results, detect=True)
 
 
 def _native_output_budget(

@@ -500,6 +500,7 @@ def create_agent_runs_router(
                 QueryCommand.CONTINUE,
                 run_id=run_id,
                 message=request.message,
+                answers=[answer.model_dump() for answer in request.answers],
                 actor_user_id=(
                     request_user_id(http_request, settings)
                     if settings.auth_mode != "disabled"

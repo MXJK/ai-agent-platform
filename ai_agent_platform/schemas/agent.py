@@ -119,10 +119,20 @@ class AgentRunResumeRequest(BaseModel):
     feedback: Optional[str] = Field(default=None, max_length=4000)
 
 
+class AgentUserQuestionAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    selected: list[str] = Field(default_factory=list, max_length=20)
+    custom: Optional[str] = Field(default=None, max_length=4000)
+    skipped: bool = False
+
+
 class AgentRunControlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(default="", max_length=4000)
+    answers: list[AgentUserQuestionAnswer] = Field(default_factory=list, max_length=3)
 
 
 class AgentCheckpointRestoreRequest(BaseModel):

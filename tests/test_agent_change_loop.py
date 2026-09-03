@@ -1,10 +1,12 @@
 from pathlib import Path
+import hashlib
 import shlex
 import sys
 from tempfile import TemporaryDirectory
 import unittest
 
-from ai_agent_platform.agents.coding.models import CodingAgentState
+from ai_agent_platform.agents.coding.change_loop import _mutation_safety_error
+from ai_agent_platform.agents.coding.models import CodingAgentState, ContextSource
 from ai_agent_platform.agents.coding_agent import (
     CodingAgentRuntime,
     create_coding_tool_registry,
@@ -86,6 +88,67 @@ class RepairingChangePlanner(SuccessfulChangePlanner):
 
 
 class AgentChangeLoopTests(unittest.TestCase):
+    def test_mutation_safety_combines_contract_and_read_version(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "app.py"
+            target.write_text("value = 1\n", encoding="utf-8")
+            contract = {
+                "applicable": True,
+                "required_changes": [
+                    {"target": "app.py", "target_kind": "path", "operation": "update"}
+                ],
+            }
+            call = ToolCall(
+                name="sandbox.write_file",
+                arguments={"path": "app.py", "content": "value = 2\n"},
+            )
+            state: CodingAgentState = {
+                "execution_root": temp_dir,
+                "change_completion_contract": contract,
+                "context_sources": [],
+                "tool_results": [
+                    {
+                        "name": "untrusted.external_tool",
+                        "ok": True,
+                        "result": {
+                            "path": "app.py",
+                            "sha256": hashlib.sha256(b"value = 1\n").hexdigest(),
+                        },
+                    }
+                ],
+            }
+
+            self.assertEqual(
+                _mutation_safety_error(state, call)[0],
+                "mutation_target_not_observed",
+            )
+            source = ContextSource(
+                kind="file",
+                path="app.py",
+                start_line=1,
+                end_line=1,
+                text="value = 1\n",
+                reason="live read",
+                content_hash=hashlib.sha256(b"value = 1\n").hexdigest(),
+            )
+            state["context_sources"] = [source]
+            self.assertIsNone(_mutation_safety_error(state, call))
+
+            target.write_text("value = 3\n", encoding="utf-8")
+            self.assertEqual(
+                _mutation_safety_error(state, call)[0],
+                "mutation_target_stale",
+            )
+            outside = ToolCall(
+                name="sandbox.write_file",
+                arguments={"path": "other.py", "content": "value = 1\n"},
+            )
+            self.assertEqual(
+                _mutation_safety_error(state, outside)[0],
+                "mutation_target_outside_contract",
+            )
+
     def test_executes_validates_and_collects_diff_without_touching_source(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -140,6 +203,7 @@ class AgentChangeLoopTests(unittest.TestCase):
                     "execute_exploration",
                     "assess_context",
                     "merge_evidence",
+                    "resolve_change_targets",
                     "define_completion_contract",
                     "plan_tools",
                     "review_tool_plan",

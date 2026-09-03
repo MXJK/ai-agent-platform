@@ -13,8 +13,10 @@ from langgraph.types import interrupt
 
 from ai_agent_platform.agents.coding.context import load_project_instructions
 from ai_agent_platform.agents.coding.completion_contract import (
+    collect_target_resolution_evidence,
     completion_contract_summary,
     define_completion_contract,
+    resolve_change_targets,
 )
 from ai_agent_platform.agents.coding.models import CodingAgentState, ContextSource
 from ai_agent_platform.agents.coding.planner import (
@@ -24,6 +26,7 @@ from ai_agent_platform.agents.coding.planner import (
 )
 from ai_agent_platform.agents.coding.runtime_support import (
     append_trace as _append_trace,
+    build_repository_discovery_queries,
     build_workspace_query,
 )
 from ai_agent_platform.agents.coding.task_shaping import (
@@ -36,6 +39,11 @@ from ai_agent_platform.agents.coding.task_shaping import (
     update_evidence_progress,
 )
 from ai_agent_platform.agents.coding.text import extract_paths, extract_symbols, unique
+from ai_agent_platform.agents.coding.user_questions import (
+    UserQuestionResponseError,
+    parse_question_response,
+    structured_input_request,
+)
 from ai_agent_platform.integrations.permissions import ToolApproval
 from ai_agent_platform.integrations.prompt_cache import prefix_token_estimates
 from ai_agent_platform.integrations.tools import ToolCall
@@ -349,6 +357,16 @@ class ContextRetrievalNodes:
         target_hint_sources = [state["user_input"], *prior_user_inputs]
         target_hint_sources.extend(str(item) for item in state.get("focus_files", []))
         target_hint_text = "\n".join(target_hint_sources).replace("\\", "/")
+        folded_target_text = target_hint_text.casefold()
+        model_target_terms = unique(
+            [
+                " ".join(str(item).strip().split())
+                for item in decision.get("target_terms", [])
+                if str(item).strip()
+                and " ".join(str(item).strip().split()).casefold()
+                in folded_target_text
+            ]
+        )[:12]
         model_target_hints = unique(
             [
                 str(item).replace("\\", "/")
@@ -418,6 +436,7 @@ class ContextRetrievalNodes:
             "intent_confidence": bounded_confidence(decision.get("confidence")),
             "planner_source": str(decision.get("source") or "unknown"),
             "model_action": model_action,
+            "model_target_terms": model_target_terms,
             "model_target_hints": model_target_hints,
             "request_mode": request_mode,
             "mutation_authorized": mutation_authorized,
@@ -449,6 +468,7 @@ class ContextRetrievalNodes:
                     "intent": intent,
                     "request_mode": request_mode,
                     "model_action": model_action,
+                    "model_target_terms": model_target_terms,
                     "model_target_hints": model_target_hints,
                     "run_budget_mode": self._run_budget_mode,
                     "mutation_authorized": mutation_authorized,
@@ -806,6 +826,16 @@ class ContextRetrievalNodes:
                     "round": round_number,
                     "strategy": strategy,
                     "planned_tools": [call.name for call in filtered],
+                    "planned_calls": [
+                        {
+                            "call_id": call.call_id,
+                            "name": call.name,
+                            "query": str(call.arguments.get("query") or ""),
+                            "path": str(call.arguments.get("path") or ""),
+                            "source": call.source,
+                        }
+                        for call in filtered
+                    ],
                     "limit": self._max_read_tools_per_round,
                 },
             ),
@@ -817,11 +847,14 @@ class ContextRetrievalNodes:
         read_files = set(state.get("context_files", []))
         discovered = _rank_discovered_paths(
             _candidate_paths(state.get("exploration_results", [])),
+            target_terms=state.get("model_target_terms", []),
+            exploration_results=state.get("exploration_results", []),
         )
         candidates = unique(
             state.get("focus_files", [])
             + extract_paths(state["user_input"])
             + state.get("model_target_hints", [])
+            + state.get("target_candidate_paths", [])
             + discovered
         )
         calls = [
@@ -861,13 +894,14 @@ class ContextRetrievalNodes:
                 ],
             )
         if generic_project_overview:
+            queries = build_repository_discovery_queries(state)
             return (
                 "fallback_project_search",
                 [
                     ToolCall(
                         name="repo.search_code",
                         arguments={
-                            "query": build_workspace_query(state),
+                            "query": queries[0] if queries else state["user_input"],
                             "max_results": 12,
                             "context_lines": 1,
                         },
@@ -888,17 +922,7 @@ class ContextRetrievalNodes:
             )
         return (
             "targeted_search",
-            [
-                ToolCall(
-                    name="repo.search_code",
-                    arguments={
-                        "query": build_workspace_query(state),
-                        "max_results": 12,
-                        "context_lines": 1,
-                    },
-                    source="rules",
-                )
-            ],
+            _targeted_repository_search_calls(state),
         )
 
     def _execute_exploration(self, state: CodingAgentState) -> CodingAgentState:
@@ -987,10 +1011,10 @@ class ContextRetrievalNodes:
     def _assess_context(self, state: CodingAgentState) -> CodingAgentState:
         sources = list(state.get("context_sources", []))
         seen = {
-            f"{source.path}:{source.start_line}:{source.end_line}:{source.content_hash}"
+            f"{source.kind}:{source.path}:{source.start_line}:"
+            f"{source.end_line}:{source.content_hash}"
             for source in sources
         }
-        content_hashes = {source.content_hash for source in sources}
         context_files = set(state.get("context_files", []))
         chars = state.get("context_chars", 0)
         for result in state.get("exploration_results", []):
@@ -1006,10 +1030,10 @@ class ContextRetrievalNodes:
             )
             for source in additions:
                 key = (
-                    f"{source.path}:{source.start_line}:"
+                    f"{source.kind}:{source.path}:{source.start_line}:"
                     f"{source.end_line}:{source.content_hash}"
                 )
-                if key in seen or source.content_hash in content_hashes:
+                if key in seen:
                     continue
                 if source.kind == "file" and source.path not in context_files:
                     if len(context_files) >= self._max_context_files:
@@ -1031,19 +1055,36 @@ class ContextRetrievalNodes:
                     )
                 sources.append(source)
                 seen.add(key)
-                content_hashes.add(source.content_hash)
                 chars += len(source.text)
         round_number = state.get("exploration_round", 0)
         unbounded = run_is_unbounded(state)
+        preview_state: CodingAgentState = {
+            **state,
+            "context_sources": sources,
+            "target_resolution_status": "unresolved",
+            "resolved_change_targets": [],
+        }
+        resolution = resolve_change_targets(preview_state)
+        target_status = str(resolution["target_resolution_status"])
+        bounded_change = bool(
+            state.get("task_shape") == "bounded_change"
+            and state.get("workspace_completion_required", True)
+        )
+        target_resolved = not bounded_change or target_status == "resolved"
         capacity_exhausted = (
             len(context_files) >= self._max_context_files
             or chars >= self._max_context_chars
         )
-        unread = [
-            path
-            for path in _candidate_paths(state.get("exploration_results", []))
-            if path not in context_files
-        ]
+        unread = unique(
+            [
+                path
+                for path in (
+                    _candidate_paths(state.get("exploration_results", []))
+                    + list(resolution["target_candidate_paths"])
+                )
+                if path not in context_files
+            ]
+        )
         has_repo_evidence = bool(sources)
         native_seed_limit = min(2, self._max_exploration_rounds)
         native_seed_complete = bool(
@@ -1051,6 +1092,7 @@ class ContextRetrievalNodes:
             and native_seed_limit > 0
             and round_number >= native_seed_limit
             and has_repo_evidence
+            and target_resolved
         )
         failed_count = sum(
             1
@@ -1067,10 +1109,20 @@ class ContextRetrievalNodes:
         stalled = bool(
             unbounded
             and round_number >= 2
-            and not has_repo_evidence
             and (
-                not state.get("analysis_tool_calls", [])
-                or failed_count + zero_result_count >= round_number
+                (
+                    not has_repo_evidence
+                    and (
+                        not state.get("analysis_tool_calls", [])
+                        or failed_count + zero_result_count >= round_number
+                    )
+                )
+                or (
+                    bounded_change
+                    and not target_resolved
+                    and not unread
+                    and not state.get("analysis_tool_calls", [])
+                )
             )
         )
         budget_exhausted = bool(
@@ -1078,8 +1130,13 @@ class ContextRetrievalNodes:
             or stalled
             or (not unbounded and round_number >= self._max_exploration_rounds)
         )
+        discovery_ready = target_resolved or (
+            bounded_change and target_status == "ambiguous" and not unread
+        )
         sufficient = has_repo_evidence and (
-            budget_exhausted or native_seed_complete or not unread
+            budget_exhausted
+            or native_seed_complete
+            or (not unread and discovery_ready)
         )
         if stalled:
             stop_reason = "exploration_stalled"
@@ -1087,6 +1144,8 @@ class ContextRetrievalNodes:
             stop_reason = "budget_exhausted"
         elif native_seed_complete:
             stop_reason = "native_seed_sufficient"
+        elif target_status == "ambiguous" and not unread:
+            stop_reason = "target_resolution_ambiguous"
         elif sufficient:
             stop_reason = "evidence_sufficient"
         elif unread:
@@ -1127,6 +1186,11 @@ class ContextRetrievalNodes:
             "context_sufficient": sufficient,
             "context_stop_reason": stop_reason,
             "context_warnings": warnings,
+            "target_resolution_status": "unresolved",
+            "resolved_change_targets": [],
+            "target_resolution_reason": "pending formal target-resolution node",
+            "target_candidate_paths": resolution["target_candidate_paths"],
+            "missing_local_references": resolution["missing_local_references"],
             "trace": _append_trace(
                 state,
                 node="assess_context",
@@ -1142,6 +1206,11 @@ class ContextRetrievalNodes:
                     "run_budget_mode": state.get("run_budget_mode", "bounded"),
                     "stalled": stalled,
                     "native_seed_complete": native_seed_complete,
+                    "target_resolution_status": target_status,
+                    "target_candidate_paths": resolution["target_candidate_paths"],
+                    "missing_local_references": resolution[
+                        "missing_local_references"
+                    ],
                     "stop_reason": stop_reason,
                     "failed_tools": failed_count,
                     "zero_result_tools": zero_result_count,
@@ -1210,6 +1279,211 @@ class ContextRetrievalNodes:
                         "unresolved_requirements"
                     ],
                     "warnings": state.get("context_warnings", []),
+                },
+            ),
+        }
+
+    def _resolve_change_targets(self, state: CodingAgentState) -> CodingAgentState:
+        resolution = resolve_change_targets(state)
+        live_evidence = collect_target_resolution_evidence(state)
+        live_paths = set(live_evidence["read_files"])
+        if resolution["target_resolution_status"] == "unresolved":
+            resolver = getattr(self._planner, "resolve_change_targets", None)
+            if callable(resolver) and resolution["target_candidate_paths"]:
+                read_sources = [
+                    source
+                    for source in state.get("context_sources", [])
+                    if isinstance(source, ContextSource) and source.kind == "file"
+                ]
+                payload = {
+                    "user_request": state.get("user_input", ""),
+                    "controlled_user_history": [
+                        str(message.get("content") or "")
+                        for message in state.get("history", [])
+                        if isinstance(message, dict) and message.get("role") == "user"
+                    ][-8:],
+                    "focus_files": list(state.get("focus_files", []))[:20],
+                    "target_terms": list(state.get("model_target_terms", []))[:12],
+                    "candidate_paths": list(resolution["target_candidate_paths"]),
+                    "candidate_evidence": [
+                        {
+                            "path": source.path,
+                            "summary": source.text[:1000],
+                            "reason": source.reason,
+                        }
+                        for source in read_sources
+                        if source.path in resolution["target_candidate_paths"]
+                    ],
+                    "missing_local_references": resolution[
+                        "missing_local_references"
+                    ],
+                }
+                try:
+                    selected = resolver(payload)
+                except Exception:
+                    selected = {"selected_paths": []}
+                selected_paths = (
+                    selected.get("selected_paths", [])
+                    if isinstance(selected, dict)
+                    else []
+                )
+                if selected_paths:
+                    resolution = resolve_change_targets(
+                        state,
+                        selected_paths=selected_paths,
+                        selection_source="model",
+                    )
+        if (
+            resolution["target_resolution_status"] == "unresolved"
+            and any(
+                path in live_paths
+                for path in resolution["target_candidate_paths"]
+            )
+        ):
+            resolution = {
+                **resolution,
+                "target_resolution_status": "ambiguous",
+                "target_resolution_reason": (
+                    "live-read candidates remain but no single target can be "
+                    "selected reliably"
+                ),
+            }
+        if resolution["target_resolution_status"] == "ambiguous":
+            choices = sorted(
+                unique(
+                    [
+                        path
+                        for path in resolution["target_candidate_paths"]
+                        if path in live_paths
+                    ]
+                    + [
+                        str(item.get("target") or "")
+                        for item in resolution["missing_local_references"]
+                        if isinstance(item, dict)
+                    ]
+                )
+            )
+            if not choices:
+                return {
+                    **resolution,
+                    "target_resolution_status": "unresolved",
+                    "target_resolution_reason": (
+                        "candidate paths were discovered but none were confirmed "
+                        "by a live file read"
+                    ),
+                    "trace": _append_trace(
+                        state,
+                        node="resolve_change_targets",
+                        summary="候选尚未经过实时读取，拒绝冻结修改目标。",
+                        output={
+                            "status": "unresolved",
+                            "reason": (
+                                "candidate paths were discovered but none were "
+                                "confirmed by a live file read"
+                            ),
+                            "candidate_paths": resolution[
+                                "target_candidate_paths"
+                            ],
+                            "resolved_targets": [],
+                            "missing_local_references": resolution[
+                                "missing_local_references"
+                            ],
+                            "rejected_target_paths": resolution.get(
+                                "rejected_target_paths", []
+                            ),
+                        },
+                    ),
+                }
+            question_id = "change-target-selection"
+            request = structured_input_request(
+                [
+                    {
+                        "id": question_id,
+                        "header": "选择修改目标",
+                        "question": "检测到多个同等可信的修改目标，请选择要继续的相对路径。",
+                        "detail": resolution["target_resolution_reason"],
+                        "options": [
+                            {
+                                "label": path,
+                                "description": (
+                                    "已由当前 Run 的实时仓库读取或入口引用确认。"
+                                ),
+                            }
+                            for path in choices
+                        ],
+                        "multi_select": False,
+                    }
+                ],
+                context=resolution["target_resolution_reason"],
+                candidate_paths=choices,
+            )
+            while True:
+                response = interrupt(request)
+                try:
+                    parsed = parse_question_response(
+                        response,
+                        request["questions"],
+                        allow_legacy_message=bool(
+                            isinstance(response, dict) and response.get("legacy")
+                        ),
+                    )
+                except UserQuestionResponseError as exc:
+                    request = {**request, "validation_error": str(exc)}
+                    continue
+                answer = parsed["answers"][0]
+                if answer.get("skipped"):
+                    return {
+                        **resolution,
+                        "target_resolution_reason": "user explicitly skipped target selection",
+                        "terminal_status": "partial",
+                        "terminal_reason": "target_selection_skipped",
+                        "trace": _append_trace(
+                            state,
+                            node="resolve_change_targets",
+                            summary="用户明确跳过目标选择，按安全边界停止本次变更。",
+                            output={
+                                "status": "unresolved",
+                                "reason": "user explicitly skipped target selection",
+                                "candidate_paths": choices,
+                                "resolved_targets": [],
+                                "user_question_result": parsed,
+                            },
+                        ),
+                    }
+                selected = list(answer.get("selected") or [])
+                custom = str(answer.get("custom") or "").strip()
+                if not selected and custom in choices:
+                    selected = [custom]
+                if not selected:
+                    request = {
+                        **request,
+                        "validation_error": "请从已确认的候选路径中选择一项。",
+                    }
+                    continue
+                break
+            resolution = resolve_change_targets(
+                state,
+                selected_paths=selected,
+                selection_source="user",
+            )
+            resolution["user_question_result"] = parsed
+        return {
+            **resolution,
+            "trace": _append_trace(
+                state,
+                node="resolve_change_targets",
+                summary="从实时入口、候选和本地引用解析并校验修改目标。",
+                output={
+                    "status": resolution["target_resolution_status"],
+                    "reason": resolution["target_resolution_reason"],
+                    "candidate_paths": resolution["target_candidate_paths"],
+                    "resolved_targets": resolution["resolved_change_targets"],
+                    "missing_local_references": resolution[
+                        "missing_local_references"
+                    ],
+                    "rejected_target_paths": resolution.get(
+                        "rejected_target_paths", []
+                    ),
                 },
             ),
         }
@@ -1308,6 +1582,47 @@ def _unique_exploration_calls(calls: list[ToolCall]) -> list[ToolCall]:
     return result
 
 
+def _targeted_repository_search_calls(state: CodingAgentState) -> list[ToolCall]:
+    queries = build_repository_discovery_queries(state)
+    terms = {
+        str(item).strip().casefold()
+        for item in state.get("model_target_terms", [])
+        if str(item).strip()
+    }
+    if terms:
+        selected = [query for query in queries if query.casefold() in terms]
+        return [
+            ToolCall(
+                name=tool_name,
+                arguments={
+                    "query": query,
+                    "max_results": 12,
+                    **(
+                        {"context_lines": 1}
+                        if tool_name == "repo.search_code"
+                        else {}
+                    ),
+                },
+                source="target_term_repository_discovery",
+            )
+            for query in selected
+            for tool_name in ("repo.search_code", "repo.find_files")
+        ]
+    if not queries:
+        return []
+    return [
+        ToolCall(
+            name="repo.search_code",
+            arguments={
+                "query": queries[0],
+                "max_results": 12,
+                "context_lines": 1,
+            },
+            source="trusted_repository_discovery",
+        )
+    ]
+
+
 def _is_generic_project_overview_request(
     user_input: str,
     knowledge_bases: list[dict[str, Any]],
@@ -1333,11 +1648,43 @@ def _is_generic_project_overview_request(
     return True
 
 
-def _rank_discovered_paths(paths: list[str]) -> list[str]:
-    def rank(path: str) -> tuple[int, int, int, str]:
+def _rank_discovered_paths(
+    paths: list[str],
+    *,
+    target_terms: list[str] | None = None,
+    exploration_results: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    terms = [str(item).casefold() for item in (target_terms or []) if str(item)]
+    matched_paths: set[str] = set()
+    for result in exploration_results or []:
+        output = result.get("result")
+        if not result.get("ok") or not isinstance(output, dict):
+            continue
+        query = str(output.get("query") or "").casefold()
+        if terms and query not in terms:
+            continue
+        if result.get("name") == "repo.search_code":
+            matched_paths.update(
+                str(item.get("path") or "")
+                for item in output.get("matches", [])
+                if isinstance(item, dict)
+            )
+        elif result.get("name") == "repo.find_files":
+            matched_paths.update(str(item) for item in output.get("matches", []))
+    matched_stems = {Path(path).stem.casefold() for path in matched_paths if path}
+
+    def rank(path: str) -> tuple[int, int, int, int, str]:
         candidate = Path(path)
         name = candidate.name.casefold()
-        if name.startswith("readme."):
+        suffix = candidate.suffix.casefold()
+        exact_target_match = path in matched_paths or any(
+            term in path.casefold() for term in terms
+        )
+        same_stem = candidate.stem.casefold() in matched_stems
+        relationship_priority = 0 if exact_target_match else 1 if same_stem else 2
+        if suffix in {".html", ".htm"}:
+            priority = 0
+        elif name.startswith("readme."):
             priority = 0
         elif name in ENTRY_FILE_PRIORITY:
             priority = ENTRY_FILE_PRIORITY[name]
@@ -1358,7 +1705,7 @@ def _rank_discovered_paths(paths: list[str]) -> list[str]:
         else:
             priority = 50
         hidden = int(any(part.startswith(".") for part in candidate.parts))
-        return priority, hidden, len(candidate.parts), path
+        return relationship_priority, priority, hidden, len(candidate.parts), path
 
     return sorted(unique(paths), key=rank)
 

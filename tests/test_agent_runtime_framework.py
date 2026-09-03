@@ -157,6 +157,60 @@ class InputPlanner(SteeringPlanner):
         )
 
 
+class StructuredInputPlanner(SteeringPlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.decisions = 0
+        self.result = {}
+
+    def decide_tool_calls(self, messages, tool_specs):
+        del tool_specs
+        self.decisions += 1
+        if self.decisions == 1:
+            return LLMToolDecision(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="structured_input_call",
+                        name="agent.request_user_input",
+                        arguments={
+                            "questions": [
+                                {
+                                    "id": "api-target",
+                                    "header": "API target",
+                                    "question": "Which API should change?",
+                                    "options": [
+                                        {
+                                            "label": "/health",
+                                            "description": "Health endpoint",
+                                        }
+                                    ],
+                                    "multi_select": False,
+                                }
+                            ]
+                        },
+                    )
+                ],
+                model="scripted",
+                provider="test",
+                stop_reason="tool_use",
+            )
+        tool_result = next(
+            message
+            for message in messages
+            if message.get("role") == "tool"
+            and message.get("call_id") == "structured_input_call"
+        )
+        self.result = tool_result["content"]["result"]
+        return LLMToolDecision(
+            text="Structured answer received.",
+            tool_calls=[],
+            model="scripted",
+            provider="test",
+            stop_reason="end_turn",
+        )
+
+
 class BlockingClassificationPlanner(SteeringPlanner):
     def __init__(self) -> None:
         super().__init__()
@@ -713,6 +767,47 @@ class AgentRuntimeFrameworkTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(planner.answer, "the /health endpoint")
         self.assertEqual(completed.answer, "Will change the /health endpoint.")
+
+    def test_structured_input_answer_resumes_as_an_ordinary_tool_result(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "README.md").write_text("demo\n", encoding="utf-8")
+            planner = StructuredInputPlanner()
+            runtime = CodingAgentRuntime(planner=planner)
+
+            waiting = runtime.run(
+                conversation_id="sess_structured_input",
+                user_input="make the requested API change",
+                history=[],
+                workspace_id="workspace_main",
+                workspace_root=str(root),
+            )
+            completed = runtime.resume(
+                run_id=waiting.run_id,
+                approved=True,
+                input_response={
+                    "answers": [
+                        {
+                            "id": "api-target",
+                            "selected": ["/health"],
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(waiting.status, "waiting_input")
+        self.assertEqual(
+            waiting.pending_approval["questions"][0]["id"],
+            "api-target",
+        )
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(
+            planner.result,
+            {
+                "answers": [{"id": "api-target", "selected": ["/health"]}],
+                "answer": "/health",
+            },
+        )
 
     def test_pause_and_continue_happen_at_a_safe_tool_boundary(self) -> None:
         tool_started = Event()

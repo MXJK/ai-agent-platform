@@ -55,21 +55,23 @@ class CheckpointResumeCoordinator:
         *,
         approved: bool,
         feedback: Optional[str],
+        input_response: dict[str, Any] | None = None,
         approved_by: str | None = None,
     ) -> tuple[CodingAgentState, Any, dict[str, Any]]:
         config = self.config(record.thread_id)
+        resume_payload = {
+            "approved": approved,
+            "feedback": feedback or "",
+            "message": feedback or "",
+            "action": "continue",
+            "approved_by": approved_by or "",
+        }
+        if input_response is not None:
+            resume_payload.update(input_response)
         with collect_llm_usage() as usage:
             try:
                 state, slice_count = self._invoke_slices(
-                    Command(
-                        resume={
-                            "approved": approved,
-                            "feedback": feedback or "",
-                            "message": feedback or "",
-                            "action": "continue",
-                            "approved_by": approved_by or "",
-                        }
-                    ),
+                    Command(resume=resume_payload),
                     config,
                 )
             except Exception as exc:

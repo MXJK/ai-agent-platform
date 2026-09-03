@@ -176,6 +176,9 @@ class _RuntimeGraphNodes:
         self.assess_context = instrument("assess_context", context._assess_context)
         self.route_after_context = context._route_after_context
         self.merge_evidence = instrument("merge_evidence", context._merge_evidence)
+        self.resolve_change_targets = instrument(
+            "resolve_change_targets", context._resolve_change_targets
+        )
         self.define_completion_contract = instrument(
             "define_completion_contract", context._define_completion_contract
         )
@@ -596,6 +599,13 @@ class CodingAgentRuntime:
             "evidence_rounds_completed": 0,
             "evidence_contract_satisfied": False,
             "change_completion_contract": {},
+            "model_target_terms": [],
+            "model_target_hints": [],
+            "target_resolution_status": "unresolved",
+            "resolved_change_targets": [],
+            "target_resolution_reason": "not_started",
+            "target_candidate_paths": [],
+            "missing_local_references": [],
             "completion_contract_satisfied": False,
             "completion_unresolved_rounds": 0,
             "validation_missing_rounds": 0,
@@ -776,6 +786,7 @@ class CodingAgentRuntime:
         run_id: str,
         approved: bool,
         feedback: Optional[str] = None,
+        input_response: dict[str, Any] | None = None,
         approved_by: str | None = None,
     ) -> AgentRunResult:
         record = self.get_run(run_id)
@@ -811,6 +822,17 @@ class CodingAgentRuntime:
                 record,
                 approved=approved,
                 feedback=feedback,
+                input_response=(
+                    input_response
+                    if input_response is not None
+                    else (
+                        {"legacy": True, "message": feedback}
+                        if (feedback or "").strip()
+                        and (record.pending_approval or {}).get("type")
+                        == "input_required"
+                        else None
+                    )
+                ),
                 approved_by=approved_by,
             )
             state = _merge_llm_usage(

@@ -372,6 +372,134 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 "call_write",
             )
 
+    def test_structured_input_is_validated_audited_and_queued_for_resume(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            kernel = _kernel(Path(temp_dir))
+            service: QueryService = kernel["service"]
+            record = service.start(
+                QueryParams(
+                    conversation_id=kernel["session_id"],
+                    message="change the selected target",
+                    workspace_id="workspace_main",
+                )
+            )
+            waiting = replace(
+                record,
+                status="waiting_input",
+                latest_node="resolve_change_targets",
+                next_nodes=["resolve_change_targets"],
+                pending_approval={
+                    "type": "input_required",
+                    "question_protocol": "structured-v1",
+                    "questions": [
+                        {
+                            "id": "change-target-selection",
+                            "question": "Which target should change?",
+                            "options": [{"label": "app.py"}],
+                            "multi_select": False,
+                        }
+                    ],
+                },
+            )
+            kernel["run_store"].save(waiting)
+            kernel["queue"].names.clear()
+            kernel["queue"].payloads.clear()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "structured answer or explicitly skip",
+            ):
+                service.continue_run(run_id=record.run_id, answers=[])
+
+            updated = service.continue_run(
+                run_id=record.run_id,
+                answers=[
+                    {
+                        "id": "change-target-selection",
+                        "selected": ["app.py"],
+                    }
+                ],
+            )
+            _, events = service.events_for_actor(record.run_id, None)
+
+        self.assertEqual(updated.status, "running")
+        self.assertEqual(kernel["queue"].names, ["agent_resume"])
+        self.assertEqual(
+            kernel["queue"].payloads[0]["input_response"],
+            {
+                "answers": [
+                    {
+                        "id": "change-target-selection",
+                        "selected": ["app.py"],
+                    }
+                ]
+            },
+        )
+        event_types = [event.type for event in events]
+        self.assertLess(
+            event_types.index("user_question_answered"),
+            event_types.index("run_resume_requested"),
+        )
+        answered = next(
+            event for event in events if event.type == "user_question_answered"
+        )
+        self.assertEqual(
+            answered.output_dict()["response"]["answers"][0]["selected"],
+            ["app.py"],
+        )
+
+    def test_continue_http_api_forwards_structured_answers(self) -> None:
+        record = AgentRunRecord(
+            run_id="run_input",
+            thread_id="run_input",
+            conversation_id="sess_input",
+            workspace_id="workspace_main",
+            workspace_root="/workspace",
+            status="running",
+            checkpoint_id="checkpoint_input",
+            latest_node="resolve_change_targets",
+            next_nodes=["resolve_change_targets"],
+            trace=[],
+        )
+
+        class Stub:
+            def execute(self, command, **kwargs):
+                self.call = (command, kwargs)
+                return record
+
+        service = Stub()
+        app = FastAPI()
+        app.include_router(
+            create_agent_runs_router(service, Settings()),  # type: ignore[arg-type]
+            prefix="/api/v1",
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/agent/runs/run_input/continue",
+                json={
+                    "answers": [
+                        {
+                            "id": "change-target-selection",
+                            "selected": ["app.py"],
+                        }
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(service.call[0], QueryCommand.CONTINUE)
+        self.assertEqual(
+            service.call[1]["answers"],
+            [
+                {
+                    "id": "change-target-selection",
+                    "selected": ["app.py"],
+                    "custom": None,
+                    "skipped": False,
+                }
+            ],
+        )
+
     async def test_eval_flag_skips_user_and_project_memory_side_effects(self) -> None:
         class UserMemorySpy:
             enabled = True

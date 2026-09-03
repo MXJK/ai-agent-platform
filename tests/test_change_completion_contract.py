@@ -12,6 +12,7 @@ from ai_agent_platform.agents.coding.completion_contract import (
     ensure_completion_contract,
     extend_completion_contract,
     extend_completion_contract_from_results,
+    resolve_change_targets,
 )
 from ai_agent_platform.agents.coding.models import CodingAgentState, ContextSource
 from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
@@ -174,6 +175,72 @@ class _MinesweeperPlanner:
 
 
 class ChangeCompletionContractUnitTests(unittest.TestCase):
+    def test_parent_relative_module_import_stays_inside_workspace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "pages").mkdir()
+            source = "import { boot } from '../feature.js';\nboot();\n"
+            (root / "pages" / "app.js").write_text(source, encoding="utf-8")
+            state: CodingAgentState = {
+                "task_shape": "bounded_change",
+                "workspace_completion_required": True,
+                "user_input": "继续完成应用",
+                "model_target_terms": ["应用"],
+                "execution_root": str(root),
+                "focus_files": [],
+                "context_sources": [
+                    ContextSource(
+                        kind="file",
+                        path="pages/app.js",
+                        start_line=1,
+                        end_line=2,
+                        text="// 应用\n" + source,
+                        reason="live file",
+                        content_hash="parent-module-import",
+                    )
+                ],
+            }
+            resolution = resolve_change_targets(state)
+            contract = define_completion_contract({**state, **resolution})
+
+        self.assertEqual(
+            [item["target"] for item in contract["required_changes"]],
+            ["feature.js"],
+        )
+
+    def test_live_module_import_uses_shared_missing_reference_resolution(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = "import { boot } from './feature.js';\nboot();\n"
+            (root / "app.js").write_text(source, encoding="utf-8")
+            state: CodingAgentState = {
+                "task_shape": "bounded_change",
+                "workspace_completion_required": True,
+                "user_input": "继续完成应用",
+                "model_target_terms": ["应用"],
+                "execution_root": str(root),
+                "focus_files": [],
+                "context_sources": [
+                    ContextSource(
+                        kind="file",
+                        path="app.js",
+                        start_line=1,
+                        end_line=2,
+                        text="// 应用\n" + source,
+                        reason="live file",
+                        content_hash="module-import",
+                    )
+                ],
+            }
+            resolution = resolve_change_targets(state)
+            contract = define_completion_contract({**state, **resolution})
+
+        self.assertEqual(resolution["target_resolution_status"], "resolved")
+        self.assertEqual(
+            [item["target"] for item in contract["required_changes"]],
+            ["feature.js"],
+        )
+
     def test_live_html_evidence_freezes_two_independent_changes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

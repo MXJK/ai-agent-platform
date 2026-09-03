@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from langgraph.types import interrupt
@@ -460,13 +461,15 @@ class ChangeLoopExecutor:
                 thread_name_prefix="agent-read",
             ) as executor:
                 futures = [
-                    executor.submit(self._execute_tool_call, call, context, tools)
+                    executor.submit(
+                        self._execute_tool_call, state, call, context, tools
+                    )
                     for call in tool_calls
                 ]
                 # Preserve model-proposed order even when later reads finish first.
                 return [future.result() for future in futures]
         return [
-            self._execute_tool_call(tool_call, context, tools)
+            self._execute_tool_call(state, tool_call, context, tools)
             for tool_call in tool_calls
         ]
 
@@ -497,6 +500,7 @@ class ChangeLoopExecutor:
 
     def _execute_tool_call(
         self,
+        state: CodingAgentState,
         tool_call: ToolCall,
         context: ToolExecutionContext,
         tools: Any,
@@ -589,6 +593,22 @@ class ChangeLoopExecutor:
         if permission.effect != "allow":
             response = tools.execute(tool_call, context=context).to_response()
             return finish(response)
+        safety_error = _mutation_safety_error(state, tool_call)
+        if safety_error is not None:
+            return finish(
+                {
+                    "call_id": tool_call.call_id,
+                    "name": tool_call.name,
+                    "ok": False,
+                    "result": None,
+                    "error": safety_error[1],
+                    "error_code": safety_error[0],
+                    "provider": "runtime",
+                    "permission_level": "write_safe",
+                    "requires_approval": True,
+                    "cached": False,
+                }
+            )
         if run_id and callable(save_execution):
             save_execution(
                 AgentToolExecution(
@@ -612,6 +632,150 @@ class ChangeLoopExecutor:
                 )
             )
         return finish(response)
+
+
+def _mutation_safety_error(
+    state: CodingAgentState,
+    tool_call: ToolCall,
+) -> tuple[str, str] | None:
+    """Combine the frozen target contract with read-before-edit/CAS evidence."""
+
+    if tool_call.name not in SANDBOX_MUTATION_TOOLS:
+        return None
+    try:
+        mutations = _mutation_paths(tool_call)
+    except ValueError as exc:
+        return "mutation_paths_invalid", str(exc)
+    if not mutations:
+        return "mutation_paths_invalid", "mutation call contains no file target"
+
+    contract = state.get("change_completion_contract", {})
+    if isinstance(contract, dict) and contract.get("applicable"):
+        allowed = {
+            str(item.get("target") or "")
+            for item in contract.get("required_changes", [])
+            if isinstance(item, dict) and item.get("target_kind", "path") == "path"
+        }
+        outside = sorted(path for path in mutations if path not in allowed)
+        if outside:
+            return (
+                "mutation_target_outside_contract",
+                "mutation target is outside the frozen ChangeCompletionContract: "
+                + ", ".join(outside),
+            )
+
+    root = Path(
+        str(state.get("execution_root") or state.get("workspace_root") or ".")
+    ).resolve()
+    observations = _observed_file_hashes(state)
+    for relative, operation in mutations.items():
+        target = (root / relative).resolve()
+        if target != root and root not in target.parents:
+            return "mutation_path_escape", f"mutation path escapes workspace: {relative}"
+        exists = target.is_file()
+        if operation == "create" and exists:
+            return "mutation_create_conflict", f"create target already exists: {relative}"
+        if not exists:
+            continue
+        if relative not in observations:
+            return (
+                "mutation_target_not_observed",
+                f'edit requires reading "{relative}" first',
+            )
+        observed_hash = observations[relative]
+        current_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        version_is_authoritative = bool(
+            len(observed_hash) == 64
+            and all(character in "0123456789abcdef" for character in observed_hash)
+        )
+        if version_is_authoritative and current_hash != observed_hash:
+            return (
+                "mutation_target_stale",
+                f'file changed after the Agent observed it; read "{relative}" again',
+            )
+        expected = (
+            str(tool_call.arguments.get("expected_sha256") or "")
+            if tool_call.name == "sandbox.write_file"
+            else ""
+        )
+        if expected and expected != current_hash:
+            return (
+                "mutation_expected_hash_mismatch",
+                f'expected_sha256 does not match the latest read of "{relative}"',
+            )
+    return None
+
+
+def _observed_file_hashes(state: CodingAgentState) -> dict[str, str]:
+    observed: dict[str, str] = {}
+    for source in state.get("context_sources", []):
+        if getattr(source, "kind", "") != "file":
+            continue
+        path = _safe_agent_relative_path(str(getattr(source, "path", "") or ""))
+        content_hash = str(getattr(source, "content_hash", "") or "")
+        if path and content_hash:
+            observed[path] = content_hash
+    for result in state.get("tool_results", []):
+        if (
+            not isinstance(result, dict)
+            or not result.get("ok")
+            or result.get("name") not in {"repo.read_file", "sandbox.write_file"}
+        ):
+            continue
+        output = result.get("result")
+        if not isinstance(output, dict):
+            continue
+        path = _safe_agent_relative_path(str(output.get("path") or ""))
+        content_hash = str(output.get("content_hash") or output.get("sha256") or "")
+        if path and content_hash:
+            observed[path] = content_hash
+    return observed
+
+
+def _mutation_paths(tool_call: ToolCall) -> dict[str, str]:
+    if tool_call.name == "sandbox.write_file":
+        path = _safe_agent_relative_path(str(tool_call.arguments.get("path") or ""))
+        if not path:
+            raise ValueError("sandbox.write_file requires a safe relative path")
+        return {path: "write"}
+
+    patch = str(tool_call.arguments.get("patch") or "")
+    old_path: str | None = None
+    paths: dict[str, str] = {}
+    for line in patch.splitlines():
+        if line.startswith("--- "):
+            old_path = _diff_path(line[4:])
+        elif line.startswith("+++ "):
+            new_path = _diff_path(line[4:])
+            if old_path is None and new_path is None:
+                raise ValueError("patch has invalid file headers")
+            selected = new_path or old_path
+            assert selected is not None
+            paths[selected] = (
+                "create" if old_path is None else "delete" if new_path is None else "write"
+            )
+            old_path = None
+    return paths
+
+
+def _diff_path(raw: str) -> str | None:
+    value = raw.strip().split("\t", 1)[0]
+    if value == "/dev/null":
+        return None
+    if not value.startswith(("a/", "b/")):
+        raise ValueError("patch paths must use a/ and b/ prefixes")
+    path = _safe_agent_relative_path(value[2:])
+    if not path:
+        raise ValueError("patch contains an unsafe relative path")
+    return path
+
+
+def _safe_agent_relative_path(raw: str) -> str:
+    normalized = raw.strip().replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return ""
+    return path.as_posix()
 
 
 def partition_tool_calls(

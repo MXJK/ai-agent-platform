@@ -336,9 +336,11 @@ Token 时才作为后备。
   审批决定；`run.read_artifact` 只持久化 artifact ID、范围、哈希和 Token 等读取元数据，
   不把受保护的分页正文复制进事件。运行中和暂停态会自动刷新，历史 Run 也可从持久化
   事件重放；原有会话内 Trace/审批控件继续承担实时操作，不与审计页互相依赖；
-- Agent 审批、追问和 checkpoint 入口显示在对应助手消息底部；常用运行控制收进 composer
-  右侧的单一紧凑按钮：运行中显示暂停，到达 `paused` 后原位切换为继续，输入框可选提交
-  补充要求。独立的转向/取消控制卡不再挤占回答区域，但对应后端 API 与审计能力仍保留；
+- Agent 审批、追问和 checkpoint 入口显示在对应助手消息底部；追问采用最多三题的
+  `structured-v1` 契约，每题带稳定 ID、候选项、单选/多选与自定义答案。空答案不能提交，
+  不回答必须显式点击“跳过”；常用运行控制收进 composer 右侧的单一紧凑按钮：运行中显示
+  暂停，到达 `paused` 后原位切换为继续，输入框可选提交补充要求。独立的转向/取消控制卡
+  不再挤占回答区域，但对应后端 API 与审计能力仍保留；
   任意终态也可打开 Git 风格 checkpoint 轨迹。历史可恢复节点会创建全新的
   Run：可在当前会话“回到此处继续”，也可复制该 Run 之前的会话前缀并分叉为新会话，
   原 Run 与父 checkpoint 不会
@@ -687,9 +689,11 @@ API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具
 结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
 
 Evidence Executor 之上还有一层确定性的任务整形。分类模型结合当前请求、最近八条受控
-历史、focus files、知识库目录与 context route，输出 `answer / diagnose / change` 行动和
-最多 12 个目标提示，再冻结本 Run 的
-`task_shape`、`evidence_contract` 和有序工具 Profile；`分析下当前项目`、`看看当前项目`、
+历史、focus files、知识库目录与 context route，输出 `answer / diagnose / change` 行动、
+最多 12 个自然语言 `target_terms` 和最多 12 个明确路径 `target_hints`，再冻结本 Run 的
+`task_shape`、`evidence_contract` 和有序工具 Profile；结构化分类不可用时，服务端规则仍会把
+“功能没完成，继续做”这类明确的未完成工作续做指令识别为 `change`，但“为什么继续做会
+失败”“是否继续做”等问句保持只读；`分析下当前项目`、`看看当前项目`、
 `summarize this project` 等无具体目标请求归为 `overview`，但“分析当前项目的登录故障”
 归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
 LangGraph checkpoint，resume 不重新分类或放宽工具集合。
@@ -697,7 +701,10 @@ LangGraph checkpoint，resume 不重新分类或放宽工具集合。
 语义 intent 与模型行动分别保存为 `intent`、`model_action` 和 `request_mode`。默认自主模式
 不再把 `change_planning` 二次降级成 `plan`：模型判断用户要实际创建、修改、修复、重构或
 删除代码时选择 `change` 并冻结 `bounded_change`；诊断与建议仍为只读。短指令“修改”或
-“继续”可以从受控历史恢复用户已经给出的路径，但模型目标只是探索提示，必须在本 Run
+“继续”可以从受控历史恢复用户已经给出的路径；带当前目标的“没完成，继续做”由服务端
+高精度规则直接授予变更模式，不依赖分类模型成功返回。`target_terms` 只用于独立只读搜索和候选
+排序，仓库发现查询只接收当前请求、user 角色历史、focus files、目标词以及用户明确路径/
+符号，不会混入 system/profile/assistant 文本；`target_hints` 也只是探索提示。历史路径必须在本 Run
 读取相同 live repository path 后才能进入 `ChangeCompletionContract`，模型不能凭空扩大
 交付范围。服务端仍在工具可见性和执行点复判 Workspace root、角色、进程 deny、审批、
 Sandbox、路径、修改后验证与 Completion Contract；自主决策不等于自动批准。
@@ -713,7 +720,12 @@ Native 会话；验证失败则保留 test report，并继续修复/复验。只
 使用同一验证事实，不会由 `compose_answer` 兜底升级。
 
 第二阶段把“证据足够”和“用户要求全部完成”拆成两个合同。`bounded_change` 在
-`merge_evidence` 之后、第一次 workspace mutation 之前由服务端冻结独立的
+`merge_evidence` 之后先经过 checkpoint-safe 的 `resolve_change_targets`：目标词精确命中、
+HTML/模块入口、同 stem 文件和入口本地 `href/src/import` 关系共同形成候选；已读取 HTML
+中的缺失本地引用可以成为 create 目标。模型只能选择候选集合内且本 Run 已读取的现有路径，
+服务端再次校验 live source、用户明确路径与缺失引用来源。唯一可靠目标解析为 `resolved`，
+同等候选进入 `waiting_input`，没有候选则 fail closed。随后、第一次 workspace mutation 之前
+由服务端冻结独立的
 `ChangeCompletionContract`：每个 required change 具有稳定 ID、精确相对路径、
 create/update/delete、当前请求或 live repository evidence 来源和单调状态；required
 validation 另存验证类别与对应 ToolResult。成功写 CSS 只能满足 CSS 项，不会连带满足 JS；
@@ -722,7 +734,9 @@ validation 另存验证类别与对应 ToolResult。成功写 CSS 只能满足 C
 BudgetPolicy 才以 `completion_contract_satisfied` 完成。模型提前给终答时，Runtime 把
 unresolved checklist 回灌继续执行；连续无法推进后才以
 `partial / completion_requirements_unresolved` 收敛。无法从当前请求、受控历史目标或 live evidence
-可靠得到目标时以 `completion_contract_unavailable` fail closed。冻结后的新 HTML read
+可靠得到目标时以 `completion_contract_unavailable` fail closed。`bounded_change` 只有目标已
+解析才允许用 `native_seed_sufficient` 结束种子探索；尚有未读入口/候选/引用时继续探索。
+冻结后的新 HTML read
 证据只能追加合同并递增 revision/trace，不能删除旧项；旧 checkpoint 没有合同 channel 时
 显式走 `legacy_phase1` 适配并继续保留修改后验证门禁。Run response、ChangeSet 验证摘要、
 trace 和 events 分别公开 evidence satisfied、mutation applied、validation passed 与
@@ -828,18 +842,26 @@ Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和�
 `CodingAgentRuntime` 保留为兼容 facade；API、Worker、Service 和 Repository 只交换
 `RunContextSnapshot`、`AgentRunRecord` 与 `AgentRunResult`，不接触 LangGraph state。
 拆分由稳定轨迹 golden tests 约束，审批、预算和工具顺序保持兼容；Change Run 在
-`merge_evidence` 与 `plan_tools` 之间新增 `define_completion_contract` 节点，并保留修改后
+`merge_evidence` 与 `plan_tools` 之间依次运行 `resolve_change_targets` 和
+`define_completion_contract` 节点，并保留修改后
 验证成功门禁，未完成交付项、未验证或验证失败都不再标记为完成。
 
 默认 `AGENT_RUN_BUDGET_MODE=unbounded` 不再用 12/36 soft、24/72 hard、900 秒或模型请求数
 决定单个 Run 的终态；这些累计计数保留为观测数据。`bounded` 兼容模式仍使用原有任务表和
-进程 ceiling。两种模式都保留证据/完成合同、连续三次失败、无进展、重复调用、暂停、取消、
+进程 ceiling。两种模式都保留上下文容量、目标解析、证据/完成合同、连续三次失败、无进展、
+重复调用、暂停、取消、
 审批、用户输入与部署队列的基础设施超时。相关兼容配置为
 `AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
 `AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
 `AGENT_MAX_CONSECUTIVE_FAILURES`。规划和变更阶段输出预算由
 `AGENT_PLAN_MAX_OUTPUT_TOKENS`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS` 控制；内置最终回答
 使用实际候选模型的注册输出上限，`AGENT_FINAL_MAX_OUTPUT_TOKENS` 仅兼容旧自定义 planner。
+其中“进展”按 evidence coverage 增长、Completion Contract 未完成项减少、Artifact 分页
+游标向前、成功 mutation 或验证结果判断；仅仅成功读取不推进游标的 Artifact 页或重叠仓库证据
+不会清零停滞计数。
+Change Run 连续两轮没有语义进展且只剩 `applied_change / validation_result` 时，下一轮模型
+只看到 mutation、validation 与用户输入等行动工具，不再看到探索型只读工具；第三轮仍无
+进展时按现有停滞门禁收口，避免无累计配额被误解为可无限重复读取。
 工具会话超过
 `AGENT_TOOL_RESULT_MAX_TOKENS`（默认 2000，最小 64）的单次结果会在进入模型转录前，无条件替换为
 包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
@@ -905,8 +927,11 @@ root、进程能力上限、冻结的项目工具选择、审批策略以及当�
 
 所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
 PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
-事件。模型可调用 `agent.request_user_input` 进入 `waiting_input`。用户也可在安全工具边界
-暂停、继续、取消或发送转向信息。审批策略通过 `AGENT_APPROVAL_POLICY=always|on_request|never`
+事件。模型只在仓库检查无法消除的实质歧义或用户决策上调用 `agent.request_user_input`，
+以稳定问题 ID 和已知候选项进入 `waiting_input`；结构化回答经后端逐题校验并记录
+`user_question_answered`，恢复后作为原 call ID 的普通 ToolResult 回灌，显式跳过也产生成功
+结果。用户也可在安全工具边界暂停、继续、取消或发送转向信息。审批策略通过
+`AGENT_APPROVAL_POLICY=always|on_request|never`
 配置；`never` 对需要 `ask` 的调用返回 `deny`，不是静默授权。批准精确绑定
 `run_id + call_id + tool name + canonical arguments SHA-256`，跨 Run/调用/工具重放或参数
 变化都会重新进入审批。项目把 `on_request` 改成 `always` 或 `never` 都可收紧；进程已为
@@ -1170,7 +1195,8 @@ GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
 GET  /api/v1/agent/runs/{run_id}/checkpoints?limit=100
 POST /api/v1/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore {"mode":"rollback|fork","message":"可选的新方向"}
 POST /api/v1/agent/runs/{run_id}/pause
-POST /api/v1/agent/runs/{run_id}/continue   {"message":"补充方向或问题答案"}
+POST /api/v1/agent/runs/{run_id}/continue   {"message":"paused Run 的可选补充方向"}
+POST /api/v1/agent/runs/{run_id}/continue   {"answers":[{"id":"问题 ID","selected":["候选项"],"custom":null,"skipped":false}]}
 POST /api/v1/agent/runs/{run_id}/steer      {"message":"新的执行方向"}
 POST /api/v1/agent/runs/{run_id}/cancel
 POST /api/v1/agent/runs/{run_id}/resume     {"approved":true,"feedback":"审批说明"}
@@ -1245,10 +1271,12 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
   当前源码检出保持不变。
 
 真实 `.env`、凭据、私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件都会被
-拒绝或跳过并记录。写文件接受可选 `expected_sha256`，所有已存在目标都校验 Run 基线和
-当前哈希；补丁还校验路径、上下文和写前哈希。写入使用同目录临时文件、`fsync` 和原子
-替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施单写者
-锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
+拒绝或跳过并记录。Agent 的每次 mutation 还必须同时满足两层条件：路径属于已冻结的
+`ChangeCompletionContract`，并且每个已存在目标已经在本 Run 读取；读取后的内容哈希若与
+当前文件不一致就要求重新读取。写文件接受可选 `expected_sha256`，所有已存在目标继续校验
+Run 基线和当前哈希；补丁还校验路径、上下文和写前哈希。写入使用同目录临时文件、`fsync`
+和原子替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施
+单写者锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
 
 当前产品只支持 `direct`：代码 Agent 经精确工具审批后直接修改登记源码根，终态
 ChangeSet 记录已经发生的写入并提供冲突安全的回滚。页面和 Run 请求都没有执行位置

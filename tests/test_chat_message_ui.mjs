@@ -489,6 +489,109 @@ test("paused composer control continues with optional input", async () => {
   assert.ok(events.includes("watch"));
 });
 
+function loadStructuredQuestionHarness({ selected = [], custom = "" } = {}) {
+  const { context, events } = loadAgentSubmissionHarness(async (calls, path, options) => {
+    calls.push(`request:${path}`);
+    calls.push(`body:${options.body}`);
+    return {
+      run_id: "run_input",
+      conversation_id: "sess_1",
+      status: "running",
+      trace: [],
+    };
+  });
+  context.testSelected = selected;
+  context.testCustom = custom;
+  vm.runInContext(`
+    state.latestRunId = "run_input";
+    state.latestRunConversationId = "sess_1";
+    state.latestRunStatus = "waiting_input";
+    performance = { now: () => 100 };
+    const questionNode = {
+      dataset: { questionId: "change-target-selection" },
+      querySelectorAll: () => testSelected.map((value) => ({ value })),
+      querySelector: () => ({ value: testCustom }),
+    };
+    const errorNode = { hidden: true, textContent: "" };
+    testQuestionCard = {
+      dataset: { runId: "run_input", status: "waiting_input" },
+      classList: { toggle: () => {} },
+      setAttribute: () => {},
+      querySelectorAll: (selector) => selector === "[data-inline-question]"
+        ? [questionNode]
+        : [],
+      querySelector: (selector) => selector === ".inline-checkpoint-error"
+        ? errorNode
+        : null,
+    };
+    testQuestionBody = {
+      run_id: "run_input",
+      conversation_id: "sess_1",
+      status: "waiting_input",
+      trace: [],
+    };
+    testQuestionContent = {};
+    renderAgentRun = () => {};
+    createAgentProgressPresenter = () => ({ update: async () => {} });
+    startResponseTimer = () => {};
+    stopResponseTimer = () => {};
+    setChatStatusFromRun = () => {};
+  `, context);
+  return { context, events };
+}
+
+test("structured Agent input submits stable ids and selected options", async () => {
+  const { context, events } = loadStructuredQuestionHarness({
+    selected: ["alpha.html"],
+  });
+
+  await vm.runInContext(
+    'handleInlineAgentAction(testQuestionContent, testQuestionBody, "continue", testQuestionCard)',
+    context,
+  );
+
+  assert.ok(events.includes("request:/agent/runs/run_input/continue"));
+  const payload = JSON.parse(events.find((event) => event.startsWith("body:")).slice(5));
+  assert.deepEqual(payload, {
+    answers: [
+      {
+        id: "change-target-selection",
+        selected: ["alpha.html"],
+        custom: "",
+      },
+    ],
+  });
+  assert.equal(Object.hasOwn(payload, "message"), false);
+});
+
+test("blank Agent input stays blocked unless Skip is explicit", async () => {
+  const blank = loadStructuredQuestionHarness();
+
+  await vm.runInContext(
+    'handleInlineAgentAction(testQuestionContent, testQuestionBody, "continue", testQuestionCard)',
+    blank.context,
+  );
+
+  assert.equal(blank.events.some((event) => event.startsWith("request:")), false);
+  assert.equal(vm.runInContext("testQuestionCard.querySelector('.inline-checkpoint-error').hidden", blank.context), false);
+
+  const skipped = loadStructuredQuestionHarness();
+  await vm.runInContext(
+    'handleInlineAgentAction(testQuestionContent, testQuestionBody, "skip-input", testQuestionCard)',
+    skipped.context,
+  );
+  const payload = JSON.parse(skipped.events.find((event) => event.startsWith("body:")).slice(5));
+  assert.deepEqual(payload, {
+    answers: [
+      {
+        id: "change-target-selection",
+        selected: [],
+        skipped: true,
+      },
+    ],
+  });
+});
+
 function loadWatchRunHarness({ events, refreshStatus }) {
   const captured = [];
   const pollCalls = [];

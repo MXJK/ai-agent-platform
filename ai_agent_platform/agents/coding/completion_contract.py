@@ -28,6 +28,11 @@ _FILE_TOKEN_RE = re.compile(
 _HTML_REFERENCE_RE = re.compile(
     r"(?:href|src)\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE
 )
+_LOCAL_IMPORT_RE = re.compile(
+    r"(?:\bfrom\s+|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)"
+    r"['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
 _DELETE_RE = re.compile(r"(?:\bdelete\b|\bremove\b|删除|移除)", re.IGNORECASE)
 
 
@@ -51,6 +56,362 @@ class RequiredValidation(TypedDict):
     tool_result_call_id: str
 
 
+def collect_target_resolution_evidence(state: CodingAgentState) -> dict[str, Any]:
+    """Collect server-verifiable target candidates and local entry references."""
+
+    root = _execution_root(state)
+    read_files: dict[str, ContextSource] = {}
+    candidate_paths: set[str] = set()
+    references: list[dict[str, Any]] = []
+    for source in state.get("context_sources", []):
+        if not isinstance(source, ContextSource) or source.kind not in {
+            "file",
+            "search_match",
+        }:
+            continue
+        source_path = _safe_relative_path(source.path, root)
+        if source_path is None:
+            continue
+        if (root / source_path).is_file():
+            candidate_paths.add(source_path)
+        if source.kind != "file":
+            continue
+        read_files[source_path] = source
+        for reference_kind, raw_reference in _source_local_references(
+            source_path, source.text
+        ):
+            target = _local_reference_path(source_path, raw_reference, root)
+            if target is None:
+                continue
+            exists = (root / target).is_file()
+            if exists:
+                candidate_paths.add(target)
+            references.append(
+                {
+                    "source_path": source_path,
+                    "reference": raw_reference,
+                    "reference_kind": reference_kind,
+                    "target": target,
+                    "exists": exists,
+                    "source_kind": "live_repository_evidence",
+                }
+            )
+    for raw_path in _request_paths(state) + [
+        str(item) for item in state.get("model_target_hints", [])
+    ]:
+        safe = _safe_relative_path(raw_path, root)
+        if safe is not None and (root / safe).is_file():
+            candidate_paths.add(safe)
+    missing = [item for item in references if not item["exists"]]
+    return {
+        "candidate_paths": sorted(candidate_paths),
+        "read_files": read_files,
+        "references": references,
+        "missing_local_references": missing,
+    }
+
+
+def resolve_change_targets(
+    state: CodingAgentState,
+    *,
+    selected_paths: Iterable[str] = (),
+    selection_source: str = "model",
+) -> dict[str, Any]:
+    """Resolve bounded-change targets without turning discovery clues into authority."""
+
+    existing_status = str(state.get("target_resolution_status") or "")
+    existing_targets = state.get("resolved_change_targets")
+    if existing_status == "resolved" and isinstance(existing_targets, list):
+        return {
+            "target_resolution_status": "resolved",
+            "resolved_change_targets": deepcopy(existing_targets),
+            "target_resolution_reason": str(
+                state.get("target_resolution_reason") or "frozen target resolution"
+            ),
+            "target_candidate_paths": list(state.get("target_candidate_paths", [])),
+            "missing_local_references": deepcopy(
+                state.get("missing_local_references", [])
+            ),
+            "rejected_target_paths": [],
+        }
+
+    evidence = collect_target_resolution_evidence(state)
+    root = _execution_root(state)
+    candidates = set(evidence["candidate_paths"])
+    read_files: dict[str, ContextSource] = evidence["read_files"]
+    missing = list(evidence["missing_local_references"])
+    missing_by_target = {str(item["target"]): item for item in missing}
+    explicit_paths = [
+        safe
+        for path in _request_paths(state)
+        if (safe := _safe_relative_path(path, root)) is not None
+    ]
+
+    def target_item(
+        target: str,
+        operation: ChangeOperation,
+        *,
+        source_path: str,
+        detail: str,
+        source_kind: str = "live_repository_evidence",
+        target_kind: str = "path",
+    ) -> dict[str, Any]:
+        return {
+            "target": target,
+            "target_kind": target_kind,
+            "operation": operation,
+            "source": {
+                "kind": source_kind,
+                "path": source_path,
+                "detail": detail,
+            },
+        }
+
+    def entry_reference_targets(paths: Iterable[str]) -> list[dict[str, Any]]:
+        selected = set(paths)
+        return [
+            target_item(
+                str(item["target"]),
+                "create",
+                source_path=str(item["source_path"]),
+                detail=f"local reference {item['reference']}",
+            )
+            for item in missing
+            if str(item["source_path"]) in selected
+        ]
+
+    def resolved(targets: list[dict[str, Any]], reason: str) -> dict[str, Any]:
+        deduplicated = list(
+            {str(item["target"]): item for item in targets}.values()
+        )
+        return {
+            "target_resolution_status": "resolved",
+            "resolved_change_targets": deduplicated,
+            "target_resolution_reason": reason,
+            "target_candidate_paths": sorted(candidates),
+            "missing_local_references": missing,
+            "rejected_target_paths": [],
+        }
+
+    requested_selection = []
+    rejected: list[str] = []
+    for raw in selected_paths:
+        safe = _safe_relative_path(str(raw), root)
+        if safe is None:
+            rejected.append(str(raw))
+            continue
+        if selection_source == "model":
+            allowed = safe in candidates and safe in read_files
+        else:
+            allowed = (safe in candidates and safe in read_files) or safe in missing_by_target
+        if not allowed:
+            rejected.append(safe)
+            continue
+        requested_selection.append(safe)
+    if requested_selection:
+        reference_targets = entry_reference_targets(requested_selection)
+        direct_targets = [
+            target_item(
+                path,
+                "update",
+                source_path=path,
+                detail=f"{selection_source} selected a live-read candidate",
+                source_kind=(
+                    "user_confirmed_live_repository_evidence"
+                    if selection_source == "user"
+                    else "live_repository_evidence"
+                ),
+            )
+            for path in requested_selection
+            if path not in missing_by_target
+            and not any(
+                str(item.get("source", {}).get("path") or "") == path
+                for item in reference_targets
+            )
+        ]
+        for path in requested_selection:
+            if path in missing_by_target:
+                item = missing_by_target[path]
+                reference_targets.append(
+                    target_item(
+                        path,
+                        "create",
+                        source_path=str(item["source_path"]),
+                        detail=f"user confirmed local reference {item['reference']}",
+                        source_kind="user_confirmed_live_repository_evidence",
+                    )
+                )
+        if reference_targets or direct_targets:
+            result = resolved(
+                reference_targets + direct_targets,
+                f"{selection_source} selection passed live candidate validation",
+            )
+            result["rejected_target_paths"] = rejected
+            return result
+    if selected_paths and rejected:
+        return {
+            "target_resolution_status": "ambiguous",
+            "resolved_change_targets": [],
+            "target_resolution_reason": "selected target paths were outside the live candidate boundary",
+            "target_candidate_paths": sorted(candidates),
+            "missing_local_references": missing,
+            "rejected_target_paths": rejected,
+        }
+
+    if explicit_paths:
+        reference_targets = entry_reference_targets(explicit_paths)
+        delete_requested = bool(
+            _DELETE_RE.search(str(state.get("user_input") or ""))
+        )
+        direct_targets = [
+            target_item(
+                path,
+                (
+                    "delete"
+                    if delete_requested
+                    else "update"
+                    if (root / path).exists()
+                    else "create"
+                ),
+                source_path=path,
+                detail="explicit path in current request or frozen focus files",
+                source_kind="current_user_request",
+            )
+            for path in explicit_paths
+            if not any(
+                str(item.get("source", {}).get("path") or "") == path
+                for item in reference_targets
+            )
+        ]
+        if reference_targets or direct_targets:
+            return resolved(
+                reference_targets + direct_targets,
+                "explicit current-request or focus-file targets resolved",
+            )
+
+    history_paths = [
+        safe
+        for path in state.get("model_target_hints", [])
+        if (safe := _safe_relative_path(str(path), root)) is not None
+        and safe in read_files
+    ]
+    if history_paths:
+        reference_targets = entry_reference_targets(history_paths)
+        direct_targets = [
+            target_item(
+                path,
+                "update",
+                source_path=path,
+                detail="controlled-history target confirmed by live file read",
+            )
+            for path in history_paths
+            if not any(
+                str(item.get("source", {}).get("path") or "") == path
+                for item in reference_targets
+            )
+        ]
+        return resolved(
+            reference_targets + direct_targets,
+            "controlled-history paths were confirmed by live reads",
+        )
+
+    requested_symbols = extract_symbols(str(state.get("user_input") or ""))
+    terms = [
+        " ".join(str(item).casefold().split())
+        for item in state.get("model_target_terms", [])
+        if str(item).strip()
+    ]
+    terms.extend(
+        symbol.casefold()
+        for symbol in requested_symbols
+        if symbol.casefold() not in terms
+    )
+    ranked: list[tuple[int, str]] = []
+    for path, source in read_files.items():
+        searchable = f"{path}\n{source.text}".casefold()
+        matched = [term for term in terms if term in searchable]
+        if not matched:
+            continue
+        suffix = PurePosixPath(path).suffix.casefold()
+        name = PurePosixPath(path).name.casefold()
+        stem = PurePosixPath(path).stem.casefold()
+        score = 30 * len(matched)
+        score += 40 * sum(term in {name, stem} for term in matched)
+        for symbol in requested_symbols:
+            if re.search(
+                rf"\b(?:class|def|function|interface)\s+{re.escape(symbol)}\b",
+                source.text,
+                re.IGNORECASE,
+            ):
+                score += 80
+        if "/test" in f"/{path.casefold()}" or PurePosixPath(path).name.casefold().startswith("test_"):
+            score -= 10
+        if suffix in {".html", ".htm"}:
+            score += 20
+        if any(str(item["source_path"]) == path for item in missing):
+            score += 30
+        ranked.append((score, path))
+    if ranked:
+        best_score = max(score for score, _ in ranked)
+        best_paths = sorted(path for score, path in ranked if score == best_score)
+        if len(best_paths) == 1:
+            reference_targets = entry_reference_targets(best_paths)
+            if reference_targets:
+                return resolved(
+                    reference_targets,
+                    "a unique target-term entry exposed missing local references",
+                )
+            path = best_paths[0]
+            return resolved(
+                [
+                    target_item(
+                        path,
+                        "update",
+                        source_path=path,
+                        detail="target term matched a uniquely ranked live-read file",
+                    )
+                ],
+                "a unique live-read candidate matched the target terms",
+            )
+        return {
+            "target_resolution_status": "ambiguous",
+            "resolved_change_targets": [],
+            "target_resolution_reason": "multiple equally ranked live-read targets matched the discovery terms",
+            "target_candidate_paths": sorted(candidates),
+            "missing_local_references": missing,
+            "rejected_target_paths": [],
+        }
+
+    if requested_symbols:
+        return resolved(
+            [
+                target_item(
+                    symbol,
+                    "update",
+                    source_path="",
+                    detail="explicit symbol in current user request",
+                    source_kind="current_user_request",
+                    target_kind="symbol",
+                )
+                for symbol in requested_symbols[:MAX_CONTRACT_ITEMS]
+            ],
+            "explicit current-request symbols remain verifiable contract targets",
+        )
+
+    return {
+        "target_resolution_status": "unresolved",
+        "resolved_change_targets": [],
+        "target_resolution_reason": (
+            "live candidates remain unread or none matched the trusted target terms"
+            if candidates
+            else "no live repository target candidate was discovered"
+        ),
+        "target_candidate_paths": sorted(candidates),
+        "missing_local_references": missing,
+        "rejected_target_paths": [],
+    }
+
+
 def define_completion_contract(state: CodingAgentState) -> dict[str, Any]:
     """Freeze a strict contract once, before any workspace mutation."""
 
@@ -65,139 +426,195 @@ def define_completion_contract(state: CodingAgentState) -> dict[str, Any]:
     root = _execution_root(state)
     changes: dict[str, RequiredChange] = {}
     referenced_by: dict[str, list[str]] = {}
-    evidence_paths: set[str] = set()
-    for source in state.get("context_sources", []):
-        if not isinstance(source, ContextSource) or source.kind != "file":
-            continue
-        source_path = _safe_relative_path(source.path, root)
-        if source_path is None:
-            continue
-        evidence_paths.add(source_path)
-        if PurePosixPath(source_path).suffix.casefold() not in {".html", ".htm"}:
-            continue
-        for raw_reference in _HTML_REFERENCE_RE.findall(source.text):
-            target = _local_reference_path(source_path, raw_reference, root)
-            if target is None:
-                continue
-            referenced_by.setdefault(source_path, []).append(target)
-            if not (root / target).exists():
-                _add_change(
-                    changes,
-                    target=target,
-                    operation="create",
-                    description=(
-                        f"Create {target}, which is referenced by {source_path}."
-                    ),
-                    source={
-                        "kind": "live_repository_evidence",
-                        "path": source_path,
-                        "detail": f"local reference {raw_reference}",
-                    },
-                )
-
-    explicit_paths = _request_paths(state)
-    delete_requested = bool(_DELETE_RE.search(str(state.get("user_input") or "")))
-    for target in explicit_paths:
-        safe = _safe_relative_path(target, root)
-        if safe is None:
-            continue
-        # An HTML file that supplied missing local references is evidence for those
-        # deliverables, not automatically a request to rewrite the HTML itself.
-        if safe in referenced_by and any(
-            referenced not in evidence_paths for referenced in referenced_by[safe]
-        ):
-            continue
-        exists = (root / safe).exists()
-        operation: ChangeOperation = (
-            "delete" if delete_requested else "update" if exists else "create"
-        )
-        _add_change(
-            changes,
-            target=safe,
-            operation=operation,
-            description=f"{operation.title()} the requested workspace target {safe}.",
-            source={
-                "kind": "current_user_request",
-                "path": safe,
-                "detail": "explicit path in current request or frozen focus files",
-            },
+    target_evidence = collect_target_resolution_evidence(state)
+    evidence_paths = set(target_evidence["read_files"])
+    for reference in target_evidence["references"]:
+        referenced_by.setdefault(str(reference["source_path"]), []).append(
+            str(reference["target"])
         )
 
-    # Autonomous classification may recover a target mentioned by the user in
-    # controlled conversation history. The hint is never sufficient by itself:
-    # it becomes a contract item only after the exact path was read from the live
-    # execution workspace during this Run.
-    for target in state.get("model_target_hints", []):
-        safe = _safe_relative_path(str(target), root)
-        if safe is None or safe not in evidence_paths:
-            continue
-        if safe in referenced_by and any(
-            referenced not in evidence_paths for referenced in referenced_by[safe]
-        ):
-            continue
-        _add_change(
-            changes,
-            target=safe,
-            operation="update" if (root / safe).exists() else "create",
-            description=(
-                f"Update {safe}, recovered from controlled user history and "
-                "confirmed by live repository evidence."
-            ),
-            source={
-                "kind": "live_repository_evidence",
-                "path": safe,
-                "detail": "controlled-history target confirmed by live file read",
-            },
-        )
-
-    if not changes:
-        requested_symbols = {
-            item.casefold() for item in extract_symbols(str(state.get("user_input") or ""))
-        }
-        for source in state.get("context_sources", []):
-            if not isinstance(source, ContextSource) or source.kind != "file":
-                continue
-            source_path = _safe_relative_path(source.path, root)
-            if source_path is None:
-                continue
-            searchable = f"{source_path}\n{source.text}".casefold()
-            if not requested_symbols or not any(
-                symbol in searchable for symbol in requested_symbols
-            ):
-                continue
-            _add_change(
-                changes,
-                target=source_path,
-                operation="update" if (root / source_path).exists() else "create",
-                description=(
-                    f"Update {source_path}, matched by a requested symbol in live "
-                    "repository evidence."
-                ),
-                source={
-                    "kind": "live_repository_evidence",
-                    "path": source_path,
-                    "detail": "requested symbol matched live file content",
-                },
+    resolution_enabled = "target_resolution_status" in state
+    if resolution_enabled:
+        if state.get("target_resolution_status") != "resolved":
+            return _invalid_contract(
+                str(state.get("target_resolution_reason") or "change target unresolved")
             )
-        if not changes and requested_symbols:
-            for symbol in sorted(requested_symbols)[:MAX_CONTRACT_ITEMS]:
-                item_id = _stable_id("change", "update", f"symbol:{symbol}")
+        explicit_paths = set(_request_paths(state))
+        missing_targets = {
+            str(item["target"]): item
+            for item in target_evidence["missing_local_references"]
+        }
+        requested_symbols = set(
+            extract_symbols(str(state.get("user_input") or ""))
+        )
+        for item in state.get("resolved_change_targets", []):
+            if not isinstance(item, dict):
+                continue
+            target_kind = str(item.get("target_kind") or "path")
+            target = str(item.get("target") or "")
+            operation = str(item.get("operation") or "")
+            source = item.get("source") if isinstance(item.get("source"), dict) else {}
+            if target_kind == "symbol":
+                if operation != "update" or target not in requested_symbols:
+                    continue
+                item_id = _stable_id("change", "update", f"symbol:{target}")
                 changes[item_id] = {
                     "id": item_id,
-                    "target": symbol,
+                    "target": target,
                     "target_kind": "symbol",
                     "operation": "update",
                     "description": (
-                        f"Update the requested verifiable symbol target {symbol}."
+                        f"Update the requested verifiable symbol target {target}."
                     ),
                     "source": {
-                        "kind": "current_user_request",
-                        "path": "",
-                        "detail": "explicit symbol in current request",
+                        "kind": str(source.get("kind") or "current_user_request"),
+                        "path": str(source.get("path") or ""),
+                        "detail": str(
+                            source.get("detail")
+                            or "explicit symbol in current request"
+                        ),
                     },
                     "status": "pending",
                     "satisfied_by": "",
                 }
+                continue
+            safe = _safe_relative_path(target, root)
+            if safe is None or operation not in {"create", "update", "delete"}:
+                continue
+            if operation == "create":
+                allowed = safe in explicit_paths or safe in missing_targets
+            else:
+                allowed = safe in explicit_paths or safe in evidence_paths
+            if not allowed:
+                continue
+            _add_change(
+                changes,
+                target=safe,
+                operation=operation,  # type: ignore[arg-type]
+                description=(
+                    f"{operation.title()} the server-validated target {safe}."
+                ),
+                source={
+                    "kind": str(source.get("kind") or "live_repository_evidence"),
+                    "path": str(source.get("path") or safe),
+                    "detail": str(source.get("detail") or "resolved change target"),
+                },
+            )
+    else:
+        for reference in target_evidence["missing_local_references"]:
+            _add_change(
+                changes,
+                target=str(reference["target"]),
+                operation="create",
+                description=(
+                    f"Create {reference['target']}, which is referenced by "
+                    f"{reference['source_path']}."
+                ),
+                source={
+                    "kind": "live_repository_evidence",
+                    "path": str(reference["source_path"]),
+                    "detail": f"local reference {reference['reference']}",
+                },
+            )
+
+        explicit_paths = _request_paths(state)
+        delete_requested = bool(_DELETE_RE.search(str(state.get("user_input") or "")))
+        for target in explicit_paths:
+            safe = _safe_relative_path(target, root)
+            if safe is None:
+                continue
+            if safe in referenced_by and any(
+                referenced not in evidence_paths for referenced in referenced_by[safe]
+            ):
+                continue
+            exists = (root / safe).exists()
+            operation: ChangeOperation = (
+                "delete" if delete_requested else "update" if exists else "create"
+            )
+            _add_change(
+                changes,
+                target=safe,
+                operation=operation,
+                description=f"{operation.title()} the requested workspace target {safe}.",
+                source={
+                    "kind": "current_user_request",
+                    "path": safe,
+                    "detail": "explicit path in current request or frozen focus files",
+                },
+            )
+
+        for target in state.get("model_target_hints", []):
+            safe = _safe_relative_path(str(target), root)
+            if safe is None or safe not in evidence_paths:
+                continue
+            if safe in referenced_by and any(
+                referenced not in evidence_paths for referenced in referenced_by[safe]
+            ):
+                continue
+            _add_change(
+                changes,
+                target=safe,
+                operation="update" if (root / safe).exists() else "create",
+                description=(
+                    f"Update {safe}, recovered from controlled user history and "
+                    "confirmed by live repository evidence."
+                ),
+                source={
+                    "kind": "live_repository_evidence",
+                    "path": safe,
+                    "detail": "controlled-history target confirmed by live file read",
+                },
+            )
+
+        if not changes:
+            requested_symbols = {
+                item.casefold()
+                for item in extract_symbols(str(state.get("user_input") or ""))
+            }
+            for source in state.get("context_sources", []):
+                if not isinstance(source, ContextSource) or source.kind != "file":
+                    continue
+                source_path = _safe_relative_path(source.path, root)
+                if source_path is None:
+                    continue
+                searchable = f"{source_path}\n{source.text}".casefold()
+                if not requested_symbols or not any(
+                    symbol in searchable for symbol in requested_symbols
+                ):
+                    continue
+                _add_change(
+                    changes,
+                    target=source_path,
+                    operation="update" if (root / source_path).exists() else "create",
+                    description=(
+                        f"Update {source_path}, matched by a requested symbol in live "
+                        "repository evidence."
+                    ),
+                    source={
+                        "kind": "live_repository_evidence",
+                        "path": source_path,
+                        "detail": "requested symbol matched live file content",
+                    },
+                )
+            if not changes and requested_symbols:
+                for symbol in sorted(requested_symbols)[:MAX_CONTRACT_ITEMS]:
+                    item_id = _stable_id("change", "update", f"symbol:{symbol}")
+                    changes[item_id] = {
+                        "id": item_id,
+                        "target": symbol,
+                        "target_kind": "symbol",
+                        "operation": "update",
+                        "description": (
+                            f"Update the requested verifiable symbol target {symbol}."
+                        ),
+                        "source": {
+                            "kind": "current_user_request",
+                            "path": "",
+                            "detail": "explicit symbol in current request",
+                        },
+                        "status": "pending",
+                        "satisfied_by": "",
+                    }
 
     try:
         _validate_change_set(changes.values())
@@ -687,15 +1104,33 @@ def _request_paths(state: CodingAgentState) -> list[str]:
     return list(dict.fromkeys(value.strip("'\"`()[]{}.,;:") for value in values if value))[:MAX_CONTRACT_ITEMS]
 
 
+def _source_local_references(source_path: str, text: str) -> list[tuple[str, str]]:
+    suffix = PurePosixPath(source_path).suffix.casefold()
+    references: list[tuple[str, str]] = []
+    if suffix in {".html", ".htm"}:
+        references.extend(("html_attribute", item) for item in _HTML_REFERENCE_RE.findall(text))
+    if suffix in {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}:
+        for item in _LOCAL_IMPORT_RE.findall(text):
+            path = urlsplit(unquote(item.strip())).path
+            if path.startswith(("./", "../")) and PurePosixPath(path).suffix:
+                references.append(("module_import", item))
+    return list(dict.fromkeys(references))
+
+
 def _local_reference_path(source_path: str, reference: str, root: Path) -> str | None:
-    parsed = urlsplit(unquote(reference.strip()))
-    if parsed.scheme or parsed.netloc or reference.startswith(("//", "#", "data:")):
+    normalized_reference = unquote(reference.strip())
+    parsed = urlsplit(normalized_reference)
+    if parsed.scheme or parsed.netloc or normalized_reference.startswith(
+        ("//", "#", "data:")
+    ):
         return None
     raw_path = parsed.path.strip()
     if not raw_path or raw_path.startswith("/"):
         return None
-    combined = PurePosixPath(source_path).parent / PurePosixPath(raw_path)
-    return _safe_relative_path(str(combined), root)
+    combined = (root / PurePosixPath(source_path).parent / raw_path).resolve()
+    if combined != root and root not in combined.parents:
+        return None
+    return _safe_relative_path(combined.relative_to(root).as_posix(), root)
 
 
 def _safe_relative_path(path: str, root: Path) -> str | None:
@@ -838,6 +1273,7 @@ __all__ = [
     "RequiredChange",
     "RequiredValidation",
     "advance_completion_contract",
+    "collect_target_resolution_evidence",
     "completion_contract_prompt",
     "completion_contract_state",
     "completion_contract_summary",
@@ -846,4 +1282,5 @@ __all__ = [
     "extend_completion_contract",
     "extend_completion_contract_from_results",
     "legacy_phase1_contract",
+    "resolve_change_targets",
 ]

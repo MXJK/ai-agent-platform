@@ -5,6 +5,7 @@ from ai_agent_platform.agents.coding.planner import native_tool_messages
 from ai_agent_platform.agents.coding.runtime_support import (
     CONVERSATION_SUMMARY_PREFIX,
     MAX_AGENT_HISTORY_CHARS,
+    build_repository_discovery_queries,
     build_workspace_query,
     recent_conversation_context,
 )
@@ -38,6 +39,20 @@ class AgentConversationContextTests(unittest.TestCase):
         self.assertIn("继续检查刚才提到的调用链", query)
         self.assertIn("最近会话上下文", query)
         self.assertIn("历史消息 7", query)
+
+    def test_repository_discovery_queries_exclude_system_and_assistant_roles(self) -> None:
+        self.state["model_target_terms"] = ["扫雷"]
+        self.state["history"] = [
+            {"role": "system", "content": "profile mentions system-ui"},
+            {"role": "assistant", "content": "inspect gomoku.css"},
+            {"role": "user", "content": "继续完成这个小游戏"},
+        ]
+
+        queries = build_repository_discovery_queries(self.state)
+
+        self.assertEqual(queries[0], "扫雷")
+        self.assertNotIn("system-ui", "\n".join(queries))
+        self.assertNotIn("gomoku.css", "\n".join(queries))
 
     def test_native_tool_planning_receives_recent_context(self) -> None:
         messages = native_tool_messages(self.state)
