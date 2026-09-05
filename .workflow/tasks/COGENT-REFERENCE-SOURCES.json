@@ -1,0 +1,157 @@
+{
+  "source": "user-supplied local reference",
+  "digest": "sha256",
+  "distribution_license_verified": false,
+  "selected_files": [
+    {
+      "module": "memory/consolidation.py",
+      "symbols": ["DEFAULT_MIN_HOURS", "DEFAULT_MIN_SESSIONS", "SCAN_THROTTLE_MS", "HOLDER_STALE_MS", "MemoryConsolidator.maybe_run"],
+      "sha256": "d31196d12c67a26c476ae6e75c731f5c9cc0d1ce05b84d061142102ec1f05f45"
+    },
+    {
+      "module": "app.py",
+      "symbols": ["ChatInput", "ToolCallBlock", "_tool_title", "_format_detail"],
+      "sha256": "9c4bdbb25d00adbfbd498f6c091f074e8b6cf0d46aee2a99e2d77d2f9428eeda"
+    },
+    {
+      "module": "__init__.py",
+      "sha256": "912b03d585da1e8fa109dc2773d2ef81879503771b988d8a0f50f090d2ea7ed6"
+    },
+    {
+      "module": "commands/completion.py",
+      "sha256": "1c5c4c40a5a10c33624d6f09186965a6d16e859bdaadeb2514a94256cb175fc7"
+    },
+    {
+      "module": "commands/loader.py",
+      "sha256": "d63d5198759595e864fa87512aef0a0cb8005c35013dd742d607c41d0befdf70"
+    },
+    {
+      "module": "commands/parser.py",
+      "sha256": "a603158122bef60ed9e3fb155f313e9c6cef94b3ebfff282521e922b11d5f6aa"
+    },
+    {
+      "module": "commands/registry.py",
+      "sha256": "fbfe1a4ae8a29b77b2cb82a138f4666b318d370f05d74a02e39f233220a9e453"
+    },
+    {
+      "module": "context/__init__.py",
+      "sha256": "9c534b5463ec92f27c0eed2f472e460c3f5be96dd8a01fcc6c55d47c1e994735"
+    },
+    {
+      "module": "context/manager.py",
+      "sha256": "a3e73793bcc0e5e2c70c1818da0402c53d253544e4a75c8e946059f8608f06b9"
+    },
+    {
+      "module": "conversation.py",
+      "sha256": "406a0e74a980c0dcf55b49f1a4b74d6427bee6c11fc8ff3d94217f98fdcea023"
+    },
+    {
+      "module": "conversation_pairing.py",
+      "sha256": "4336055154e950007192d765adcf3293c1ccc3f4a6d345ef990ed800dec150ce"
+    },
+    {
+      "module": "filehistory/__init__.py",
+      "sha256": "9c51aa48decf8958cb4cc9058e651f279093ca9ec458592aff9e6d9c12cf209c"
+    },
+    {
+      "module": "filehistory/history.py",
+      "sha256": "8a56c3b899ed6e8096dfe061d846f49887e30a49f3d15d3b4943d2b0544b6402"
+    },
+    {
+      "module": "mcp/loading_strategy.py",
+      "sha256": "0079f4cf289c0933d79ea348ceb335a86fecdf33f331d7a16d9797fbfe19b98c"
+    },
+    {
+      "module": "memory/auto_memory.py",
+      "sha256": "541b09b4ab66af430ea6deffc895bdf46cf48c5ad5d98438c3a68218199be73b"
+    },
+    {
+      "module": "memory/instructions.py",
+      "sha256": "3085f99c137b5105733be120cabefc0a859fcb9c9de400088ce3d2ca66d45a55"
+    },
+    {
+      "module": "memory/recall.py",
+      "sha256": "e65fad169e961c593867327cae85c7644222e708b394c9d8b95cac46a3c8ca09"
+    },
+    {
+      "module": "memory/session.py",
+      "sha256": "29680ac533fe7a8c2591669e8863b67f3a856d543890df5224f36c541e7c9b0c"
+    },
+    {
+      "module": "permissions/__init__.py",
+      "sha256": "4ba4fce645a7b225cc349bb15c785282b238d2f7a5f0e6b21d2c0df67dd6ed0b"
+    },
+    {
+      "module": "permissions/checker.py",
+      "sha256": "32b698174e874914fc3c3e0ce4c8fb729843ae69db1f52ba4bc6deb577591b0f"
+    },
+    {
+      "module": "permissions/dangerous.py",
+      "sha256": "6de120e749f1aaa3ea12fe657891c0b2bf944d26e5de33bdefecbd0bf6443d95"
+    },
+    {
+      "module": "permissions/modes.py",
+      "sha256": "524406d0e2ba8f78f863296fd59adb5edd6c955e36525672a488a50a7dceac28"
+    },
+    {
+      "module": "permissions/rules.py",
+      "sha256": "fa771a335a6855f858e06ceab725b6306db7f08f795e65e89c84dbc336051b90"
+    },
+    {
+      "module": "permissions/sandbox.py",
+      "sha256": "4d3c77f734b9df5c200b899145393838bcffb3443125b4c21bb561134836a344"
+    },
+    {
+      "module": "prompts.py",
+      "sha256": "ee23755ef825f332223383ddde3fb41c72f1e1a111a8a2fc49270527416cd0b3"
+    },
+    {
+      "module": "sandbox/__init__.py",
+      "sha256": "9c0bf0e02715611a81618dd68d1c2cc62e8426e912bf3d87b56371cc3ddb70c8"
+    },
+    {
+      "module": "sandbox/bwrap.py",
+      "sha256": "dc1f5cf9fb40dbfaa720936e413d5b0c76cd22c622f24605d96e960c70e6da66"
+    },
+    {
+      "module": "sandbox/seatbelt.py",
+      "sha256": "01f0195cb029c81f84cd1a5faab56bfd5ddfc0af59341911d926baa942006752"
+    },
+    {
+      "module": "serialization.py",
+      "sha256": "d7c115e1a966a35dbfd38d1ba74adbd7438df9f281b96673949f443761ea1edc"
+    },
+    {
+      "module": "skills/executor.py",
+      "sha256": "adf85d6eca7a44ffe3904bf8adc8f20b3e415aa22ffc46b31f4f8a71680624f4"
+    },
+    {
+      "module": "skills/loader.py",
+      "sha256": "18c16e6c623d7b47d5a94608f1bc50510f18e5ebcd2b31200eb353c2842d60c4"
+    },
+    {
+      "module": "skills/parser.py",
+      "sha256": "87a28c8fd0ed2222ff83c7da0ab47129c46058ffd02868e67bec530b5c60ec2a"
+    },
+    {
+      "module": "tools/__init__.py",
+      "sha256": "d5454a3dbfa3fc0b88f5cda9288d16f78b51f0d295155e896cbff6ed7a4bce7d"
+    },
+    {
+      "module": "tools/base.py",
+      "sha256": "29ccd96e92024738e8579440de5462263692ec81de3df9ac70a79c1cf4ad3751"
+    },
+    {
+      "test": "test_conversation_pairing.py",
+      "sha256": "222fdfc892c0beb06babb484932042add21277c7390b876b23d7d17c5a3e5c50"
+    },
+    {
+      "test": "test_serialization.py",
+      "sha256": "e85295cbb5a38c98fdf1d5096dc9d6b840f653222030a1acf48befd2706257b0"
+    },
+    {
+      "test": "test_context.py",
+      "sha256": "23f7407a01e210c6288abd02d811534fa1ebc1ccf325602bf15e2120e2aeba14"
+    }
+  ]
+}

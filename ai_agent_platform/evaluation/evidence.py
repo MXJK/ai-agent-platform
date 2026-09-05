@@ -68,7 +68,7 @@ def build_read_evidence_ledger(
             ledger.append(evidence)
 
     for call in observation.executed_calls:
-        if call.name != "repo.read_file" or call.ok is not True:
+        if call.name not in {"repo.read_file", "ReadFile"} or call.ok is not True:
             continue
         evidence = _evidence_from_payload(
             call.result,

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
-from ai_agent_platform.agents.coding_agent import AgentRunRecord
+from ai_agent_platform.agents.coding.models import AgentRunRecord
 from ai_agent_platform.core import (
     CeleryTaskQueue,
     InProcessTaskQueue,
@@ -109,7 +109,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
                 get_session=lambda **_: SimpleNamespace(user_id="viewer"),
             ),
             workspace_service=SimpleNamespace(),
-            project_memory_service=ViewerOnlyMemoryService(),
+            workspace_authorizer=ViewerOnlyMemoryService(),
         )
         with self.assertRaisesRegex(PermissionError, "editor access"):
             service.resume_run(
@@ -162,7 +162,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
                 get_session=lambda **_: SimpleNamespace(user_id="editor"),
             ),
             workspace_service=SimpleNamespace(),
-            project_memory_service=EditorMemoryService(),
+            workspace_authorizer=EditorMemoryService(),
             task_queue=CaptureQueue(),
         )
         resumed = service.resume_run(
@@ -235,6 +235,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
         service = AgentRunService(
             runtime=runtime,
             session_service=SimpleNamespace(
+                get_session=lambda **_: SimpleNamespace(user_id='owner'),
                 list_messages=lambda **_: [],
                 add_message=lambda **_: None,
             ),

@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import replace
 from typing import Protocol
 
-from ai_agent_platform.agents.coding.models import AgentRunRecord
+from ai_agent_platform.agents.coding.models import AgentRunRecord, AgentRunInvalidStateError
 from ai_agent_platform.agents.coding.store import events_for_record
 from ai_agent_platform.domain import Message, UserPreferences
 
@@ -55,6 +55,10 @@ class InMemoryQueryUnitOfWork:
     ) -> Message:
         del preferences
         with self._sessions._lock, self._runs._lock:
+            if record.runtime_engine == 'cogent-v1':
+                for prior in self._runs._runs.values():
+                    if prior.conversation_id == record.conversation_id and prior.runtime_engine == 'cogent-v1' and prior.status in {'queued', 'running', 'waiting_input', 'waiting_approval', 'paused'}:
+                        raise AgentRunInvalidStateError(prior.run_id, prior.status)
             snapshot = self._snapshot()
             try:
                 self._runs.save(record)
@@ -152,6 +156,11 @@ class PostgresQueryUnitOfWork:
 
         Jsonb = _require_jsonb()
         with self._runs._connect() as conn:
+            if record.runtime_engine == 'cogent-v1':
+                conn.execute('SELECT id FROM sessions WHERE id = %s FOR UPDATE', (record.conversation_id,))
+                active = conn.execute("SELECT id, status FROM agent_runs WHERE conversation_id = %s AND runtime_engine = 'cogent-v1' AND status IN ('queued', 'running', 'waiting_input', 'waiting_approval', 'paused') LIMIT 1", (record.conversation_id,)).fetchone()
+                if active:
+                    raise AgentRunInvalidStateError(active[0], active[1])
             conn.execute(
                 """
                 INSERT INTO agent_runs (
@@ -159,11 +168,12 @@ class PostgresQueryUnitOfWork:
                     status, checkpoint_id, latest_node, next_nodes, trace, result,
                     error, pending_approval, errors, control_action,
                     steering_messages, pending_compaction, run_context_snapshot,
+                    runtime_engine, runtime_state_version, runtime_state_json,
                     created_at, updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, NOW(), NOW()
+                    %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
                 )
                 """,
                 (
@@ -189,6 +199,9 @@ class PostgresQueryUnitOfWork:
                         if record.context_snapshot is not None
                         else None
                     ),
+                    record.runtime_engine,
+                    record.runtime_state_version,
+                    Jsonb(record.runtime_state),
                 ),
             )
             for event_key, event in events_for_record(record):
@@ -267,6 +280,10 @@ class SQLiteQueryUnitOfWork:
         preferences: UserPreferences | None,
     ) -> Message:
         with self._runs.database.transaction(immediate=True) as conn:
+            if record.runtime_engine == 'cogent-v1':
+                active = conn.execute("SELECT id, status FROM agent_runs WHERE conversation_id = ? AND runtime_engine = 'cogent-v1' AND status IN ('queued', 'running', 'waiting_input', 'waiting_approval', 'paused') LIMIT 1", (record.conversation_id,)).fetchone()
+                if active:
+                    raise AgentRunInvalidStateError(active[0], active[1])
             self._runs.save_in_transaction(conn, record)
             stored = self._sessions.add_message_in_transaction(
                 conn,

@@ -3,7 +3,7 @@ import time
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
-from ai_agent_platform.agents.coding_agent import (
+from ai_agent_platform.agents.coding.models import (
     AgentRunInvalidStateError,
     AgentRunNotFoundError,
 )
@@ -95,6 +95,10 @@ def create_agent_runs_router(
                     model=request.model,
                     thinking_level=request.thinking_level,
                     routing_policy=request.routing_policy,
+                    mode=request.mode,
+                    permission_mode=request.permission_mode,
+                    sandbox_enabled=request.sandbox_enabled,
+                    sandbox_network_enabled=request.sandbox_network_enabled,
                     cwd=request.cwd,
                     additional_workspace_ids=tuple(
                         request.additional_workspace_ids
@@ -283,6 +287,8 @@ def create_agent_runs_router(
                 status_code=409,
                 detail="archived conversation must be restored before rollback",
             ) from exc
+        except AgentRunInvalidStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except AgentCheckpointRestoreError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PermissionError as exc:

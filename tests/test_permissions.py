@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ai_agent_platform.agents.coding_agent import CodingAgentRuntime
+from test_cogent_runtime import runtime_for, start, execute, ScriptedClient, response
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.integrations.permissions import (
@@ -272,19 +272,13 @@ class ToolRegistryPermissionTests(unittest.TestCase):
     def test_always_policy_interrupts_before_read_only_repository_exploration(self) -> None:
         with TemporaryDirectory() as temp_dir:
             Path(temp_dir, "README.md").write_text("demo", encoding="utf-8")
-            runtime = CodingAgentRuntime(
-                tool_registry=create_coding_tool_registry(
+            runtime = runtime_for(Path(temp_dir), ScriptedClient(response('', ToolCall('ReadFile', {'file_path': 'README.md'}, 'read-first'))),
+                registry=create_coding_tool_registry(
                     permission_resolver=PermissionResolver()
                 ),
                 approval_policy="always",
             )
-            waiting = runtime.run(
-                conversation_id="session_1",
-                user_input="what does this project do?",
-                history=[],
-                workspace_id="workspace_1",
-                workspace_root=temp_dir,
-            )
+            waiting = execute(runtime, Path(temp_dir), start(runtime, Path(temp_dir)))
 
         self.assertEqual(waiting.status, "waiting_approval")
         item = waiting.pending_approval["approval_required_tools"][0]

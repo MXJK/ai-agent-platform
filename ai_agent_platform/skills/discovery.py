@@ -34,6 +34,9 @@ _SKILL_FIELDS = frozenset(
         "context_budget",
         "tools",
         "command",
+        "mode",
+        "context",
+        "model",
     }
 )
 _COMMAND_FIELDS = frozenset({"name", "description", "usage", "aliases"})
@@ -99,7 +102,8 @@ class SkillDiscovery:
         *,
         bundled_root: str | Path | None = None,
         user_root: str | Path | None = None,
-        project_skills_directory: str = ".agents/skills",
+        legacy_user_root: str | Path | None = None,
+        project_skills_directory: str = ".cogent/skills",
         limits: SkillDiscoveryLimits | None = None,
     ) -> None:
         project_path = Path(project_skills_directory)
@@ -107,6 +111,7 @@ class SkillDiscovery:
             raise ValueError("project_skills_directory must stay relative to workspace")
         self._bundled_root = Path(bundled_root) if bundled_root is not None else None
         self._user_root = Path(user_root) if user_root is not None else None
+        self._legacy_user_root = Path(legacy_user_root) if legacy_user_root is not None else None
         self._project_skills_directory = project_path
         self._limits = limits or SkillDiscoveryLimits()
 
@@ -163,6 +168,20 @@ class SkillDiscovery:
                         max_bytes=self._limits.max_file_bytes,
                     )
                     text = raw.decode("utf-8")
+                    if candidate.name == "skill.yaml":
+                        metadata = yaml.load(text, Loader=_UniqueKeySafeLoader)
+                        if not isinstance(metadata, dict):
+                            raise SkillDocumentError("invalid_frontmatter", "skill.yaml must be a mapping")
+                        prompt = _read_regular_file(
+                            candidate.parent / "prompt.md", root=root,
+                            max_bytes=self._limits.max_file_bytes,
+                        )
+                        metadata.setdefault("name", candidate.parent.name)
+                        body = prompt.decode("utf-8")
+                        if not metadata.get("description"):
+                            metadata["description"] = next((line.strip() for line in body.splitlines() if line.strip() and not line.startswith("#")), "")
+                        text = "---\n" + yaml.safe_dump(metadata, allow_unicode=True) + "---\n" + body
+                        raw = raw + b"\n" + prompt
                     if "\x00" in text:
                         raise SkillDocumentError(
                             "invalid_markdown", "SKILL.md contains a NUL character"
@@ -191,6 +210,12 @@ class SkillDiscovery:
                             message=str(exc),
                         )
                     )
+                    continue
+                except (yaml.YAMLError, RecursionError):
+                    diagnostics.append(SkillDiagnostic(
+                        severity="error", code="invalid_frontmatter", source=source,
+                        path=display_path, message="Skill metadata is invalid YAML",
+                    ))
                     continue
                 except UnicodeDecodeError:
                     diagnostics.append(
@@ -307,6 +332,7 @@ class SkillDiscovery:
                             )
         for source, configured in (
             (SkillSource.USER, self._user_root),
+            (SkillSource.LEGACY_USER, self._legacy_user_root),
             (SkillSource.BUNDLED, self._bundled_root),
         ):
             if configured is None or not (
@@ -381,7 +407,12 @@ def _skill_candidates(
                     kept_directories.append(name)
             directory_names[:] = kept_directories
             for name in file_names:
-                if name == "SKILL.md":
+                selected_yaml = "skill.yaml" in file_names
+                if (
+                    name == "skill.yaml"
+                    or (name == "SKILL.md" and not selected_yaml)
+                    or (current_path == root and name.endswith(".md") and name not in {"SKILL.md", "prompt.md"})
+                ):
                     candidates.append(current_path / name)
                     if len(candidates) >= max_candidates:
                         return candidates, diagnostics
@@ -456,6 +487,12 @@ def parse_skill_document(
 ) -> SkillDefinition:
     resolved_raw = text.encode("utf-8") if raw is None else raw
     metadata, instructions = _frontmatter(text)
+    if metadata.get("mode") == "fork" or metadata.get("context") == "fork":
+        raise SkillDocumentError("unsupported_skill_execution", "Cogent supports inline Skills only; fork execution is unsupported")
+    if metadata.get("mode", "inline") != "inline":
+        raise SkillDocumentError("unsupported_skill_execution", "Unsupported Skill execution mode")
+    if metadata.get("context", "full") not in {"full", "recent", "none"}:
+        raise SkillDocumentError("invalid_metadata", "Unsupported Skill context mode")
     unknown_fields = sorted(set(metadata).difference(_SKILL_FIELDS))
     if unknown_fields:
         raise SkillDocumentError(

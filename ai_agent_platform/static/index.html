@@ -5,11 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="AI Agent Platform — 面向代码、知识库与智能工作流的统一工作台"
+      content="Cogent — 面向代码、知识库与智能工作流的统一工作台"
     />
     <meta name="theme-color" content="#08131f" />
-    <title>AI Agent Platform</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260903-structured-questions-r1" />
+    <title>Cogent</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260904-cogent-r2" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -56,10 +56,10 @@
         >
           <svg class="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
         </button>
-        <a class="brand" href="#chat" aria-label="AI Agent Platform 首页">
-          <span class="brand-mark" aria-hidden="true">A</span>
+        <a class="brand" href="#chat" aria-label="Cogent 首页">
+          <span class="brand-mark" aria-hidden="true">C</span>
           <span>
-            <strong>AI Agent Platform</strong>
+            <strong>Cogent</strong>
             <small>Agent engineering console</small>
           </span>
         </a>
@@ -115,7 +115,7 @@
         <nav class="primary-nav" aria-label="主要功能">
           <button class="nav-item mobile-primary active" type="button" data-view="chat" aria-current="page">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-message"></use></svg></span>
-            <span><strong>对话工作台</strong><small>Chat 与 Agent 统一入口</small></span>
+            <span><strong>对话工作台</strong><small>Cogent 统一任务入口</small></span>
           </button>
           <button class="nav-item mobile-primary" type="button" data-view="rag">
             <span class="nav-icon" aria-hidden="true"><svg class="app-icon"><use href="#icon-knowledge"></use></svg></span>
@@ -218,7 +218,7 @@
               <div class="welcome-content">
                 <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
                 <h2>从一个具体问题开始</h2>
-                <p>先理解上下文，再选择快速回答或代码 Agent；涉及写入时会暂停等待审批。</p>
+                <p>由 Cogent 理解上下文并完成任务；需要确认的操作会在执行前暂停。</p>
                 <div class="prompt-grid" aria-label="推荐问题">
                   <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
                     <span>理解项目</span><strong>解释核心架构和请求调用链</strong>
@@ -289,13 +289,6 @@
               </div>
               <div class="composer-mode-bar">
                 <div class="composer-tools">
-                  <label class="composer-mode-control" for="composer-mode-input">
-                    <span>模式</span>
-                    <select id="composer-mode-input" aria-label="响应模式">
-                      <option value="chat">快速对话</option>
-                      <option value="agent">代码 Agent</option>
-                    </select>
-                  </label>
                   <details id="composer-config" class="composer-config">
                     <summary>
                       <svg class="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>
@@ -339,15 +332,20 @@
                         <input id="model-fallback-toggle" type="checkbox" checked />
                         <span>不可用时 fallback</span>
                       </label>
-                      <label id="approval-mode-control" class="composer-mode-control approval-mode-control" for="auto-approve-toggle">
-                        <input id="auto-approve-toggle" type="checkbox" />
-                        <span>自动审批工具</span>
-                        <em class="approval-mode-hint">Agent 模式：写操作无需逐次确认</em>
+                      <label id="approval-mode-control" class="composer-mode-control approval-mode-control" for="permission-mode-input">
+                        <span>权限模式</span>
+                        <select id="permission-mode-input" aria-label="Cogent 权限模式">
+                          <option value="default">逐次确认</option>
+                          <option value="acceptEdits">接受文件编辑</option>
+                          <option value="plan">只读规划</option>
+                          <option value="bypassPermissions">跳过普通确认</option>
+                        </select>
+                        <em class="approval-mode-hint">平台、工作区和危险操作限制始终生效</em>
                       </label>
                     </div>
                   </details>
                 </div>
-                <span id="composer-mode-description">流式回答，不执行代码工具。</span>
+                <span id="composer-mode-description">Cogent 统一处理对话和代码任务；权限边界始终生效。</span>
               </div>
               <label class="sr-only" for="chat-message-input">输入消息</label>
               <textarea
@@ -778,7 +776,7 @@
             <div>
               <span class="step-kicker">Global Skills</span>
               <h2>全局 Skill</h2>
-              <p>目录 <code id="skill-registry-root">~/.ai-agent-platform/skills</code> 对所有 Workspace 生效。显式 <code>/</code> 选择会直接加载；隐式匹配按需读取正文。</p>
+              <p>目录 <code id="skill-registry-root">~/.cogent/skills</code> 对所有 Workspace 生效。显式 <code>/</code> 选择会直接加载；隐式匹配按需读取正文。</p>
             </div>
             <span id="skill-list-count" class="meta-badge">0</span>
           </article>
@@ -1356,6 +1354,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260903-structured-questions-r1" defer></script>
+    <script src="/static/app.js?v=20260904-cogent-r2" defer></script>
   </body>
 </html>

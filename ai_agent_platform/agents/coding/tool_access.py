@@ -5,7 +5,7 @@ from __future__ import annotations
 from threading import RLock
 from typing import Any
 
-from ai_agent_platform.agents.coding.models import CodingAgentState
+CodingAgentState = dict[str, Any]
 from ai_agent_platform.agents.coding.run_artifacts import RUN_ARTIFACT_TOOL_NAME
 from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.permissions import (

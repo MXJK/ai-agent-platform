@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -519,6 +520,12 @@ class ExecutionWorkspaceRuntime:
             if record.baseline.get(path) != current.get(path)
         ]
 
+    def history_files(self, context: Any) -> dict[str, bytes]:
+        record = self.for_context(context)
+        with record.mutation_lock:
+            return {path: raw for path, raw in _snapshot_files(record.execution_root).items()
+                    if not path.startswith('.cogent/') or path.startswith('.cogent/plans/')}
+
     def diff(self, context: Any, *, max_chars: int = 20000) -> dict[str, Any]:
         record = self.for_context(context)
         text = _workspace_diff(record.baseline, _snapshot_files(record.execution_root))
@@ -885,6 +892,8 @@ def _snapshot_files(root: Path) -> dict[str, bytes]:
             continue
         if any(part in _IGNORED_NAMES for part in PurePosixPath(relative).parts):
             continue
+        if relative.startswith((".cogent/sessions/", ".cogent/memory/", ".cogent/file-history/")):
+            continue
         if _is_sensitive_relative(relative):
             continue
         snapshot[relative] = path.read_bytes()
@@ -915,6 +924,8 @@ def _copy_source_item(
             _append_warning(warnings, f"skipped symbolic link: {relative.as_posix()}")
             return
         if source.name in _IGNORED_NAMES:
+            return
+        if relative.as_posix() in {".cogent/sessions", ".cogent/memory", ".cogent/file-history"}:
             return
         if _is_sensitive_name(source.name):
             _append_warning(warnings, f"skipped sensitive file: {relative.as_posix()}")
@@ -1007,19 +1018,34 @@ def _is_sensitive_name(name: str) -> bool:
 
 def _patch_paths(patch: str) -> set[str]:
     old_path: str | None = None
+    old_header_seen = False
     paths: set[str] = set()
     for line in patch.splitlines():
-        if line.startswith("--- "):
+        if line.startswith("diff --git "):
+            try:
+                headers = shlex.split(line)[2:]
+            except ValueError as exc:
+                raise ExecutionWorkspaceError('invalid Git patch headers') from exc
+            if len(headers) != 2:
+                raise ExecutionWorkspaceError('invalid Git patch headers')
+            paths.update(path for raw in headers if (path := _patch_path(raw)) is not None)
+        elif line.startswith("--- "):
             old_path = _patch_path(line[4:])
+            old_header_seen = True
         elif line.startswith("+++ "):
             new_path = _patch_path(line[4:])
-            if old_path is None:
+            if not old_header_seen:
                 raise ExecutionWorkspaceError("patch file headers are incomplete")
             selected = new_path if new_path is not None else old_path
             if selected is None:
                 raise ExecutionWorkspaceError("patch has invalid /dev/null headers")
             paths.add(selected)
+            if old_path is not None:
+                paths.add(old_path)
             old_path = None
+            old_header_seen = False
+    if old_header_seen:
+        raise ExecutionWorkspaceError('patch file headers are incomplete')
     return paths
 
 

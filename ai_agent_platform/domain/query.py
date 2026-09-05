@@ -32,6 +32,9 @@ class QueryParams:
     thinking_level: str | None = None
     routing_policy: str | None = None
     mode: str | None = None
+    permission_mode: str = "default"
+    sandbox_enabled: bool = True
+    sandbox_network_enabled: bool = False
     cwd: str | None = None
     additional_workspace_ids: tuple[str, ...] = ()
     actor_user_id: str | None = None
@@ -39,11 +42,17 @@ class QueryParams:
     skill_arguments: tuple[str, ...] = ()
     preferred_tool_name: str | None = None
     evaluation: bool = False
-    evaluation_knowledge_base_ids: tuple[str, ...] = ()
     entrypoint: str = "sdk"
     entrypoint_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.permission_mode not in {
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+        }:
+            raise ValueError("unsupported Cogent permission mode")
         object.__setattr__(
             self,
             "focus_files",
@@ -58,11 +67,6 @@ class QueryParams:
             self,
             "skill_arguments",
             tuple(str(item) for item in self.skill_arguments),
-        )
-        object.__setattr__(
-            self,
-            "evaluation_knowledge_base_ids",
-            tuple(str(item) for item in self.evaluation_knowledge_base_ids),
         )
         object.__setattr__(
             self,

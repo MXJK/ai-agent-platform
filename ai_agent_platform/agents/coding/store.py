@@ -1,11 +1,13 @@
 """Agent-run storage implementations used by the coding runtime."""
 
-from threading import RLock
+from contextlib import contextmanager
+from threading import Lock, RLock
 from typing import Any
 
 from ai_agent_platform.agents.coding.models import (
     AgentRunEvent,
     AgentRunRecord,
+    AgentRuntimeSnapshot,
     AgentToolExecution,
 )
 from ai_agent_platform.agents.coding.run_artifacts import (
@@ -22,7 +24,21 @@ class InMemoryAgentRunStore:
         self._event_keys: dict[str, set[str]] = {}
         self._events_by_key: dict[tuple[str, str], AgentRunEvent] = {}
         self._tool_executions: dict[tuple[str, str], AgentToolExecution] = {}
+        self._runtime_snapshots: dict[str, list[AgentRuntimeSnapshot]] = {}
         self._lock = RLock()
+        self._leases: dict[str, Lock] = {}
+
+    @contextmanager
+    def run_lease(self, run_id: str):
+        from ai_agent_platform.cogent.leases import RunLeaseUnavailable
+        with self._lock:
+            lock = self._leases.setdefault(run_id, Lock())
+        if not lock.acquire(blocking=False):
+            raise RunLeaseUnavailable(run_id)
+        try:
+            yield
+        finally:
+            lock.release()
 
     def save(self, record: AgentRunRecord) -> None:
         with self._lock:
@@ -134,6 +150,26 @@ class InMemoryAgentRunStore:
         with self._lock:
             self._tool_executions[(execution.run_id, execution.call_id)] = execution
 
+    def save_runtime_snapshot(self, snapshot: AgentRuntimeSnapshot) -> None:
+        with self._lock:
+            snapshots = self._runtime_snapshots.setdefault(snapshot.run_id, [])
+            snapshots.append(snapshot)
+            del snapshots[:-100]
+
+    def save_runtime_boundary(self, record, snapshot) -> None:
+        with self._lock:
+            self.save(record)
+            self.save_runtime_snapshot(snapshot)
+
+    def list_runtime_snapshots(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRuntimeSnapshot]:
+        with self._lock:
+            return list(self._runtime_snapshots.get(run_id, ())[-max(1, limit) :])
+
 
 def _audit_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     output = dict(result)
@@ -172,7 +208,7 @@ def events_for_record(
                     type="run_started",
                     status="running",
                     node="setup_workspace",
-                    summary="Background worker started executing the Agent graph.",
+                    summary="Background worker started executing the Agent runtime.",
                     output={"thread_id": record.thread_id},
                 ),
             )

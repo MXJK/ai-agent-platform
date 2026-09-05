@@ -583,6 +583,7 @@ class LLMClient:
         alias_tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
         use_model_max_output_tokens: bool = False,
+        model_output_tokens_cap: int | None = None,
         disable_tool_calls: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
@@ -657,6 +658,7 @@ class LLMClient:
                     trace=trace,
                     requested_max_output_tokens=routing_output_tokens,
                     use_model_max_output_tokens=use_model_max_output_tokens,
+                    model_output_tokens_cap=model_output_tokens_cap,
                 )
             except LLMProviderError as exc:
                 if exc.code == "token_budget_exceeded":
@@ -701,6 +703,7 @@ class LLMClient:
                             trace=trace,
                             requested_max_output_tokens=routing_output_tokens,
                             use_model_max_output_tokens=use_model_max_output_tokens,
+                            model_output_tokens_cap=model_output_tokens_cap,
                         )
                         trace = request_plan.route_trace or trace
                         candidate = request_plan.candidate or candidate
@@ -1588,11 +1591,13 @@ class LLMClient:
         if tools:
             payload.update({
                 "tools": [
-                {
+                ({"type": spec.native_type, "name": "tool_search_tool_regex"}
+                 if spec.native_type else {
                     "name": reverse_aliases[spec.name],
                     "description": spec.description,
                     "input_schema": spec.input_schema,
-                }
+                    **({"defer_loading": True} if spec.defer_loading else {}),
+                })
                 for spec in tools
                 ],
                 "tool_choice": (
@@ -1864,7 +1869,10 @@ class LLMClient:
                         content = getattr(current, "content", None)
                         for part in getattr(content, "parts", None) or []:
                             parts.append(part)
-                            if part.text and not getattr(part, "thought", False):
+                            if part.text and getattr(part, 'thought', False):
+                                from .public_reasoning import publish_summary
+                                publish_summary('google', part.text)
+                            elif part.text:
                                 on_delta(part.text)
                         usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
                         finish_reason = _google_candidate_finish_reason(current) or finish_reason
@@ -2094,6 +2102,7 @@ class LLMClient:
         trace: ModelRouteTrace,
         requested_max_output_tokens: int,
         use_model_max_output_tokens: bool = False,
+        model_output_tokens_cap: int | None = None,
     ) -> LLMRequestPlan:
         return self._authorize_candidate(
             candidate=candidate,
@@ -2102,6 +2111,7 @@ class LLMClient:
             fallback_candidates=(),
             requested_max_output_tokens=requested_max_output_tokens,
             use_model_max_output_tokens=use_model_max_output_tokens,
+            model_output_tokens_cap=model_output_tokens_cap,
             count_tokens=lambda provider, model: self._count_tool_input_tokens(
                 messages,
                 tools,
@@ -2122,6 +2132,7 @@ class LLMClient:
         usage_context: Any = None,
         requested_max_output_tokens: int | None = None,
         use_model_max_output_tokens: bool = False,
+        model_output_tokens_cap: int | None = None,
     ) -> LLMRequestPlan:
         usage_context = usage_context or current_model_usage_context()
         self._require_model_available(candidate.provider, candidate.model)
@@ -2140,6 +2151,10 @@ class LLMClient:
             if use_model_max_output_tokens
             else configured_output_tokens
         )
+        if model_output_tokens_cap is not None:
+            if model_output_tokens_cap <= 0:
+                raise ValueError("model_output_tokens_cap must be positive")
+            requested_output_tokens = min(requested_output_tokens, model_output_tokens_cap)
         max_output_tokens = _effective_model_output_limit(
             candidate,
             input_tokens=input_tokens,
@@ -3910,7 +3925,7 @@ def _openai_tool_input(
         role = str(message.get("role") or "")
         if role == "assistant" and message.get("provider") == "openai":
             provider_items = message.get("provider_items")
-            if isinstance(provider_items, list):
+            if isinstance(provider_items, list) and provider_items:
                 items.extend(
                     dict(item) for item in provider_items if isinstance(item, dict)
                 )
@@ -4012,7 +4027,7 @@ def _anthropic_tool_messages(
         flush_tool_results()
         if role == "assistant" and message.get("provider") == "anthropic":
             provider_items = message.get("provider_items")
-            if isinstance(provider_items, list):
+            if isinstance(provider_items, list) and provider_items:
                 converted.append(
                     {
                         "role": "assistant",

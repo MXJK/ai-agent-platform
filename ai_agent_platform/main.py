@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ai_agent_platform.agents import CodingAgentRuntime
+from ai_agent_platform.cogent import AgentRuntime
 from ai_agent_platform.api import create_api_router
 from ai_agent_platform.core import (
     ConfigResolver,
@@ -29,7 +29,7 @@ def create_app(
     settings: Settings | ResolvedConfig | None = None,
     llm_client: LLMClient | None = None,
     rag_service: RAGService | None = None,
-    coding_agent_runtime: CodingAgentRuntime | None = None,
+    coding_agent_runtime: AgentRuntime | None = None,
     directory_picker: DirectoryPicker | None = None,
     application_factory: ApplicationFactory | None = None,
 ) -> FastAPI:

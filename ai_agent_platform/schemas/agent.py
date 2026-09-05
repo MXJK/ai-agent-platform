@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
-from ai_agent_platform.agents.coding_agent import AgentRunRecord, AgentRunResult
+from ai_agent_platform.agents.coding.models import AgentRunRecord, AgentRunResult
 from ai_agent_platform.agents.coding.models import (
     AgentCheckpoint,
     AgentRunEvent,
@@ -39,6 +39,10 @@ class AgentRunRequest(BaseModel):
     model: Optional[str] = Field(default=None, min_length=1, max_length=128)
     thinking_level: Optional[LLMThinkingLevel] = None
     routing_policy: Optional[LLMRoutingPolicy] = None
+    mode: Optional[Literal["auto", "manual"]] = None
+    permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = "default"
+    sandbox_enabled: bool = True
+    sandbox_network_enabled: bool = False
     skill_name: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -59,6 +63,15 @@ class AgentRunRequest(BaseModel):
             "on_request policy; strict always/never policies cannot be bypassed."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_agent_knowledge_selection(cls, value):
+        if isinstance(value, dict) and any(key in value for key in (
+            "knowledge_base_ids", "evaluation_knowledge_base_ids", "context_route",
+        )):
+            raise ValueError("knowledge-base selection is not supported by Cogent; use the standalone RAG API")
+        return value
 
     @field_validator("additional_workspace_ids")
     @classmethod
@@ -219,6 +232,14 @@ class ContextSourceResponse(BaseModel):
 
 
 class AgentRunResponse(BaseModel):
+    @model_serializer(mode="wrap")
+    def serialize_runtime_fields(self, handler):
+        payload = handler(self)
+        if self.graph_engine == "cogent-v1":
+            for key in ("context_route", "selected_knowledge_base_ids", "context_sources"):
+                payload.pop(key, None)
+        return payload
+
     run_id: str
     thread_id: str
     conversation_id: str
@@ -363,6 +384,9 @@ class AgentRunStatusResponse(BaseModel):
     execution_root: Optional[str]
     branch_name: Optional[str]
     worktree_path: Optional[str]
+    runtime_engine: str = "langgraph-v1"
+    runtime_state_version: int = 0
+    legacy_read_only: bool = False
 
     @classmethod
     def from_domain(cls, record: AgentRunRecord) -> "AgentRunStatusResponse":
@@ -406,6 +430,9 @@ class AgentRunStatusResponse(BaseModel):
             ),
             branch_name=(execution.branch_name if execution is not None else None),
             worktree_path=(execution.worktree_path if execution is not None else None),
+            runtime_engine=record.runtime_engine,
+            runtime_state_version=record.runtime_state_version,
+            legacy_read_only=record.runtime_engine != "cogent-v1",
         )
 
 
@@ -552,7 +579,7 @@ class AgentRunEventsResponse(BaseModel):
                     type="run_started",
                     status="running",
                     node="setup_workspace",
-                    summary="Background worker started executing the Agent graph.",
+                    summary="Background worker started executing the Agent runtime.",
                     output={"thread_id": record.thread_id},
                 )
             )

@@ -17,7 +17,6 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "document_store": "memory",
         "eval_store": "memory",
         "workspace_store": "sqlite",
-        "langgraph_checkpointer": "memory",
         "model_registry_store": "memory",
         "rag_vector_store": "memory",
         "project_memory_store": "sqlite",
@@ -36,7 +35,6 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "document_store": "postgres",
         "eval_store": "postgres",
         "workspace_store": "postgres",
-        "langgraph_checkpointer": "postgres",
         "model_registry_store": "postgres",
         "rag_vector_store": "qdrant",
         "project_memory_store": "postgres",
@@ -91,7 +89,6 @@ _RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
             "document_store",
             "eval_store",
             "workspace_store",
-            "langgraph_checkpointer",
             "model_registry_store",
             "rag_vector_store",
             "project_memory_store",
@@ -142,7 +139,6 @@ class Settings:
     workspace_allowed_roots: tuple[str, ...] = field(
         default_factory=lambda: (str(Path.home().resolve()),)
     )
-    langgraph_checkpointer: str = "memory"
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 2
     llm_retry_policy_json: str | None = None
@@ -243,7 +239,7 @@ class Settings:
     skills_enabled: bool = False
     skills_allowed: bool = True
     skills_directory_path: str = str(
-        Path.home() / ".ai-agent-platform" / "skills"
+        Path.home() / ".cogent" / "skills"
     )
     tool_allowlist: tuple[str, ...] | None = None
     skill_allowlist: tuple[str, ...] | None = None
@@ -440,11 +436,6 @@ class Settings:
             "model_secret_backend",
             self.model_secret_backend,
             {"encrypted_file", "keyring", "memory"},
-        )
-        _require_choice(
-            "langgraph_checkpointer",
-            self.langgraph_checkpointer,
-            {"memory", "postgres"},
         )
         _require_choice(
             "rag_vector_store",
@@ -1093,9 +1084,6 @@ class Settings:
                 (str(Path.home().resolve()),),
                 dotenv,
             ),
-            langgraph_checkpointer=_env(
-                "LANGGRAPH_CHECKPOINTER", cls.langgraph_checkpointer, dotenv
-            ),
             llm_timeout_seconds=_float_env(
                 "LLM_TIMEOUT_SECONDS", cls.llm_timeout_seconds, dotenv
             ),
@@ -1645,10 +1633,6 @@ class Settings:
             "document_store": (self.document_store, "postgres"),
             "workspace_store": (
                 self.workspace_store,
-                "postgres",
-            ),
-            "langgraph_checkpointer": (
-                self.langgraph_checkpointer,
                 "postgres",
             ),
             "rag_vector_store": (self.rag_vector_store, "qdrant"),

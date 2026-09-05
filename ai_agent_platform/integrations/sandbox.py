@@ -242,7 +242,7 @@ class SandboxRuntime:
             raise ValueError("timeout_seconds must be positive")
         timeout = min(timeout, self._command_timeout_seconds)
         self._execution_workspaces.prepare_command(context)
-
+        os_sandbox_status = "disabled"
         try:
             if self._mode == "docker":
                 result = self._run_docker_command(
@@ -252,15 +252,38 @@ class SandboxRuntime:
                     timeout=timeout,
                 )
             else:
+                scratch = self._execution_workspaces.command_scratch(context)
+                environment = _local_sandbox_environment(workspace, scratch=scratch)
+                launch_args = args
+                if context is not None and context.os_sandbox_enabled:
+                    from ai_agent_platform.cogent.sandbox import SandboxConfig, create_sandbox
+
+                    backend = create_sandbox()
+                    if backend is None or not backend.available():
+                        if not any(approval.matches(context) for approval in context.approvals):
+                            raise PermissionError("OS sandbox unavailable; an exact user approval is required")
+                        os_sandbox_status = "unavailable_explicitly_approved"
+                    else:
+                        protected = workspace.path / ".cogent"
+                        protected.mkdir(mode=0o700, exist_ok=True)
+                        denied_write = [protected]
+                        if (workspace.path / ".git").exists():
+                            denied_write.append(workspace.path / ".git")
+                        denied_read = [Path.home() / ".ai-agent-platform", Path.home() / ".ssh"]
+                        denied_read.extend(path for path in workspace.path.iterdir() if _is_sensitive_sandbox_path(path))
+                        launch_args = backend.wrap_argv(args, SandboxConfig(
+                            allow_write=[str(workspace.path), str(scratch or workspace.path)],
+                            deny_write=[str(path) for path in denied_write],
+                            deny_read=[str(path) for path in denied_read],
+                            network_enabled=context.os_sandbox_network_enabled,
+                        ))
+                        os_sandbox_status = "enforced"
                 result = _run_bounded_process(
-                    args,
+                    launch_args,
                     cwd=working_dir,
                     timeout=timeout,
                     output_max_chars=self._command_output_max_chars,
-                    env=_local_sandbox_environment(
-                        workspace,
-                        scratch=self._execution_workspaces.command_scratch(context),
-                    ),
+                    env=environment,
                 )
         finally:
             self._execution_workspaces.complete_command(context)
@@ -273,6 +296,7 @@ class SandboxRuntime:
             "output_truncated": result.output_truncated,
             "workspace": str(workspace.path),
             "workspace_mode": workspace.mode,
+            "os_sandbox": os_sandbox_status,
         }
         if result.output_truncated:
             output["truncated_output_preview"] = _combined_output_preview(
@@ -465,6 +489,8 @@ def _copy_source_item(
             return
         if source.name in DEFAULT_SANDBOX_IGNORES:
             return
+        if relative in {".cogent/sessions", ".cogent/memory", ".cogent/file-history"}:
+            return
         if _is_sensitive_sandbox_path(source):
             _append_copy_warning(warnings, f"skipped sensitive file: {relative}")
             return
@@ -517,6 +543,8 @@ def _snapshot_files(root: Path) -> dict[str, bytes]:
         if not path.is_file() or path.is_symlink():
             continue
         if any(part in DEFAULT_SANDBOX_IGNORES for part in path.parts):
+            continue
+        if _relative_to(path, root).startswith((".cogent/sessions/", ".cogent/memory/", ".cogent/file-history/")):
             continue
         snapshot[_relative_to(path, root)] = path.read_bytes()
     return snapshot

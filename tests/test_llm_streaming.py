@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import httpx
 
-from ai_agent_platform.api.routes.chat import sse_heartbeat, stream_with_heartbeat
+from ai_agent_platform.api.sse import sse_heartbeat, stream_with_heartbeat
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import (
     LLMClient,

@@ -102,6 +102,9 @@ class NativeStreamAccumulator:
     def _openai(self, kind: str, payload: dict[str, Any]) -> None:
         if kind in {"response.output_text.delta", "response.refusal.delta"}:
             self._text(payload.get("delta"))
+        elif kind == 'response.reasoning_summary_text.delta':
+            from ai_agent_platform.integrations.public_reasoning import publish_summary
+            publish_summary('openai', payload.get('delta'))
         elif kind in {"response.completed", "response.incomplete"}:
             response = payload.get("response")
             if not isinstance(response, dict) or not isinstance(
@@ -142,6 +145,9 @@ class NativeStreamAccumulator:
                 block[field] = block.get(field, "") + delta.get(field, "")
                 if delta_type == "text_delta":
                     self._text(delta.get("text"))
+                elif delta_type == 'thinking_delta':
+                    from .public_reasoning import publish_summary
+                    publish_summary('anthropic', delta.get('thinking'))
             elif delta_type == "citations_delta":
                 block.setdefault("citations", []).append(delta.get("citation"))
         elif kind == "message_delta":
@@ -167,6 +173,9 @@ class NativeStreamAccumulator:
                 text = delta.get(field)
                 if isinstance(text, str):
                     message[field] = message.get(field, "") + text
+                    if field == 'reasoning_content':
+                        from .public_reasoning import publish_summary
+                        publish_summary(self.provider, text)
                     if field == "content":
                         if self.provider == "deepseek":
                             self._deepseek_text(text)

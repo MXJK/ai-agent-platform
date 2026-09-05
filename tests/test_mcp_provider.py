@@ -6,7 +6,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
+from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.mcp import (
     MCPServerConfig,
@@ -18,6 +18,7 @@ from ai_agent_platform.integrations.mcp import (
 )
 from ai_agent_platform.integrations.tools import ToolCall, ToolExecutionContext
 from ai_agent_platform.main import create_app
+from test_cogent_runtime import ScriptedClient, response
 
 
 def wait_for_agent_run(
@@ -361,6 +362,8 @@ class MCPProviderTests(unittest.TestCase):
     def test_agent_centrally_approves_mcp_reported_read_only_tool(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _create_app_with_fake_mcp(temp_dir, server_name="dynamic_demo")
+            app.state.runtime.cogent_runtime._llm = ScriptedClient(response('', ToolCall('mcp__dynamic_demo__echo', {'text': 'hello MCP'}, 'echo-1')), response('Done.'))
+            app.state.runtime.cogent_runtime._memory_service = None
 
             with TestClient(app) as client:
                 create_response = client.post(
@@ -388,7 +391,7 @@ class MCPProviderTests(unittest.TestCase):
                 approval_item = next(
                     item
                     for item in pending["approval_required_tools"]
-                    if item["name"] == "mcp.dynamic_demo.echo"
+                    if item["name"] == "mcp__dynamic_demo__echo"
                 )
                 resume_response = client.post(
                     f"/api/v1/agent/runs/{run_response.json()['run_id']}/resume",
@@ -412,21 +415,23 @@ class MCPProviderTests(unittest.TestCase):
             body = completed_body["result"]
             self.assertEqual(body["status"], "completed")
             tool_names = [tool_call["name"] for tool_call in body["tool_calls"]]
-            self.assertIn("mcp.dynamic_demo.echo", tool_names)
+            self.assertIn("mcp__dynamic_demo__echo", tool_names)
             result_by_name = {item["name"]: item for item in body["tool_results"]}
-            self.assertTrue(result_by_name["mcp.dynamic_demo.echo"]["ok"])
+            self.assertTrue(result_by_name["mcp__dynamic_demo__echo"]["ok"])
             self.assertEqual(
-                result_by_name["mcp.dynamic_demo.echo"]["provider"],
+                result_by_name["mcp__dynamic_demo__echo"]["provider"],
                 "mcp:dynamic_demo",
             )
             self.assertEqual(
-                result_by_name["mcp.dynamic_demo.echo"]["permission_level"],
+                result_by_name["mcp__dynamic_demo__echo"]["permission_level"],
                 "read_only",
             )
 
     def test_agent_routes_non_read_only_mcp_tool_to_approval(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _create_app_with_fake_mcp(temp_dir, server_name="approval_demo")
+            app.state.runtime.cogent_runtime._llm = ScriptedClient(response('', ToolCall('mcp__approval_demo__create_issue', {'title': 'production outage'}, 'issue-1')), response('Done.'))
+            app.state.runtime.cogent_runtime._memory_service = None
 
             with TestClient(app) as client:
                 create_response = client.post(
@@ -450,7 +455,7 @@ class MCPProviderTests(unittest.TestCase):
                     client,
                     run_response.json()["run_id"],
                 )
-                run_body = run_status_body["result"]
+                run_body = run_status_body
                 resume_response = client.post(
                     f"/api/v1/agent/runs/{run_body['run_id']}/resume",
                     json={"approved": True, "feedback": "approved for test"},
@@ -465,18 +470,18 @@ class MCPProviderTests(unittest.TestCase):
             body = run_status_body
             self.assertEqual(body["status"], "waiting_approval")
             self.assertIn(
-                "mcp.approval_demo.create_issue",
-                body["pending_approval"]["planned_tools"],
+                "mcp__approval_demo__create_issue",
+                [item['name'] for item in body["pending_approval"]["tool_calls"]],
             )
             approval_names = [
                 item["name"]
                 for item in body["pending_approval"]["approval_required_tools"]
             ]
-            self.assertIn("mcp.approval_demo.create_issue", approval_names)
+            self.assertIn("mcp__approval_demo__create_issue", approval_names)
             approval_item = next(
                 item
                 for item in body["pending_approval"]["approval_required_tools"]
-                if item["name"] == "mcp.approval_demo.create_issue"
+                if item["name"] == "mcp__approval_demo__create_issue"
             )
             self.assertEqual(
                 approval_item["permission_level"],
@@ -488,9 +493,9 @@ class MCPProviderTests(unittest.TestCase):
             resume_body = resume_status_body["result"]
             self.assertEqual(resume_body["status"], "completed")
             result_by_name = {item["name"]: item for item in resume_body["tool_results"]}
-            self.assertTrue(result_by_name["mcp.approval_demo.create_issue"]["ok"])
+            self.assertTrue(result_by_name["mcp__approval_demo__create_issue"]["ok"])
             self.assertEqual(
-                result_by_name["mcp.approval_demo.create_issue"]["provider"],
+                result_by_name["mcp__approval_demo__create_issue"]["provider"],
                 "mcp:approval_demo",
             )
 

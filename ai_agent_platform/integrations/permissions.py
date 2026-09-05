@@ -107,6 +107,8 @@ class ToolUseContext:
     call_id: str | None = None
     tool_name: str | None = None
     arguments_hash: str | None = None
+    os_sandbox_enabled: bool = False
+    os_sandbox_network_enabled: bool = False
 
     def bind(self, *, call_id: str, tool_name: str, arguments: Mapping[str, Any]) -> "ToolUseContext":
         return replace(

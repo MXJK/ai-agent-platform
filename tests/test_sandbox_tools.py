@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ai_agent_platform.agents.coding_agent import create_coding_tool_registry
+from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.integrations.sandbox import (
     BoundedProcessResult,
     SandboxRuntime,

@@ -31,7 +31,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             )
             _write_skill(user, "alpha", name="alpha", command="alpha")
             _write_skill(
-                project / ".agents" / "skills",
+                project / ".cogent" / "skills",
                 "middle",
                 name="middle",
                 command="middle",
@@ -66,7 +66,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             _write_skill(bundled, "review", name="review", body="bundled")
             _write_skill(user, "review", name="review", body="user")
             _write_skill(
-                project / ".agents" / "skills",
+                project / ".cogent" / "skills",
                 "review",
                 name="review",
                 body="project",
@@ -84,7 +84,7 @@ class SkillDiscoveryTests(unittest.TestCase):
                 item for item in catalog.diagnostics if item.code == "skill_overridden"
             ]
             self.assertEqual(len(overridden), 2)
-            self.assertTrue(all(item.related_path == ".agents/skills/review/SKILL.md" for item in overridden))
+            self.assertTrue(all(item.related_path == ".cogent/skills/review/SKILL.md" for item in overridden))
 
     def test_same_source_duplicate_and_command_conflicts_are_deterministic(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -120,7 +120,7 @@ class SkillDiscoveryTests(unittest.TestCase):
                 aliases=("shared",),
             )
             _write_skill(
-                project / ".agents" / "skills",
+                project / ".cogent" / "skills",
                 "zeta",
                 name="zeta",
                 command="zeta",
@@ -250,7 +250,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             _write_skill(outside, "external", name="external")
 
             project = root / "project"
-            skills = project / ".agents" / "skills"
+            skills = project / ".cogent" / "skills"
             skills.mkdir(parents=True)
             file_link = skills / "file-link"
             file_link.mkdir()
@@ -270,7 +270,7 @@ class SkillDiscoveryTests(unittest.TestCase):
 
             escaped_project = root / "escaped-project"
             escaped_project.mkdir()
-            (escaped_project / ".agents").symlink_to(
+            (escaped_project / ".cogent").symlink_to(
                 outside,
                 target_is_directory=True,
             )

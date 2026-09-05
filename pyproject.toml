@@ -1,7 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ai_agent_platform*"]
+
+[tool.setuptools.package-data]
+ai_agent_platform = ["static/*", "evaluation/*.json", "bundled_skills/**/*"]
+
 [project]
-name = "ai-agent-platform"
-version = "0.1.0"
-description = "A learning project for Python AI backend and game AI agent engineering."
+name = "cogent"
+version = "0.2.0"
+description = "Cogent coding agent with durable workspace execution and standalone RAG."
 requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.13.0",
@@ -13,8 +23,6 @@ dependencies = [
     "httpx>=0.28.0",
     "jsonschema>=4.23.0",
     "keyring>=25.0.0,<26.0.0",
-    "langgraph>=0.6.0",
-    "langgraph-checkpoint-postgres>=2.0.0",
     "mcp==2.0.0",
     "pydantic>=2.8.0",
     "psycopg[binary]>=3.2.0",
@@ -26,13 +34,13 @@ dependencies = [
     "qdrant-client>=1.16.0,<1.18.0",
     "sentence-transformers>=3.0.0",
     "socksio>=1.0.0",
+    "textual>=2.1.0",
     "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
-ai-agent = "ai_agent_platform.cli:main"
-ai-agent-platform = "ai_agent_platform.cli:main"
-ai-agent-api = "ai_agent_platform.api.entrypoint:main"
+cogent = "ai_agent_platform.cli:main"
+cogent-api = "ai_agent_platform.api.entrypoint:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

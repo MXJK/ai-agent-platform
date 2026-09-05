@@ -1,26 +1,30 @@
 from __future__ import annotations
 
+from ai_agent_platform.cogent.leases import RunLeaseUnavailable
+
 import asyncio
 import logging
+import json
+import shlex
 from dataclasses import replace
 from threading import Lock
 from time import perf_counter
 from typing import Any, AsyncIterator, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from ai_agent_platform.agents.coding_agent import (
-    AgentRunInvalidStateError,
-    AgentRunNotFoundError,
-    AgentRunRecord,
-    AgentRunResult,
-    CodingAgentRuntime,
-)
-from ai_agent_platform.agents.coding.models import AgentRunEvent
 from ai_agent_platform.agents.coding.models import (
     AgentCheckpoint,
     AgentCheckpointNotFoundError,
     AgentCheckpointRestoreError,
+    AgentRunEvent,
+    AgentRunInvalidStateError,
+    AgentRunNotFoundError,
+    AgentRunRecord,
+    AgentRunResult,
 )
+from ai_agent_platform.cogent.protocol import AgentRuntime
+from ai_agent_platform.cogent.commands.parser import parse_command
+from ai_agent_platform.cogent.commands.catalog import LOCAL_COMMANDS, command_capabilities, resolve_command
 from ai_agent_platform.agents.coding.user_questions import (
     normalize_questions,
     parse_question_response,
@@ -67,8 +71,6 @@ from ai_agent_platform.integrations.tool_pool import (
     ToolPoolRestoreError,
 )
 from ai_agent_platform.usage_ledger import model_usage_scope
-from ai_agent_platform.project_memory.service import ProjectMemoryService
-from ai_agent_platform.memory import UserMemoryService
 
 
 logger = logging.getLogger(__name__)
@@ -84,14 +86,13 @@ class QueryService:
     def __init__(
         self,
         *,
-        runtime: CodingAgentRuntime,
+        runtime: AgentRuntime,
         session_service: SessionService,
         workspace_service: WorkspaceService,
         max_workers: int = 4,
         metrics: MetricsRegistry | None = None,
         task_queue: TaskQueue | None = None,
-        project_memory_service: ProjectMemoryService | None = None,
-        user_memory_service: UserMemoryService | None = None,
+        workspace_authorizer: Any = None,
         max_context_messages: int = 12,
         llm_provider: str = "agent",
         llm_model: str = "aggregated",
@@ -113,8 +114,7 @@ class QueryService:
             max_workers=max_workers,
             metrics=self._metrics,
         )
-        self._project_memory_service = project_memory_service
-        self._user_memory_service = user_memory_service
+        self._workspace_authorizer = workspace_authorizer
         self._max_context_messages = max_context_messages
         self._llm_provider = llm_provider
         self._llm_model = llm_model
@@ -140,6 +140,70 @@ class QueryService:
         return self._event_encoder
 
     def start(self, params: QueryParams) -> AgentRunRecord:
+        name, arguments, is_command = parse_command(params.message)
+        command = resolve_command(name) if is_command else None
+        if is_command and name == 'exit':
+            raise ValueError('/exit is a CLI-local command')
+        if command and command.name == 'resume':
+            try:
+                previous = self.get_latest_run_for_actor(params.conversation_id, params.actor_user_id)
+            except AgentRunNotFoundError:
+                previous = None
+            if previous is None:
+                raise ValueError('No Run is available to resume')
+            if previous.status == 'waiting_approval':
+                if arguments not in {'approve', 'reject'}:
+                    raise ValueError('Use /resume approve or /resume reject after reviewing the pending operation')
+                return self.resume_run(run_id=previous.run_id, approved=arguments == 'approve', actor_user_id=params.actor_user_id)
+            return self.continue_run(run_id=previous.run_id, message=arguments, actor_user_id=params.actor_user_id)
+        if command and command.name == 'compact':
+            try:
+                previous = self.get_latest_run_for_actor(params.conversation_id, params.actor_user_id)
+            except AgentRunNotFoundError:
+                previous = None
+            if previous and previous.status in {'running', 'paused'}:
+                return self.compact_run(run_id=previous.run_id, instruction=arguments, actor_user_id=params.actor_user_id)
+        try:
+            latest = self.get_latest_run_for_actor(params.conversation_id, params.actor_user_id)
+        except AgentRunNotFoundError:
+            latest = None
+        if latest is not None and latest.runtime_engine == 'cogent-v1':
+            if latest.status in QueryLifecycle.ACTIVE_STATUSES | QueryLifecycle.SUSPENDED_STATUSES:
+                raise AgentRunInvalidStateError(latest.run_id, latest.status)
+            if command and command.name == 'permissions' and arguments and arguments != 'plan' and latest.runtime_state.get('permission_mode') == 'plan':
+                raise ValueError('Confirm the plan through ExitPlanMode before leaving plan mode')
+        if command and command.name == 'permissions' and arguments and arguments not in {'default', 'acceptEdits', 'plan', 'bypassPermissions'}:
+            raise ValueError('Unsupported Cogent permission mode')
+        if command and command.name == 'plan':
+            params = replace(params, permission_mode='plan', message=arguments or 'Inspect the current task and prepare a plan. Ask the user to confirm it with ExitPlanMode before implementation.')
+        elif command and command.name == 'review':
+            params = replace(params, permission_mode='plan', message=arguments or 'Review the current Git diff. Report concrete issues with file and line references. Do not edit any file.')
+        if is_command and (command is None or command.name == 'skill' and arguments):
+            capabilities = self.composer_capabilities(conversation_id=params.conversation_id,
+                workspace_id=params.workspace_id or '', actor_user_id=params.actor_user_id)
+            tokens = shlex.split(arguments)
+            skill_name = tokens.pop(0) if command else name
+            selected = next((item for item in capabilities['skill_commands']
+                if skill_name in {item['name'], item['skill_name'], item['skill_qualified_name'], *item['aliases']}), None)
+            mcp = next((item for item in capabilities['mcp_tools'] if item['name'] == name), None)
+            if selected is None and mcp is not None:
+                params = replace(params, preferred_tool_name=mcp['name'], message=arguments or f"Use MCP tool {mcp['name']} for the current request.")
+            elif selected is None:
+                unavailable = next((item for item in capabilities.get('unavailable_skill_commands', [])
+                    if skill_name in {item['name'], item['skill_name'], item['skill_qualified_name'], *item['aliases']}), None)
+                if unavailable is None:
+                    raise ValueError(f'Unknown or unavailable Cogent command: /{name}')
+                params = replace(params, skill_name=unavailable['skill_qualified_name'], skill_arguments=tuple(tokens),
+                                 message=' '.join(tokens) or f'Apply Skill {skill_name}.')
+            else:
+                params = replace(params, skill_name=selected['skill_qualified_name'], skill_arguments=tuple(tokens),
+                                 message=' '.join(tokens) or f"Apply Skill {selected['skill_qualified_name']}.")
+            command = None
+        metadata = params.metadata_dict()
+        if command:
+            metadata['cogent_command'] = {'name': command.name, 'arguments': arguments}
+        else:
+            metadata.pop('cogent_command', None)
         return self._start_query(
             conversation_id=params.conversation_id,
             message=params.message,
@@ -151,17 +215,17 @@ class QueryService:
             thinking_level=params.thinking_level,
             routing_policy=params.routing_policy,
             mode=params.mode,
+            permission_mode=params.permission_mode,
+            sandbox_enabled=params.sandbox_enabled,
+            sandbox_network_enabled=params.sandbox_network_enabled,
             cwd=params.cwd,
             additional_workspace_ids=list(params.additional_workspace_ids),
             skill_name=params.skill_name,
             skill_arguments=params.skill_arguments,
             preferred_tool_name=params.preferred_tool_name,
             evaluation=params.evaluation,
-            evaluation_knowledge_base_ids=(
-                list(params.evaluation_knowledge_base_ids)
-            ),
             entrypoint_type=params.entrypoint,
-            entrypoint_metadata=params.metadata_dict(),
+            entrypoint_metadata=metadata,
         )
 
     def submit_run(
@@ -179,7 +243,9 @@ class QueryService:
         cwd: str | None = None,
         additional_workspace_ids: Optional[list[str]] = None,
         evaluation: bool = False,
-        evaluation_knowledge_base_ids: Optional[list[str]] = None,
+        permission_mode: str = "default",
+        sandbox_enabled: bool = True,
+        sandbox_network_enabled: bool = False,
     ) -> AgentRunRecord:
         return self.start(
             QueryParams(
@@ -195,9 +261,9 @@ class QueryService:
                 additional_workspace_ids=tuple(additional_workspace_ids or ()),
                 actor_user_id=actor_user_id,
                 evaluation=evaluation,
-                evaluation_knowledge_base_ids=tuple(
-                    evaluation_knowledge_base_ids or ()
-                ),
+                permission_mode=permission_mode,
+                sandbox_enabled=sandbox_enabled,
+                sandbox_network_enabled=sandbox_network_enabled,
                 entrypoint=(
                     self._execution_context_factory.entrypoint_type
                     if self._execution_context_factory is not None
@@ -207,9 +273,6 @@ class QueryService:
                     "adapter": "AgentRunService",
                     "evaluation": {
                         "isolated": True,
-                        "knowledge_base_ids": list(
-                            evaluation_knowledge_base_ids or ()
-                        ),
                     }
                     if evaluation
                     else {},
@@ -238,7 +301,9 @@ class QueryService:
         skill_arguments: tuple[str, ...] = (),
         preferred_tool_name: str | None = None,
         evaluation: bool = False,
-        evaluation_knowledge_base_ids: Optional[list[str]] = None,
+        permission_mode: str = "default",
+        sandbox_enabled: bool = True,
+        sandbox_network_enabled: bool = False,
     ) -> AgentRunRecord:
         if mode is not None and mode not in {"auto", "manual"}:
             raise ValueError("Query mode must be auto or manual")
@@ -296,12 +361,14 @@ class QueryService:
             )
         run_id = f"run_{uuid4().hex[:12]}"
         snapshot_entrypoint_metadata = dict(entrypoint_metadata or {})
+        snapshot_entrypoint_metadata.update(
+            permission_mode=permission_mode,
+            sandbox_enabled=sandbox_enabled,
+            sandbox_network_enabled=sandbox_network_enabled,
+        )
         if evaluation:
             snapshot_entrypoint_metadata["evaluation"] = {
                 "isolated": True,
-                "knowledge_base_ids": list(
-                    evaluation_knowledge_base_ids or ()
-                ),
             }
         if self._execution_context_factory is not None:
             context_snapshot = self._execution_context_factory.create(
@@ -327,50 +394,66 @@ class QueryService:
                 {"role": item.role, "content": item.content}
                 for item in context_snapshot.session.controlled_history
             ]
-            if self._query_uow is not None:
-                QueryLifecycle.assert_transition(None, "queued")
-                record = AgentRunRecord(
-                    run_id=context_snapshot.metadata.run_id,
-                    thread_id=context_snapshot.metadata.run_id,
-                    conversation_id=conversation_id,
-                    workspace_id=workspace_id,
-                    workspace_root=workspace_root,
-                    status="queued",
-                    checkpoint_id=None,
-                    latest_node=None,
-                    next_nodes=["setup_workspace"],
-                    trace=[],
-                    context_snapshot=context_snapshot,
-                )
-                preferences = (
-                    None
-                    if evaluation
-                    else self._session_service.get_user_preferences(
-                        resolved_actor
+            try:
+                if self._query_uow is not None:
+                    QueryLifecycle.assert_transition(None, "queued")
+                    create_record = getattr(self._runtime, "create_queued_record", None)
+                    record = (
+                        create_record(
+                            run_id=context_snapshot.metadata.run_id,
+                            conversation_id=conversation_id,
+                            workspace_id=workspace_id,
+                            workspace_root=workspace_root,
+                            context_snapshot=context_snapshot,
+                        )
+                        if callable(create_record)
+                        else AgentRunRecord(
+                            run_id=context_snapshot.metadata.run_id,
+                            thread_id=context_snapshot.metadata.run_id,
+                            conversation_id=conversation_id,
+                            workspace_id=workspace_id,
+                            workspace_root=workspace_root,
+                            status="queued",
+                            checkpoint_id=None,
+                            latest_node=None,
+                            next_nodes=["setup_workspace"],
+                            trace=[],
+                            context_snapshot=context_snapshot,
+                        )
                     )
-                )
-                self._query_uow.persist_start(
-                    record=record,
-                    message_id=f"msg_{uuid4().hex[:12]}",
-                    message=message,
-                    preferences=preferences,
-                )
-            else:
-                self._session_service.add_message(
-                    session_id=conversation_id,
-                    role="user",
-                    content=message,
-                )
-                record = self._runtime.create_queued_run(
-                    run_id=context_snapshot.metadata.run_id,
-                    conversation_id=conversation_id,
-                    workspace_id=workspace_id,
-                    workspace_root=workspace_root,
-                    context_snapshot=context_snapshot,
-                )
+                    preferences = (
+                        None
+                        if evaluation
+                        else self._session_service.get_user_preferences(
+                            resolved_actor
+                        )
+                    )
+                    self._query_uow.persist_start(
+                        record=record,
+                        message_id=f"msg_{uuid4().hex[:12]}",
+                        message=message,
+                        preferences=preferences,
+                    )
+                else:
+                    self._session_service.add_message(
+                        session_id=conversation_id,
+                        role="user",
+                        content=message,
+                    )
+                    record = self._runtime.create_queued_run(
+                        run_id=context_snapshot.metadata.run_id,
+                        conversation_id=conversation_id,
+                        workspace_id=workspace_id,
+                        workspace_root=workspace_root,
+                        context_snapshot=context_snapshot,
+                    )
+            except BaseException:
+                self._execution_context_factory.discard_prepared(
+                    run_id=context_snapshot.metadata.run_id, workspace_id=workspace_id)
+                raise
         else:
-            if actor_user_id is not None and self._project_memory_service is not None:
-                self._project_memory_service.authorize(
+            if actor_user_id is not None and self._workspace_authorizer is not None:
+                self._workspace_authorizer.authorize(
                     workspace_id=workspace_id,
                     actor_user_id=actor_user_id,
                     required_role="viewer",
@@ -449,14 +532,9 @@ class QueryService:
         except TaskQueueError as exc:
             self._metrics.increment("agent_runs_rejected_total")
             self._mark_queued_run_failed(record.run_id, str(exc))
+            if self._execution_context_factory is not None:
+                self._execution_context_factory.discard_prepared(run_id=record.run_id, workspace_id=workspace_id)
             raise
-        if not evaluation:
-            self._enqueue_user_memory(
-                user_id=resolved_actor,
-                message=message,
-                source_id=record.run_id,
-                workspace_id=workspace_id,
-            )
         self._metrics.increment("agent_runs_submitted_total")
         return record
 
@@ -484,6 +562,7 @@ class QueryService:
             model_selection=selection,
         )
         catalog = factory.effective_skills(snapshot)
+        declared_catalog = factory.declared_skills(snapshot)
         tool_access = factory.restore_tool_access(snapshot)
         mcp_specs = sorted(
             (
@@ -501,6 +580,7 @@ class QueryService:
         return {
             "conversation_id": conversation_id,
             "workspace_id": workspace_id,
+            "commands": command_capabilities(),
             "skill_commands": [
                 {
                     "name": command.name,
@@ -512,6 +592,12 @@ class QueryService:
                     "source": command.source.value,
                 }
                 for command in (catalog.commands if catalog is not None else ())
+            ],
+            "unavailable_skill_commands": [
+                {"name": item.name, "skill_name": item.skill_name,
+                 "skill_qualified_name": item.skill_qualified_name, "aliases": list(item.aliases)}
+                for item in (declared_catalog.commands if declared_catalog else ())
+                if catalog is None or catalog.get_skill(item.skill_qualified_name) is None
             ],
             "mcp_tools": [
                 {
@@ -672,10 +758,10 @@ class QueryService:
         if (
             approved
             and actor_user_id is not None
-            and self._project_memory_service is not None
+            and self._workspace_authorizer is not None
             and self._approval_requires_editor(record)
         ):
-            self._project_memory_service.authorize(
+            self._workspace_authorizer.authorize(
                 workspace_id=record.workspace_id,
                 actor_user_id=actor_user_id,
                 required_role="editor",
@@ -749,6 +835,8 @@ class QueryService:
     ) -> AgentRunRecord:
         record = self.get_run(run_id)
         self._assert_actor(record, actor_user_id)
+        if record.runtime_engine == 'cogent-v1' and record.result is not None:
+            self._record_assistant_message(record.result)
         return record
 
     def list_runs_for_actor(
@@ -797,6 +885,9 @@ class QueryService:
         actor_user_id: str | None = None,
     ) -> tuple[AgentRunRecord, Any | None]:
         source = self.get_run_for_actor(run_id, actor_user_id)
+        require_writable = getattr(self._runtime, "require_writable", None)
+        if callable(require_writable):
+            require_writable(source)
         source_session = self._session_service.get_session(source.conversation_id)
         resolved_actor = actor_user_id or source_session.user_id
         if mode == "rollback" and source_session.archived_at is not None:
@@ -1074,34 +1165,6 @@ class QueryService:
         if callable(mark_failed):
             mark_failed(run_id=run_id, error=error)
 
-    def _enqueue_user_memory(
-        self,
-        *,
-        user_id: str,
-        message: str,
-        source_id: str,
-        workspace_id: str | None,
-    ) -> None:
-        if self._user_memory_service is None or not self._user_memory_service.enabled:
-            return
-        try:
-            self._task_queue.submit(
-                "user_memory_extraction",
-                self._user_memory_service.capture_user_message,
-                user_id=user_id,
-                message=message,
-                source_type="agent_request",
-                source_id=source_id,
-                workspace_id=workspace_id,
-            )
-        except TaskQueueError:
-            self._metrics.increment("user_memory_agent_extraction_enqueue_failed_total")
-            logger.warning(
-                "agent user-memory extraction enqueue skipped",
-                exc_info=True,
-                extra={"run_id": source_id},
-            )
-
     def fail_run_task(
         self,
         *,
@@ -1121,6 +1184,31 @@ class QueryService:
             )
             return
         self._mark_queued_run_failed(run_id, error)
+
+    def recover_incomplete_runs(self) -> int:
+        """Requeue durable work after API/CLI startup; suspended runs stay suspended."""
+        recovered = 0
+        for record in self._runtime.list_recent_runs(limit=1000):
+            if record.runtime_engine != 'cogent-v1':
+                continue
+            if record.context_snapshot is None or record.runtime_state.get('internal_maintenance'):
+                continue
+            if record.status in QueryLifecycle.TERMINAL_STATUSES and record.result is not None:
+                self._record_assistant_message(record.result)
+                continue
+            if record.status not in {'queued', 'running'}:
+                continue
+            # Approval/input payloads are not a new authorization after restart.
+            if record.pending_approval:
+                self._runtime.restore_record(replace(record, status=(
+                    'paused' if record.pending_approval.get('type') == 'run_pause'
+                    else 'waiting_input' if record.pending_approval.get('type') == 'input_required'
+                    else 'waiting_approval'), control_action=None))
+                continue
+            self._task_queue.submit('agent_run', self.execute_run_task,
+                                    run_id=record.run_id, broker_redelivered=True)
+            recovered += 1
+        return recovered
 
     def execute_run_task(
         self,
@@ -1153,7 +1241,12 @@ class QueryService:
             model_selection = context_snapshot.session.model_selection.to_dict()
         if conversation_id is None or message is None or history is None:
             raise AgentRunExecutionError("Run execution context is unavailable")
-        if broker_redelivered and record.status == "running":
+        recovery = (
+            broker_redelivered and record.status == "running"
+            and record.runtime_engine == "cogent-v1"
+            and callable(getattr(self._runtime, "recover", None))
+        )
+        if broker_redelivered and record.status == "running" and not recovery:
             self._metrics.increment("agent_run_worker_lost_total")
             self.fail_run_task(
                 run_id=run_id,
@@ -1165,7 +1258,7 @@ class QueryService:
                 max_attempts=1,
             )
             return
-        if record.status != "queued":
+        if record.status != "queued" and not recovery:
             self._metrics.increment("agent_run_duplicate_deliveries_total")
             if record.result is not None:
                 self._record_assistant_message(record.result)
@@ -1198,22 +1291,29 @@ class QueryService:
                         operation="agent",
                         resource_id=run_id,
                     ):
-                        result = self._runtime.run(
-                            run_id=run_id,
-                            conversation_id=conversation_id,
-                            user_input=message,
-                            history=history,
-                            workspace_id=record.workspace_id,
-                            workspace_root=record.workspace_root,
-                            focus_files=focus_files,
-                            actor_user_id=actor_user_id,
-                            run_context=context_snapshot,
-                        )
+                        if recovery:
+                            result = self._runtime.recover(run_id)
+                        else:
+                            result = self._runtime.run(
+                                run_id=run_id,
+                                conversation_id=conversation_id,
+                                user_input=message,
+                                history=history,
+                                workspace_id=record.workspace_id,
+                                workspace_root=record.workspace_root,
+                                focus_files=focus_files,
+                                actor_user_id=actor_user_id,
+                                run_context=context_snapshot,
+                            )
+            except RunLeaseUnavailable:
+                self._metrics.increment('agent_run_duplicate_deliveries_total')
+                return
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
                     started_at=started_at,
                 )
+                self.fail_run_task(run_id=run_id, error=str(exc), attempt=1, max_attempts=1)
                 logger.exception("agent run failed")
                 raise AgentRunExecutionError(str(exc)) from exc
             self._record_execution_metrics(
@@ -1291,6 +1391,9 @@ class QueryService:
                 )
                 self._fail_tool_pool_restore(run_id)
                 return
+            except RunLeaseUnavailable:
+                self._metrics.increment('agent_run_duplicate_deliveries_total')
+                return
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
@@ -1328,10 +1431,12 @@ class QueryService:
         resume_pending = (
             record.status == "running" and record.control_action == "resume"
         )
+        cogent_replay = broker_redelivered and record.runtime_engine == "cogent-v1"
+        recovery = cogent_replay and record.status == "running" and not resume_pending
         if broker_redelivered and (
             resume_pending
             or record.status in QueryLifecycle.SUSPENDED_STATUSES
-        ):
+        ) and not cogent_replay:
             self._metrics.increment("agent_resume_worker_lost_total")
             self.fail_run_task(
                 run_id=run_id,
@@ -1346,6 +1451,7 @@ class QueryService:
         if (
             record.status not in QueryLifecycle.SUSPENDED_STATUSES
             and not resume_pending
+            and not recovery
         ):
             self._metrics.increment("agent_resume_duplicate_deliveries_total")
             if record.result is not None:
@@ -1367,16 +1473,16 @@ class QueryService:
                     and self._can_restore_tool_access()
                 ):
                     self._restore_tool_access(record.context_snapshot)
-                if approved:
+                if approved and not recovery:
                     self._validate_approval_binding(record)
                     self._authorize_pending_approval(record, actor_user_id)
                 if (
                     approved
                     and actor_user_id is not None
-                    and self._project_memory_service is not None
+                    and self._workspace_authorizer is not None
                     and self._approval_requires_editor(record)
                 ):
-                    self._project_memory_service.authorize(
+                    self._workspace_authorizer.authorize(
                         workspace_id=record.workspace_id,
                         actor_user_id=actor_user_id,
                         required_role="editor",
@@ -1397,13 +1503,16 @@ class QueryService:
                         operation="agent",
                         resource_id=run_id,
                     ):
-                        result = self._runtime.resume(
-                            run_id=run_id,
-                            approved=approved,
-                            feedback=feedback,
-                            input_response=input_response,
-                            approved_by=actor_user_id,
-                        )
+                        if recovery:
+                            result = self._runtime.recover(run_id)
+                        else:
+                            result = self._runtime.resume(
+                                run_id=run_id,
+                                approved=approved,
+                                feedback=feedback,
+                                input_response=input_response,
+                                approved_by=actor_user_id,
+                            )
             except ToolPoolRestoreError:
                 self._record_execution_metrics(
                     status="failed",
@@ -1411,12 +1520,16 @@ class QueryService:
                 )
                 self._fail_tool_pool_restore(run_id)
                 return
+            except RunLeaseUnavailable:
+                self._metrics.increment('agent_run_duplicate_deliveries_total')
+                return
             except Exception as exc:
                 self._record_execution_metrics(
                     status="failed",
                     started_at=started_at,
                 )
                 logger.exception("agent run resume failed")
+                self.fail_run_task(run_id=run_id, error=str(exc), attempt=1, max_attempts=1)
                 raise AgentRunExecutionError(str(exc)) from exc
             self._record_execution_metrics(
                 status=result.status,
@@ -1486,6 +1599,14 @@ class QueryService:
         record: AgentRunRecord,
         actor_user_id: str | None,
     ) -> None:
+        validate_runtime_approval = getattr(
+            self._runtime,
+            "validate_pending_approval",
+            None,
+        )
+        if callable(validate_runtime_approval):
+            validate_runtime_approval(record, approved_by=actor_user_id)
+            return
         if self._permission_resolver is None or self._tool_registry is None:
             return
         pending = record.pending_approval or {}
@@ -1497,8 +1618,8 @@ class QueryService:
         }
         snapshot = record.context_snapshot
         role = snapshot.identity.workspace_role if snapshot is not None else "admin"
-        if actor_user_id is not None and self._project_memory_service is not None:
-            role_for = getattr(self._project_memory_service, "role_for", None)
+        if actor_user_id is not None and self._workspace_authorizer is not None:
+            role_for = getattr(self._workspace_authorizer, "role_for", None)
             if callable(role_for):
                 role = str(
                     role_for(
@@ -1712,78 +1833,13 @@ class QueryService:
                     session_id=result.conversation_id,
                     trigger_message_id=assistant_message.id,
                 )
-        if self._project_memory_service is None:
-            return
-        session = self._session_service.get_session(
-            session_id=result.conversation_id
-        )
-        if user_message is None:
-            messages = self._session_service.list_messages(
-                session_id=result.conversation_id
-            )
-            user_message = next(
-                (
-                    item.content
-                    for item in reversed(messages)
-                    if item.role == "user"
-                ),
-                "",
-            )
-        source_evidence = [
-            {
-                "kind": source.kind,
-                "source_id": result.run_id,
-                "path": source.path,
-                "start_line": source.start_line,
-                "end_line": source.end_line,
-                "content_hash": source.content_hash,
-                "excerpt": source.text[:500],
-            }
-            for source in result.context_sources
-            if source.kind not in {"knowledge_chunk", "project_memory"}
-            and not source.path.startswith(("knowledge://", "memory://"))
-        ]
-        if result.change_summary.validation_command_count:
-            source_evidence.append(
-                {
-                    "kind": "validation_result",
-                    "source_id": result.run_id,
-                    "excerpt": (
-                        f"{result.change_summary.validation_command_count} "
-                        "validation command(s); "
-                        f"passed={result.change_summary.validation_passed}"
-                    ),
-                }
-            )
-        try:
-            self._task_queue.submit(
-                "memory_extraction",
-                self._project_memory_service.extract_and_store,
-                workspace_id=result.workspace_id,
-                actor_user_id=actor_user_id or session.user_id,
-                source_type="agent_run",
-                source_id=result.run_id,
-                user_message=user_message or "",
-                assistant_message=result.answer,
-                verified=(
-                    result.change_summary.validation_passed
-                    or bool(source_evidence)
-                ),
-                source_evidence=source_evidence,
-            )
-        except TaskQueueError:
-            self._metrics.increment("project_memory_agent_extraction_enqueue_failed_total")
-            logger.warning(
-                "agent memory extraction enqueue skipped",
-                exc_info=True,
-                extra={"run_id": result.run_id},
-            )
-
     def _assert_actor(
         self,
         record: AgentRunRecord,
         actor_user_id: str | None,
     ) -> None:
+        if record.runtime_state.get('internal_maintenance'):
+            raise AgentRunNotFoundError(record.run_id)
         if actor_user_id is None:
             return
         session = self._session_service.get_session(
@@ -1792,11 +1848,14 @@ class QueryService:
         if session.user_id != actor_user_id:
             raise PermissionError("agent run access denied")
 
-    @staticmethod
     def _assert_command(
+        self,
         command: QueryCommand,
         record: AgentRunRecord,
     ) -> None:
+        require_writable = getattr(self._runtime, "require_writable", None)
+        if callable(require_writable):
+            require_writable(record)
         try:
             QueryLifecycle.assert_command(command, record.status)
         except QueryStateError as exc:

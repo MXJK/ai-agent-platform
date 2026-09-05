@@ -41,6 +41,7 @@ class ChangeSetApiTests(unittest.TestCase):
                 )
                 self.assertEqual(registered.status_code, 200, registered.text)
                 patch_text = _diff("app.py", "before\n", "after\n")
+                app.state.runtime.cogent_runtime.create_queued_run(run_id='run-direct-api', conversation_id='conversation-1', workspace_id='workspace-1', workspace_root=str(project))
                 record = app.state.change_set_service.capture(
                     run_id="run-direct-api",
                     conversation_id="conversation-1",
@@ -112,6 +113,7 @@ class ChangeSetApiTests(unittest.TestCase):
                 root_path=str(project),
             )
             patch_text = _diff("app.py", "before\n", "after\n")
+            app.state.runtime.cogent_runtime.create_queued_run(run_id='run-api-1', conversation_id='conversation-1', workspace_id='workspace-1', workspace_root=str(project))
             record = app.state.change_set_service.capture(
                 run_id="run-api-1",
                 conversation_id="conversation-1",

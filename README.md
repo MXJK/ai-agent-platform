@@ -1,14 +1,14 @@
-# AI Agent Platform
+# Cogent
 
 **简体中文** | [English](README.en.md)
 
-基于 FastAPI 的单用户自托管 AI Agent 平台，提供流式对话、任务驱动的代码 Agent、
-托管文档知识库、工作区级项目记忆，以及带审批机制的受控执行能力。当前产品通过
-Docker Compose 运行 App、PostgreSQL 和 Qdrant，并以进程内队列保持单实例边界。
+Cogent 0.2.0 是现有平台外壳上的 Agent 内核替换式重构。普通对话统一进入
+QueryService/CogentRuntime；模型管理、认证、Workspace、Run/Event、ChangeSet、
+MCP 管理和独立 RAG 保留。内部 Python 包仍是 `ai_agent_platform`。
 
-代码 Agent 不会预先索引代码仓库，也不依赖向量嵌入。每次运行都会捕获已注册的
-工作区根目录，围绕当前任务搜索实时文件系统，只读取必要的源码区间，并把原始
-片段直接放入当前模型上下文。
+当前重构支持本地使用；实现与验收证据见
+[重构任务](.workflow/tasks/COGENT-AGENT-REFACTOR.md)。以下部署命令需要操作者审阅迁移后执行，
+不代表本次已部署或已迁移真实数据库。
 
 ## 目录
 
@@ -40,8 +40,8 @@ Chroma 和 OS keyring；会安装 Sentence Transformers/Torch，因为官方 Com
 ```bash
 cp -n .env.example .env
 mkdir -p workspaces
-docker compose up -d --build
-docker compose ps
+docker compose -f docker-compose.yml up -d --build
+docker compose -f docker-compose.yml ps
 ```
 
 浏览器入口是 <http://127.0.0.1:8000>。Compose 只把 App 发布到宿主机 loopback；
@@ -50,9 +50,9 @@ PostgreSQL 和 Qdrant 只在私有 Compose 网络可达。`WORKSPACE_HOST_PATH` 
 不会尝试从容器打开 macOS Finder。
 
 默认 `RUNTIME_PROFILE=custom` 组合现有 PostgreSQL Repository、Qdrant Vector Store 和
-`in_process` TaskQueue。项目记忆开启，用户记忆关闭；Provider API Key 只从模型管理页
+`in_process` TaskQueue。独立项目记忆和用户记忆开启；Provider API Key 只从模型管理页
 录入，Compose 将其加密保存到私有 `app_state` 持久卷，PostgreSQL 只保存不透明引用。
-默认模型仍是 Fake LLM；接入真实 Provider 时在页面保存连接并注册模型即可。
+持久化模型目录首次启动为空：请在模型管理页保存 Provider 连接，注册并启用支持工具调用的模型。Fake 仅用于内存测试。
 
 `AUTH_MODE=single_user` 忽略请求体与 Header 中的用户声明，所有请求都归属固定
 `SINGLE_USER_ID=owner`，并允许 owner 管理模型和 MCP。该模式没有公网认证能力；不得把
@@ -67,52 +67,52 @@ App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App �
 演进使用，但不属于当前 MVP 的支持部署面。旧 `start-local.sh` 仅转发到同一个 Compose
 入口；可用 `./scripts/start.sh --check` 做静态配置检查。
 
-## CLI、REPL、SDK 与进程入口
-
-可安装入口全部是 `RuntimeContainer` 和 `QueryService` 之上的薄适配器：
+已有安装升级时，先备份 PostgreSQL，再执行：
 
 ```bash
-# 一个 Query；stdout 每行都是 AgentEvent 的 JSON，适合脚本消费。
-.venv/bin/ai-agent --workspace /absolute/path/to/project print "解释入口结构"
-
-# 同一 conversation 的多轮交互。
-.venv/bin/ai-agent --workspace /absolute/path/to/project repl
-
-# 兼容的非 Docker 直启入口；未认证模式仍强制 loopback。
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+docker compose -f docker-compose.yml build app migrate
+docker compose -f docker-compose.yml run --rm migrate
+docker compose -f docker-compose.yml up -d app
+docker compose -f docker-compose.yml logs --tail=80 app
 ```
 
-REPL 内置 `/skills`、`/tools`、`/mcp`、`/permissions`、`/resume` 和 `/exit`。
-普通输入在同一个 session 中逐轮创建 Query；运行期间按 `Ctrl+C` 会向当前 Run 发送
-`cancel`，不会把信号处理安装进 SDK、Service 或领域模型。`/resume [run_id]
-[approve|deny] [message]` 对 `waiting_approval` 使用 resume，对 `waiting_input`/`paused`
-使用 continue。print mode 和 REPL 都直接输出 `AgentEventEncoder` 的七字段事件 Schema，
-不另造 CLI 事件模型。
+`migrate` 必须成功到 `20260903_0028`；只看到健康接口成功并不代表数据库已升级。
+启动命令显式指定基础 Compose 文件，避免本机开发 override 的旧镜像或热重载设置干扰。
+首次安装也会自动等待迁移成功。保留数据时停止用 `docker compose -f docker-compose.yml down`，不要加 `-v`。
 
-Python SDK 同样返回领域契约：
+第一次使用：打开页面 → 模型管理中添加连接和模型 → 工作区登记 `/workspaces/项目目录` →
+新建会话并选择该工作区 → 输入任务。默认逐次确认，写入/命令出现审批后再选择是否执行。
+可先发送 `/help`、`/status` 或让 Agent 阅读 README；`/plan` 用于先做只读计划。
+容器中的用户 Cogent 配置与文件记忆保存在 `cogent_user_state` 卷，重建 App 会保留。
 
-```python
-from ai_agent_platform.domain import QueryParams
-from ai_agent_platform.sdk import AgentSDK
+## CLI、REPL、SDK 与进程入口
 
-async def run() -> None:
-    with AgentSDK.from_settings() as sdk:
-        events = sdk.query(QueryParams(
-            conversation_id="sess_existing",
-            workspace_id="project",
-            message="解释 RuntimeContainer",
-        ))
-        last = None
-        async for event in events:       # AgentEvent
-            last = event
-        result = sdk.result(last.run_id) # QueryResult
+在源码目录安装开发入口：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --no-deps -e .
+source .venv/bin/activate
 ```
 
-`AgentSDK.query()`/`resume()` 返回 `AsyncIterator[AgentEvent]`，`control()`/`result()`
-返回 `QueryResult`。SDK 不拥有进程信号；只有 `AgentSDK.from_settings()` 创建的 facade
-会在 `close()` 时释放自己的容器。官方 App 镜像从
-`ai_agent_platform.api.entrypoint` 启动 FastAPI，并由 lifespan 关闭同一个 RuntimeContainer。
-Celery Worker 生命周期适配器仍保留为兼容实现，但当前 Compose 不启动它。
+入口为 `cogent` 和 `cogent-api`，也支持 `python -m ai_agent_platform.cli`。
+本机入口读取本机配置，不会自动连接 Compose 内部数据库；官方持久化使用推荐前面的 Docker 网页路径。
+容器内可直接运行 `docker compose -f docker-compose.yml exec app cogent --workspace /workspaces/项目目录`。
+
+```bash
+cogent --workspace /absolute/path/to/project
+cogent --workspace /absolute/path/to/project --print "解释入口结构"
+cogent-api --host 127.0.0.1 --port 8000
+```
+
+默认启动 Textual TUI；非交互输出、兼容 REPL 和 AgentSDK.query() 同样经过 QueryService。
+Web 通过 POST /api/v1/agent/runs 与 Run SSE 订阅相同事件，/api/v1/chat/stream 返回 404。
+审批、追问、取消、暂停和压缩共享运行时能力，不维护另一套 CLI Agent 循环。
+
+共享命令为 /help、/status、/clear、/compact、/mcp、/memory、/session、
+/skill（兼容 /skills）、/tools、/permissions、/resume、/plan、/review、
+/rewind、/sandbox；/exit 仅用于 CLI 本地退出。
 
 ## 分层运行时配置
 
@@ -198,207 +198,26 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 
 ## Skill 发现与 slash command
 
-启用 `skills_enabled` 后，运行时只发现以下用户全局目录中的 `SKILL.md`：
+发现优先级为项目 `.cogent/skills` > 用户 `~/.cogent/skills` >
+兼容读取 `~/.ai-agent-platform/skills` > 内置。旧 Skill 不自动移动，
+现有 CRUD API/UI 保留，但新写入目标为 ~/.cogent/skills。
 
-- bundled：`ai_agent_platform/bundled_skills/<skill>/SKILL.md`；
-- user：`SKILLS_DIRECTORY_PATH`，默认
-  `~/.ai-agent-platform/skills/<skill>/SKILL.md`。
-
-Workspace 下的 `.agents/skills` 不再参与运行时发现；注册一次后，每个 Workspace 的
-composer、CLI 和 Run 都看到同一份 catalog。来源优先级固定为 `user > bundled`，限定名
-分别是 `user:<name>` 和 `bundled:<name>`。同一来源的重复名称按相对路径字典序选择
-第一项并产生错误诊断；跨来源覆盖、slash command/alias 冲突也产生稳定诊断。最终
-Skill 与 command 都按规范化名称排序。
-
-最小 `SKILL.md` 使用严格、无重复键的 YAML frontmatter：
-
-```markdown
----
-name: review
-description: Review requested code changes
-agents: [coding]
-modes: [default]
-context_budget: 4000
-tools: [repo.search_code, repo.read_file]
-command:
-  name: review
-  description: Review code in the current Workspace
-  usage: "[path]"
-  aliases: [rv]
----
-Inspect live evidence before giving review findings.
-```
-
-`command` 可以省略；此时平台自动用 Skill 的 `name` 和 `description` 注册同名 `/`
-入口。第一版只接受上述字段。每个文件最多 64 KiB，每次发现最多 64 个候选、最多加载
-128 KiB 字符；单个 Skill 的上下文预算上限为 16,000 字符，最终还受 Run 的项目
-指令总预算约束。错误 UTF-8、损坏/重复 YAML、未知字段、超限文件和单个坏 Skill
-只产生诊断，不会终止其余发现。来源根、子目录或 `SKILL.md` 中的 symlink 都不会被
-跟随，真实路径必须留在对应来源根内。
-
-Skill 使用渐进加载：composer 和普通 Run 先只接收名称、描述、路径等元数据；用户通过
-`/` 显式选择时，选中 Skill 的正文在入队前冻结；没有显式选择时，正文不会批量进入
-上下文，模型只有在描述与任务强匹配时才可调用只读 `agent.load_skill` 加载一份正文。
-Skill 是纯声明数据：系统不会执行同目录 Python/Shell，也不会从 Markdown 注册函数。
-`tools` 只是所需工具名称；缺少本次 Run 已筛选工具时 Skill 不进入上下文，即使工具
-存在，调用仍受既有 `ToolUseContext`、Sandbox 和 allow/ask/deny 规则约束。Skill
-不能注册工具、降低审批、扩大 allowlist 或授予权限。Skill 指令的快照优先级低于
-Workspace 指令文件和项目配置指令。REPL 对非内置 slash command 使用用户全局
-Skill catalog 解析覆盖、进程启用列表、Agent/模式和 `required_tools`；成功后提交普通
-`QueryParams(skill_name, skill_arguments)`，并在入队前把选中 Skill 指令与 invocation
-元数据冻结。未知、禁用或缺依赖命令返回稳定诊断；注册表只保存元数据，不执行 Skill
-目录代码，也不扩大工具池或绕过 `PermissionResolver`。
-
-浏览器统一输入框也复用这条调用链。输入 `/` 会按内置命令、全局有效 Skill 和当前
-`EffectiveToolPool` 中的 MCP 工具分组展示并过滤，支持方向键、Enter/Tab、Escape 和
-鼠标选择。选择 Skill 会把限定名与引号感知的参数提交给 Agent；选择 MCP 工具只冻结
-“优先使用此工具”的用户意图，仍由模型原生 tool calling、中央权限解析、审批和 Sandbox
-决定是否调用。`GET /api/v1/agent/composer-capabilities` 按已鉴权会话、Workspace、模型与
-配置生成只读目录，不会把进程中已注册但本次 Run 不可用的能力暴露为可选项。
-
-工作台「工具」（`/#tools`）统一管理 Skill 与 MCP。Skill 管理 API 为
-`GET /api/v1/skills`、`PUT /api/v1/skills/{name}`、
-`PATCH /api/v1/skills/{name}/enabled` 和 `DELETE /api/v1/skills/{name}`；用户 Skill
-支持创建、编辑、启停和删除，bundled Skill 只读。写入使用本机管理能力校验、严格
-Frontmatter 校验、拒绝 symlink，并以 `0600` 原子替换 `SKILL.md`；停用状态保存在同目录
-`.disabled` 标记中，保存后无需重启。
+支持 .md、SKILL.md、skill.yaml + prompt.md、参数替换、热加载及 slash command。
+只支持 inline，mode/context=fork 返回不支持；不会降级执行，也不会读取 .agents/skills。
+Codex 自身 Skill 和项目运行时 Skill 保持隔离。
+Skill 内容是声明式上下文，不能授予工具、提升权限或越过 Workspace 边界。
 
 ## 主要能力
 
-统一输入框提供两种模式：
-
-- `快速对话`：直接返回模型的 SSE 流式响应；
-- `代码 Agent`：围绕任务探索工作区，并在同一条助手消息内展示进度、审批、文件变更、
-  Diff 和 ChangeSet 操作；
-- Agent 模式在 Run 创建请求发出前就乐观显示用户问题与助手等待态；创建失败时保留问题、
-  恢复输入内容，并在原对话提供重试、更换模型和 Trace 审计入口，不再出现“已点击发送但
-  消息区没有问题”的空档；
-- 键入 `/` 可调用内置 `/chat`、`/agent`、`/new`、`/tools` 命令，或选择当前会话真正
-  可用的 Skill/MCP 工具；Skill/MCP 选择会自动切换到代码 Agent；
-- 两种模式共享会话历史和持久化滚动摘要。压缩后的历史与数量受控的近期消息可以
-  共同参与 Chat、Agent 探索和原生工具选择，同时保留原始消息。
-
-两种响应都会在消息内展示运行状态和用量指标。快速对话保留连续执行过程；代码 Agent
-运行卡片只展示 EventStore 驱动的实时活动，不再重复步骤流程和工具汇总。尚未收到对应
-完成事件的节点或工具调用以轻量脉冲标识，完成、失败和终态活动保持静止，并尊重系统的
-减少动态效果偏好。进入终态后卡片自动收敛为一行工作摘要；完整执行事实仍可在 Trace
-审计页按 sequence 复盘，不暴露模型私有 chain-of-thought。
-Chat 使用模型提供方的 SSE 用量；Agent 汇总结构化规划和答案生成阶段由提供方上报的用量。界面会显示每条响应的
-输入、输出、思考和总 Token。Agent 在执行源头实时追加 `node_started`、
-`node_completed`、`reasoning_summary`、工具生命周期和回答事件；OpenAI、Anthropic、
-DeepSeek、Google 与国产 Provider（智谱 GLM、MiniMax、豆包）的原生工具调用正文在
-Provider 生成时即写入 `answer_delta`，cursor
-SSE 直接驱动当前阶段、工具结果和回答正文，只在终态读取一次完整 Run 快照，断流时才
-回退轮询。如果同一模型轮次随后选择工具，`answer_reset` 会清除临时前言，避免污染工具
-执行后的最终回答。`reasoning_summary` 是面向用户的结构化进度摘要，不包含 Provider
-私有 chain-of-thought；工具参数和私有思考也不会作为回答 delta 推送。快速任务仍使用
-有界短暂回放保持阶段顺序。
-
-DeepSeek 兼容端点如果把工具调用编码到正文，adapter 会在 Provider 边界识别 ASCII
-`<tool_calls>`、标准全角 `<｜DSML｜tool_calls>` 和双全角分隔符变体，将完整闭合且通过
-本轮 ToolSpec/参数 Schema 校验的 envelope 转成结构化调用。流式聚合器会跨 chunk 暂存
-可能的协议前缀，只公开确定的普通正文；截断、未知工具或未解析残留 fail closed。文本
-finalization 中的任何工具协议只触发 `answer_reset` 与确定性回答回退，不会执行或进入
-最终消息。
-
-所有模型调用都写入同一本用量账本。Chat、Agent 模型轮次、语义会话压缩、RAG
-Ask 和嵌入调用都会记录：
-
-- `operation` 与资源；
-- 可用时的会话和工作区归属；
-- 请求与实际使用的 Provider/Model；
-- 输入计数方式；
-- 预算决策。
-
-会话页展示每个对话累计的输入、输出、思考和总 Token，以及当前受控会话上下文的
-估算大小和最近一次最终 Prompt 由提供方计数的输入 Token。运行页则按已注册工作区
-展示同类汇总、操作分布和预算状态。
-
-上下文卡片仍采用本地 `unicode_heuristic_v1` 预估，因为它还不是一次真实的提供方
-请求。实际调用前，在历史、记忆、RAG 引用和工具 Schema 组装完毕后，系统会使用
-OpenAI Responses 的 `input_tokens`、Anthropic Messages 的 `count_tokens` 或 Gemini
-的 `models.count_tokens` 统计最终 Provider 形态的 Prompt。提供方在完成响应中返回的
-用量仍是账本中的权威值；预检计数仅作为审计方式记录，只有在完成用量缺失输入
-Token 时才作为后备。
-
-浏览器工作台还包括：
-
-- 托管知识库目录、多文件上传、混合检索、问答、引用和索引任务状态；
-- 项目记忆治理页，包括模式、状态和类型筛选，证据、置信度、乐观锁编辑、确认、
-  拒绝、遗忘和索引修复；
-- 受 `WORKSPACE_ALLOWED_ROOTS` 约束的本地工作区文件夹管理，可切换当前工作区、设置
-  新会话默认值、重新关联失效路径和安全移除注册；统一输入框不重复展开代码上下文，
-  当前工作区通过左侧工作上下文或设置管理，不再提供独立代码 Agent 页面；当前 Compose
-  禁用容器原生目录选择器，网页目录浏览器只展示挂载到 `/workspaces` 的内容，所有选中
-  路径仍经过允许根校验；macOS Finder 选择器仅作为非默认本机开发兼容实现保留；
-- 独立的 `Trace 审计` 页（`/#trace-audit`）按当前身份列出最近 Agent Run，并以可筛选的
-  只读事件时间线展示状态转移、节点、精确工具选择与参数、完整结果或错误、审批请求与
-  审批决定；`run.read_artifact` 只持久化 artifact ID、范围、哈希和 Token 等读取元数据，
-  不把受保护的分页正文复制进事件。运行中和暂停态会自动刷新，历史 Run 也可从持久化
-  事件重放；原有会话内 Trace/审批控件继续承担实时操作，不与审计页互相依赖；
-- Agent 审批、追问和 checkpoint 入口显示在对应助手消息底部；追问采用最多三题的
-  `structured-v1` 契约，每题带稳定 ID、候选项、单选/多选与自定义答案。空答案不能提交，
-  不回答必须显式点击“跳过”；常用运行控制收进 composer 右侧的单一紧凑按钮：运行中显示
-  暂停，到达 `paused` 后原位切换为继续，输入框可选提交补充要求。独立的转向/取消控制卡
-  不再挤占回答区域，但对应后端 API 与审计能力仍保留；
-  任意终态也可打开 Git 风格 checkpoint 轨迹。历史可恢复节点会创建全新的
-  Run：可在当前会话“回到此处继续”，也可复制该 Run 之前的会话前缀并分叉为新会话，
-  原 Run 与父 checkpoint 不会
-  被改写或删除；终态消息内显示修改文件、逐文件增删行、
-  可展开完整 Diff、ChangeSet 校验状态和安全回滚。当前产品的 `direct` Run 会显示已经
-  写入的源码位置，回滚需二次确认摘要；历史 `patch_only` / `worktree` 记录仍按原语义显示。
-  刷新或重新进入会话时会恢复该会话最近一次 Run 及其检查点/ChangeSet，避免把
-  `waiting_approval` 误认为卡死，也避免误以为 Sandbox 文件已经进入真实工作区；
-- 对话输入框随内容自动增高，按会话保存未发送草稿；发送可用性会即时反映空输入、
-  流式忙碌、归档状态和 Agent 工作区前置条件。长对话只在用户停留于底部附近时自动
-  跟随，否则显示显式“回到底部”，避免用户阅读历史时被新内容强制拉走；
-- 对话页将空会话引导与活动会话工作台分开：开始对话后切换为紧凑会话标题和独立消息
-  滚动区，输入框固定显示当前 Workspace、模型和会话累计实际 Token 消耗；上下文进度则
-  以环形指示器呈现“当前保留会话历史估算 / 当前模型输入预算”的百分比，不再把跨请求
-  累计消耗当作上下文占用。悬停环形可查看系统上下文、工具调用、对话消息三段 token
-  拆解（来自最近一次 Agent 运行的 `context_shares`，以 k 为单位）。该估算会随滚动摘要
-  和历史裁剪收敛，并明确不含下一条用户输入、系统提示、工具 Schema 与工作区检索内容；
-  会话详情仍展示最近最终 Prompt 的实际输入计数。
-  用户问题采用右对齐的弱强调气泡，可复制或重新编辑；助手回答采用开放式正文布局，
-  保留克制的身份标记、复制操作以及执行/审批/ChangeSet 内联内容。失败响应提供重试、
-  更换模型和 Trace 审计入口。顶部栏、活动会话标题和输入区采用紧凑密度，让消息区获得
-  更多可视高度；
-- 桌面端左右辅助栏可独立隐藏，并可用指针拖拽或键盘方向键调整宽度；设备会记住显隐和
-  宽度。窄屏右栏作为带遮罩的最近会话抽屉，移动端导航保留四个主要目的地并通过“更多”
-  承载低频工作台；
-- 安全 Markdown 渲染、响应取消、响应式导航和无障碍文字状态。
+普通对话、代码任务、Skill、MCP 和 slash command 共用 Cogent Run，不再提供快速对话模式。
+会话页面显示文本、活动、工具结果、审批、追问和可折叠思考区；模型选择界面保留原有行为。
+知识库/RAG、项目记忆和个人记忆保留独立页面与 API，不注入 Agent。
 
 ### 持久化会话与重启恢复
 
-PostgreSQL 是可跨重启恢复会话的事实来源。会话记录保存自动生成或手工修改的标题、
-归档状态、最后更新时间、工作区和模型配置；`user_preferences` 保存未来会话的默认值
-和最后活跃会话。Provider API Key 位于服务端 Secret Store；数据库 URL 和允许访问的
-文件系统根目录仍是服务端配置，三者都不会进入会话或偏好记录。
-
-`GET /api/v1/sessions` 按最近更新时间返回包含 `message_count` 和
-`last_message_preview` 的列表，支持标题或正文子串搜索、活跃或归档筛选，以及不透明
-游标分页。新分配的会话在第一条消息持久化前只是本地草稿：零消息记录不会出现在
-历史或搜索中，也不会替换最后活跃会话。
-
-在“会话记录”页点击会话，会在当前页的“消息详情”区域展示消息、摘要和 Token 用量，
-不会自动跳转到对话工作台；右侧“最近会话”入口仍直接打开工作台以便继续对话。
-
-`PATCH /sessions/{id}` 可重命名、归档、恢复或修改单个会话，并可选择把配置复制为
-用户默认值，而不重写旧会话。归档会话仍可读取，但恢复之前，Chat、消息写入和
-Agent 执行都会返回 `409`。
-
-桌面端可收起、可调宽的右侧辅助栏只展示最近 12 个活跃会话，并按今天、过去七天和更早
-分组；完整运行详情统一进入独立 Trace 审计页。左侧主导航同样可收起、可调宽。启动恢复
-依次检查 URL 中的会话、
-`last_active_session_id` 和最近活跃会话，并跳过过期的零消息候选。如果没有有效会话，
-页面会停留在欢迎页，不会再创建空记录。加载会话时会恢复消息、摘要，以及该会话
-自己的模型、工作区和输入模式。
-
-浏览器 `localStorage` 只保存设备级 UI 状态和最多 20 个非空会话草稿，不保存用户 ID，
-也不重复保存会话配置。草稿仅保留在当前设备，消息成功提交前不会进入服务端会话记录。
-本地单用户模式使用内部身份，认证模式由可信网关注入身份。健康检查接口会暴露
-`session_storage` 和 `persistent_sessions`；如果使用内存
-模式，界面会明确标记为临时存储。
+会话历史、配置、模型偏好、用量和归档规则保持；Run 的状态与事件流由平台持久化。
+新运行使用版本化 Cogent 状态和快照；旧运行只读。工具执行账本按 call ID 去重。
+当前通过了部分 SQLite 恢复测试，不应将其扩大为全存储、全中断点的生产可靠性承诺。
 
 ### 全局模型注册中心
 
@@ -546,13 +365,9 @@ PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
 `LLM_MODEL_CATALOG_JSON` 形成启动候选，也不会维护第二份静态准入策略；前端的
 注册、启用和停用状态立即影响运行时目录，无需重启。
 
-模型注册记录分别保存上下文窗口和最大输出 token；后者可在模型管理页调整。普通 Chat
-默认请求 `LLM_MAX_OUTPUT_TOKENS`；代码 Agent 的规划和变更阶段分别请求
-`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384`，最终
-text-only 回答则在路由选出实际候选后请求该注册模型的 `max_output_tokens`。模型未声明
-上限时回退 `LLM_MAX_OUTPUT_TOKENS`；上下文剩余空间和 Usage Ledger 仍可进一步安全下调。
-`AGENT_FINAL_MAX_OUTPUT_TOKENS` 仅保留为旧自定义 planner 的兼容 fallback。因此 16K 是
-变更阶段预算，不是要求每个模型都生成 16K，也不会越过注册的模型能力。
+模型注册记录分别保存上下文窗口和最大输出 token。Cogent 普通模型调用使用
+`LLM_MAX_OUTPUT_TOKENS`，截断恢复请求注册能力上限但最多 64K；上下文空间和 Usage Ledger
+仍可进一步下调。旧规划/变更/最终回答阶段预算不再决定 Cogent 的模型循环。
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
@@ -563,8 +378,8 @@ TOKEN_BUDGET_ACTION=reject
 ```
 
 `0` 表示关闭对应范围。使用 `reject` 时，如果请求无法至少保留一个输出 Token，系统
-会在提交用户消息或调用模型之前拒绝请求；允许执行的请求也会把 Provider 输出上限
-限制到剩余硬预算。API 返回 `429` 和 `code=token_budget_exceeded`。
+会在模型生成前拒绝请求；允许执行的请求也会把 Provider 输出上限限制到剩余预算。
+异步 Agent Run 进入 failed 并记录预算错误，已经接收的用户消息保留。
 
 使用 `downgrade` 时，应配置一个会被导入注册中心的低成本组合：
 
@@ -589,530 +404,39 @@ MiniMax、豆包）在预检阶段采用保守估算，最终仍以 Provider 返
 
 ## 代码 Agent 流程
 
-LangGraph 链从以下节点开始：
+1. QueryService 冻结身份、会话、模型、配置、执行工作区和工具池；同会话只允许一个活动或挂起 Run。
+2. Cogent 构造稳定提示，读取项目指令、inline Skill 和独立文件记忆。
+3. canonical conversation 经 RegistryClient.stream 进入已有 Provider/模型管理层。
+4. 完整响应落库后做批次权限预判；AskUserQuestion 和审批都形成持久等待点。
+5. 相邻只读调用受并发上限约束，写入/命令串行。每个结果按 call ID 和参数哈希记账。
+6. 没有工具调用时结束；默认无语义迭代总配额，取消、暂停、超时、预算和权限仍生效。
 
-```text
-setup_workspace
-→ load_project_instructions
-→ classify_request
-→ decide_context_source
-→ retrieve_project_memory（与 repo/RAG 路由正交）
-   ├─ repo   → plan_exploration → execute_exploration → assess_context
-   │                    ↑ 零命中/失败/未读候选时换策略 ─────┘
-   ├─ rag    → retrieve_knowledge
-   ├─ hybrid → retrieve_knowledge → repository exploration
-   └─ none
-→ merge_evidence
-```
+输出截断最多恢复三次，耗尽为 `partial/output_limit_exhausted`；上下文溢出在可压缩时恢复，
+否则 `partial/context_overflow`。大结果保存在 `.cogent/sessions/<run>/tool-results`，只允许
+读取登记且哈希匹配的结果。压缩保留近期工具对，失败保持原历史。
 
-分类器只接收一个受控目录，其中包括知识库 ID、名称、描述和标签。它会选择 `none`、
-`repo`、`rag` 或 `hybrid`，最多选中三个托管知识库。仓库证据仍来自实时文件，文档
-证据复用独立的 RAG 搜索栈。项目记忆最多贡献六条当前 revision 的活跃记录，总预算
-为 3,000 字符。未显式指向知识库的通用“项目介绍”问题强制使用 `repo`，先发现并
-读取 README、项目清单和入口文件，避免无关托管文档填补源码证据真空。
+权限模式：default、acceptEdits、plan、bypassPermissions；规则来自用户、项目和项目本地文件。
+硬拒绝不能被 bypass 或旧审批覆盖。OS sandbox 尝试 Seatbelt/bubblewrap，默认禁网；不可用时
+Bash 不能因此自动获准。官方容器没有 bubblewrap 时显示不可用，仍需命令审批和平台限制。
 
-`merge_evidence` 会在工具或变更规划、答案生成之前保留所有证据来源。当前产品的变更任务
-在 Run 开始前由服务端冻结登记源码根作为 `direct` 执行根；UI 和 `POST /agent/runs` 都
-不接受逐 Run 的执行位置选择。精确工具审批、验证、有界修复以及 Diff/测试产物继续生效。
-终态把完整补丁、写前/写后哈希和源码位置持久化为已应用 ChangeSet，并继续使用基线冲突
-检查、mutation journal、单写者锁和摘要绑定的安全回滚。底层仍可读取历史
-`patch_only` / `worktree` Run 和 ChangeSet。
+MCP 自动选择 eager、小目录全量加载；大目录在支持的官方 Anthropic 模型上使用原生搜索，
+其他模型使用 dispatch/ToolSearch。也可用 `COGENT_MCP_LOADING` 显式设置；不兼容 native 自动
+降级为 dispatch。原生搜索传递 deferred schema，普通工具执行仍受同一权限控制。
+加载集合存入 Run 状态并在恢复/后续会话重建。
 
-运行中的 Agent 状态以产品运行存储为事实源，LangGraph checkpointer 保存完整的有序
-checkpoint 历史。只读历史接口会规范化父节点、时间、图步骤、下一节点、中断信息和恢复
-资格；恢复接口把选中边界克隆到新的 `run_id`/`thread_id`，恢复冻结的 Run context 和
-Effective Tool Pool 后从其下一图节点执行。`rollback` 只改变当前会话的最新执行路径，
-`fork` 创建新会话；两者都不覆盖当前工作区文件，文件撤销仍必须走 ChangeSet 回滚。
-每个恢复 Run 都冻结独立执行根；已清理的 `patch_only` 临时副本会从当前登记的源码重新
-建立沙箱，因此恢复的是历史图状态而不是一份隐式的历史文件快照。
-产品记录一旦进入终态便不可被迟到的 running 快照覆盖；恢复异常也会
-保留原始错误并完成沙箱清理。最终指标包括耗时、节点、实际执行工具数量、修改文件、
-模型请求/模型重试、已恢复错误，以及 Provider 上报的输入、输出、思考和总 Token。支持时
-还会原样采集缓存命中输入、缓存写入输入，并且只在 Provider 的输入口径满足恒等式时计算
-`uncached_input_tokens = input_tokens - cached_input_tokens` 和命中率；总重试同时包含模型
-网关重试和工具重试，不再只反映工具层。
+Cogent 项目记忆根为 `.cogent/memory`，用户记忆按身份隔离于 `~/.cogent/memory/.users/<hash>`。
+MEMORY.md 限制 200 行/25KB。自动整理有 24 小时、至少 5 会话、扫描节流及锁门控；内部维护 Run
+只处理这两处记忆，不获得普通 Workspace、Bash 或 MCP 权限。验证后的模型响应持久化，恢复不重调模型；
+写入前核对整个计划和旧哈希，整理会去除重复/失效索引项，未引用的主题文件不会擅自删除。
 
-默认新 Run 使用自主、无累计配额模式：
+/plan 仅允许读取与写当前计划；ExitPlanMode 要审批。/review 只读审查 Git diff。
+/rewind 先列出文件快照和已完成 Run：`/rewind <run-id> conversation` 可纯对话回退，
+文件回退使用 snapshot ID 与 all/files 模式。预览后审批，冲突拒绝，追加逻辑分支而不删除历史。
+FileHistory 最多保存 100 个快照及前后像。
 
-- `AGENT_AUTONOMOUS_MUTATION_ENABLED=true`，分类模型结合当前请求、受控历史与 focus files
-  选择 `answer / diagnose / change`，不再生成新的 `plan` 模式；
-- `AGENT_RUN_BUDGET_MODE=unbounded`，累计模型请求、工具轮次、工具调用与 Agent graph steps
-  只做观测，不作为终止条件；
-- 每个模型 step 最多 10 个安全只读工具并发；
-- 12 个不同源码文件；
-- 32,000 个源码证据字符；
-- 16,000 个项目指令字符。
-
-探索采用 `targeted_search → broaden_file_inventory → read_discovered_entries` 等可审计
-策略：零命中、工具错误或尚有未读候选都会继续观察并换策略；空计划本身不代表证据
-充分。无累计配额模式只有取得相关仓库证据、达到文件/字符容量，或连续探索没有新证据
-时才会离开探索循环；`AGENT_MAX_EXPLORATION_ROUNDS=4` 只用于 `bounded` 兼容模式。重复工具
-调用、相同行区间和重复内容不会再次消耗证据预算；预算耗尽且仍无证据时会记录明确
-警告，回答必须标注不确定性。原生工具可用时，这一阶段只是种子探索，取得证据后最多
-运行两轮，且每轮由 `AGENT_MAX_READ_TOOLS_PER_ROUND=6` 约束确定性种子读取；它与模型
-step 的 10 路并发上限相互独立。非原生规划器仍保留完整配置预算。通用“仓库有哪些文件/说明项目结构”会按
-项目概览处理，优先形成目录与入口文件证据。
-
-### 原生工具调用循环
-
-OpenAI、DeepSeek、Anthropic、Google 以及国产 Provider（智谱 GLM、MiniMax、豆包，均走
-OpenAI chat-completions 兼容层）的适配器会通过各 Provider 原生的 Function/Tool Calling
-API 发送 `ToolSpec`。生产模型不再通过 Prompt 文本生成 JSON 工具计划。Provider
-特有的函数调用会被标准化为 `LLMToolDecision`，其中包含稳定的 tool-call ID；带点号
-的注册名会转换为 Provider 安全别名，并在执行前映射回原名。Fake Provider 保留
-确定性规则规划，用于离线测试。
-
-原生模型采用统一、受契约与安全门禁约束的“观察—决策—执行”循环。读文件、写 Sandbox、运行验证、
-获取状态与 Diff 都由同一次模型会话按原顺序选择，不再把读、写、验证拆成彼此看不到
-结果的固定阶段：
-
-种子探索已成功完成的根目录列举和整文件读取会作为首轮原生观察直接复用；首轮计划
-若再次提出同一路径会收到 `seeded_evidence` 抑制结果，不会重复执行。显式行范围读取、
-后续精确复核，以及单工具失败恢复不受此规则影响。
-
-需要跨文件采证时，标准 native 工具视图只向模型公开一个只读
-`repo.collect_evidence` 协议，而不是要求模型逐条编排 `repo.list_files`、
-`repo.find_files`、`repo.search_code` 和 `repo.read_file`。模型提交严格的
-`EvidencePlan`，包含查询、候选路径、文件/深度/查询结果/单文件字符/总 Evidence Token
-上限、必需证据和停止条件；缺失或越界预算回退到安全默认值，额外字段直接拒绝。Runtime
-在闭集内规范化并去重查询与路径，跳过版本库、依赖、虚拟环境、缓存和构建目录，对独立
-读取受控并发，并按文件内容哈希去重。write、shell、MCP 或任意模型生成代码不能进入该
-执行器。
-
-每个内部 list/search/read 的成功或失败原始结果都会立即成为当前 Run 的
-`tool_result` Artifact，记录稳定子调用 ID、工具、规范化参数、状态和截断信息；子调用
-继续进入实际工具事件、运行详情和 durable execution ledger，但不会成为逐条
-`role=tool` native 消息。模型只收到外层 call ID 对应的一个有
-`max_evidence_tokens` 硬上限的 `EvidenceBundle`，其中保留路径、行定位、短摘要/片段、
-选择原因与 `artifact_id`，并显式报告 coverage、unresolved、结构化 errors、原始/去重
-数量和截断状态。部分失败不丢弃成功证据；checkpoint 重放通过稳定子调用身份复用已完成
-结果。终态的实际工具数按这些内部真实 ToolResult 计算，外层编排不会冒充一次仓库读取。
-
-Evidence Executor 之上还有一层确定性的任务整形。分类模型结合当前请求、最近八条受控
-历史、focus files、知识库目录与 context route，输出 `answer / diagnose / change` 行动、
-最多 12 个自然语言 `target_terms` 和最多 12 个明确路径 `target_hints`，再冻结本 Run 的
-`task_shape`、`evidence_contract` 和有序工具 Profile；结构化分类不可用时，服务端规则仍会把
-“功能没完成，继续做”这类明确的未完成工作续做指令识别为 `change`，但“为什么继续做会
-失败”“是否继续做”等问句保持只读；`分析下当前项目`、`看看当前项目`、
-`summarize this project` 等无具体目标请求归为 `overview`，但“分析当前项目的登录故障”
-归为 `investigation`。这些字段连同 coverage、unresolved、重复调用数和扩展轮次进入
-LangGraph checkpoint，resume 不重新分类或放宽工具集合。
-
-语义 intent 与模型行动分别保存为 `intent`、`model_action` 和 `request_mode`。默认自主模式
-不再把 `change_planning` 二次降级成 `plan`：模型判断用户要实际创建、修改、修复、重构或
-删除代码时选择 `change` 并冻结 `bounded_change`；诊断与建议仍为只读。短指令“修改”或
-“继续”可以从受控历史恢复用户已经给出的路径；带当前目标的“没完成，继续做”由服务端
-高精度规则直接授予变更模式，不依赖分类模型成功返回。`target_terms` 只用于独立只读搜索和候选
-排序，仓库发现查询只接收当前请求、user 角色历史、focus files、目标词以及用户明确路径/
-符号，不会混入 system/profile/assistant 文本；`target_hints` 也只是探索提示。历史路径必须在本 Run
-读取相同 live repository path 后才能进入 `ChangeCompletionContract`，模型不能凭空扩大
-交付范围。服务端仍在工具可见性和执行点复判 Workspace root、角色、进程 deny、审批、
-Sandbox、路径、修改后验证与 Completion Contract；自主决策不等于自动批准。
-
-所有 `bounded_change` 的证据契约都包含 `validation_result`。成功的
-`sandbox.write_file`/`sandbox.apply_patch` 只证明 `applied_change`，不会同时冒充修改前的
-`current_behavior`；只有修改后的验证命令实际执行且全部以 exit code 0 成功，Change Run
-才允许进入 `completed`。已产生 Diff 但缺少验证时，Runtime 会把明确的补验证提示回灌同一
-Native 会话；验证失败则保留 test report，并继续修复/复验。只有连续无进展、连续失败或
-外部控制边界才会以 `partial`/`blocked` 收敛，
-拒绝修复等外部阻塞保持 `blocked`。`AgentRunResponse.terminal_reason` 和终态 Run event
-公开这一原因，且 `change_summary.validation_passed`、`change_status`、Run status 与最终回答
-使用同一验证事实，不会由 `compose_answer` 兜底升级。
-
-第二阶段把“证据足够”和“用户要求全部完成”拆成两个合同。`bounded_change` 在
-`merge_evidence` 之后先经过 checkpoint-safe 的 `resolve_change_targets`：目标词精确命中、
-HTML/模块入口、同 stem 文件和入口本地 `href/src/import` 关系共同形成候选；已读取 HTML
-中的缺失本地引用可以成为 create 目标。模型只能选择候选集合内且本 Run 已读取的现有路径，
-服务端再次校验 live source、用户明确路径与缺失引用来源。唯一可靠目标解析为 `resolved`，
-同等候选进入 `waiting_input`，没有候选则 fail closed。随后、第一次 workspace mutation 之前
-由服务端冻结独立的
-`ChangeCompletionContract`：每个 required change 具有稳定 ID、精确相对路径、
-create/update/delete、当前请求或 live repository evidence 来源和单调状态；required
-validation 另存验证类别与对应 ToolResult。成功写 CSS 只能满足 CSS 项，不会连带满足 JS；
-`git diff --check` 只属于 Diff 格式证据，不能单独满足功能验证。只有全部 change、第一阶段
-验证门禁、逐项 validation，以及最终 workspace status、Diff 和目标文件状态同时满足，
-BudgetPolicy 才以 `completion_contract_satisfied` 完成。模型提前给终答时，Runtime 把
-unresolved checklist 回灌继续执行；连续无法推进后才以
-`partial / completion_requirements_unresolved` 收敛。无法从当前请求、受控历史目标或 live evidence
-可靠得到目标时以 `completion_contract_unavailable` fail closed。`bounded_change` 只有目标已
-解析才允许用 `native_seed_sufficient` 结束种子探索；尚有未读入口/候选/引用时继续探索。
-冻结后的新 HTML read
-证据只能追加合同并递增 revision/trace，不能删除旧项；旧 checkpoint 没有合同 channel 时
-显式走 `legacy_phase1` 适配并继续保留修改后验证门禁。Run response、ChangeSet 验证摘要、
-trace 和 events 分别公开 evidence satisfied、mutation applied、validation passed 与
-completion contract satisfied 的有界状态。
-
-下表累计配额只在 `AGENT_RUN_BUDGET_MODE=bounded` 的旧 checkpoint/兼容运行中生效；默认
-`unbounded` Run 保留 Evidence Token 和工具 Profile，但移除模型请求、工具轮次与工具调用总量上限。
-
-| task shape（bounded 兼容） | 模型请求上限 | 工具轮次 soft/max | 工具调用 soft/max | Evidence Token | 工具 Profile |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `overview` | 5 | 2 / 3 | 8 / 12 | 12,000 | repository list/find/search/read + `repo.collect_evidence` |
-| `targeted_read` | 8 | 4 / 6 | 12 / 20 | 16,000 | search/read/collect evidence |
-| `bounded_change` | 26 | 12 / 24 | 36 / 72 | 24,000 | search/read/patch/test |
-| `investigation` | 20 | 10 / 18 | 30 / 54 | 24,000 | search/read/log/test |
-| `broad_review` | 12 | 6 / 10 | 20 / 32 | 20,000 | 较宽但仍只读的审查工具 |
-
-bounded 兼容预算只会收紧进程级旧上限。默认 unbounded 模式不读取这些累计 ceiling；
-工具调用计数与模型请求计数仍进入 Run metrics。overview 的真实执行视图不包含
-write、shell、MCP 或控制工具；其他 Profile 也在执行点按冻结集合复判，而不只依赖模型
-可见 Schema。
-
-同一 task shape 的模型前缀也在这一安全边界冻结：system/developer 指令保持最前且顺序
-稳定，工具按名称排序，input/output JSON Schema 使用规范化键序列化；workspace、运行时
-进度、配置变化和 steering 只追加在旧前缀之后，不把时间戳、随机 ID 或动态计数插入
-可缓存前缀。`overview` 不暴露 write、shell、MCP 或 Skill Schema，`targeted_read` 默认不
-暴露修改工具；只有显式外部工具偏好或明确 Skill 需求才把对应动态能力加入冻结 Profile。
-Profile 在 Run 中途不会为了少量 Schema Token 重新排列。
-
-Provider 缓存能力按协议隔离：OpenAI Responses 使用稳定、不可反推 Workspace ID 的
-`prompt_cache_key`，支持显式 breakpoint 的模型再发送其专属 cache options；Anthropic
-使用自己的 `cache_control` system breakpoint；DeepSeek 只依赖其隐式磁盘 KV Cache，
-不会收到 OpenAI 字段；Google 保持稳定前缀并采集隐式 cached-content usage；其他兼容
-端点不支持时保持原请求语义且不虚构命中率。Agent API/UI 分开显示累计输入、缓存命中
-输入、可靠时的未缓存输入、缓存写入、当前保留上下文估算、稳定指令前缀估算、工具
-Schema 估算和模型可见工具数。缓存命中输入仍属于 Provider 上报的累计输入，不会从
-`input_tokens` 或 `total_tokens` 中扣除。
-
-每个 native 工具观察边界维护 `evidence_coverage`、`new_evidence_count`、
-`coverage_delta`、`unresolved_requirements`、`duplicate_tool_call_count` 和
-`evidence_extension_rounds`。必需证据齐全后立即进入文本终答；一轮没有有效新证据，或
-模型再次提出等价/已由种子满足的调用时停止且不执行重复调用。默认 unbounded 模式不再
-进入 soft/hard 累计预算分支；bounded 兼容模式仍保留原有一次扩展与 `partial` 语义。
-最终回答是独立的 text-only 请求，传给
-Provider 的工具集合始终为空。
-
-创建/修改任务在空工作区也必须继续调用 `sandbox.write_file` 或
-`sandbox.apply_patch`；目录盘点使用 `repo.list_files`。`sandbox.run_command` 的模型
-可见契约列出允许的 executable basename，并定位为变更后的验证工具。变更前失败的
-诊断命令只作为可观察错误回灌，不会触发 artifact 收尾或产生空 ChangeSet。
-获服务端修改授权的 Run 还有运行时完成门：没有成功的 Sandbox mutation 时，模型的文本终答
-会被退回并附带明确重规划要求；连续三次仍不执行变更则进入 `blocked`，不会把零文件
-结果标成 `completed`。
-Google Developer API 的工具调用 Token 预检把 system instruction 与工具 Schema 作为
-额外 content 计数，因为它不支持 `CountTokensConfig.system_instruction/tools`；真实
-生成请求仍使用原生 system instruction 和 tools，预算预检不会因 fallback 到 Google
-而失败。
-跨 Provider fallback 时，仅 Google 自己返回的原始 provider items 会作为带
-`thought_signature` 的原生 functionCall 历史重放；其他 Provider 的调用与结果转成
-明确文本观察，避免伪造 Gemini 签名或丢失已执行证据。
-运行时收集 Workspace 状态与 Diff 时会合成一轮 assistant 工具历史：DeepSeek
-思考模式要求每个工具轮次都回传 `reasoning_content`，因此本地合成轮次使用空字符串
-作为无私有推理的 Provider 合法占位；模型真实返回的 reasoning/provider items 仍原样
-重放。OpenAI 和 Anthropic 继续使用各自合法的合成 function/tool-use 历史，Google
-继续降级为文本观察，不伪造 `thought_signature`。Provider JSON 错误的 message 会先做
-凭据脱敏与长度裁剪再进入 Run 错误，便于定位协议问题而不返回请求正文。
-
-生产规划器允许每轮接受一组连续、独立、幂等、无需审批的 `read_only` 调用，批次受
-`AGENT_MAX_PARALLEL_TOOLS_PER_STEP` 限制，默认且执行时硬封顶为 10；执行器并发运行这组读取，
-但按模型提议顺序回灌结果。OpenAI 启用 `parallel_tool_calls`，Anthropic 允许并行
-`tool_use`；Harness 仍会校验 ToolSpec 与本轮权限，所以写入、验证、需审批工具、用户输入
-以及读写混合计划每轮只接受一个，其余调用回灌 `single_tool_turn`，超过读取批次上限的
-调用在默认 unbounded 模式回灌 `step_tool_limit`，让模型在后续 step 重提；bounded 兼容
-模式仍使用 `read_batch_limit`。变更 Prompt 继续要求一次只修改一个文件并优先使用小
-`sandbox.apply_patch`，避免把多个完整文件塞进一个 JSON 参数。当前仍使用各 Provider 的
-结构化工具参数协议，没有假装 DeepSeek/Anthropic/Google 已支持 OpenAI 的 freeform
-`apply_patch` custom tool。
-
-如果函数参数 JSON 非法，错误会被标为可恢复；若 Provider 的 finish reason 是
-`length`/`max_tokens`/`MAX_TOKENS`/`max_output_tokens`，则进一步标记为截断。`LLMClient`
-在 `LLM_MAX_RETRIES` 范围内追加“单工具、单文件、小 patch”的纠错提示并重新预检、授权、
-调用。失败尝试的真实 usage 仍写统一账本；Run 错误只保存 finish reason、参数字符数和
-JSON 解析位置，不保存可能含源码的原始参数。`tool_output_truncated` 默认跳过同一模型的
-重放，直接尝试下一候选，避免把同一份长转录重复发送；运维人员仍可通过
-`LLM_RETRY_POLICY_JSON` 为该错误码显式配置同模型重试次数。
-
-```text
-原生工具调用
-→ EffectiveToolPool 只暴露本 Run 冻结且校验通过的 ToolSpec
-→ PermissionResolver 以 ToolUseContext 判定 allow/ask/deny
-→ ToolRegistry 在执行点复判并校验/执行
-→ 通过 call ID 关联结果或错误
-→ 批量仓库采证：原始子结果全部写 Artifact，只回灌一个 EvidenceBundle
-→ Harness 对内置/MCP 结果统一执行 Token 上限，超限原文写入 Run Artifact
-→ Provider 原生工具结果消息
-→ 模型观察后继续调用工具或作答
-```
-
-Agent Loop 的实现按职责拆分：`graph_builder` 只声明既有节点和边，
-`context_nodes` 负责上下文/检索，`tool_loop_nodes` 负责工具循环，`policies` 负责完成、
-预算与控制策略，`tool_access` 负责每 Run 工具视图与权限投影，
-`run_recorder` 负责 Run/事件/ChangeSet 收尾，
-`checkpoint_coordinator` 负责 invoke/resume 和 checkpoint 查询。
-`CodingAgentRuntime` 保留为兼容 facade；API、Worker、Service 和 Repository 只交换
-`RunContextSnapshot`、`AgentRunRecord` 与 `AgentRunResult`，不接触 LangGraph state。
-拆分由稳定轨迹 golden tests 约束，审批、预算和工具顺序保持兼容；Change Run 在
-`merge_evidence` 与 `plan_tools` 之间依次运行 `resolve_change_targets` 和
-`define_completion_contract` 节点，并保留修改后
-验证成功门禁，未完成交付项、未验证或验证失败都不再标记为完成。
-
-默认 `AGENT_RUN_BUDGET_MODE=unbounded` 不再用 12/36 soft、24/72 hard、900 秒或模型请求数
-决定单个 Run 的终态；这些累计计数保留为观测数据。`bounded` 兼容模式仍使用原有任务表和
-进程 ceiling。两种模式都保留上下文容量、目标解析、证据/完成合同、连续三次失败、无进展、
-重复调用、暂停、取消、
-审批、用户输入与部署队列的基础设施超时。相关兼容配置为
-`AGENT_SOFT_TOOL_ROUNDS`、`AGENT_MAX_TOOL_ROUNDS`、`AGENT_SOFT_TOOL_CALLS`、
-`AGENT_MAX_TOOL_CALLS`、`AGENT_MAX_ELAPSED_SECONDS`、`AGENT_NO_PROGRESS_ROUNDS` 和
-`AGENT_MAX_CONSECUTIVE_FAILURES`。规划和变更阶段输出预算由
-`AGENT_PLAN_MAX_OUTPUT_TOKENS`、`AGENT_MUTATION_MAX_OUTPUT_TOKENS` 控制；内置最终回答
-使用实际候选模型的注册输出上限，`AGENT_FINAL_MAX_OUTPUT_TOKENS` 仅兼容旧自定义 planner。
-其中“进展”按 evidence coverage 增长、Completion Contract 未完成项减少、Artifact 分页
-游标向前、成功 mutation 或验证结果判断；仅仅成功读取不推进游标的 Artifact 页或重叠仓库证据
-不会清零停滞计数。
-Change Run 连续两轮没有语义进展且只剩 `applied_change / validation_result` 时，下一轮模型
-只看到 mutation、validation 与用户输入等行动工具，不再看到探索型只读工具；第三轮仍无
-进展时按现有停滞门禁收口，避免无累计配额被误解为可无限重复读取。
-工具会话超过
-`AGENT_TOOL_RESULT_MAX_TOKENS`（默认 2000，最小 64）的单次结果会在进入模型转录前，无条件替换为
-包含原文首尾、原始 Token 估算与 `artifact_id` 的占位符；完整结果仍保存为同一 Run 的
-`tool_result` Artifact。该规则位于统一 Harness 边界，因此内置工具和 MCP 使用同一路径，
-并通过 `agent_tool_results_truncated_total` 计数。现有每工具字符上限仍作为第二道保护。
-这里的“完整”指进入 Agent Harness 的完整 `ToolResult` canonical JSON；若 Provider 或
-`ToolRegistry` 在此之前已经按自身输出边界截断，Artifact 不承诺恢复更早的原始 payload。
-除 `repo.collect_evidence` 的内部原始结果会按协议立即外置外，未超过单结果上限的普通
-小结果不会预先创建 Artifact；只有正文确实即将被 Snip、Micro-Compact、Auto-Compact
-或确定性 fallback 改变时，`plan_tools` 才按内容哈希惰性外置，
-并把 Artifact additions 与缩减后的 messages 放进同一个 LangGraph state update。该过程不需要
-额外模型调用。四层治理按成本递增且每层后重新计量：L1 立即外置超限结果；L2 在消息预算
-达到 `AGENT_SNIP_PRESSURE_RATIO=0.60` 且存在至少两个安全候选时，在动态 Prompt 后缀暴露
-`agent.snip_context`，模型可在正常回合移除远古只读幂等 assistant/tool 块，最近
-`AGENT_SNIP_KEEP_RECENT_GROUPS=4` 组、用户消息、变更、失败验证与未解决错误不可选；L3 在
-距上次模型请求超过 `AGENT_MICRO_COMPACT_IDLE_SECONDS=3600` 秒时，把旧的可重现只读结果
-惰性外置，只保留最近 `AGENT_MICRO_COMPACT_KEEP_RECENT_RESULTS=5` 份完整正文；L4 使用
-`message_budget - min(message_budget/4, 4096+2048)` 触发 Auto-Compact，先做一次 Micro
-预处理，再由当前 Run 的同一模型在无工具环境生成九段严格 JSON 工作摘要。全部用户消息仍在
-摘要外逐字保留，冻结 system/任务/权限/工具 Profile 重新使用，不重新读取磁盘指令。
-Context Collapse/读时投影没有实现。
-
-当前 Run 的模型可通过只读、幂等工具 `run.read_artifact` 分页回读 `tool_result_*` 与
-`context_transcript_*` 正文。模型只能传
-`artifact_id`、`view=page|head_tail`、`offset_chars` 和 `max_tokens`（默认 800，范围
-64..2000），不能传 `run_id`、conversation、Workspace 或 actor。Runtime 只检查所选
-checkpoint state 实际继承、由自身创建且标为 model-readable 的 Artifact，不做全局哈希查询，
-也不访问 Run Store，因此缺失、跨 Run、类型/哈希损坏统一为 `artifact_not_found`；越界 offset
-返回 `artifact_offset_out_of_range`。MCP 输出里伪造的 ID 不会成为能力，legacy v1/v2
-`RunContextSnapshot` 也不会自动获得新工具。分页结果是 ephemeral，不能再次外置形成 Artifact
-套 Artifact；trace/SSE/metrics 只记录 ID、call/tool、字符范围、字符/Token 数、哈希与错误码，
-不记录正文。pause/resume、rollback 和 fork 始终以被选择 checkpoint 的 Artifact state 为准。
-
-unbounded Run 可按上下文压力重复执行全量重写，不再受累计
-`AGENT_NATIVE_MAX_COMPACTIONS` 次数终止；bounded 兼容模式默认最多 3 次。模型压缩连续失败三次后
-熔断，只保留 pair-safe eviction/fold/drop/truncate 确定性兜底。压缩后仍无法收敛，或已没有
-可安全缩减内容时，Run 以 `blocked/context_compaction_exhausted` 结束。Provider 返回
-“上下文长度超限”时统一映射为 `context_overflow`：
-Harness 只允许一次强制压缩和一次重试，第二次同类错误立即阻断。每个 native 压缩阶段都
-产生 `AgentEvent(type="context")`，包括 `result_externalized`、`snip`、`micro_compact`、
-`auto_compact`、`compaction_fallback` 与 `compaction_failed`；output 只含 Token 前后值、
-释放量、块数、Artifact ID、耗时/触发原因和
-`fits`；checkpoint 分支继承的历史阶段额外标记 `replayed` 及来源 Run/checkpoint，避免被
-误认为分支新执行的压缩。对应指标使用 `agent_native_context_*` 前缀。
-`AGENT_GRAPH_RECURSION_LIMIT` 在 unbounded 模式只定义一次 checkpoint 执行切片的节点数；
-达到后从 durable checkpoint 自动续跑，不再是单任务最大 Agent steps。bounded 兼容模式
-仍把它视为图递归保险。
-
-手动 `/compact [关注点]` 通过
-`POST /api/v1/agent/runs/{run_id}/compact` 与 `QueryCommand.COMPACT` 控制当前 Run，不写会话
-消息。running 请求排队到下一安全边界，paused 自动恢复、压缩并继续；审批/输入等待、queued、
-终态和重复 pending 请求返回 409。pending 请求由 Memory/SQLite/PostgreSQL Run repository
-一致保存。压缩模型调用在 Usage Ledger 中记为 `agent_compaction`，不改写 Provider 原始 Token
-或 Prompt Cache 指标。普通 Chat 的跨轮滚动摘要不受影响。
-
-每次工具使用都构造不可变 `ToolUseContext`，携带已鉴权身份与 Workspace role、登记
-root、进程能力上限、冻结的项目工具选择、审批策略以及当前调用身份。统一
-`PermissionResolver` 返回 `allow`、`ask` 或 `deny`，并附匹配规则、原因和风险摘要。
-进程 deny、Workspace root 边界和身份 RBAC 是不可覆盖硬拒绝；显式 deny 优先，项目配置
-只能继续收紧。展示给模型的工具可先过滤 deny，但 `ToolRegistry` 执行前仍无条件复判，
-避免展示和执行之间的 TOCTOU。MCP/Skill 的权限注解只作为不可信风险输入，不能自行
-产生最终授权。
-
-所有成功或失败结果都会按 call ID 回灌。相同 `(run_id, call_id)` 的完成结果可从内存或
-PostgreSQL 工具执行账本重放，参数哈希变化会拒绝；PostgreSQL 还保存 append-only Run
-事件。模型只在仓库检查无法消除的实质歧义或用户决策上调用 `agent.request_user_input`，
-以稳定问题 ID 和已知候选项进入 `waiting_input`；结构化回答经后端逐题校验并记录
-`user_question_answered`，恢复后作为原 call ID 的普通 ToolResult 回灌，显式跳过也产生成功
-结果。用户也可在安全工具边界暂停、继续、取消或发送转向信息。审批策略通过
-`AGENT_APPROVAL_POLICY=always|on_request|never`
-配置；`never` 对需要 `ask` 的调用返回 `deny`，不是静默授权。批准精确绑定
-`run_id + call_id + tool name + canonical arguments SHA-256`，跨 Run/调用/工具重放或参数
-变化都会重新进入审批。项目把 `on_request` 改成 `always` 或 `never` 都可收紧；进程已为
-`always` 或 `never` 时，项目不能切换到另一种策略造成部分调用重新放行。
-
-Composer 的「自动审批」开关按 per-Run 运行时覆盖把默认 `on_request` 放宽为
-`auto_approve`：需要审批的写、命令或外部调用直接执行，不再进入 `waiting_approval`。
-该覆盖仍受进程 deny、Workspace root 边界与身份 RBAC 等硬拒绝约束，且只对 `on_request`
-生效，不能绕过 `always` 或 `never`。`agent_approval_policy` 配置仍只接受
-`always|on_request|never`，`auto_approve` 仅是用户在对话内的运行时选择。
-
-`ToolRegistry` 在注册时校验完整的 Draft 2020-12 JSON Schema，并在执行时校验输入
-和输出。校验失败只回报路径、约束名、schema 侧期望值以及被拒值的类型和长度，凭据或
-文件内容不会经由错误文本回灌模型。工具规格还声明超时、重试和幂等行为。只有幂等工具
-遇到可重试失败时才会重试；相同 `run_id + call_id` 会重放缓存结果，参数变化则会被拒绝。
-超时不等于取消：工具在独立 daemon 线程中执行，超时后线程被放弃，结果如实说明调用可能
-仍在运行；同一 Run 内还有被放弃的写工具时，后续副作用调用返回 `tool_timeout_in_flight`
-而不是与之竞争。MCP 工具使用同一注册契约：优先读取 `structuredContent`，文本块会被
-标准化，`isError=true` 会变成稳定的工具失败，而不是成功载荷；执行上下文使用保留参数名
-`__tool_context__`，因此服务端自带的 `context` 参数原样透传。
-
-### MCP 生命周期与传输
-
-MCP 默认通过精确锁定的官方 Python SDK `mcp==2.0.0` 协商当前 `2026-07-28`
-协议。`stdio` 和无会话的 `streamable_http` 是当前路径；原有固定
-`2025-06-18` 客户端仅由 `stdio_2025_06_18` 显式选择，旧 HTTP+SSE 仅由
-`legacy_sse` 加 `legacy_compatibility=true` 启用，不参与默认回退。架构取舍记录在
-[`docs/adr/0001-mcp-official-python-sdk-v2.md`](docs/adr/0001-mcp-official-python-sdk-v2.md)。
-
-`MCPConnectionManager` 为每个 Server 独立拥有连接、事件循环、连接/请求超时、幂等
-重试、指数退避、熔断、缓存、取消、关闭和脱敏状态。启动会隔离单 Server 故障；只有
-`required=true` 且未就绪的 Server 会令 `/api/v1/health` 返回 `503` 和
-`ready=false`，可选 Server 故障只使健康状态降级。`tools/list` 会遍历全部分页、拒绝
-重复 cursor/工具名、按名称确定性排序，遵循 `ttlMs`/`cacheScope` 提示，并支持显式
-refresh。工具调用沿用 ToolRegistry 的稳定 call ID；超时、取消、连接关闭、熔断和远端
-工具失败映射为稳定错误码。
-
-HTTP Server 必须使用显式 host allowlist；HTTPS 是默认要求，重定向和代理环境被禁用，
-解析到私网/本机地址默认拒绝。凭据只能通过共享 `SecretStore` 引用注入
-`header_refs`/`env_refs`，不会进入配置快照、诊断或 repr。Header 控制字符、保留
-MCP/HTTP Header、危险 stdio 环境变量和继承的 API Key 都会被阻断。MCP 权限注解始终先
-进入中央 `PermissionResolver`，缺失或高风险提示按外部副作用保守处理，不能直接授权。
-
-启用 MCP 后可直接打开工作台的「工具」（`/#tools`，旧 `/#mcp` 自动兼容跳转）注册、编辑、测试/刷新、启停
-或删除 Server。前端支持当前 stdio、当前 Streamable HTTP 以及两条显式兼容路径，展示
-独立连接状态、协议版本、重试错误和发现/注册工具数。`MCP_CONFIG_PATH` 默认是
-`~/.ai-agent-platform/mcp.json`；文件可以尚不存在，首次保存会以 `0600` 原子创建。
-同时设置 `MCP_ENABLED=true` 时，保存会立即替换该 Server 的连接并同步 ToolRegistry；
-否则配置会保存并标记为等待重启。普通环境变量/Header 与 Secret 输入分开，Secret 值只
-写共享 `SecretStore`，配置文件和后续 GET 响应只保留引用或键名。当前
-`AUTH_MODE=single_user` 下管理写接口统一归属固定 `owner`，并依靠 Compose 只发布
-loopback 端口；关闭认证的直连 loopback 和带本机证明的可信网关是保留兼容模式，
-不是当前产品链路。
-
-管理 API 为 `GET /api/v1/mcp/servers`、
-`PUT /api/v1/mcp/servers/{name}`、
-`PATCH /api/v1/mcp/servers/{name}/enabled`、
-`POST /api/v1/mcp/servers/{name}/test` 和
-`DELETE /api/v1/mcp/servers/{name}`。这些变更只影响目标 Server；停用或删除会关闭其连接
-并原子移除对应的动态工具，不会重建其他 Server 的生命周期。
-
-自托管 Compose 默认同时启用 Skill 与 MCP，把宿主机 `~/.ai-agent-platform` 挂载到
-容器同名目录，并在镜像内安装 `nodejs`/`npm`/`npx`，因此工具页保存的注册表可跨重建
-保留，常见的 Node stdio MCP Server 也具备启动运行时。
-
-最小配置示例：
-
-```json
-{
-  "mcp_servers": {
-    "local-tools": {
-      "transport": "stdio",
-      "command": "python",
-      "args": ["-m", "example_mcp_server"],
-      "env_refs": {"EXAMPLE_TOKEN": "keyring:mcp/example"},
-      "required": false
-    },
-    "remote-tools": {
-      "transport": "streamable_http",
-      "url": "https://mcp.example.com/mcp",
-      "allowed_hosts": ["mcp.example.com"],
-      "header_refs": {"Authorization": "keyring:mcp/remote"},
-      "required": true
-    }
-  }
-}
-```
-
-### 项目指令
-
-Agent 会从工作区根目录到目标文件所在目录逐级加载 `AGENTS.md`。同目录下的
-`AGENTS.override.md` 会替代 `AGENTS.md`；只有两者都不存在时才兼容读取 `CLAUDE.md`，
-因此不会改变既有 AGENTS 优先级。越靠近目标文件的规则越晚加载，也更具体；涉及多个
-目录的任务会保留每条规则的适用路径。配置中的 `project_session.project_instructions`
-作为最低优先级 `config_instruction` 追加，文件指令先消费同一个
-`AGENT_MAX_INSTRUCTION_CHARS` 预算；每个来源冻结 kind/path、priority、完整内容 hash 和
-截断状态。
-
-指令文件通过以可信 Workspace root 为锚的目录描述符读取，目录和文件打开都禁止跟随
-symlink，并要求普通文件；读取前后还会核对 inode、类型、大小和时间元数据以及目录链。
-symlink、路径逃逸、FIFO/socket 等非普通文件或读取过程替换都会阻断 Run，工作区外正文
-不会进入快照。
-
-`QueryService` 是 HTTP、CLI/SDK 适配器和 Worker 共用的入口无关命令内核。
-`QueryParams` 固定 conversation/message、Workspace、focus files、模型/模式覆盖、可选
-Skill invocation 和入口元数据；
-`QueryCommand` 统一 start/resume/continue/steer/pause/cancel/compact；`AgentEvent` 与 `QueryResult`
-分别固定游标事件和终态/恢复结果。FastAPI 仍在 start/resume/continue 入队后立即返回 `202`，
-不会等待 Agent Loop。
-
-`ExecutionContextFactory` 在 start 入队前一次性冻结 Identity、受控会话历史/摘要/模型、
-Workspace revision/root/cwd/Git 摘要、Workspace 有效配置版本、项目指令、schema v3
-Effective Tool Pool 快照和额外目录，形成
-可 JSON 往返的深度不可变 `RunContextSnapshot`。用户消息、queued Run 及其中的模型/配置/
-上下文/工具快照在同一 Query UoW 中提交，提交成功后才派发只含 `run_id` 的 Worker 任务。
-配置解析要求 Session 与 Run store 使用同一受支持后端；无法建立原子 UoW 的组合在运行时
-资源构造前就会失败。
-Worker 重启后从 Run store 恢复快照，不重新读取已经变化的会话历史、模型偏好或指令文件。
-v3 恢复会校验 catalog/pool 摘要与 hash、工具顺序、当前 Registry 中的 callable 以及
-Schema/provider/权限/超时/重试等定义；新增无关全局工具不会进入旧 Run，缺失、漂移或
-篡改则在模型和工具执行前产生安全的 `tool_pool_restore_failed` 终态。v1/v2 历史快照
-仍通过明确的 legacy `ToolRegistryView` 路径加载。
-Git 缺失、非仓库、无 HEAD 或状态读取失败只记录诊断，不会无条件拒绝 Run。
-
-README 文件和目录不会无条件注入上下文；通用项目概览会先列举工作区并优先读取
-README/项目清单，其他任务仍只读取搜索或文件发现选中的路径。
-
-会话历史分两层：旧轮次进入增量压缩的滚动摘要，最新消息保持未压缩。成功完成 Chat
-或 Agent 响应后才会触发压缩；原始消息会被保留，类似凭据的值会被脱敏，同时保存
-乐观锁版本和最后已摘要消息。摘要有长度限制、允许有损，并作为不可信历史上下文注入；
-当前请求和实时证据始终优先。摘要按 `FACTS`/`PREFERENCES`/`DECISIONS`/`OPEN` 分区
-重写，`PREFERENCES` 只增不删，避免反复递归压缩逐轮丢失用户偏好。
-
-滚动摘要的边界按最后已摘要消息 ID 对齐，消息被删除后不会错位；ID 不存在时才退回
-消息计数，并计入 `conversation_summary_realigned_total`。
-
-上下文装配同时受消息条数和 Token 预算约束。Token 预算来自本次将要服务的模型的
-上下文窗口（`LLM_CONTEXT_INPUT_TOKEN_RATIO` 乘以窗口再扣除输出预留），因此小窗口
-模型会更早收敛，大窗口模型可以在 `LLM_MAX_CONTEXT_MESSAGES` 与
-`LLM_MAX_CONTEXT_MESSAGES_CEILING` 之间自动放宽历史条数。超预算按代价从低到高恢复：
-先同步触发一次会话压缩，再丢弃最旧轮次，最后才对消息正文做保留首尾的截断，而不是
-把请求直接抛给 Provider 触发 `context_window_too_small`。装配结果通过 Chat SSE 的
-`context` 事件和 `/sessions/{id}/token-usage` 的 `context` 字段暴露：估算 Token、
-预算、是否含摘要、丢弃与截断条数、同步压缩次数，以及最近一次 Agent 运行的
-`context_shares` 输入预算拆解。会话 Token API 按当前会话模型偏好
-解析预算；前端同时展示 Usage Ledger 的累计实际消耗，避免把历史估算误读为已消耗量。
-
-#### 统一上下文预算
-
-Agent Run 的模型输入额度只在 `setup_workspace` 解析和切分一次。先显式计量 system prompt
-与本 Run 可见工具 input/output Schema 的固定份额，再以
-`LLM_CONTEXT_EVIDENCE_RATIO`（默认 0.25）和
-`LLM_CONTEXT_HISTORY_RATIO`（默认 0.15）切分剩余额度；native 工具转录取得最后的余量。
-所有份额相加恰好等于 `LLM_CONTEXT_INPUT_TOKEN_RATIO` 所解析的 input allowance，并持久化到
-Run 状态及 `setup_workspace` trace。后续层只读取这些份额，不再各自从模型窗口推导比例。
-
-份额在 seed 组装时按字段生效：evidence 先整条丢弃排名较低的来源，最后一个来源只裁剪
-`text`；conversation history 在 Token 模式下使用完整规范化消息，从最新向前选择，只在
-字段边界裁剪最后一条装不下的 content，不再套用摘要 600 字符或每条 280 字符上限；RAG 的
-固定字符上限只在拿不到模型信息时兜底。system、用户本轮请求、checkpoint 恢复方向及全部
-steering 保持逐字。
-因此 seed 始终是合法 JSON，Layered ladder 不会在序列化字符串中间截断它；Provider 报
-`context_overflow` 时也会用缩小后的 evidence/history 份额重建 seed，再执行唯一一次强制
-回收与重试。
-
-若 system 与工具 Schema 固定开销已使 transcript 无可用份额，Run 会在 Provider 调用前以
-`blocked/context_budget_too_small` 结束。`AGENT_NATIVE_CONTEXT_MAX_CHARS`、
-`MAX_AGENT_HISTORY_CHARS`、`MAX_AGENT_HISTORY_MESSAGES` 与 RAG 字符上限仅是预算解析不可用
-或 legacy checkpoint 缺少份额时的兼容退路。
-
-生产入口仍是有界的：Session assembler 先按其消息 ceiling 与 Token 预算冻结
-`RunContextSnapshot.controlled_history`；Coding Runtime 不再对这份已受控输入重复套 12 条
-消息上限，而是完整写入 checkpoint state，再由 history share 决定本轮模型视图。这样既不会
-绕过提交边界的大小控制，也不会让旧消息数上限压过统一预算。
-
-Prompt 前缀按稳定性排序：用户画像等长期稳定内容在最前，滚动摘要与历史其次，
-每轮随查询变化的项目记忆紧贴当前用户消息，使 Provider 的前缀缓存可以命中。
-
-项目记忆是独立的工作区长期子系统，不等同于会话历史或 LangGraph checkpoint，也
-不会自动吸收知识库文档。记忆只作为历史线索；系统/项目指令、当前请求和实时源码
-始终优先。
+Run、事件和版本快照在同一数据库事务保存；SQLite 使用进程文件锁，PostgreSQL 使用 advisory lock。
+启动恢复重新投递未完成 Run，审批/追问保持等待，已确认但未完成的 resume 从落库边界继续。
+旧 `langgraph-v1` 记录只读，非终态在 API 中投影为 blocked/legacy_runtime_retired，不改原记录。
 
 ## 工作区 API
 
@@ -1193,7 +517,7 @@ GET  /api/v1/sessions/{conversation_id}/agent/runs/latest
 GET  /api/v1/agent/runs/{run_id}/events?after={cursor}
 GET  /api/v1/agent/runs/{run_id}/events/stream?cursor={cursor}
 GET  /api/v1/agent/runs/{run_id}/checkpoints?limit=100
-POST /api/v1/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore {"mode":"rollback|fork","message":"可选的新方向"}
+POST /api/v1/agent/runs/{run_id}/checkpoints/{checkpoint_id}/restore  # 历史兼容路由，不再执行旧图恢复
 POST /api/v1/agent/runs/{run_id}/pause
 POST /api/v1/agent/runs/{run_id}/continue   {"message":"paused Run 的可选补充方向"}
 POST /api/v1/agent/runs/{run_id}/continue   {"answers":[{"id":"问题 ID","selected":["候选项"],"custom":null,"skipped":false}]}
@@ -1205,38 +529,16 @@ POST /api/v1/agent/runs/{run_id}/changes/reject {"change_set_id":"chg_xxx"}
 POST /api/v1/agent/runs/{run_id}/changes/apply  {"change_set_id":"chg_xxx","patch_sha256":"<64 hex>"}
 ```
 
-轮询、SSE 与 QueryService 的异步迭代器都读取同一个 append-only EventStore，并通过同一
-`AgentEventEncoder` 编码；事件的 sequence cursor 可用于断线恢复。图节点包装器在进入和
-完成边界分别追加 `node_started` / `node_completed`，并把节点的安全摘要记录为
-`reasoning_summary`。工具执行按 call ID 实时追加 `tool_selected`、`tool_started`、
-`tool_result` 或 `tool_error`；Provider 文本生成期间以有界小批次写入 `answer_delta`，
-工具轮次的临时文字通过 `answer_reset` 清除，最终以 `answer_completed` 收尾。工具参数只在
-完整聚合和 JSON 校验后执行，Provider 私有思考不进入回答事件；首个公开 delta 之后也不再
-静默重试或切换模型。稳定 event key 让 Worker 重投与终态投影不会重复同一执行事实。
-浏览器按事件类型归约当前节点、实时活动和回答正文；代码 Agent 的消息内卡片只呈现实时
-活动，并依据 `node_completed`、`tool_result` / `tool_error` 停止对应进行中标识。在终态
-先读取一次完整 Run 快照再发布 completed UI；事件快照尚无权威 `result.answer` 时保留
-已归约的 `streamed_answer`，不会用空答案占位覆盖正文。连接失败或提前结束时回退到状态
-轮询。`run.read_artifact` 继续复用无正文的 observability
-投影，保留 artifact 身份、读取范围与完整性元数据而不泄漏正文。审批恢复在重新入队前
-追加含操作者与原始请求的 `approval_decided`。因此审计页不依赖瞬时前端状态，也能按
-sequence 复盘执行事实；Provider 私有 chain-of-thought 不进入事件协议。
-最近 Run 列表在 QueryService 中按会话归属过滤，不会跨身份暴露记录。终态包括 `completed`、
-已删除会话遗留的孤儿 Run 按不可见处理，不会使集合查询失败。终态包括 `completed`、
-`partial`、`blocked`、`cancelled` 和 `failed`，交互暂停态包括 `waiting_approval`、
-`waiting_input` 和 `paused`。加载历史会话时，前端通过会话级 latest Run 接口恢复最近
-一次运行，并把审批、追问或暂停控件重新挂回原助手消息，同时恢复常驻 Run 控制条。
-checkpoint 时间线按 Run 做所有权校验；没有下一节点的终态 checkpoint 仍可查看但不能
-恢复，运行中的源 Run 必须先到达暂停边界。生命周期观察器绑定 Run 和
-会话 ID，切换会话不会让旧 Run 的晚到事件覆盖当前页面。最终助手消息用持久化
-`source_run_id + role` 唯一键确保只写一次；Worker 重投可补写崩溃窗口内缺失的消息，已写入
-时则安全跳过。
+轮询、SSE 与 QueryService 异步迭代器读取同一个 append-only EventStore，
+由 AgentEventEncoder 编码并使用 sequence cursor 续传。新运行输出 answer_delta、
+thinking_delta/thinking_completed、tool_started/tool_result、permission_required、
+compact_completed、retry、turn_completed 和 usage；reasoning_summary 仅用于旧记录。
+终态以完整 Run 结果为准，用户归属校验和最终助手消息 source_run_id 幂等约束保留。
 
-响应会暴露 `context_route`、`selected_knowledge_base_ids` 和 `context_sources`。知识块
-使用 `kind=knowledge_chunk`，并包含可选的 `knowledge_base_id`、`document_id` 和
-`score` 来源字段。已经移除的 `repository_id`、`rag_context` 和逐 Run
-`workspace_mode` Agent 字段不会被接受；Run 状态仍返回服务端冻结的最终 mode 与
-execution root 作为审计信息。
+新 Cogent 结果不返回 context_route、selected_knowledge_base_ids 或 context_sources，
+请求不得选择知识库。历史 JSON 仍可只读展示。checkpoint 接口用于查看快照，
+旧图 restore 不再提供执行能力；回退必须走 /rewind 的预览、审批及哈希复核。
+Run 状态继续返回服务端冻结的执行模式与 execution root，不能逐 Run 覆盖。
 
 ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒绝/历史应用/回滚也进入同一
 `PermissionResolver` 的 Workspace role/root 判定，同时保留服务内纵深校验。它保存不可
@@ -1271,9 +573,8 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
   当前源码检出保持不变。
 
 真实 `.env`、凭据、私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件都会被
-拒绝或跳过并记录。Agent 的每次 mutation 还必须同时满足两层条件：路径属于已冻结的
-`ChangeCompletionContract`，并且每个已存在目标已经在本 Run 读取；读取后的内容哈希若与
-当前文件不一致就要求重新读取。写文件接受可选 `expected_sha256`，所有已存在目标继续校验
+拒绝或跳过并记录。Cogent 的副作用先经过批次权限与精确审批。
+写文件接受可选 `expected_sha256`，所有已存在目标继续校验
 Run 基线和当前哈希；补丁还校验路径、上下文和写前哈希。写入使用同目录临时文件、`fsync`
 和原子替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施
 单写者锁，外部编辑和并发 Agent 冲突都会停止而不覆盖内容。
@@ -1314,6 +615,9 @@ Docker Socket，也不声称支持不可信仓库。
 Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmpfs。
 
 ## 项目记忆
+
+本节是保留的独立平台记忆系统，不是 Cogent 文件记忆。治理 API、数据、索引和评测保留；
+普通 Cogent 对话既不注入这些事实/画像，也不再触发旧 Chat/Agent 自动抽取链。
 
 当前记忆架构采用 **L0 → L1 → L2 → L3**：L0 保存原始消息并支持按需搜索；L1 是当前
 Workspace/revision 的原子项目事实；L2 按用户和 Workspace 将 active L1 确定性聚合为
@@ -1370,9 +674,7 @@ Workspace/revision 的原子项目事实；L2 按用户和 Workspace 将 active 
 ```
 
 时间新鲜度使用 `last_confirmed_at`（缺失时回退到 `updated_at`），默认半衰期为 180
-天。候选会先全局排序，再应用六条结果和 3,000 字符预算；Chat/Agent 来源信息会暴露
-最终分数及三个组成项。向量失败时降级为词法检索，记忆失败不会导致主 Chat 或 Agent
-回答失败。
+天。独立检索服务先全局排序，再应用六条结果和 3,000 字符预算。
 
 管理接口：
 
@@ -1391,9 +693,7 @@ PATCH、confirm 和 reject 必须携带当前 `version`。Viewer 可以检索和
 创建、编辑、确认和拒绝；Admin 可以修改模式、遗忘记录和修复索引。遗忘操作会硬删除
 记忆、证据和向量数据，但不会删除来源会话。
 
-`ChatStreamRequest.workspace_id` 对旧客户端仍是可选字段。传入后，Chat 会在答案
-Token 前发送 `memory_context`，并在响应完成后排队抽取任务。Agent 在上下文路由后
-执行 `retrieve_project_memory`，只有运行成功完成后才按 `run_id` 排队抽取。
+Cogent 不调用本节的检索或抽取链；旧 /chat/stream 已删除。
 
 ### L0 对话搜索与 L2/L3 画像流水线
 
@@ -1409,10 +709,7 @@ L3 使用独立的 `UserMemory` 领域，固定为 `profile_fact`、
 请求直接 active；普通偏好在 `auto` 下也直接 active，在 `review` 下保留为 candidate。
 每次 L1 新增、编辑、状态变化或删除都会异步重建对应的 `UserMemoryScene`（L2），再从
 L2 场景和 active 用户事实确定性重建最多 1,500 字符的 `UserProfileSnapshot`（L3），
-不调用 LLM。Chat 与 Agent
-始终把已确认小画像标记为不可信历史偏好；它不能覆盖当前请求、系统/项目指令、权限或
-实时源码。Agent 的助手结果只可提炼 L1，不能推导 L3。凭据、完整环境变量、权限提升
-要求和 Prompt Injection 会在 L1/L3 写入前被拒绝。
+不调用 LLM。这些画像仅保留为平台独立数据；Cogent 不读取或注入它们。
 
 L3 管理接口：
 
@@ -1430,8 +727,8 @@ GET       /api/v1/memory/conversations/search
 
 前端“记忆工作台”按用户可直接查看和治理的对象划分为“项目记忆 / 个人记忆 / 对话记录”：
 项目记忆和个人事实均使用左侧资产列表、右侧详情治理的双栏布局，显示 active/candidate
-统计、状态/类型筛选、证据、版本和可用操作；个人摘要单独预览模型实际会参考的确定性
-快照；对话记录展示用户隔离的最近消息、搜索命中与原文详情。L2 场景仍在后台参与画像
+统计、状态/类型筛选、证据、版本和可用操作；个人摘要单独预览独立保存的确定性
+快照（Cogent 不读取）；对话记录展示用户隔离的最近消息、搜索命中与原文详情。L2 场景仍在后台参与画像
 生成和来源追溯，但不作为独立前端资产展示。L1 固定自动提炼，前端不再暴露工作区模式、
 手动重建索引或刷新控件；进入页面即自动加载。
 
@@ -1462,46 +759,12 @@ USER_PROFILE_MAX_CONTEXT_CHARS=1500
 [`.env.local-memory.example`](.env.local-memory.example) 提供全部结构化数据均落 SQLite 的
 单进程变体；Compose 则只把用户级 L2/L3 放在挂载到 `app_state` 的 SQLite 中。
 
-会话压缩单独配置：
-
-```dotenv
-CONVERSATION_SUMMARY_ENABLED=true
-CONVERSATION_SUMMARY_TRIGGER_MESSAGES=12
-CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES=6
-CONVERSATION_SUMMARY_MAX_CHARS=4000
-CONVERSATION_SUMMARY_MAX_SOURCE_CHARS=12000
-CONVERSATION_SUMMARY_SYNC_ON_OVERFLOW=true
-```
-
-上下文预算单独配置：
-
-```dotenv
-LLM_MAX_CONTEXT_MESSAGES=12
-LLM_MAX_CONTEXT_MESSAGES_CEILING=48
-LLM_CONTEXT_INPUT_TOKEN_RATIO=0.6
-LLM_CONTEXT_EVIDENCE_RATIO=0.25
-LLM_CONTEXT_HISTORY_RATIO=0.15
-AGENT_TOOL_RESULT_MAX_TOKENS=2000
-AGENT_TOOL_RESULT_KEEP_RECENT=6
-AGENT_NATIVE_MAX_COMPACTIONS=3
-AGENT_SNIP_ENABLED=true
-AGENT_SNIP_PRESSURE_RATIO=0.60
-AGENT_SNIP_KEEP_RECENT_GROUPS=4
-AGENT_MICRO_COMPACT_IDLE_SECONDS=3600
-AGENT_MICRO_COMPACT_KEEP_RECENT_RESULTS=5
-AGENT_COMPACTION_MAX_OUTPUT_TOKENS=4096
-AGENT_COMPACTION_SAFETY_BUFFER_TOKENS=2048
-AGENT_COMPACTION_MIN_RECLAIMABLE_TOKENS=2048
-```
-
-`LLM_MAX_CONTEXT_MESSAGES` 是下界，`LLM_MAX_CONTEXT_MESSAGES_CEILING` 是 Token 预算
-允许时的上界；两者相等即固定为原有的定长窗口。
-
-`LLM_CONTEXT_INPUT_TOKEN_RATIO` 是唯一的窗口比例。evidence 和 history 比例都作用于扣除
-system/tool-schema 固定开销后的余额，二者之和必须小于 1；调小它们会把更多额度留给工具
-转录。旧 `AGENT_NATIVE_CONTEXT_TOKEN_RATIO` 已移除。
+Cogent 会话压缩与本节平台记忆无关；其近期保留、成对工具消息及摘要边界由新内核管理。
 
 ## 独立知识库
+
+RAG answer、索引和评测直接使用独立 RAG service 与模型注册中心，不经过 Cogent 循环。
+Agent 请求携带知识库选择将被明确拒绝；本次不重建现有索引或迁移 RAG 数据。
 
 导入文档前，先创建目录元数据：
 
@@ -1615,6 +878,9 @@ RAG_RERANK_DEFAULT_ENABLED=false
 .venv/bin/alembic upgrade head
 ```
 
+新增 `20260903_0028` 保存 Cogent 版本化运行状态与快照，SQLite 对应 schema v4。
+本次没有对真实数据库应用迁移；迁移前必须备份并由操作者确认。
+
 主要迁移：
 
 - `20260723_0006`：永久删除仓库索引表，将 repositories 重命名为 workspaces，迁移
@@ -1644,7 +910,7 @@ RAG_RERANK_DEFAULT_ENABLED=false
   恢复。该 revision 在本任务中**没有执行**；启动 PostgreSQL runtime 前必须先由操作者
   审阅并显式授权应用。
 - `20260813_0021`：为消息添加 `source_run_id` 与每 Run/role 唯一约束，使 Query start 的
-  用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束；该迁移同样尚未执行。
+  用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束；这是既有迁移；本次仅在隔离验收数据库执行迁移链，用户数据库需按升级步骤处理。
 - `20260820_0022`：为每个已注册模型添加 `max_output_tokens` 能力上限；现有 DeepSeek
   记录回填为 8192、fake 为 4096，其余为 16384。该迁移随代码交付但未在当前数据库执行。
 - `20260825_0025`：新增 `model_probe_stats`，将固定短提示的手动/周期探测与真实业务请求
@@ -1664,7 +930,6 @@ AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
-LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=true
 PROJECT_MEMORY_MODE=auto
@@ -1679,7 +944,7 @@ WORKSPACE_ALLOWED_ROOTS=/workspaces
 
 | 组件 | 职责 |
 | --- | --- |
-| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 LangGraph checkpoint |
+| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 Cogent runtime snapshot |
 | Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
 | SQLite | 保留的兼容/测试 Adapter；当前产品只可选用于尚未迁移的单实例用户记忆 |
 | Redis/Celery | 保留的多 Worker 扩展实现；当前 Compose 不启动 |
@@ -1708,8 +973,7 @@ Celery 不在当前服务集合中。
 
 FastAPI `create_app()` 与保留的 Celery Worker 进程适配器都通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
-Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、LangGraph
-checkpointer、Agent runtime 和业务 Service 因此使用同一依赖图；正式 CLI print、REPL
+Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、Cogent runtime 和业务 Service 因此使用同一依赖图；正式 CLI print、REPL
 和 SDK 也复用该容器与 Query Kernel。启动配置在进入工厂前只解析进程基线；Workspace
 项目覆盖、配置指令和 Effective Tool Pool 在 Run 入队前按已鉴权主 Workspace root
 解析并冻结。共享 `ToolPoolBuilder` 注入 ExecutionContextFactory、QueryService 与拆分后的
@@ -1745,6 +1009,8 @@ go vet ./gateway/...
 ```bash
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
+.venv/bin/python INTERVIEW_NOTES/validate.py
+node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs
 docker compose --env-file .env.example config --quiet
 bash -n scripts/start.sh scripts/start-local.sh
 node --check ai_agent_platform/static/app.js
@@ -1765,7 +1031,8 @@ git diff --check
 .venv/bin/python evals/run_memory_evals.py
 ```
 
-四个套件分别回答不同问题：`run_evals.py` 是 L0 管道回归与小型 RAG 检索门槛；
+各套件分别回答不同问题：`run_evals.py` 默认跑 Agent 管道回归，
+`--cases evals/platform_rag_cases.json` 单独跑原小型 RAG 检索门槛；
 `run_rag_evals.py` 是独立的 30 条分级 RAG 试标集，按文件去重后报告
 K=1/3/5/10 的 Recall、Precision、Core MRR、NDCG、Hit Rate，以及 hard negative、
 无答案、冲突资料和检索 p50/p95。它默认只诊断，标注复核稳定前不会用草案门槛阻断；
@@ -1817,3 +1084,14 @@ Provider 凭据仍由应用内模型注册表解析，Secret 不进入评测记�
 ---
 
 [查看英文版 README](README.en.md)
+
+真实数据库/OS 验收可选项（只能指定隔离测试库）：
+
+```bash
+COGENT_TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/cogent_test \
+COGENT_TEST_OS_SANDBOX=1 .venv/bin/python -m pytest -q tests/test_cogent_acceptance.py
+```
+
+不设置变量时跳过需要真实 PostgreSQL/OS 权限的用例；常规内存和 SQLite 测试继续运行。
+测试库须先使用项目 Alembic 迁移到 head。检索回归可单独运行
+`evals/run_evals.py --cases evals/platform_rag_cases.json`，原分层 RAG pilot 数据保留不变。

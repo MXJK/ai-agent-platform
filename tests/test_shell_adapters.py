@@ -152,90 +152,42 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.command, QueryCommand.CANCEL)
         self.assertIn("cancelling active Run", errors.getvalue())
 
-    async def test_repl_compact_uses_query_kernel_control(self) -> None:
-        class StubQueryService:
-            event_encoder = AgentEventEncoder()
-
-            def execute(self, command, **kwargs):
-                self.command = QueryCommand(command)
-                self.kwargs = kwargs
-                return SimpleNamespace(run_id=kwargs["run_id"])
-
-            def get_result(self, run_id, *, actor_user_id=None):
-                return QueryResult(run_id=run_id, status="running", cursor=3)
-
-        service = StubQueryService()
-        runtime = RuntimeContainer(settings=Settings(), role="cli")
-        runtime.query_service = service  # type: ignore[assignment]
-        output = io.StringIO()
-        with TemporaryDirectory() as temp_dir:
-            application = CliApplication(
-                runtime,
-                workspace_root=temp_dir,
-                workspace_id="workspace",
-                output_stream=output,
-                error_stream=io.StringIO(),
-            )
-            application.last_run_id = "run_compact"
-            self.assertFalse(
-                await application._handle_slash_command(
-                    "/compact preserve migration state"
-                )
-            )
-
-        self.assertEqual(service.command, QueryCommand.COMPACT)
-        self.assertEqual(service.kwargs["run_id"], "run_compact")
-        self.assertEqual(
-            service.kwargs["message"], "preserve migration state"
-        )
-        diagnostic = _json_objects(output.getvalue())[0]
-        self.assertEqual(diagnostic["kind"], "compact")
-        self.assertTrue(diagnostic["queued"])
-
-    async def test_repl_exposes_required_commands_and_explicit_exit(self) -> None:
+    async def test_repl_compact_uses_shared_query_command(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-            runtime = build_runtime(_settings(root), role="cli")
+            runtime = build_runtime(_settings(root), role='cli')
             output = io.StringIO()
             try:
-                application = CliApplication(
-                    runtime,
-                    workspace_root=root,
-                    workspace_id="workspace",
-                    input_stream=io.StringIO(
-                        "/skills\n/tools\n/mcp\n/permissions\n/resume\n/exit\n"
-                    ),
-                    output_stream=output,
-                    error_stream=io.StringIO(),
-                )
+                application = CliApplication(runtime, workspace_root=root, workspace_id='workspace',
+                    input_stream=io.StringIO('hello\n/compact preserve state\n/exit\n'),
+                    output_stream=output, error_stream=io.StringIO())
                 self.assertEqual(await application.run_repl(), 0)
+                record = runtime.cogent_runtime.get_run(application.last_run_id)
             finally:
                 runtime.close()
+        self.assertEqual(record.status, 'completed')
+        events = _json_objects(output.getvalue())
+        self.assertTrue(any(item.get('type') == 'compact_completed' for item in events))
+        self.assertTrue(any(item.get('type') == 'command_completed' and item['output']['command'] == 'compact' for item in events))
 
-        kinds = {
-            payload["kind"]
-            for payload in _json_objects(output.getvalue())
-            if "kind" in payload
-        }
-        self.assertEqual(
-            kinds,
-            {"skills", "tools", "mcp", "permissions", "error"},
-        )
-        diagnostics = {
-            item["kind"]: item
-            for item in _json_objects(output.getvalue())
-            if "kind" in item
-        }
-        self.assertEqual(diagnostics["skills"]["workspace_id"], "workspace")
-        self.assertEqual(diagnostics["skills"]["agent"], "coding")
-        self.assertEqual(diagnostics["tools"]["workspace_id"], "workspace")
-        self.assertIn("effective_pool_tools", diagnostics["mcp"])
-        self.assertEqual(
-            diagnostics["permissions"]["workspace_role"],
-            "admin",
-        )
-        self.assertIn("effective_denies", diagnostics["permissions"])
+    async def test_repl_exposes_shared_commands_and_explicit_exit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = build_runtime(_settings(root), role='cli')
+            output = io.StringIO()
+            try:
+                application = CliApplication(runtime, workspace_root=root, workspace_id='workspace',
+                    input_stream=io.StringIO('/skills\n/tools\n/mcp\n/permissions\n/exit\n'),
+                    output_stream=output, error_stream=io.StringIO())
+                self.assertEqual(await application.run_repl(), 0)
+                records = runtime.cogent_runtime.list_recent_runs()
+            finally:
+                runtime.close()
+        events = _json_objects(output.getvalue())
+        commands = [item['output']['command'] for item in events if item.get('type') == 'command_completed']
+        self.assertEqual(commands, ['skill', 'tools', 'mcp', 'permissions'])
+        self.assertEqual(len(records), 4)
+        self.assertFalse(any(item.get('kind') == 'error' for item in events))
 
     async def test_global_skill_command_submits_query_and_freezes_invocation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -243,13 +195,13 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
             (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
             _write_project_skill(
                 root,
-                name="review",
-                command="review",
+                name="inspect",
+                command="inspect",
                 required_tools=("repo.read_file",),
             )
             _write_project_config(
                 root,
-                enabled_skills=("user:review",),
+                enabled_skills=("user:inspect",),
             )
             runtime = build_runtime(_settings(root), role="cli")
             output = io.StringIO()
@@ -258,7 +210,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                     runtime,
                     workspace_root=root,
                     workspace_id="workspace",
-                    input_stream=io.StringIO("/review app.py\n/exit\n"),
+                    input_stream=io.StringIO("/inspect app.py\n/exit\n"),
                     output_stream=output,
                     error_stream=io.StringIO(),
                 )
@@ -273,14 +225,14 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         invocation = record.context_snapshot.metadata.entrypoint_metadata[
             "skill_invocation"
         ]
-        self.assertEqual(invocation["skill_name"], "user:review")
+        self.assertEqual(invocation["skill_name"], "user:inspect")
         self.assertEqual(invocation["arguments"], ["app.py"])
         self.assertIn(
             "skill_instruction",
             {item.kind for item in record.context_snapshot.instructions.sources},
         )
         self.assertNotIn(
-            "review",
+            "inspect",
             record.context_snapshot.tools.enabled_tools,
         )
 
@@ -288,7 +240,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
         for enabled_skills, required_tools, expected_code in (
             ((), (), "skill_disabled"),
             (
-                ("user:review",),
+                ("user:inspect",),
                 ("missing.tool",),
                 "skill_required_tools_unavailable",
             ),
@@ -298,8 +250,8 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                 (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
                 _write_project_skill(
                     root,
-                    name="review",
-                    command="review",
+                    name="inspect",
+                    command="inspect",
                     required_tools=required_tools,
                 )
                 _write_project_config(root, enabled_skills=enabled_skills)
@@ -313,7 +265,7 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                         runtime,
                         workspace_root=root,
                         workspace_id="workspace",
-                        input_stream=io.StringIO("/review app.py\n/exit\n"),
+                        input_stream=io.StringIO("/inspect app.py\n/exit\n"),
                         output_stream=output,
                         error_stream=io.StringIO(),
                     )
@@ -372,15 +324,11 @@ class ShellAdapterE2ETests(unittest.TestCase):
         pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('ai-agent = "ai_agent_platform.cli:main"', pyproject)
-        self.assertIn(
-            'ai-agent-platform = "ai_agent_platform.cli:main"',
-            pyproject,
-        )
-        self.assertIn(
-            'ai-agent-api = "ai_agent_platform.api.entrypoint:main"',
-            pyproject,
-        )
+        self.assertIn('cogent = "ai_agent_platform.cli:main"', pyproject)
+        self.assertIn('cogent-api = "ai_agent_platform.api.entrypoint:main"', pyproject)
+        self.assertNotIn('ai-agent = ', pyproject)
+        self.assertNotIn('ai-agent-platform = ', pyproject)
+        self.assertNotIn('ai-agent-api = ', pyproject)
 
         resolved = ResolvedConfig.from_settings(
             Settings(auth_mode="disabled", model_secret_backend="memory")

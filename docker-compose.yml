@@ -12,7 +12,6 @@ x-app-environment: &app-environment
   EVAL_FAULT_INJECTION_ENABLED: "true"
   DOCUMENT_STORE: "postgres"
   WORKSPACE_STORE: "postgres"
-  LANGGRAPH_CHECKPOINTER: "postgres"
   MODEL_REGISTRY_STORE: "postgres"
   MODEL_SECRET_BACKEND: "encrypted_file"
   MODEL_PROBE_INTERVAL_SECONDS: "${MODEL_PROBE_INTERVAL_SECONDS:-0}"
@@ -110,6 +109,7 @@ services:
       - "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform"
       - app_state:/var/lib/ai-agent-platform
       - model_cache:/home/app/.cache/huggingface
+      - cogent_user_state:/home/app/.cogent
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -131,6 +131,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  cogent_user_state:
   app_state:
   model_cache:
   postgres_data:

@@ -113,9 +113,25 @@ class ChangeSetService:
         self._role_for = role_for
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
+        self._run_write_guard: Callable[[str], None] | None = None
 
     def set_audit_callback(self, callback: Callable[..., None] | None) -> None:
         self._audit_callback = callback
+
+    def set_run_write_guard(self, guard: Callable[[str], None]) -> None:
+        self._run_write_guard = guard
+
+    def _assert_run_writable(self, record: ChangeSetRecord) -> None:
+        if self._run_write_guard is not None:
+            try:
+                self._run_write_guard(record.run_id)
+            except Exception as exc:
+                if getattr(exc, "code", None) == "legacy_run_read_only":
+                    raise ChangeSetInvalidStateError("legacy_run_read_only") from exc
+                from ai_agent_platform.agents.coding.models import AgentRunNotFoundError
+                if isinstance(exc, AgentRunNotFoundError):
+                    raise ChangeSetNotFoundError("The source Run is missing; changes cannot be applied") from exc
+                raise
 
     def capture(
         self,
@@ -322,6 +338,7 @@ class ChangeSetService:
         actor_user_id: str | None,
     ) -> ChangeSetRecord:
         current = self.get(change_set_id, actor_user_id=actor_user_id)
+        self._assert_run_writable(current)
         self._authorize_role(
             current,
             actor_user_id,
@@ -349,6 +366,7 @@ class ChangeSetService:
         actor_user_id: str | None,
     ) -> ChangeSetRecord:
         current = self.get(change_set_id, actor_user_id=actor_user_id)
+        self._assert_run_writable(current)
         self._authorize_role(
             current,
             actor_user_id,
@@ -464,6 +482,7 @@ class ChangeSetService:
         actor_user_id: str | None,
     ) -> ChangeSetRecord:
         current = self.get(change_set_id, actor_user_id=actor_user_id)
+        self._assert_run_writable(current)
         self._authorize_role(
             current,
             actor_user_id,

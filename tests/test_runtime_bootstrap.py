@@ -95,9 +95,6 @@ class _RecordingFactory(ApplicationFactory):
     def create_rag_service(self, settings, **kwargs):
         return super().create_rag_service(self.local_settings, **kwargs)
 
-    def create_langgraph_checkpointer(self, settings):
-        return None, None
-
 
 class RuntimeBootstrapTests(unittest.TestCase):
     def settings(self, **overrides: object) -> Settings:
@@ -117,7 +114,6 @@ class RuntimeBootstrapTests(unittest.TestCase):
             change_set_store="postgres",
             document_store="postgres",
             workspace_store="postgres",
-            langgraph_checkpointer="postgres",
             rag_vector_store="qdrant",
         )
 
@@ -218,7 +214,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "skill_service",
                 "skill_catalog",
                 "command_registry",
-                "checkpointer",
+                "cogent_runtime",
                 "coding_agent_runtime",
                 "session_service",
                 "query_service",
@@ -337,10 +333,10 @@ class RuntimeBootstrapTests(unittest.TestCase):
             def create_tool_registry(self, settings, *, mcp_providers):
                 return _FakeToolRegistry(events)
 
-            def create_langgraph_checkpointer(self, settings):
-                raise RuntimeError("checkpointer setup failed")
+            def create_cogent_runtime(self, settings, **kwargs):
+                raise RuntimeError("Cogent setup failed")
 
-        with self.assertRaisesRegex(RuntimeError, "checkpointer setup failed"):
+        with self.assertRaisesRegex(RuntimeError, "Cogent setup failed"):
             build_runtime(
                 self.settings(),
                 role="api",

@@ -465,9 +465,6 @@ class EvalService:
                 provider=provider or None,
                 model=model or None,
                 evaluation=True,
-                evaluation_knowledge_base_ids=list(
-                    getattr(self._suite, "fixture_knowledge_base_ids", ())
-                ),
             )
             status_body = self._await_run(submitted.run_id)
         except Exception as exc:  # noqa: BLE001 - one bad case must not kill the suite

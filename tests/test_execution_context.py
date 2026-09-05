@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ai_agent_platform.agents import CodingAgentRuntime
 from ai_agent_platform.agents.coding import AgentRunRecord, InMemoryAgentRunStore
 from ai_agent_platform.agents.coding.context import InstructionSecurityError
 from ai_agent_platform.core import ConfigResolver, ConfigSecurityError
@@ -111,7 +110,6 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             factory = ExecutionContextFactory(
                 session_service=sessions,
                 workspace_service=_workspace_service(root, ("main", root)),
-                user_memory_service=memory,
             )
 
             snapshot = factory.create(

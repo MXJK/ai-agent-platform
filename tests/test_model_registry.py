@@ -82,8 +82,10 @@ class _RegisteredProviderAdapter:
         yield LLMStreamEvent(type="delta", text=f"reply from {model}")
         yield LLMStreamEvent(type="done")
 
-    def decide_tools(self, messages, tools, *, model):
-        raise AssertionError("tool selection is not used by this chat test")
+    def decide_tools(self, messages, tools, *, model, **kwargs):
+        from ai_agent_platform.integrations.llm import LLMToolDecision
+        self.stream_calls.append(model)
+        return LLMToolDecision(text=f'reply from {model}', tool_calls=[], provider='openai', model=model, stop_reason='end_turn')
 
 
 class _FailingConnectionRepository(InMemoryModelRegistryRepository):
@@ -736,14 +738,17 @@ class ModelRegistryApiTests(unittest.TestCase):
                         }
                     },
                 )
+                client.app.state.runtime.cogent_runtime._memory_service = None
                 chat = client.post(
-                    "/api/v1/chat/stream",
+                    "/api/v1/agent/runs",
                     json={
                         "conversation_id": session_id,
                         "message": "hello from a dynamically registered model",
                     },
                 )
 
+                from test_api import wait_for_run
+                completed = wait_for_run(client, chat.json()['run_id'])
                 registry = client.get("/api/v1/model-registry").json()
                 session = client.get(f"/api/v1/sessions/{session_id}").json()
                 frontend = client.get("/").text
@@ -760,8 +765,9 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertEqual(workspace_change.json()["workspace_id"], "project")
         self.assertEqual(unregistered_change.status_code, 400)
         self.assertIn("not registered and enabled", unregistered_change.text)
-        self.assertEqual(chat.status_code, 200)
-        self.assertIn("reply from test-model", chat.text)
+        self.assertEqual(chat.status_code, 202)
+        self.assertEqual(completed['status'], 'completed')
+        self.assertIn("reply from test-model", completed['result']['answer'])
         self.assertEqual(provider_adapter.stream_calls, ["test-model"])
         self.assertEqual(session["provider"], "openai")
         self.assertEqual(session["model"], "test-model")
@@ -818,16 +824,23 @@ class ModelRegistryApiTests(unittest.TestCase):
                     },
                 )
 
+                client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
                 response = client.post(
-                    "/api/v1/chat/stream",
+                    "/api/v1/agent/runs",
                     json={
                         "conversation_id": session_id,
                         "message": "hello",
+                        "workspace_id": "project",
                     },
                 )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('"fallback_enabled": false', response.text)
+                from test_api import wait_for_run
+                body = wait_for_run(client, response.json()['run_id'])
+                record = client.app.state.runtime.cogent_runtime.get_run(body['run_id'])
+                self.assertFalse(record.context_snapshot.session.model_selection.fallback_enabled)
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(body['status'], 'completed')
 
     def test_registry_writes_accept_only_direct_or_trusted_gateway_local_mode(
         self,

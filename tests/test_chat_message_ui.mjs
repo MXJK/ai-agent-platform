@@ -315,7 +315,7 @@ test("Agent answer deltas render while running and resets remove tool preambles"
     renderInlineRunFooter = () => {};
     renderMarkdown = (text) => text;
     performance = { now: () => 100 };
-    const contentNode = { innerHTML: "" };
+    const contentNode = { innerHTML: "", closest: () => null };
     const events = [
       { type: "answer_reset", sequence: 1, status: "running", output: {} },
       { type: "answer_delta", sequence: 2, status: "running", output: { text: "temporary tool preamble" } },
@@ -414,7 +414,7 @@ test("composer Run control changes from pause to continue for the current Agent 
   assert.equal(vm.runInContext("composerRunControlPresentation()", context), null);
 });
 
-test("/compact queues the current Run before active-run composer interception", async () => {
+test("/compact reaches the shared command dispatcher before active-run composer interception", async () => {
   const { context, events } = loadAgentSubmissionHarness(async (calls, path, options) => {
     calls.push(`request:${path}`);
     calls.push(`instruction:${JSON.parse(options.body).instruction}`);
@@ -430,19 +430,17 @@ test("/compact queues the current Run before active-run composer interception", 
     state.latestRunId = "run_1";
     state.latestRunConversationId = "sess_1";
     state.latestRunStatus = "running";
+    state.slashCapabilities.commands = [{ name: "compact", aliases: [], description: "Compact", usage: "/compact [focus]" }];
     const composerInput = { value: "/compact 重点保留数据库迁移" };
     document.getElementById = (id) => id === "chat-message-input" ? composerInput : null;
     clearComposerInput = () => { composerInput.value = ""; testEvents.push("clear"); };
     renderAgentRun = (body) => { testEvents.push("render:" + body.status); };
+    runBuiltinComposerCommand = async (item, args) => { testEvents.push("shared:" + item.command + ":" + args); };
   `, context);
 
   await vm.runInContext("submitComposerMessage()", context);
 
-  assert.ok(events.includes("request:/agent/runs/run_1/compact"));
-  assert.ok(events.includes("instruction:重点保留数据库迁移"));
-  assert.ok(events.includes("clear"));
-  assert.ok(events.includes("render:running"));
-  assert.ok(events.includes("watch"));
+  assert.ok(events.includes("shared:compact:重点保留数据库迁移"));
 });
 
 test("paused composer control continues with optional input", async () => {

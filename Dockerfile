@@ -18,11 +18,14 @@ RUN python -m pip install --upgrade pip \
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY ai_agent_platform ./ai_agent_platform
+COPY pyproject.toml ./
+
+RUN python -m pip install --no-deps --no-build-isolation .
 
 RUN groupadd --gid 1000 app \
     && useradd --uid 1000 --gid app --create-home app \
-    && mkdir -p /workspaces /var/lib/ai-agent-platform /home/app/.cache/huggingface \
-    && chown -R app:app /app /workspaces /var/lib/ai-agent-platform /home/app/.cache
+    && mkdir -p /workspaces /var/lib/ai-agent-platform /home/app/.cache/huggingface /home/app/.cogent \
+    && chown -R app:app /app /workspaces /var/lib/ai-agent-platform /home/app/.cache /home/app/.cogent
 
 USER app
 

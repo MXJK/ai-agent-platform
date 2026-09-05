@@ -31,16 +31,17 @@ def load_project_instructions(
     seen: set[str] = set()
     for target in sorted(target_directories, key=lambda item: item.as_posix()):
         for directory in _path_chain(root, target):
-            loaded = _read_preferred_instruction(root, directory)
-            if loaded is None:
-                continue
-            name, raw, text = loaded
-            relative_path = (directory.relative_to(root) / name).as_posix()
-            if relative_path in seen:
-                continue
-            seen.add(relative_path)
-            if text is not None:
-                selected.append((relative_path, directory.as_posix(), raw, text))
+            for names in (("AGENTS.override.md", "AGENTS.md", "CLAUDE.md"), ("COGENT.md",)):
+                loaded = _read_preferred_instruction(root, directory, names=names)
+                if loaded is None:
+                    continue
+                name, raw, text = loaded
+                relative_path = (directory.relative_to(root) / name).as_posix()
+                if relative_path in seen:
+                    continue
+                seen.add(relative_path)
+                if text is not None:
+                    selected.append((relative_path, directory.as_posix(), raw, text))
 
     sources: list[ContextSource] = []
     remaining = max_chars
@@ -73,6 +74,8 @@ def load_project_instructions(
 def _read_preferred_instruction(
     root: Path,
     directory: Path,
+    *,
+    names: tuple[str, ...] = ("AGENTS.override.md", "AGENTS.md", "CLAUDE.md"),
 ) -> tuple[str, bytes, str | None] | None:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -102,7 +105,7 @@ def _read_preferred_instruction(
                 (parent_fd, part, current_fd, os.fstat(current_fd))
             )
 
-        for name in ("AGENTS.override.md", "AGENTS.md", "CLAUDE.md"):
+        for name in names:
             try:
                 file_fd = os.open(
                     name,

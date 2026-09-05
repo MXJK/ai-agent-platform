@@ -29,6 +29,7 @@ from ai_agent_platform.domain import (
 from ai_agent_platform.runtime import RuntimeContainer, build_runtime
 from ai_agent_platform.sdk import AgentSDK
 from ai_agent_platform.skills import CommandRegistry, SkillInvocationError
+from ai_agent_platform.agents.coding.models import AgentRunInvalidStateError
 
 
 _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -132,12 +133,12 @@ class CliApplication:
     async def run_repl(self) -> int:
         self._prepare_context()
         self.error_stream.write(
-            "AI Agent REPL. Use /skills, /tools, /mcp, /permissions, "
+            "Cogent REPL. Use /skills, /tools, /mcp, /permissions, "
             "/compact, /resume, or /exit.\n"
         )
         self.error_stream.flush()
         while True:
-            raw = self._readline("agent> ")
+            raw = self._readline("cogent> ")
             if raw is None:
                 return 0
             message = raw.strip()
@@ -276,252 +277,12 @@ class CliApplication:
         return self.sdk.result(first.run_id), cancellation_sent
 
     async def _handle_slash_command(self, raw: str) -> bool:
-        try:
-            parts = shlex.split(raw)
-        except ValueError as exc:
-            self._write_diagnostic("error", {"message": str(exc)})
-            return False
-        command = parts[0].casefold()
-        arguments = parts[1:]
-        if command == "/exit":
+        if raw.strip().casefold() == "/exit":
             return True
-        if command == "/skills":
-            snapshot = self._effective_snapshot()
-            factory = self.runtime.execution_context_factory
-            catalog = (
-                factory.effective_skills(snapshot)
-                if factory is not None
-                else None
-            )
-            self._write_diagnostic(
-                "skills",
-                {
-                    "workspace_id": self.workspace_id,
-                    "agent": "coding",
-                    "mode": "default",
-                    "skills": [
-                        {
-                            "name": item.qualified_name,
-                            "description": item.description,
-                            "source": item.source.value,
-                        }
-                        for item in (catalog.skills if catalog is not None else ())
-                    ],
-                    "diagnostics": [
-                        {
-                            "severity": item.severity,
-                            "code": item.code,
-                            "message": item.message,
-                        }
-                        for item in (
-                            catalog.diagnostics if catalog is not None else ()
-                        )
-                    ],
-                },
-            )
-            return False
-        if command == "/tools":
-            snapshot = self._effective_snapshot()
-            tools = self._effective_tools(snapshot)
-            specs = tools.list_specs()
-            self._write_diagnostic(
-                "tools",
-                {
-                    "run_id": (
-                        self.last_run_id
-                        if self.last_run_id == snapshot.metadata.run_id
-                        else None
-                    ),
-                    "workspace_id": snapshot.project.workspace_id,
-                    "agent": "coding",
-                    "mode": "default",
-                    "tools": [
-                        {
-                            "name": item.name,
-                            "provider": item.provider,
-                            "permission_level": item.permission_level,
-                            "requires_approval": item.requires_approval,
-                        }
-                        for item in specs
-                    ]
-                },
-            )
-            return False
-        if command == "/mcp":
-            registry = self.runtime.mcp_registry
-            snapshot = self._effective_snapshot()
-            pool = self._effective_tools(snapshot)
-            view = (
-                registry.registry_view()
-                if registry is not None
-                else {
-                    "runtime_enabled": False,
-                    "config_writable": False,
-                    "servers": [],
-                }
-            )
-            self._write_diagnostic(
-                "mcp",
-                {
-                    **view,
-                    "effective_pool_tools": [
-                        name
-                        for name in pool.allowed_names
-                        if name.startswith("mcp.")
-                    ],
-                },
-            )
-            return False
-        if command == "/permissions":
-            snapshot = self._effective_snapshot()
-            factory = self.runtime.execution_context_factory
-            permissions = (
-                factory.describe_permissions(snapshot)
-                if factory is not None
-                else {}
-            )
-            self._write_diagnostic(
-                "permissions",
-                {
-                    "workspace_id": snapshot.project.workspace_id,
-                    "run_id": (
-                        self.last_run_id
-                        if self.last_run_id == snapshot.metadata.run_id
-                        else None
-                    ),
-                    **permissions,
-                },
-            )
-            return False
-        if command == "/resume":
-            try:
-                await self._resume(arguments)
-            except (QueryStateError, RuntimeError, ValueError) as exc:
-                self._write_diagnostic("error", {"message": str(exc)})
-            return False
-        if command == "/compact":
-            run_id = self.last_run_id
-            if not run_id:
-                self._write_diagnostic(
-                    "error",
-                    {"message": "/compact requires an active or paused Run"},
-                )
-                return False
-            try:
-                result = self.sdk.control(
-                    run_id,
-                    QueryCommand.COMPACT,
-                    message=" ".join(arguments).strip(),
-                    actor_user_id=(
-                        self.user_id
-                        if self.runtime.settings.auth_mode != "disabled"
-                        else None
-                    ),
-                )
-            except (QueryStateError, RuntimeError, ValueError) as exc:
-                self._write_diagnostic("error", {"message": str(exc)})
-                return False
-            self._write_diagnostic(
-                "compact",
-                {
-                    "run_id": result.run_id,
-                    "status": result.status,
-                    "queued": True,
-                },
-            )
-            return False
-        snapshot = self._effective_snapshot()
-        factory = self.runtime.execution_context_factory
-        catalog = (
-            factory.effective_skills(snapshot)
-            if factory is not None
-            else None
-        )
-        registered = CommandRegistry(
-            catalog.commands if catalog is not None else ()
-        ).resolve(command)
-        if registered is not None:
-            try:
-                message = " ".join(arguments).strip() or (
-                    f"Invoke Skill {registered.skill_qualified_name}."
-                )
-                await self._stream(
-                    self.sdk.query(
-                        self._query_params(
-                            message,
-                            mode="repl",
-                            skill_name=registered.skill_qualified_name,
-                            skill_arguments=arguments,
-                        )
-                    )
-                )
-            except SkillInvocationError as exc:
-                self._write_diagnostic(
-                    "error", {"code": exc.code, "message": str(exc)}
-                )
-            return False
-        service = self.runtime.skill_service
-        raw_catalog = (
-            service.discover(workspace_root=self.workspace_root, enabled=True)
-            if service is not None
-            else None
-        )
-        unavailable = CommandRegistry(
-            raw_catalog.commands if raw_catalog is not None else ()
-        ).resolve(command)
-        if unavailable is not None:
-            skill = raw_catalog.get_skill(unavailable.skill_qualified_name)
-            missing = sorted(
-                set(skill.required_tools).difference(snapshot.tools.enabled_tools or ())
-                if skill is not None
-                else ()
-            )
-            not_applicable = bool(
-                skill is not None
-                and not skill.applies_to(agent="coding", mode="default")
-            )
-            code = (
-                "skill_not_applicable"
-                if not_applicable
-                else (
-                    "skill_required_tools_unavailable"
-                    if missing
-                    else "skill_disabled"
-                )
-            )
-            self._write_diagnostic(
-                "error",
-                {
-                    "code": code,
-                    "message": (
-                        f"Skill command {parts[0]} is unavailable for coding/default"
-                        if not_applicable
-                        else (
-                        f"Skill command {parts[0]} requires unavailable tools: "
-                        + ", ".join(missing)
-                        if missing
-                        else f"Skill command {parts[0]} is disabled or not applicable"
-                        )
-                    ),
-                },
-            )
-            return False
-        self._write_diagnostic(
-            "error",
-            {
-                "code": "unknown_slash_command",
-                "message": f"unknown slash command: {parts[0]}",
-                "available": [
-                    "/skills",
-                    "/tools",
-                    "/mcp",
-                    "/permissions",
-                    "/compact",
-                    "/resume",
-                    "/exit",
-                ],
-            },
-        )
+        try:
+            await self._stream(self.sdk.query(self._query_params(raw, mode="repl")))
+        except (ValueError, SkillInvocationError, AgentRunInvalidStateError, QueryStateError) as exc:
+            self._write_diagnostic("error", {"message": str(exc), "code": getattr(exc, 'code', 'invalid_command')})
         return False
 
     def _effective_snapshot(self):
@@ -607,8 +368,8 @@ class CliApplication:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ai-agent",
-        description="Thin CLI over the ai-agent-platform Query Kernel.",
+        prog="cogent",
+        description="Cogent Textual interface and non-interactive Query output.",
     )
     parser.add_argument(
         "--workspace",
@@ -626,10 +387,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write process and runtime startup checkpoints to stderr.",
     )
-    modes = parser.add_subparsers(dest="mode", required=True)
+    parser.add_argument("--print", dest="print_message", nargs=argparse.REMAINDER, help="Run one Query non-interactively.")
+    modes = parser.add_subparsers(dest="mode", required=False)
     print_parser = modes.add_parser("print", help="Run one Query and print JSON events.")
     print_parser.add_argument("message", nargs="+", help="Query message.")
     modes.add_parser("repl", help="Start a multi-turn interactive session.")
+    parser.set_defaults(mode="tui", message=[])
     return parser
 
 
@@ -643,6 +406,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code or 0)
     timeline.checkpoint("arguments_parsed")
+    if args.print_message is not None:
+        args.mode, args.message = "print", args.print_message
+        if not args.message:
+            parser.print_usage(sys.stderr)
+            return 2
 
     runtime: RuntimeContainer | None = None
     caught_warnings: list[warnings.WarningMessage] = []
@@ -719,6 +487,10 @@ async def _run_mode(
     with signal_context:
         if args.mode == "print":
             return await application.run_print(" ".join(args.message))
+        if args.mode == "tui":
+            from ai_agent_platform.cogent.tui import CogentApp
+            await CogentApp(application).run_async()
+            return 0
         return await application.run_repl()
 
 
@@ -832,3 +604,7 @@ __all__ = [
     "main",
     "validate_cli_environment",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

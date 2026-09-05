@@ -44,7 +44,7 @@ class ContextShares:
         return self.transcript_tokens > 0
 
     def as_dict(self) -> dict[str, int]:
-        """Serialize shares for LangGraph state and trace persistence."""
+        """Serialize context shares for persisted diagnostics."""
 
         return {
             "total_tokens": self.total_tokens,

@@ -13,6 +13,7 @@ from uuid import uuid4
 from ai_agent_platform.agents.coding.models import (
     AgentRunEvent,
     AgentRunRecord,
+    AgentRuntimeSnapshot,
     AgentToolExecution,
 )
 from ai_agent_platform.agents.coding.store import events_for_record
@@ -31,7 +32,7 @@ from ai_agent_platform.repositories.memory import (
     SessionArchivedError,
     SessionNotFoundError,
 )
-from ai_agent_platform.repositories.postgres import _agent_result_from_json
+from ai_agent_platform.repositories.postgres import _agent_result_from_json, _agent_result_to_json
 from ai_agent_platform.text_search import fts_index_text, fts_match_query
 
 
@@ -607,6 +608,10 @@ class SQLiteAgentRunRepository:
     def __init__(self, *, database: LocalStateDatabase) -> None:
         self.database = database
 
+    def run_lease(self, run_id):
+        from ai_agent_platform.cogent.leases import file_run_lease
+        return file_run_lease(self.database.path.parent / (self.database.path.name + '.run-locks'), run_id)
+
     def save(self, record: AgentRunRecord) -> None:
         with self.database.transaction(immediate=True) as conn:
             self.save_in_transaction(conn, record)
@@ -627,8 +632,9 @@ class SQLiteAgentRunRepository:
                 status, checkpoint_id, latest_node, next_nodes_json, trace_json,
                 result_json, error, pending_approval_json, errors_json,
                 control_action, steering_messages_json, pending_compaction_json,
-                run_context_snapshot_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                run_context_snapshot_json, runtime_engine, runtime_state_version,
+                runtime_state_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 thread_id=excluded.thread_id, conversation_id=excluded.conversation_id,
                 workspace_id=excluded.workspace_id, workspace_root=excluded.workspace_root,
@@ -640,6 +646,9 @@ class SQLiteAgentRunRepository:
                 steering_messages_json=excluded.steering_messages_json,
                 pending_compaction_json=excluded.pending_compaction_json,
                 run_context_snapshot_json=excluded.run_context_snapshot_json,
+                runtime_engine=excluded.runtime_engine,
+                runtime_state_version=excluded.runtime_state_version,
+                runtime_state_json=excluded.runtime_state_json,
                 updated_at=excluded.updated_at
             """,
             (
@@ -653,7 +662,7 @@ class SQLiteAgentRunRepository:
                 record.latest_node,
                 _json(record.next_nodes),
                 _json(record.trace),
-                _json(asdict(record.result)) if record.result is not None else None,
+                _json(_agent_result_to_json(record.result)) if record.result is not None else None,
                 record.error,
                 _json(record.pending_approval) if record.pending_approval is not None else None,
                 _json(record.errors),
@@ -661,6 +670,9 @@ class SQLiteAgentRunRepository:
                 _json(record.steering_messages),
                 _json(record.pending_compaction) if record.pending_compaction is not None else None,
                 _json(record.context_snapshot.to_dict()) if record.context_snapshot else None,
+                record.runtime_engine,
+                record.runtime_state_version,
+                _json(record.runtime_state),
                 current["created_at"] if current is not None else _iso(now),
                 _iso(now),
             ),
@@ -826,6 +838,78 @@ class SQLiteAgentRunRepository:
                 ),
             )
 
+    def save_runtime_snapshot(self, snapshot: AgentRuntimeSnapshot) -> None:
+        with self.database.transaction(immediate=True) as conn:
+            self._save_snapshot_in_transaction(conn, snapshot)
+
+    def _save_snapshot_in_transaction(self, conn, snapshot: AgentRuntimeSnapshot) -> None:
+        conn.execute(
+            """
+            INSERT INTO agent_runtime_snapshots (
+                run_id, snapshot_id, sequence, boundary, runtime_engine,
+                runtime_state_version, state_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, snapshot_id) DO NOTHING
+            """,
+            (
+                snapshot.run_id,
+                snapshot.snapshot_id,
+                snapshot.sequence,
+                snapshot.boundary,
+                snapshot.runtime_engine,
+                snapshot.runtime_state_version,
+                _json(snapshot.state),
+                snapshot.created_at or _iso(_now()),
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM agent_runtime_snapshots
+            WHERE run_id = ? AND snapshot_id NOT IN (
+                SELECT snapshot_id FROM agent_runtime_snapshots
+                WHERE run_id = ? ORDER BY sequence DESC LIMIT 100
+            )
+            """,
+            (snapshot.run_id, snapshot.run_id),
+        )
+
+    def save_runtime_boundary(self, record, snapshot) -> None:
+        with self.database.transaction(immediate=True) as conn:
+            self.save_in_transaction(conn, record)
+            self._save_snapshot_in_transaction(conn, snapshot)
+
+    def list_runtime_snapshots(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRuntimeSnapshot]:
+        with self.database.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, snapshot_id, sequence, boundary, runtime_engine,
+                       runtime_state_version, state_json, created_at
+                FROM (
+                    SELECT * FROM agent_runtime_snapshots
+                    WHERE run_id = ? ORDER BY sequence DESC LIMIT ?
+                ) ORDER BY sequence ASC
+                """,
+                (run_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [
+            AgentRuntimeSnapshot(
+                run_id=str(row["run_id"]),
+                snapshot_id=str(row["snapshot_id"]),
+                sequence=int(row["sequence"]),
+                boundary=str(row["boundary"]),
+                runtime_engine=str(row["runtime_engine"]),
+                runtime_state_version=int(row["runtime_state_version"]),
+                state=_json_load(row["state_json"], {}),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
 
 def _run_from_row(row: sqlite3.Row) -> AgentRunRecord:
     result_data = _json_load(row["result_json"], None)
@@ -849,6 +933,21 @@ def _run_from_row(row: sqlite3.Row) -> AgentRunRecord:
         steering_messages=_json_load(row["steering_messages_json"], []),
         pending_compaction=_json_load(row["pending_compaction_json"], None),
         context_snapshot=RunContextSnapshot.from_dict(snapshot_data) if snapshot_data else None,
+        runtime_engine=(
+            str(row["runtime_engine"])
+            if "runtime_engine" in row.keys()
+            else "langgraph-v1"
+        ),
+        runtime_state_version=(
+            int(row["runtime_state_version"])
+            if "runtime_state_version" in row.keys()
+            else 0
+        ),
+        runtime_state=(
+            _json_load(row["runtime_state_json"], {})
+            if "runtime_state_json" in row.keys()
+            else {}
+        ),
     )
 
 

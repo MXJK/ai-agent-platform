@@ -251,6 +251,14 @@ def check_constraints(
         ),
         _order_verdict(observation, case.get("order_constraints") or []),
         _max_steps_verdict(observation, _max_steps_for(case, provider)),
+        *([ConstraintVerdict('forbidden_tools_executed',
+             not set(case['forbidden_executed_tools']).intersection(observation.executed_tool_names),
+             f'executed={list(observation.executed_tool_names)}')]
+           if case.get('forbidden_executed_tools') else []),
+        *([ConstraintVerdict('required_pending_tools',
+             set(case['required_pending_tools']).issubset({c.name for c in observation.pending_approval_calls}),
+             f'pending={[c.name for c in observation.pending_approval_calls]}')]
+           if case.get('required_pending_tools') else []),
     ]
     return [verdict for verdict in verdicts if verdict is not None]
 
@@ -478,6 +486,9 @@ def _budget_reasons(observation: RunObservation) -> tuple[str, ...]:
         if not isinstance(output, dict):
             continue
         node = str(step.get("node") or "")
+        if node == 'compact_completed' and output.get('automatic') and output.get('changed'):
+            if 'context_compacted' not in reasons:
+                reasons.append('context_compacted')
         if node == "assess_context" and output.get("budget_exhausted"):
             reason = f"exploration_round_{output.get('round')}"
             if reason not in reasons:

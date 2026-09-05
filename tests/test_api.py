@@ -193,45 +193,22 @@ class ApiTests(unittest.TestCase):
             finally:
                 disabled_app.state.runtime.close()
 
-    def test_chat_rolls_old_turns_into_summary_visible_from_api(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            settings = Settings(
-                llm_provider="fake",
-                embedding_provider="local",
-                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
-                background_task_workers=2,
-                conversation_summary_trigger_messages=4,
-                conversation_summary_keep_recent_messages=2,
-            )
-            with TestClient(create_app(settings=settings)) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "user_1"},
-                ).json()["id"]
-                for message in ("first durable choice", "second question"):
-                    response = client.post(
-                        "/api/v1/chat/stream",
-                        json={
-                            "conversation_id": session_id,
-                            "message": message,
-                        },
-                    )
-                    self.assertEqual(response.status_code, 200)
-
-                summary = None
-                for _ in range(100):
-                    summary = client.get(
-                        f"/api/v1/sessions/{session_id}/summary"
-                    ).json()
-                    if summary["summary_version"]:
-                        break
-                    time.sleep(0.01)
-
-                assert summary is not None
-                self.assertEqual(summary["message_count"], 4)
-                self.assertEqual(summary["summarized_message_count"], 2)
-                self.assertEqual(summary["summary_version"], 1)
-                self.assertIn("first durable choice", summary["compressed_summary"])
+    def test_cogent_manual_compact_preserves_durable_conversation_boundary(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+            client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+            for message in ('First turn', 'Second turn', '/compact Keep the user requests'):
+                started = client.post('/api/v1/agent/runs', json={
+                    'conversation_id': session, 'workspace_id': 'project', 'message': message})
+                started.raise_for_status()
+                body = wait_for_run(client, started.json()['run_id'])
+                self.assertEqual(body['status'], 'completed')
+            events = client.get(f"/api/v1/agent/runs/{body['run_id']}/events").json()['events']
+            self.assertIn('compact_completed', {item['type'] for item in events})
+            state = client.app.state.query_service._runtime.get_run(body['run_id']).runtime_state
+            self.assertTrue(state['compact_boundaries'])
+            messages = client.get(f'/api/v1/sessions/{session}/messages').json()['messages']
+            self.assertEqual(sum(item['role'] == 'user' for item in messages), 3)
 
     def test_workspace_registration_listing_and_lookup(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -574,7 +551,18 @@ class ApiTests(unittest.TestCase):
             workspace.mkdir()
             source = workspace / "app.py"
             source.write_text("VALUE = 'first'\n", encoding="utf-8")
+            from test_cogent_runtime import response
+            from ai_agent_platform.integrations.tools import ToolCall
             with self._client(root) as client:
+                runtime = client.app.state.query_service._runtime
+                original = runtime._llm
+                class FileReadingClient:
+                    def decide_tools(self, messages, tools, **kwargs):
+                        if messages[-1]['role'] == 'user':
+                            return response('', ToolCall('ReadFile', {'file_path': 'app.py'}, f'read-{len(messages)}'))
+                        return original.decide_tools(messages, tools, **kwargs)
+                runtime._llm = FileReadingClient()
+                runtime._memory_service = None
                 session_id = client.post(
                     "/api/v1/sessions", json={"user_id": "tester"}
                 ).json()["id"]
@@ -613,10 +601,10 @@ class ApiTests(unittest.TestCase):
                     + usage["output_tokens"]
                     + usage["thoughts_tokens"],
                 )
-                sources = result["result"]["context_sources"]
+                sources = result["result"]["tool_results"]
                 self.assertTrue(
                     any(
-                        item["path"] == "app.py" and "first" in item["text"]
+                        item["name"] == "ReadFile" and "first" in str(item.get("result"))
                         for item in sources
                     )
                 )
@@ -656,8 +644,8 @@ class ApiTests(unittest.TestCase):
                 second_result = wait_for_run(client, second.json()["run_id"])
                 self.assertTrue(
                     any(
-                        item["path"] == "app.py" and "second" in item["text"]
-                        for item in second_result["result"]["context_sources"]
+                        item["name"] == "ReadFile" and "second" in str(item.get("result"))
+                        for item in second_result["result"]["tool_results"]
                     )
                 )
                 recent_runs = client.get(
@@ -707,68 +695,17 @@ class ApiTests(unittest.TestCase):
                 )
                 self.assertEqual(workspace_usage["conversation_count"], 1)
 
-    def test_completed_patch_only_run_can_fork_from_historical_checkpoint(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            workspace = root / "project"
-            workspace.mkdir()
-            (workspace / "app.py").write_text("VALUE = 'current'\n", encoding="utf-8")
-            with self._client(root) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "tester"},
-                ).json()["id"]
-                client.put(
-                    "/api/v1/workspaces/project",
-                    json={"root_path": str(workspace)},
-                ).raise_for_status()
-                started = client.post(
-                    "/api/v1/agent/runs",
-                    json={
-                        "conversation_id": session_id,
-                        "message": "read app.py",
-                        "workspace_id": "project",
-                        "focus_files": ["app.py"],
-                    },
-                )
-                self.assertEqual(started.status_code, 202, started.text)
-                source_run_id = started.json()["run_id"]
-                source_execution_root = Path(started.json()["execution_root"])
-                source_result = wait_for_run(client, source_run_id)
-                self.assertEqual(source_result["status"], "completed")
-                self.assertFalse(source_execution_root.exists())
-
-                history = client.get(
-                    f"/api/v1/agent/runs/{source_run_id}/checkpoints",
-                    params={"limit": 200},
-                )
-                self.assertEqual(history.status_code, 200, history.text)
-                selected = next(
-                    checkpoint
-                    for checkpoint in history.json()["checkpoints"]
-                    if checkpoint["can_restore"]
-                )
-                restored = client.post(
-                    f"/api/v1/agent/runs/{source_run_id}/checkpoints/"
-                    f"{selected['checkpoint_id']}/restore",
-                    json={"mode": "fork", "message": "take another path"},
-                )
-                self.assertEqual(restored.status_code, 202, restored.text)
-                restored_body = restored.json()
-                branch = restored_body["run"]
-                self.assertNotEqual(branch["run_id"], source_run_id)
-                self.assertNotEqual(
-                    restored_body["forked_conversation_id"],
-                    session_id,
-                )
-                self.assertNotEqual(branch["execution_root"], str(source_execution_root))
-                branch_result = wait_for_run(client, branch["run_id"])
-
-                self.assertEqual(branch_result["status"], "completed")
-                self.assertEqual(
-                    client.get(f"/api/v1/agent/runs/{source_run_id}").json()["status"],
-                    "completed",
-                )
+    def test_checkpoint_inspection_does_not_restore_retired_graph(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+            client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+            started = client.post('/api/v1/agent/runs', json={
+                'conversation_id': session, 'workspace_id': 'project', 'message': 'Hello'})
+            body = wait_for_run(client, started.json()['run_id'])
+            checkpoints = client.get(f"/api/v1/agent/runs/{body['run_id']}/checkpoints").json()['checkpoints']
+            self.assertTrue(checkpoints)
+            self.assertFalse(any(item['can_restore'] for item in checkpoints))
+            self.assertEqual(body['runtime_engine'], 'cogent-v1')
 
     def test_removed_repository_index_endpoints_return_404(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
@@ -800,14 +737,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260903-structured-questions-r1',
+            '/static/styles.css?v=20260904-cogent-r2',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260903-structured-questions-r1',
+            '/static/app.js?v=20260904-cogent-r2',
             response.text,
         )
-        self.assertIn('id="composer-mode-input"', response.text)
+        self.assertNotIn('id="composer-mode-input"', response.text)
         self.assertNotIn('id="agent-workspace-mode-select"', response.text)
         self.assertNotIn("执行位置", response.text)
         self.assertIn('id="slash-command-menu"', response.text)
@@ -1341,276 +1278,96 @@ Inspect the requested code before reporting findings.
         self.assertEqual(request.provider, "google")
         self.assertEqual(request.thinking_level, "medium")
 
-    def test_streams_chat_response_and_records_messages(self) -> None:
+    def test_streams_cogent_events_and_records_messages_and_raw_usage(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
-            session_id = client.post(
-                "/api/v1/sessions",
-                json={"user_id": "user_1"},
-            ).json()["id"]
-            client.put(
-                "/api/v1/workspaces/workspace_main",
-                json={"root_path": temp_dir},
-            )
-            stream_response = client.post(
-                "/api/v1/chat/stream",
-                json={
-                    "conversation_id": session_id,
-                    "message": "解释一下SSE",
-                    "workspace_id": "workspace_main",
-                },
-            )
+            session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+            client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+            started = client.post('/api/v1/agent/runs', json={
+                'conversation_id': session, 'workspace_id': 'project', 'message': '解释一下 SSE'})
+            body = wait_for_run(client, started.json()['run_id'])
+            self.assertEqual(body['status'], 'completed')
+            response = client.get(f"/api/v1/agent/runs/{body['run_id']}/events/stream")
+            self.assertEqual(response.headers['content-type'].split(';')[0], 'text/event-stream')
+            for event in ('answer_delta', 'usage', 'turn_completed', 'run_completed'):
+                self.assertIn(f'event: {event}', response.text)
+            messages = client.get(f'/api/v1/sessions/{session}/messages').json()['messages']
+            self.assertEqual([item['role'] for item in messages], ['user', 'assistant'])
+            usage = client.get(f'/api/v1/sessions/{session}/token-usage').json()
+            self.assertGreater(usage['input_tokens'], 0)
+            self.assertGreater(usage['output_tokens'], 0)
+            self.assertEqual(usage['total_tokens'], usage['input_tokens'] + usage['output_tokens'])
+            workspace_usage = client.get('/api/v1/workspaces/project/token-usage').json()
+            self.assertEqual(usage['total_tokens'], workspace_usage['total_tokens'])
 
-            self.assertEqual(stream_response.status_code, 200)
-            self.assertEqual(
-                stream_response.headers["content-type"].split(";")[0],
-                "text/event-stream",
-            )
-            self.assertIn("event: meta", stream_response.text)
-            self.assertIn("event: delta", stream_response.text)
-            self.assertIn("event: usage", stream_response.text)
-            self.assertIn("event: done", stream_response.text)
-
-            messages = client.get(
-                f"/api/v1/sessions/{session_id}/messages"
-            ).json()["messages"]
-            self.assertEqual(
-                [message["role"] for message in messages],
-                ["user", "assistant"],
-            )
-            self.assertIn("fake model reply to", messages[1]["content"])
-            metrics = client.get("/api/v1/metrics").json()["counters"]
-            self.assertEqual(metrics["chat_streams_completed_total"], 1)
-            self.assertGreater(metrics["llm_input_tokens_total"], 0)
-            self.assertGreater(metrics["llm_output_tokens_total"], 0)
-            usage = client.get(
-                f"/api/v1/sessions/{session_id}/token-usage"
-            ).json()
-            self.assertEqual(usage["session_id"], session_id)
-            self.assertGreater(usage["input_tokens"], 0)
-            self.assertGreater(usage["output_tokens"], 0)
-            self.assertEqual(usage["thoughts_tokens"], 0)
-            self.assertEqual(
-                usage["total_tokens"],
-                usage["input_tokens"] + usage["output_tokens"],
-            )
-            self.assertEqual(len(usage["records"]), 1)
-            self.assertGreater(usage["context"]["estimated_tokens"], 0)
-            self.assertEqual(usage["context"]["message_count"], 2)
-            self.assertEqual(
-                usage["workspaces"][0]["workspace_id"],
-                "workspace_main",
-            )
-            workspace_usage = client.get(
-                "/api/v1/workspaces/workspace_main/token-usage"
-            ).json()
-            self.assertEqual(
-                workspace_usage["total_tokens"],
-                usage["total_tokens"],
-            )
-            self.assertEqual(workspace_usage["conversation_count"], 1)
-
-    def test_chat_rejects_before_persisting_when_session_budget_is_exhausted(
-        self,
-    ) -> None:
+    def test_cogent_fails_without_provider_usage_when_session_budget_is_exhausted(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            settings = Settings(
-                llm_provider="fake",
-                llm_model="fake-primary",
-                session_token_budget=8,
-                token_budget_action="reject",
-                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
-            )
+            settings = Settings(llm_provider='fake', llm_model='fake-primary',
+                session_token_budget=8, token_budget_action='reject',
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),))
             with TestClient(create_app(settings=settings)) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "user_1"},
-                ).json()["id"]
+                session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+                client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+                started = client.post('/api/v1/agent/runs', json={
+                    'conversation_id': session, 'workspace_id': 'project', 'message': 'hello'})
+                started.raise_for_status()
+                body = wait_for_run(client, started.json()['run_id'])
+                self.assertEqual(body['status'], 'failed')
+                self.assertIn('budget', body['error'].lower())
+                usage = client.get(f'/api/v1/sessions/{session}/token-usage').json()
+                self.assertEqual(usage['record_count'], 0)
 
-                response = client.post(
-                    "/api/v1/chat/stream",
-                    json={
-                        "conversation_id": session_id,
-                        "message": "hello",
-                    },
-                )
-
-                self.assertEqual(response.status_code, 429)
-                self.assertEqual(
-                    response.json()["detail"]["code"],
-                    "token_budget_exceeded",
-                )
-                messages = client.get(
-                    f"/api/v1/sessions/{session_id}/messages"
-                ).json()["messages"]
-                self.assertEqual(messages, [])
-
-    def test_chat_downgrades_to_registered_cheap_model_over_budget(self) -> None:
+    def test_cogent_downgrades_to_registered_cheap_model_over_budget(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            settings = Settings(
-                llm_provider="fake",
-                llm_model="fake-expensive",
-                session_token_budget=8,
-                token_budget_action="downgrade",
-                token_budget_fallback_provider="fake",
-                token_budget_fallback_model="fake-cheap",
-                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
-            )
+            settings = Settings(llm_provider='fake', llm_model='fake-expensive',
+                session_token_budget=8, token_budget_action='downgrade',
+                token_budget_fallback_provider='fake', token_budget_fallback_model='fake-cheap',
+                workspace_allowed_roots=(str(Path(temp_dir).resolve()),))
             with TestClient(create_app(settings=settings)) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "user_1"},
-                ).json()["id"]
+                session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+                client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+                started = client.post('/api/v1/agent/runs', json={
+                    'conversation_id': session, 'workspace_id': 'project', 'message': 'hello'})
+                body = wait_for_run(client, started.json()['run_id'])
+                self.assertEqual(body['status'], 'completed', body)
+                usage = client.get(f'/api/v1/sessions/{session}/token-usage').json()
+                self.assertTrue(usage['records'])
+                self.assertTrue(all(item['model'] == 'fake-cheap' for item in usage['records']))
 
-                response = client.post(
-                    "/api/v1/chat/stream",
-                    json={
-                        "conversation_id": session_id,
-                        "message": "hello",
-                    },
-                )
-
-                self.assertEqual(response.status_code, 200)
-                self.assertIn('"model": "fake-cheap"', response.text)
-                self.assertIn('"requested_model": "fake-expensive"', response.text)
-                self.assertIn('"budget_decision": "downgraded"', response.text)
-                usage = client.get(
-                    f"/api/v1/sessions/{session_id}/token-usage"
-                ).json()
-                self.assertEqual(usage["records"][0]["model"], "fake-cheap")
-                self.assertEqual(
-                    usage["records"][0]["requested_model"],
-                    "fake-expensive",
-                )
-                self.assertEqual(
-                    usage["records"][0]["budget_decision"],
-                    "downgraded",
-                )
-
-    def test_chat_enforces_workspace_budget_and_exposes_status(self) -> None:
+    def test_cogent_enforces_workspace_budget_and_exposes_status(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            settings = Settings(
-                llm_provider="fake",
-                llm_model="fake-primary",
-                workspace_token_budget=8,
-                token_budget_action="reject",
-                workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
-            )
+            settings = Settings(llm_provider='fake', workspace_token_budget=8,
+                token_budget_action='reject', workspace_allowed_roots=(str(Path(temp_dir).resolve()),))
             with TestClient(create_app(settings=settings)) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "user_1"},
-                ).json()["id"]
-                client.put(
-                    "/api/v1/workspaces/workspace_main",
-                    json={"root_path": temp_dir},
-                )
+                session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+                client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+                started = client.post('/api/v1/agent/runs', json={
+                    'conversation_id': session, 'workspace_id': 'project', 'message': 'hello'})
+                body = wait_for_run(client, started.json()['run_id'])
+                self.assertEqual(body['status'], 'failed')
+                self.assertIn('budget', body['error'].lower())
+                usage = client.get('/api/v1/workspaces/project/token-usage').json()
+                self.assertEqual(usage['total_tokens'], 0)
 
-                response = client.post(
-                    "/api/v1/chat/stream",
-                    json={
-                        "conversation_id": session_id,
-                        "workspace_id": "workspace_main",
-                        "message": "hello",
-                    },
-                )
-
-                self.assertEqual(response.status_code, 429)
-                status = client.get(
-                    "/api/v1/workspaces/workspace_main/token-usage"
-                ).json()
-                self.assertEqual(status["budget"]["workspace"]["limit"], 8)
-                self.assertEqual(status["budget"]["workspace"]["used"], 0)
-                self.assertEqual(status["budget"]["workspace"]["remaining"], 8)
-
-    def test_chat_stream_reports_google_max_tokens_as_error(self) -> None:
-        class TruncatedLLMClient:
-            def set_usage_ledger(self, usage_ledger):
-                self.usage_ledger = usage_ledger
-
-            def prepare_chat_request(self, messages, **kwargs):
-                return LLMRequestPlan(
-                    requested_provider="google",
-                    requested_model="gemini-3.5-flash",
-                    provider="google",
-                    model="gemini-3.5-flash",
-                    input_tokens=12,
-                    max_output_tokens=2048,
-                    input_count_method="test_exact_count",
-                    usage_context=current_model_usage_context(),
-                )
-
-            def stream_chat(self, messages, **kwargs):
-                self.thinking_level = kwargs.get("thinking_level")
-                yield LLMStreamEvent(type="delta", text="partial answer")
-                usage = LLMUsage(
-                    input_tokens=12,
-                    output_tokens=900,
-                    thoughts_tokens=1100,
-                )
-                plan = kwargs["request_plan"]
-                self.usage_ledger.record(
-                    provider=plan.provider,
-                    model=plan.model,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    thoughts_tokens=usage.thoughts_tokens,
-                    input_count_method=plan.input_count_method,
-                    context=plan.usage_context,
-                )
-                yield LLMStreamEvent(
-                    type="usage",
-                    usage=usage,
-                )
-                raise LLMProviderError(
-                    "Gemini reached the configured output token limit",
-                    code="max_output_tokens",
-                    finish_reason="MAX_TOKENS",
-                )
-
-        truncated_llm = TruncatedLLMClient()
-        with TemporaryDirectory() as temp_dir:
-            client = TestClient(
-                create_app(
-                    settings=Settings(
-                        llm_provider="google",
-                        llm_model="gemini-3.5-flash",
-                        workspace_allowed_roots=(str(Path(temp_dir).resolve()),),
-                    ),
-                    llm_client=truncated_llm,
-                )
-            )
-            with client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "user_1"},
-                ).json()["id"]
-                response = client.post(
-                    "/api/v1/chat/stream",
-                    json={
-                        "conversation_id": session_id,
-                        "message": "long answer",
-                        "thinking_level": "high",
-                    },
-                )
-
-                self.assertEqual(response.status_code, 200)
-                self.assertIn("event: delta", response.text)
-                self.assertIn('"thoughts_tokens": 1100', response.text)
-                self.assertIn("event: error", response.text)
-                self.assertIn('"code": "max_output_tokens"', response.text)
-                self.assertIn('"finish_reason": "MAX_TOKENS"', response.text)
-                self.assertIn('"partial_response": true', response.text)
-                self.assertNotIn("event: done", response.text)
-                self.assertEqual(truncated_llm.thinking_level, "high")
-                counters = client.get("/api/v1/metrics").json()["counters"]
-                self.assertEqual(counters["chat_streams_failed_total"], 1)
-                self.assertEqual(counters["llm_thoughts_tokens_total"], 1100)
-                usage = client.get(
-                    f"/api/v1/sessions/{session_id}/token-usage"
-                ).json()
-                self.assertEqual(usage["thoughts_tokens"], 1100)
-                self.assertEqual(usage["total_tokens"], 2012)
-                self.assertIsNone(usage["records"][0]["workspace_id"])
+    def test_output_limit_recovery_exhaustion_remains_partial(self) -> None:
+        from test_cogent_runtime import ScriptedClient, response
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            runtime = client.app.state.query_service._runtime
+            runtime._memory_service = None
+            runtime._llm = ScriptedClient(*[
+                response('partial segment', stop_reason='max_tokens',
+                    usage=LLMUsage(input_tokens=12, output_tokens=900, thoughts_tokens=1100))
+                for _ in range(4)])
+            session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+            client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+            started = client.post('/api/v1/agent/runs', json={
+                'conversation_id': session, 'workspace_id': 'project', 'message': 'long answer'})
+            body = wait_for_run(client, started.json()['run_id'])
+            self.assertEqual(body['status'], 'partial')
+            self.assertEqual(body['result']['terminal_reason'], 'output_limit_exhausted')
+            self.assertEqual(body['result']['metrics']['thoughts_tokens'], 4400)
+            events = client.get(f"/api/v1/agent/runs/{body['run_id']}/events").json()['events']
+            self.assertEqual(sum(item['type'] == 'retry' for item in events), 3)
+            self.assertFalse(any(item['type'] == 'turn_completed' for item in events))
 
     def test_chat_stream_rejects_missing_session_and_oversized_message(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1622,7 +1379,7 @@ Inspect the requested code before reporting findings.
             )
             with TestClient(create_app(settings=settings)) as client:
                 missing = client.post(
-                    "/api/v1/chat/stream",
+                    "/api/v1/agent/runs",
                     json={
                         "conversation_id": "sess_missing",
                         "message": "hi",
@@ -1634,7 +1391,7 @@ Inspect the requested code before reporting findings.
                     json={"user_id": "user_1"},
                 ).json()["id"]
                 oversized = client.post(
-                    "/api/v1/chat/stream",
+                    "/api/v1/agent/runs",
                     json={
                         "conversation_id": session_id,
                         "message": "hello",
@@ -1968,83 +1725,23 @@ Inspect the requested code before reporting findings.
             self.assertEqual(oversized.status_code, 413)
             self.assertIn("20 MiB", oversized.json()["detail"])
 
-    def test_agent_automatically_routes_to_rag_and_hybrid_context(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            (root / "app.py").write_text(
-                "FALCON_ENABLED = False\n",
-                encoding="utf-8",
-            )
-            with self._client(root) as client:
-                session_id = client.post(
-                    "/api/v1/sessions",
-                    json={"user_id": "routing-test"},
-                ).json()["id"]
-                client.put(
-                    "/api/v1/workspaces/project",
-                    json={"root_path": str(root)},
-                ).raise_for_status()
-                client.post(
-                    "/api/v1/knowledge-bases",
-                    json={
-                        "id": "falcon_docs",
-                        "name": "Falcon Guide",
-                        "description": "Falcon mode product policy and setup manual.",
-                        "tags": ["Falcon", "manual", "policy"],
-                    },
-                ).raise_for_status()
-                upload_document(
-                    client,
-                    "falcon_docs",
-                    "falcon.md",
-                    "Falcon mode enables deterministic offline testing.",
-                ).raise_for_status()
-
-                rag_run = client.post(
-                    "/api/v1/agent/runs",
-                    json={
-                        "conversation_id": session_id,
-                        "workspace_id": "project",
-                        "message": "根据 Falcon 知识库文档说明它的用途",
-                    },
-                )
-                rag_result = wait_for_run(client, rag_run.json()["run_id"])["result"]
-                self.assertEqual(rag_result["context_route"], "rag")
-                self.assertEqual(
-                    rag_result["selected_knowledge_base_ids"],
-                    ["falcon_docs"],
-                )
-                self.assertTrue(
-                    any(
-                        item["kind"] == "knowledge_chunk"
-                        and item["knowledge_base_id"] == "falcon_docs"
-                        and item["path"].startswith("knowledge://falcon_docs/")
-                        for item in rag_result["context_sources"]
-                    )
-                )
-
-                hybrid_run = client.post(
-                    "/api/v1/agent/runs",
-                    json={
-                        "conversation_id": session_id,
-                        "workspace_id": "project",
-                        "focus_files": ["app.py"],
-                        "message": "根据 Falcon 规范修改 app.py 的实现方案",
-                    },
-                )
-                hybrid_result = wait_for_run(
-                    client,
-                    hybrid_run.json()["run_id"],
-                )["result"]
-                self.assertEqual(hybrid_result["context_route"], "hybrid")
-                source_kinds = {
-                    item["kind"] for item in hybrid_result["context_sources"]
-                }
-                self.assertIn("knowledge_chunk", source_kinds)
-                self.assertIn("file", source_kinds)
-                trace_nodes = [item["node"] for item in hybrid_result["trace"]]
-                self.assertIn("retrieve_knowledge", trace_nodes)
-                self.assertIn("merge_evidence", trace_nodes)
+    def test_agent_does_not_automatically_route_to_knowledge_bases(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
+            client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+            client.post('/api/v1/knowledge-bases', json={'id': 'falcon_docs', 'name': 'Falcon Guide'}).raise_for_status()
+            upload_document(client, 'falcon_docs', 'falcon.md', 'FALCON_PRIVATE_KB_SENTINEL').raise_for_status()
+            started = client.post('/api/v1/agent/runs', json={
+                'conversation_id': session, 'workspace_id': 'project', 'message': '根据 Falcon 知识库文档说明它的用途'})
+            body = wait_for_run(client, started.json()['run_id'])
+            self.assertEqual(body['status'], 'completed')
+            self.assertFalse({'context_route', 'selected_knowledge_base_ids', 'context_sources'} & body['result'].keys())
+            state = client.app.state.query_service._runtime.get_run(body['run_id']).runtime_state
+            self.assertNotIn('FALCON_PRIVATE_KB_SENTINEL', str(state))
+            for field in ('knowledge_base_ids', 'evaluation_knowledge_base_ids', 'context_route'):
+                denied = client.post('/api/v1/agent/runs', json={
+                    'conversation_id': session, 'workspace_id': 'project', 'message': 'hello', field: ['falcon_docs']})
+                self.assertEqual(denied.status_code, 422)
 
     def test_rag_search_is_scoped_and_rejects_unsupported_types(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
@@ -2254,7 +1951,7 @@ Inspect the requested code before reporting findings.
                 )
                 self.assertEqual(blocked_message.status_code, 409)
                 blocked_chat = client.post(
-                    "/api/v1/chat/stream",
+                    "/api/v1/agent/runs",
                     json={"conversation_id": first["id"], "message": "blocked"},
                     headers={"X-User-ID": "session_user"},
                 )

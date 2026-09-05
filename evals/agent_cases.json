@@ -7,13 +7,6 @@
       "name": "Empty evaluation knowledge base"
     }
   ],
-  "retrieval_thresholds": {
-    "min_recall_at_k": 0.9,
-    "min_precision_at_k": 0.2,
-    "min_mrr": 0.8,
-    "min_ndcg_at_k": 0.85,
-    "min_hit_rate_at_k": 1.0
-  },
   "fixtures": [
     {
       "filename": "README.md",
@@ -58,78 +51,62 @@
       "type": "agent",
       "message": "这个项目是干什么的？",
       "expected_status": "completed",
-      "expected_intent": "repository_question",
-      "expected_tools": ["repo.list_files", "repo.read_file"],
-      "expected_files": ["README.md"],
-      "expected_answer_keywords": ["README.md", "repository-aware"]
+      "expected_intent": "coding",
+      "expected_tools": [
+        "Glob",
+        "ReadFile"
+      ],
+      "expected_files": [
+        "README.md"
+      ],
+      "expected_answer_keywords": [
+        "README.md",
+        "repository-aware"
+      ]
     },
     {
       "id": "agent_locates_run_agent",
       "type": "agent",
       "message": "解释 run_agent 接口在哪里实现",
       "expected_status": "completed",
-      "expected_intent": "repo_navigation",
-      "expected_tools": ["repo.search_code", "repo.read_file", "code_explainer"],
-      "expected_files": ["ai_agent_platform/api/routes/agent_runs.py"],
-      "expected_answer_keywords": ["run_agent", "agent_runs.py"]
+      "expected_intent": "coding",
+      "expected_tools": [
+        "Grep",
+        "ReadFile"
+      ],
+      "expected_files": [
+        "ai_agent_platform/api/routes/agent_runs.py"
+      ],
+      "expected_answer_keywords": [
+        "run_agent",
+        "agent_runs.py"
+      ]
     },
     {
       "id": "agent_waits_for_change_approval",
       "type": "agent",
       "message": "帮我实现 agent 支持 workspace_id 参数并补测试",
       "expected_status": "waiting_approval",
-      "expected_intent": "change_planning",
-      "expected_tools": ["change_planner", "test_designer"],
+      "expected_intent": "coding",
+      "expected_tools": [],
       "expected_pending_approval": true
-    },
-    {
-      "id": "rag_finds_tool_registry_security",
-      "type": "search",
-      "query": "ToolRegistry execute 做了哪些安全校验和审计",
-      "expected_files": ["ai_agent_platform/integrations/tools.py"],
-      "expected_symbols": ["ToolRegistry"]
     },
     {
       "id": "agent_explains_resume_approval",
       "type": "agent",
       "message": "Agent run resume 审批在哪里处理？",
       "expected_status": "completed",
-      "expected_intent": "repo_navigation",
-      "expected_tools": ["repo.search_code"],
-      "expected_files": ["ai_agent_platform/agents/coding_agent.py"],
-      "expected_answer_keywords": ["resume", "coding_agent.py"]
-    },
-    {
-      "id": "rag_lexical_channel_rescues_exact_control",
-      "type": "search",
-      "query": "QUASAR_RETENTION_47X",
-      "check_limit": 3,
-      "expected_files": ["policies/data-retention.md"]
-    },
-    {
-      "id": "rag_recalls_multiple_recovery_documents",
-      "type": "search",
-      "query": "disaster recovery RTO",
-      "check_limit": 5,
+      "expected_intent": "coding",
+      "expected_tools": [
+        "Grep"
+      ],
       "expected_files": [
-        "operations/disaster-primary.md",
-        "operations/disaster-database.md"
+        "ai_agent_platform/agents/coding_agent.py"
+      ],
+      "expected_answer_keywords": [
+        "resume",
+        "coding_agent.py"
       ]
-    },
-    {
-      "id": "rag_rejects_refund_hard_negative",
-      "type": "search",
-      "query": "customer refund seven days after order completion",
-      "check_limit": 1,
-      "expected_files": ["policies/refund-policy.md"],
-      "expected_absent_files": ["engineering/refund-logging.md"]
-    },
-    {
-      "id": "rag_empty_knowledge_base_returns_no_evidence",
-      "type": "search",
-      "knowledge_base_id": "empty_eval_docs",
-      "query": "What is the production retention policy?",
-      "expect_empty_results": true
     }
   ]
 }

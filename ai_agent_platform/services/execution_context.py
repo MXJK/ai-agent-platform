@@ -85,7 +85,6 @@ class ExecutionContextFactory:
         tool_pool_builder: ToolPoolBuilder | None = None,
         model_registry: Any = None,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
-        user_memory_service: Any = None,
         llm_client: Any = None,
         max_context_messages_ceiling: int = 0,
     ) -> None:
@@ -110,7 +109,6 @@ class ExecutionContextFactory:
         self._execution_workspace_runtime = (
             execution_workspace_runtime or ExecutionWorkspaceRuntime()
         )
-        self._user_memory_service = user_memory_service
         safe_config = _redact_config(config_snapshot or {})
         self._config_json = canonical_project_config(safe_config)
         self._config_version = "sha256:" + hashlib.sha256(
@@ -125,7 +123,20 @@ class ExecutionContextFactory:
     def config_version(self) -> str:
         return self._config_version
 
-    def create(
+    def discard_prepared(self, *, run_id: str, workspace_id: str) -> None:
+        from types import SimpleNamespace
+        self._execution_workspace_runtime.cleanup(SimpleNamespace(run_id=run_id, workspace_id=workspace_id))
+
+    def create(self, **kwargs) -> RunContextSnapshot:
+        kwargs['run_id'] = kwargs.get('run_id') or f'run_{uuid4().hex[:12]}'
+        try:
+            return self._create(**kwargs)
+        except BaseException:
+            if kwargs.get('prepare_execution_workspace', True):
+                self.discard_prepared(run_id=kwargs['run_id'], workspace_id=kwargs['workspace_id'])
+            raise
+
+    def _create(
         self,
         *,
         conversation_id: str,
@@ -271,15 +282,6 @@ class ExecutionContextFactory:
                 {"role": item.role, "content": item.content}
                 for item in messages[-context_message_limit:]
             ]
-        if self._user_memory_service is not None and not isolated:
-            profile_context = self._user_memory_service.context_for_user(
-                user_id=actor
-            )
-            if profile_context:
-                raw_history = [
-                    {"role": "system", "content": profile_context},
-                    *raw_history,
-                ]
         history = tuple(
             ConversationMessageSnapshot(
                 role=str(item.get("role") or ""),
@@ -460,10 +462,10 @@ class ExecutionContextFactory:
             )
             if implicit_catalog.skills:
                 catalog_lines = [
-                    "[Global Skill catalog]",
-                    "The following reusable Skills are available in every Workspace. ",
+                    "[Workspace Skill catalog]",
+                    "The following inline Skills are available in this Workspace. ",
                     "When exactly one Skill clearly matches the user's request, call ",
-                    "`agent.load_skill` with its qualified name before continuing. ",
+                    "`LoadSkill` with its qualified name before continuing. ",
                     "Do not load a Skill merely because of a weak keyword match.",
                 ]
                 catalog_lines.extend(
@@ -480,7 +482,7 @@ class ExecutionContextFactory:
                         end_line=clipped.count("\n") + 1,
                         text=clipped,
                         reason=(
-                            "global Skill metadata for conservative implicit activation"
+                            "effective Workspace Skill metadata for inline activation"
                         ),
                         content_hash=hashlib.sha256(
                             catalog_text.encode("utf-8")
@@ -501,6 +503,7 @@ class ExecutionContextFactory:
                 )
             if selected_skill_names is not None:
                 skill_options["selected_skill_names"] = selected_skill_names
+                skill_options["arguments"] = " ".join(skill_arguments)
             selection = self._skill_service.build_context(
                 workspace_root=execution_root,
                 agent=agent_type,
@@ -714,6 +717,11 @@ class ExecutionContextFactory:
                 spec.name for spec in self._tool_registry.list_specs()
             )
         return self._tool_registry.select(tuple(selected))
+
+    def declared_skills(self, snapshot: RunContextSnapshot):
+        if self._skill_service is None:
+            return None
+        return self._skill_service.discover(workspace_root=snapshot.project.workspace_root, enabled=True)
 
     def effective_skills(self, snapshot: RunContextSnapshot):
         if self._skill_service is None:

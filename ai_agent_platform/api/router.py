@@ -5,7 +5,6 @@ from fastapi import APIRouter
 from ai_agent_platform.api.routes import (
     create_agent_runs_router,
     create_change_sets_router,
-    create_chat_router,
     create_evals_router,
     create_health_router,
     create_knowledge_bases_router,
@@ -81,18 +80,6 @@ def create_api_router(
     )
     router.include_router(create_mcp_registry_router(mcp_registry, settings))
     router.include_router(create_skill_registry_router(skill_registry, settings))
-    router.include_router(
-        create_chat_router(
-            session_service,
-            llm_client,
-            settings,
-            metrics,
-            project_memory_service=project_memory_service,
-            task_queue=task_queue,
-            model_registry=model_registry,
-            user_memory_service=user_memory_service,
-        )
-    )
     router.include_router(create_agent_runs_router(query_service, settings))
     router.include_router(create_evals_router(eval_service))
     router.include_router(create_change_sets_router(change_set_service, settings))

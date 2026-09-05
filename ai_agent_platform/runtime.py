@@ -10,13 +10,11 @@ from threading import Lock
 from time import perf_counter
 from typing import Any, Callable, Literal
 
-from ai_agent_platform.agents import (
-    CodingAgentRuntime,
-    GameAgentRuntime,
-    LLMStructuredAgentPlanner,
-    create_coding_tool_registry,
-)
+from ai_agent_platform.agents.game_agent import GameAgentRuntime
+from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.agents.coding import InMemoryAgentRunStore
+from ai_agent_platform.cogent import AgentRuntime
+from ai_agent_platform.cogent.runtime import CogentRuntime
 from ai_agent_platform.core import (
     CeleryTaskQueue,
     InProcessTaskQueue,
@@ -94,7 +92,6 @@ from ai_agent_platform.skills import (
     SkillService,
     SkillRegistryService,
 )
-from ai_agent_platform.tools import register_memory_tools
 
 
 logger = logging.getLogger(__name__)
@@ -160,8 +157,8 @@ class RuntimeContainer:
     skill_registry: SkillRegistryService | None = None
     skill_catalog: SkillCatalog | None = None
     command_registry: CommandRegistry | None = None
-    checkpointer: Any = None
-    coding_agent_runtime: CodingAgentRuntime | None = None
+    coding_agent_runtime: AgentRuntime | None = None
+    cogent_runtime: CogentRuntime | None = None
     session_service: SessionService | None = None
     execution_context_factory: ExecutionContextFactory | None = None
     execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None
@@ -233,7 +230,7 @@ class ApplicationFactory:
         resolved_config: ResolvedConfig | None = None,
         llm_client: LLMClient | None = None,
         rag_service: RAGService | None = None,
-        coding_agent_runtime: CodingAgentRuntime | None = None,
+        coding_agent_runtime: AgentRuntime | None = None,
         directory_picker: DirectoryPicker | None = None,
     ) -> RuntimeContainer:
         if role not in _RUNTIME_ROLES:
@@ -557,23 +554,11 @@ class ApplicationFactory:
             container.checkpoint("skills_ready")
 
             if coding_agent_runtime is None:
-                (
-                    container.checkpointer,
-                    close_checkpointer,
-                ) = self.create_langgraph_checkpointer(settings)
-                if close_checkpointer is not None:
-                    container.register_cleanup(
-                        "langgraph_checkpointer",
-                        close_checkpointer,
-                    )
-                container.coding_agent_runtime = self.create_coding_agent_runtime(
+                container.cogent_runtime = self.create_cogent_runtime(
                     settings,
                     tool_registry=container.tool_registry,
                     run_store=container.agent_run_store,
-                    checkpointer=container.checkpointer,
                     llm_client=container.llm_client,
-                    knowledge_base_service=container.knowledge_base_service,
-                    project_memory_service=container.project_memory_service,
                     change_set_service=container.change_set_service,
                     tool_pool_builder=container.tool_pool_builder,
                     execution_workspace_runtime=(
@@ -581,8 +566,11 @@ class ApplicationFactory:
                     ),
                     metrics=container.metrics,
                 )
+                container.coding_agent_runtime = container.cogent_runtime
             else:
                 container.coding_agent_runtime = coding_agent_runtime
+                if isinstance(coding_agent_runtime, CogentRuntime):
+                    container.cogent_runtime = coding_agent_runtime
 
             change_set_event_recorder = getattr(
                 container.coding_agent_runtime,
@@ -592,6 +580,10 @@ class ApplicationFactory:
             if callable(change_set_event_recorder):
                 container.change_set_service.set_audit_callback(
                     change_set_event_recorder
+                )
+            if container.cogent_runtime is not None:
+                container.change_set_service.set_run_write_guard(
+                    container.cogent_runtime.require_change_set_writable
                 )
             container.session_service = SessionService(
                 repository=container.session_repository,
@@ -643,7 +635,6 @@ class ApplicationFactory:
                 tool_pool_builder=container.tool_pool_builder,
                 model_registry=container.model_registry,
                 execution_workspace_runtime=container.execution_workspace_runtime,
-                user_memory_service=container.user_memory_service,
             )
             container.query_uow = create_query_unit_of_work(
                 session_service=container.session_service,
@@ -663,8 +654,7 @@ class ApplicationFactory:
                 runtime=container.coding_agent_runtime,
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
-                project_memory_service=container.project_memory_service,
-                user_memory_service=container.user_memory_service,
+                workspace_authorizer=container.project_memory_service,
                 metrics=container.metrics,
                 task_queue=container.task_queue,
                 max_context_messages=settings.llm_max_context_messages,
@@ -693,6 +683,8 @@ class ApplicationFactory:
                 fault_controller=container.tool_fault_controller,
             )
             container.checkpoint("agent_ready")
+            if role in {'api', 'cli'} and settings.agent_run_store in {'sqlite', 'postgres'}:
+                container.query_service.recover_incomplete_runs()
             return container
         except BaseException:
             container.close()
@@ -992,8 +984,6 @@ class ApplicationFactory:
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
             execution_workspace_runtime=execution_workspace_runtime,
         )
-        if session_repository is not None:
-            register_memory_tools(registry, session_repository)
         if settings.tool_allowlist is not None:
             registry.restrict_to(settings.tool_allowlist)
         return registry
@@ -1021,9 +1011,14 @@ class ApplicationFactory:
         tool_registry: ToolRegistry,
     ) -> SkillService:
         package_root = Path(__file__).resolve().parent
+        user_root = Path(settings.skills_directory_path).expanduser()
         discovery = SkillDiscovery(
             bundled_root=package_root / "bundled_skills",
-            user_root=Path(settings.skills_directory_path).expanduser(),
+            user_root=user_root,
+            legacy_user_root=(
+                Path.home() / ".ai-agent-platform" / "skills"
+                if user_root == Path.home() / ".cogent" / "skills" else None
+            ),
         )
         effective_selection = (
             settings.enabled_skills
@@ -1053,113 +1048,33 @@ class ApplicationFactory:
             skill_service=skill_service,
         )
 
-    def create_langgraph_checkpointer(
-        self,
-        settings: Settings,
-    ) -> tuple[Any, Callable[[], Any] | None]:
-        if settings.langgraph_checkpointer == "memory":
-            return None, None
-        if settings.langgraph_checkpointer == "postgres":
-            try:
-                from langgraph.checkpoint.postgres import PostgresSaver
-                from psycopg_pool import ConnectionPool
-            except ImportError as exc:
-                raise RuntimeError(
-                    "langgraph-checkpoint-postgres and psycopg-pool are required "
-                    "for LANGGRAPH_CHECKPOINTER=postgres"
-                ) from exc
-
-            pool = ConnectionPool(
-                conninfo=settings.database_url,
-                kwargs={"autocommit": True},
-            )
-            try:
-                checkpointer = PostgresSaver(pool)
-                checkpointer.setup()
-            except BaseException:
-                pool.close()
-                raise
-            return checkpointer, pool.close
-        raise ValueError(
-            "unsupported LangGraph checkpointer: "
-            f"{settings.langgraph_checkpointer}"
-        )
-
-    def create_coding_agent_runtime(
+    def create_cogent_runtime(
         self,
         settings: Settings,
         *,
         tool_registry: ToolRegistry,
         run_store: Any,
-        checkpointer: Any,
         llm_client: LLMClient,
-        knowledge_base_service: KnowledgeBaseService,
-        project_memory_service: ProjectMemoryService,
         change_set_service: ChangeSetService,
         tool_pool_builder: ToolPoolBuilder,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
         metrics: MetricsRegistry | None = None,
-    ) -> CodingAgentRuntime:
-        return CodingAgentRuntime(
+    ) -> CogentRuntime:
+        from ai_agent_platform.cogent.client import RegistryClient
+        from ai_agent_platform.cogent.memory.service import MemoryService
+        del metrics
+        cogent_client = RegistryClient(llm_client)
+        return CogentRuntime(
             tool_registry=tool_registry,
             run_store=run_store,
-            checkpointer=checkpointer,
-            planner=LLMStructuredAgentPlanner(llm_client),
-            autonomous_mutation_enabled=(
-                settings.agent_autonomous_mutation_enabled
-            ),
-            run_budget_mode=settings.agent_run_budget_mode,
-            max_exploration_rounds=settings.agent_max_exploration_rounds,
-            max_read_tools_per_round=settings.agent_max_read_tools_per_round,
-            max_parallel_tools_per_step=(
-                settings.agent_max_parallel_tools_per_step
-            ),
-            max_context_files=settings.agent_max_context_files,
-            max_context_chars=settings.agent_max_context_chars,
-            max_instruction_chars=settings.agent_max_instruction_chars,
-            soft_tool_rounds=settings.agent_soft_tool_rounds,
-            max_tool_rounds=settings.agent_max_tool_rounds,
-            soft_tool_calls=settings.agent_soft_tool_calls,
-            max_tool_calls=settings.agent_max_tool_calls,
-            max_elapsed_seconds=settings.agent_max_elapsed_seconds,
-            no_progress_rounds=settings.agent_no_progress_rounds,
-            max_consecutive_failures=settings.agent_max_consecutive_failures,
-            native_context_max_chars=settings.agent_native_context_max_chars,
-            native_context_keep_messages=(
-                settings.agent_native_context_keep_messages
-            ),
-            context_evidence_ratio=settings.llm_context_evidence_ratio,
-            context_history_ratio=settings.llm_context_history_ratio,
-            tool_result_keep_recent=settings.agent_tool_result_keep_recent,
-            native_max_compactions=settings.agent_native_max_compactions,
-            llm_client=llm_client,
-            context_compressor=create_conversation_compressor(
-                llm_provider=settings.llm_provider,
-                llm_client=llm_client,
-            ),
-            plan_max_output_tokens=settings.agent_plan_max_output_tokens,
-            mutation_max_output_tokens=(
-                settings.agent_mutation_max_output_tokens
-            ),
-            final_max_output_tokens=settings.agent_final_max_output_tokens,
-            tool_result_max_tokens=settings.agent_tool_result_max_tokens,
-            snip_enabled=settings.agent_snip_enabled,
-            snip_pressure_ratio=settings.agent_snip_pressure_ratio,
-            snip_keep_recent_groups=settings.agent_snip_keep_recent_groups,
-            micro_compact_idle_seconds=settings.agent_micro_compact_idle_seconds,
-            micro_compact_keep_recent_results=settings.agent_micro_compact_keep_recent_results,
-            compaction_max_output_tokens=settings.agent_compaction_max_output_tokens,
-            compaction_safety_buffer_tokens=settings.agent_compaction_safety_buffer_tokens,
-            compaction_min_reclaimable_tokens=settings.agent_compaction_min_reclaimable_tokens,
-            graph_recursion_limit=settings.agent_graph_recursion_limit,
-            approval_policy=settings.agent_approval_policy,
-            knowledge_context_provider=knowledge_base_service,
-            project_memory_provider=project_memory_service,
-            max_rag_context_chars=settings.rag_max_prompt_chars,
-            change_set_service=change_set_service,
+            llm_client=cogent_client,
             tool_pool_builder=tool_pool_builder,
+            approval_policy=settings.agent_approval_policy,
+            change_set_service=change_set_service,
             execution_workspace_runtime=execution_workspace_runtime,
-            metrics=metrics,
+            max_parallel_reads=settings.agent_max_parallel_tools_per_step,
+            tool_result_max_chars=50_000,
+            memory_service=MemoryService(client=cogent_client, run_store=run_store),
         )
 
 
@@ -1186,7 +1101,7 @@ def build_runtime(
     factory: ApplicationFactory | None = None,
     llm_client: LLMClient | None = None,
     rag_service: RAGService | None = None,
-    coding_agent_runtime: CodingAgentRuntime | None = None,
+    coding_agent_runtime: AgentRuntime | None = None,
     directory_picker: DirectoryPicker | None = None,
 ) -> RuntimeContainer:
     """Build a complete API, worker, or future CLI runtime."""

@@ -129,14 +129,15 @@ def create_coding_tool_registry(
         "agent.load_skill",
         skill_loader,
         description=(
-            "Load one globally registered Skill after its name and description "
+            "Load one available inline Skill after its name and description "
             "clearly match the user's task. Load at most one unless the user "
             "explicitly requests multiple Skills."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "minLength": 1, "maxLength": 80}
+                "name": {"type": "string", "minLength": 1, "maxLength": 80},
+                "arguments": {"type": "string", "maxLength": 4000},
             },
             "required": ["name"],
             "additionalProperties": False,

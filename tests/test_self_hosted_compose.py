@@ -32,7 +32,7 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["CHANGE_SET_STORE"] == "postgres"
     assert environment["DOCUMENT_STORE"] == "postgres"
     assert environment["WORKSPACE_STORE"] == "postgres"
-    assert environment["LANGGRAPH_CHECKPOINTER"] == "postgres"
+    assert not any('CHECKPOINTER' in key for key in environment)
     assert environment["MODEL_REGISTRY_STORE"] == "postgres"
     assert environment["MODEL_SECRET_BACKEND"] == "encrypted_file"
     assert environment["MODEL_PROBE_INTERVAL_SECONDS"] == (

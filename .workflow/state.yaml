@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "AUTONOMOUS-UNBOUNDED-AGENT-RUN"
-next_action: "Review the verified uncommitted Agent runtime diff and commit or push it only when explicitly requested."
+active_task: "COGENT-AGENT-REFACTOR"
+next_action: "Start or refresh the local Cogent installation using README Compose commands; verify reference licenses before any external distribution."
 blockers: []
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-03T14:35:04+08:00"
+updated_at: "2026-09-04T23:19:13+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

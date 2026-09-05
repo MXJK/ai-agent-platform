@@ -5,189 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, TypedDict
 
-from ai_agent_platform.domain import KnowledgeBaseRecord, RunContextSnapshot
-from ai_agent_platform.integrations.rag import RetrievedDocument
+from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.tools import ToolCall, ToolSpec
 
 
-CODING_AGENT_ROLE = "研发助手 / 代码仓库问答 Agent"
-CODING_AGENT_OBJECTIVE = (
-    "围绕代码仓库检索上下文、解释实现、定位文件/符号、规划安全改动，"
-    "并输出可复盘的执行轨迹。"
-)
-VALID_AGENT_INTENTS = {
-    "repository_question",
-    "repo_navigation",
-    "code_explanation",
-    "change_planning",
-    "bug_investigation",
-    "test_strategy",
-    "small_talk",
-}
-
-
-class CodingAgentState(TypedDict, total=False):
-    run_id: str
-    conversation_id: str
-    user_input: str
-    workspace_id: str
-    workspace_root: str
-    execution_root: str
-    execution_workspace_mode: str
-    actor_user_id: str
-    workspace_role: str
-    authorized_workspace_root: str
-    approval_policy: str
-    tool_approvals: list[dict[str, str]]
-    cwd: str
-    additional_directories: list[dict[str, Any]]
-    enabled_tools: list[str]
-    evaluation_isolated: bool
-    evaluation_knowledge_base_ids: list[str]
-    instructions_snapshotted: bool
-    history: list[dict[str, str]]
-    focus_files: list[str]
-    intent: str
-    intent_reason: str
-    intent_confidence: float
-    planner_source: str
-    model_action: str
-    model_target_terms: list[str]
-    model_target_hints: list[str]
-    request_mode: str
-    mutation_authorized: bool
-    mutation_authority_reason: str
-    autonomous_mutation_enabled: bool
-    run_budget_mode: str
-    graph_slice_count: int
-    workspace_completion_required: bool
-    task_shape: str
-    evidence_contract: dict[str, Any]
-    task_tool_profile: list[str]
-    explicit_requested_tools: list[str]
-    explicit_skill_requested: bool
-    stable_prefix_tokens: int
-    tool_schema_tokens: int
-    visible_tool_count: int
-    context_route: str
-    route_reason: str
-    selected_knowledge_base_ids: list[str]
-    knowledge_base_catalog: list[dict[str, Any]]
-    catalog_truncated: bool
-    rag_context_sources: list["ContextSource"]
-    memory_context_sources: list["ContextSource"]
-    context_warnings: list[str]
-    context_shares: dict[str, int]
-    project_instructions: list["ContextSource"]
-    context_sources: list["ContextSource"]
-    exploration_round: int
-    exploration_strategy: str
-    context_sufficient: bool
-    context_budget_exhausted: bool
-    context_stop_reason: str
-    context_chars: int
-    context_files: list[str]
-    target_resolution_status: str
-    resolved_change_targets: list[dict[str, Any]]
-    target_resolution_reason: str
-    target_candidate_paths: list[str]
-    missing_local_references: list[dict[str, Any]]
-    user_question_result: dict[str, Any]
-    seen_context_keys: list[str]
-    tool_calls: list[ToolCall]
-    analysis_tool_calls: list[ToolCall]
-    change_tool_calls: list[ToolCall]
-    validation_tool_calls: list[ToolCall]
-    repair_tool_calls: list[ToolCall]
-    repair_approval_tool_calls: list[ToolCall]
-    tool_results: list[dict[str, Any]]
-    native_tool_messages: list[dict[str, Any]]
-    native_tool_round: int
-    native_tool_call_count: int
-    task_model_request_count: int
-    native_pending_tool_calls: list[ToolCall]
-    native_parallel_read_batch: bool
-    native_tool_signatures: list[str]
-    native_tool_loop_active: bool
-    native_tool_answer: str
-    native_tool_stop_reason: str
-    native_soft_limit_warned: bool
-    native_no_progress_rounds: int
-    evidence_coverage: list[str]
-    evidence_keys: list[str]
-    new_evidence_count: int
-    coverage_delta: int
-    unresolved_requirements: list[str]
-    duplicate_tool_call_count: int
-    evidence_extension_rounds: int
-    evidence_rounds_completed: int
-    evidence_contract_satisfied: bool
-    change_completion_contract: dict[str, Any]
-    completion_contract_satisfied: bool
-    completion_unresolved_rounds: int
-    validation_missing_rounds: int
-    native_unfulfilled_change_rounds: int
-    native_consecutive_failures: int
-    native_context_compactions: int
-    native_auto_compactions: int
-    native_context_chars: int
-    native_context_reduction_stages: list[dict[str, Any]]
-    native_last_model_request_at: float
-    native_snip_candidates: list[dict[str, Any]]
-    native_compaction_failures: int
-    native_model_compaction_disabled: bool
-    native_artifacts_collected: bool
-    terminal_status: str
-    terminal_reason: str
-    exploration_results: list[dict[str, Any]]
-    validation_results: list[dict[str, Any]]
-    validation_history: list[dict[str, Any]]
-    llm_input_tokens: int
-    llm_output_tokens: int
-    llm_thoughts_tokens: int
-    llm_request_count: int
-    llm_retry_count: int
-    llm_cached_input_tokens: int | None
-    llm_uncached_input_tokens: int | None
-    llm_cache_write_tokens: int | None
-    llm_provider_models: list[tuple[str, str, str]]
-    llm_provider_total_tokens: int
-    artifacts: list[dict[str, Any]]
-    run_artifact_read_enabled: bool
-    changed_files: list[str]
-    change_status: str
-    change_iteration: int
-    change_set_id: str
-    answer: str
-    trace: list[dict[str, Any]]
-    started_at: float
-    review_decision: dict[str, Any]
-    repair_review_decision: dict[str, Any]
-    approval_required_tools: list[dict[str, Any]]
-    errors: list[dict[str, Any]]
-
-
-AgentRoute = Literal["plan_exploration", "compose_answer"]
-PlanRoute = Literal[
-    "plan_tools",
-    "review_tool_plan",
-    "inspect_repository",
-    "collect_artifacts",
-    "compose_answer",
-]
-ReviewRoute = Literal["inspect_repository", "compose_answer"]
-ContextRoute = Literal["plan_exploration", "merge_evidence"]
-AnswerRoute = Literal["handle_error", "end"]
-InspectionRoute = Literal[
-    "plan_tools",
-    "execute_changes",
-    "validate_changes",
-    "collect_artifacts",
-    "compose_answer",
-]
-ValidationRoute = Literal["review_repair_plan", "collect_artifacts"]
-RepairReviewRoute = Literal["execute_changes", "collect_artifacts"]
-ChangeExecutionRoute = Literal["validate_changes", "collect_artifacts"]
 AgentRunStatus = Literal[
     "queued",
     "running",
@@ -309,14 +130,14 @@ class AgentRunResult:
     role: str
     objective: str
     intent: str
-    context_route: str
-    selected_knowledge_base_ids: list[str]
     answer: str
     graph_engine: str
-    context_sources: list[ContextSource]
     tool_calls: list[ToolCall]
     tool_results: list[dict[str, Any]]
     trace: list[dict[str, Any]]
+    context_route: str = ""
+    selected_knowledge_base_ids: list[str] = field(default_factory=list)
+    context_sources: list[ContextSource] = field(default_factory=list)
     terminal_reason: str = ""
     completion_contract: dict[str, Any] = field(default_factory=dict)
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -351,6 +172,9 @@ class AgentRunRecord:
     steering_messages: list[str] = field(default_factory=list)
     pending_compaction: Optional[dict[str, Any]] = None
     context_snapshot: RunContextSnapshot | None = None
+    runtime_engine: str = "langgraph-v1"
+    runtime_state_version: int = 0
+    runtime_state: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -391,6 +215,18 @@ class AgentToolExecution:
     arguments_hash: str
     status: str
     response: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class AgentRuntimeSnapshot:
+    run_id: str
+    snapshot_id: str
+    sequence: int
+    boundary: str
+    runtime_engine: str
+    runtime_state_version: int
+    state: dict[str, Any]
+    created_at: str | None = None
 
 
 class AgentRunNotFoundError(Exception):
@@ -455,68 +291,18 @@ class AgentRunStore(Protocol):
     def save_tool_execution(self, execution: AgentToolExecution) -> None:
         ...
 
+    def save_runtime_snapshot(self, snapshot: AgentRuntimeSnapshot) -> None:
+        ...
+
+    def list_runtime_snapshots(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRuntimeSnapshot]:
+        ...
+
 
 class LLMCompletionClient(Protocol):
     def complete(self, prompt: str) -> Any:
-        ...
-
-
-class AgentPlanner(Protocol):
-    def classify_intent(self, user_input: str) -> dict[str, Any]:
-        ...
-
-    def classify_request(
-        self,
-        user_input: str,
-        knowledge_bases: list[dict[str, Any]],
-        *,
-        history: list[dict[str, str]] | None = None,
-        focus_files: list[str] | None = None,
-    ) -> dict[str, Any]:
-        ...
-
-    def plan_tool_calls(
-        self,
-        state: CodingAgentState,
-        tool_specs: list[ToolSpec],
-    ) -> list[ToolCall]:
-        ...
-
-    def plan_repair_tool_calls(
-        self,
-        state: CodingAgentState,
-        tool_specs: list[ToolSpec],
-    ) -> list[ToolCall]:
-        ...
-
-    def resolve_change_targets(self, payload: dict[str, Any]) -> dict[str, Any]:
-        ...
-
-    def compose_answer(self, state: CodingAgentState) -> str:
-        ...
-
-
-class KnowledgeContextProvider(Protocol):
-    def list(self) -> list[KnowledgeBaseRecord]:
-        ...
-
-    def search(
-        self,
-        *,
-        knowledge_base_id: str,
-        query: str,
-        limit: int,
-        recall_limit: int | None,
-    ) -> list[RetrievedDocument]:
-        ...
-
-
-class ProjectMemoryContextProvider(Protocol):
-    def retrieve(
-        self,
-        *,
-        workspace_id: str,
-        actor_user_id: str,
-        query: str,
-    ) -> list[Any]:
         ...

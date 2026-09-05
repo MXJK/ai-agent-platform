@@ -77,6 +77,7 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
     workspace_id = str(suite.get("workspace_id") or "workspace_main")
     knowledge_base_id = str(suite.get("knowledge_base_id") or "eval_docs")
     fixtures = list(suite.get("fixtures", []))
+    has_search = any(c.get("type") == "search" for c in suite.get("cases", []))
     with TemporaryDirectory() as temp_dir:
         workspace_root = Path(temp_dir)
         for fixture in fixtures:
@@ -96,30 +97,31 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
                 f"/api/v1/workspaces/{workspace_id}",
                 json={"root_path": str(workspace_root)},
             ).raise_for_status()
-            client.post(
-                "/api/v1/knowledge-bases",
-                json={
-                    "id": knowledge_base_id,
-                    "name": "Evaluation documents",
-                    "description": "Source fixtures used by the offline evaluation suite.",
-                    "tags": ["evaluation", "source"],
-                },
-            ).raise_for_status()
-            for item in suite.get("additional_knowledge_bases", []):
+            if has_search:
                 client.post(
                     "/api/v1/knowledge-bases",
                     json={
-                        "id": item["id"],
-                        "name": item.get("name") or item["id"],
-                        "description": item.get("description") or "",
-                        "tags": item.get("tags") or [],
+                        "id": knowledge_base_id,
+                        "name": "Evaluation documents",
+                        "description": "Source fixtures used by the offline evaluation suite.",
+                        "tags": ["evaluation", "source"],
                     },
                 ).raise_for_status()
-            _ingest_fixtures(
-                client=client,
-                knowledge_base_id=knowledge_base_id,
-                fixtures=fixtures,
-            )
+                for item in suite.get("additional_knowledge_bases", []):
+                    client.post(
+                        "/api/v1/knowledge-bases",
+                        json={
+                            "id": item["id"],
+                            "name": item.get("name") or item["id"],
+                            "description": item.get("description") or "",
+                            "tags": item.get("tags") or [],
+                        },
+                    ).raise_for_status()
+                _ingest_fixtures(
+                    client=client,
+                    knowledge_base_id=knowledge_base_id,
+                    fixtures=fixtures,
+                )
             results = [
                 _run_case(
                     client=client,
@@ -140,11 +142,11 @@ def run_eval_suite(suite: dict[str, Any]) -> EvalReport:
             set(result.expected_files or []) for result in retrieval_results
         ],
         k=5,
-    )
+    ) if has_search else None
     quality_failures = _retrieval_quality_failures(
         retrieval_metrics,
         suite.get("retrieval_thresholds", {}),
-    )
+    ) if has_search else []
     return EvalReport(
         results=results,
         retrieval_metrics=retrieval_metrics,
@@ -260,17 +262,16 @@ def _run_agent_case(
 ) -> tuple[list[CheckResult], list[str]]:
     session_response = client.post("/api/v1/sessions", json={"user_id": "eval_runner"})
     session_response.raise_for_status()
-    run_response = client.post(
-        "/api/v1/agent/runs",
-        json={
-            "conversation_id": session_response.json()["id"],
-            "workspace_id": workspace_id,
-            "message": case["message"],
-        },
+    run = client.app.state.query_service.submit_run(
+        conversation_id=session_response.json()['id'], workspace_id=workspace_id,
+        message=case['message'], evaluation=True,
     )
-    run_response.raise_for_status()
-    status = _wait_for_run(client, run_response.json()["run_id"])
+    status = _wait_for_run(client, run.run_id)
     result = status.get("result") or {}
+    from ai_agent_platform.evaluation import RunObservation, build_read_evidence_ledger
+    observation = RunObservation.from_run_status(str(case['id']), status)
+    workspace = client.app.state.workspace_service.get(workspace_id)
+    evidence = build_read_evidence_ledger(observation=observation, workspace_root=Path(workspace.root_path))
     checks = [
         _equals_check("status", status.get("status"), case.get("expected_status")),
         _equals_check("intent", result.get("intent"), case.get("expected_intent")),
@@ -281,7 +282,7 @@ def _run_agent_case(
         ),
         _contains_any_file_check(
             "retrieval",
-            [item.get("path") for item in result.get("context_sources", [])],
+            [item.path for item in evidence],
             case.get("expected_files", []),
         ),
         _answer_keywords_check(
@@ -297,11 +298,7 @@ def _run_agent_case(
                 bool(case.get("expected_pending_approval")),
             )
         )
-    retrieved_files = [
-        str(item["path"])
-        for item in result.get("context_sources", [])
-        if item.get("path")
-    ]
+    retrieved_files = [item.path for item in evidence]
     return (
         [check for check in checks if check.detail != "skipped"],
         retrieved_files,

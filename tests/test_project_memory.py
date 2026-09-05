@@ -1230,7 +1230,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
 
 
 class ProjectMemoryApiTests(unittest.TestCase):
-    def test_memory_api_lifecycle_and_old_chat_client_compatibility(self) -> None:
+    def test_memory_api_lifecycle_and_removed_chat_route(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace = root / "project"
@@ -1303,7 +1303,7 @@ class ProjectMemoryApiTests(unittest.TestCase):
                         "message": "hello",
                     },
                 )
-                self.assertEqual(old_client.status_code, 200)
+                self.assertEqual(old_client.status_code, 404)
                 self.assertNotIn("event: memory_context", old_client.text)
 
                 deleted = client.delete(
@@ -1319,71 +1319,33 @@ class ProjectMemoryApiTests(unittest.TestCase):
                     [],
                 )
 
-    def test_chat_reuses_memory_across_sessions_without_cross_workspace_leakage(
-        self,
-    ) -> None:
+    def test_agent_does_not_recall_standalone_project_memory(self) -> None:
+        from test_api import wait_for_run
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            project = root / "project"
-            other = root / "other"
+            project = root / 'project'
+            other = root / 'other'
             project.mkdir()
             other.mkdir()
             with self._client(root) as client:
-                headers = {"X-User-ID": "alice"}
-                for workspace_id, path in (("project", project), ("other", other)):
-                    client.put(
-                        f"/api/v1/workspaces/{workspace_id}",
-                        headers=headers,
-                        json={"root_path": str(path)},
-                    )
-                    client.patch(
-                        f"/api/v1/workspaces/{workspace_id}/memory-settings",
-                        headers=headers,
-                        json={"mode": "auto"},
-                    )
-                session_a = client.post(
-                    "/api/v1/sessions",
-                    headers=headers,
-                    json={"user_id": "alice"},
-                ).json()["id"]
-                first = client.post(
-                    "/api/v1/chat/stream",
-                    headers=headers,
-                    json={
-                        "conversation_id": session_a,
-                        "workspace_id": "project",
-                        "message": "请记住：项目数据库使用 PostgreSQL 作为事实源",
-                    },
-                )
-                self.assertEqual(first.status_code, 200)
-                self._wait_for_memory(client, "project", headers)
-
-                session_b = client.post(
-                    "/api/v1/sessions",
-                    headers=headers,
-                    json={"user_id": "alice"},
-                ).json()["id"]
-                recalled = client.post(
-                    "/api/v1/chat/stream",
-                    headers=headers,
-                    json={
-                        "conversation_id": session_b,
-                        "workspace_id": "project",
-                        "message": "项目数据库的事实源是什么？",
-                    },
-                )
-                self.assertIn("event: memory_context", recalled.text)
-                self.assertIn("PostgreSQL", recalled.text)
-                isolated = client.post(
-                    "/api/v1/chat/stream",
-                    headers=headers,
-                    json={
-                        "conversation_id": session_b,
-                        "workspace_id": "other",
-                        "message": "项目数据库的事实源是什么？",
-                    },
-                )
-                self.assertNotIn("event: memory_context", isolated.text)
+                headers = {'X-User-ID': 'alice'}
+                for workspace_id, path in (('project', project), ('other', other)):
+                    client.put(f'/api/v1/workspaces/{workspace_id}', headers=headers,
+                        json={'root_path': str(path)}).raise_for_status()
+                client.post('/api/v1/workspaces/project/memories', headers=headers, json={
+                    'kind': 'decision', 'title': 'Private project decision',
+                    'content': 'LEGACY_MEMORY_SECRET_SENTINEL', 'importance': 5}).raise_for_status()
+                for workspace_id in ('project', 'other'):
+                    session = client.post('/api/v1/sessions', headers=headers, json={'user_id': 'alice'}).json()['id']
+                    started = client.post('/api/v1/agent/runs', headers=headers, json={
+                        'conversation_id': session, 'workspace_id': workspace_id, 'message': '项目数据库的事实源是什么？'})
+                    body = wait_for_run(client, started.json()['run_id'])
+                    self.assertEqual(body['status'], 'completed')
+                    state = client.app.state.query_service._runtime.get_run(body['run_id']).runtime_state
+                    self.assertNotIn('LEGACY_MEMORY_SECRET_SENTINEL', str(state))
+                stored = client.get('/api/v1/workspaces/project/memories', headers=headers).json()['memories']
+                self.assertEqual(len(stored), 1)
+                self.assertEqual(stored[0]['content'], 'LEGACY_MEMORY_SECRET_SENTINEL')
 
     def test_trusted_identity_blocks_spoofing_and_cross_user_access(self) -> None:
         with TemporaryDirectory() as temp_dir:

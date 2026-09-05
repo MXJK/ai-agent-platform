@@ -107,6 +107,8 @@ class ToolSpec:
     max_retries: int = 0
     idempotent: bool = True
     permission_source: str = "local_policy"
+    defer_loading: bool = False
+    native_type: str = ""
 
 
 @dataclass(frozen=True)

@@ -1,16 +1,14 @@
-# AI Agent Platform
+# Cogent
 
 [简体中文](README.md) | **English**
 
-Single-user FastAPI self-hosted AI Agent platform with streaming chat, a
-task-driven code Agent, managed document knowledge bases, workspace-scoped
-project memory, and approval-aware controlled execution. The current product runs
-the App, PostgreSQL, and Qdrant through Docker Compose with an in-process queue.
+Cogent 0.2.0 replaces the Agent kernel while retaining the platform's model
+registry, authentication, workspaces, Run/Event storage, ChangeSets, MCP management
+and independent RAG. The internal Python namespace remains `ai_agent_platform`.
 
-The code Agent does not index a repository and does not use embeddings. A run
-captures a registered workspace root, searches the live filesystem for the
-current task, reads only necessary source ranges, and places those original
-snippets in the current model context.
+The refactor supports local use. See the [refactor task](.workflow/tasks/COGENT-AGENT-REFACTOR.md)
+for verification evidence and limits. Existing installations need the schema upgrade below.
+This task has not released the project or migrated the existing user database.
 
 ## Single-node Docker start
 
@@ -20,14 +18,14 @@ Qdrant; a one-shot `migrate` service applies the existing Alembic chain. Agent w
 uses the in-process bounded queue, so no Go gateway, Redis, Celery Worker, or
 Adminer is started.
 The App image installs `requirements.self-hosted.txt`, excluding Celery/Redis,
-Chroma, OS keyring, and local SentenceTransformer/Torch dependencies that the
-current topology never loads. Those adapters remain in the full development set.
+Chroma and OS keyring. It includes SentenceTransformer/Torch for the default BGE-M3
+document embeddings. Optional adapters remain in the full development set.
 
 ```bash
 cp -n .env.example .env
 mkdir -p workspaces
-docker compose up -d --build
-docker compose ps
+docker compose -f docker-compose.yml up -d --build
+docker compose -f docker-compose.yml ps
 ```
 
 Open `http://127.0.0.1:8000`. Only the App is published to host loopback;
@@ -38,10 +36,10 @@ to open the host Finder from a container.
 
 The official `RUNTIME_PROFILE=custom` combination reuses the existing PostgreSQL
 repositories, Qdrant vector stores, and `in_process` task queue. Project memory is
-enabled and user memory is disabled. Provider API keys are entered only in Model
+enabled, and independent user memory is enabled. Cogent does not inject either service. Provider API keys are entered only in Model
 Management; Compose encrypts them in the private persistent `app_state` volume while
-PostgreSQL stores only opaque references. The default Fake LLM keeps the stack
-offline until a real Provider connection and model are registered in the UI.
+PostgreSQL stores only opaque references. Its model catalog starts empty; register and
+enable a Provider connection and a tool-capable model in the UI before sending a task.
 
 `AUTH_MODE=single_user` ignores caller-controlled identities and assigns every
 request to `SINGLE_USER_ID=owner`, who may administer models and MCP. It is not
@@ -61,28 +59,44 @@ compatibility and test code, not supported deployment paths. `start-local.sh` no
 forwards to the same Compose entrypoint; `./scripts/start.sh --check` performs a
 static Compose check.
 
-## CLI, REPL, SDK, and process entrypoints
-
-The installed entrypoints are thin adapters over `RuntimeContainer` and
-`QueryService`:
+For an existing installation, back up PostgreSQL, then run:
 
 ```bash
-.venv/bin/ai-agent --workspace /absolute/path/to/project print "Explain the entrypoints"
-.venv/bin/ai-agent --workspace /absolute/path/to/project repl
-.venv/bin/ai-agent-api --host 127.0.0.1 --port 8000
+docker compose -f docker-compose.yml build app migrate
+docker compose -f docker-compose.yml run --rm migrate
+docker compose -f docker-compose.yml up -d app
 ```
 
-Print mode emits one canonical `AgentEvent` JSON object per stdout line. The REPL
-keeps one conversation across turns and provides `/skills`, `/tools`, `/mcp`,
-`/permissions`, `/resume`, and `/exit`. `Ctrl+C` during a Run requests cancellation
-of that Run; signal handling exists only in the process-owning CLI, never in the SDK
-or Query Kernel.
+Migration must reach `20260903_0028`; health alone does not verify schema compatibility.
+Open http://127.0.0.1:8000, add a Provider connection and register/enable a tool-capable model,
+register your mounted project under `/workspaces`, create a session and select that workspace.
+Persistent model catalogs start empty; Fake bootstrap is limited to memory tests.
+Try `/help`, `/status` or `/plan` before a coding task. The default permission mode asks before writes.
+User Cogent settings/memory survive container recreation in the `cogent_user_state` volume.
+Explicit `-f docker-compose.yml` avoids machine-specific development overrides.
 
-`AgentSDK.query()` and `resume()` return `AsyncIterator[AgentEvent]`, while
-`control()` and `result()` return `QueryResult`. The official App image starts
-FastAPI from `ai_agent_platform.api.entrypoint` and lifespan closes the same
-`RuntimeContainer`. The Celery process lifecycle adapter remains as compatibility
-code, but the current Compose stack does not start it.
+## CLI, REPL, SDK, and process entrypoints
+
+Install locally with `python3 -m venv .venv`, `.venv/bin/python -m pip install -r requirements.txt`
+and `.venv/bin/python -m pip install --no-deps -e .`. Activate `.venv` before using the commands below.
+Local configuration does not automatically connect to Compose stores. To share the container setup,
+use `docker compose -f docker-compose.yml exec app cogent --workspace /workspaces/your-project`.
+
+The published commands are `cogent` and `cogent-api`; old script names are removed.
+
+```bash
+cogent --workspace /absolute/path/to/project
+cogent --workspace /absolute/path/to/project --print "Explain the entrypoints"
+cogent-api --host 127.0.0.1 --port 8000
+```
+
+The default interface is Textual. Noninteractive output, the compatibility REPL,
+AgentSDK.query(), and the web API all use QueryService. Web clients submit to
+POST /api/v1/agent/runs and subscribe to Run SSE. /api/v1/chat/stream returns 404.
+
+Shared commands: /help, /status, /clear, /compact, /mcp, /memory, /session,
+/skill (also /skills), /tools, /permissions, /resume, /plan, /review, /rewind,
+/sandbox. /exit is local to the CLI.
 
 ## Layered runtime configuration
 
@@ -173,270 +187,15 @@ tool Schemas, headers, credentials, and sensitive arguments are not persisted.
 
 ## Skill discovery and slash commands
 
-When `skills_enabled` is true, the runtime discovers only `SKILL.md` files below
-these roots:
+Priority: project .cogent/skills > ~/.cogent/skills >
+read-only compatibility with ~/.ai-agent-platform/skills > built-ins.
+The existing CRUD API/UI remains; new files target ~/.cogent/skills.
+Existing Skills are not moved automatically.
 
-- bundled: `ai_agent_platform/bundled_skills/<skill>/SKILL.md`;
-- user: `~/.ai-agent-platform/skills/<skill>/SKILL.md`;
-- project: `.agents/skills/<skill>/SKILL.md` under the authorized Workspace.
-
-The fixed precedence is `project > user > bundled`, with qualified names such as
-`project:review`. Same-source duplicates use the lexicographically first relative
-path and emit an error diagnostic. Cross-source overrides and slash command/alias
-conflicts emit stable diagnostics, and final definitions are sorted by normalized
-name. Project Skills always enter the Run snapshot as `untrusted_project_skill`
-context, including when they override a user or bundled definition.
-
-The first version accepts strict, duplicate-free YAML frontmatter:
-
-```markdown
----
-name: review
-description: Review requested code changes
-agents: [coding]
-modes: [default]
-context_budget: 4000
-tools: [repo.search_code, repo.read_file]
-command:
-  name: review
-  description: Review code in the current Workspace
-  usage: "[path]"
-  aliases: [rv]
----
-Inspect live evidence before giving review findings.
-```
-
-Only those fields are accepted. A file is limited to 64 KiB; one discovery pass
-considers at most 64 candidates and loads at most 128 KiB of text. One Skill can
-request at most 16,000 context characters and still shares the Run instruction
-budget. Invalid UTF-8, malformed or duplicate YAML, unknown fields, oversized
-files, and individual bad Skills become diagnostics without aborting discovery.
-Symlink roots, directories, and `SKILL.md` files are not followed, and canonical
-paths must remain below their source root.
-
-Skills are declarative data. Python and shell files are never executed, and
-Markdown cannot register functions. `tools` lists requirements only: a Skill with
-missing registered tools is not injected, while existing tools remain governed by
-`ToolUseContext`, sandbox, and allow/ask/deny policy. Skills cannot register tools,
-reduce approval, expand allowlists, or grant permission. For a non-built-in REPL
-slash command, the effective Workspace Skill catalog applies source precedence,
-enabled Skills, Agent/mode, and `required_tools`, then submits an ordinary
-`QueryParams(skill_name, skill_arguments)`. The selected instructions are frozen
-before queueing; unknown, disabled, or dependency-missing commands return stable
-diagnostics and never execute Skill-directory code.
-
-The browser composer reuses the same path. Typing `/` groups and filters built-in
-commands, effective Skills, and MCP tools from the current `EffectiveToolPool`,
-with Arrow, Enter/Tab, Escape, and pointer operation. A Skill selection sends its
-qualified name plus quote-aware arguments to Agent. An MCP selection freezes only
-a user preference to use that tool; provider-native tool calling, central
-permission resolution, approval, and the sandbox still decide whether it runs.
-`GET /api/v1/agent/composer-capabilities` builds this read-only catalog from the
-authenticated conversation, Workspace, model, and effective configuration, so a
-process-registered but unavailable capability is not presented as usable.
-
-The shared composer offers:
-
-- `快速对话` for direct SSE model responses;
-- `代码 Agent` for task-driven workspace exploration with progress, approvals,
-  changed files, Diff, and ChangeSet actions rendered in the same assistant message;
-- optimistic Agent submission that renders the user prompt and assistant waiting
-  state before the Run-creation request starts. If creation fails, the prompt stays
-  visible, the composer text is restored, and retry, model-selection, and Trace
-  recovery remain in the conversation instead of leaving an empty message gap;
-- `/chat`, `/agent`, `/new`, and `/mcp` built-ins plus effective Skill/MCP choices
-  from the same composer; selecting Skill or MCP switches to code Agent;
-- a common conversation history with persistent rolling summaries, so a
-  compressed history plus bounded recent messages can inform Chat and Agent
-  exploration and native tool selection without discarding the original
-  messages.
-
-Both response modes render in-message runtime status and response metrics.
-Quick Chat keeps its sequential execution process; the Code Agent card shows
-only EventStore-backed live activities, without a duplicate step track or tool
-summary. A restrained pulse marks only nodes and tool calls that have not yet
-received their matching completion event; completed, failed, and terminal
-activities stay still, including under the system reduced-motion preference.
-The complete sequence remains available on the Trace audit page. Chat uses
-provider SSE usage; Agent runs aggregate provider-reported
-usage across structured planning and answer generation. The UI shows input,
-output, thinking, and total tokens per response. Agent execution emits
-`node_started`, `node_completed`, `reasoning_summary`, tool lifecycle, and
-answer events at their source. OpenAI, Anthropic, DeepSeek, and Google native
-tool turns publish bounded `answer_delta` events while the provider is still
-generating. Cursor SSE drives the current stage, tool results, and answer text
-directly, with one full Run snapshot fetched at a terminal state and polling
-used only after a disconnect. If the same turn later selects a tool,
-`answer_reset` removes its tentative preamble. Tool arguments and
-provider-private reasoning never become answer deltas. Fast runs retain a
-bounded short replay.
-
-All model use is persisted in one ledger. Chat, Agent model turns, semantic
-conversation compression, RAG Ask, and embedding calls carry an `operation`,
-resource, session/workspace attribution when available, requested/actual
-Provider/Model, input-count method, and budget decision. The sessions page
-shows cumulative input, output, thinking, and total tokens for every
-conversation plus the estimated size of its currently bounded conversation
-context and the most recent final Prompt's provider-counted input tokens. The
-operations page shows the same totals, operation distribution, and budget
-status for every registered workspace.
-
-The composer keeps these two scopes explicit: cumulative actual usage remains
-a ledger statistic, while the ring and percentage use the retained-history
-estimate divided by the current model's input budget. Hovering the ring reveals
-the system-context, tool-call, and conversation-message token split (derived
-from the latest Agent run's `context_shares`, shown in `k` units). The history
-preview contains only retained conversation messages and summaries; it excludes
-the next user input, system prompt, tool schemas, and workspace retrieval, so it
-is not the complete final Prompt. The session usage API resolves that preview
-budget from the session's current model preference, and changing the model
-refreshes the displayed denominator immediately.
-
-The context card remains a local `unicode_heuristic_v1` preview because it is
-not yet a provider request. Immediately before an actual LLM request, after
-history, memory, RAG citations, and tool schemas have been assembled, the final
-provider-shaped Prompt is counted with OpenAI Responses `input_tokens`,
-Anthropic Messages `count_tokens`, or Gemini `models.count_tokens`. Provider
-completion usage remains the authoritative actual-request value stored in the
-ledger; the preflight count is recorded as its audit method and is the fallback
-only when completion usage omits input tokens.
-
-The browser workspace also includes:
-
-- managed knowledge-base catalog, multi-file upload, hybrid search, answers,
-  citations, and index-job status;
-- a project-memory governance page with mode/status/type filters, evidence,
-  confidence, optimistic edits, confirm/reject/forget, and index repair;
-- local workspace folder management constrained by `WORKSPACE_ALLOWED_ROOTS`,
-  including current/default selection, invalid-path relinking, and safe removal;
-- a dedicated `Trace Audit` page (`/#trace-audit`) that lists the current actor's
-  recent Agent Runs and presents a filterable, read-only event timeline for
-  state transitions, nodes, exact tool selections and arguments, complete
-  results or errors, approval requests, and approval decisions. Active and
-  suspended Runs refresh automatically. `run.read_artifact` is the deliberate
-  exception: its event retains artifact identity, ranges, hashes, and token
-  metadata without copying protected page content. The existing in-conversation
-  Trace and approval controls remain the live interaction surface;
-  the shared composer omits a duplicate code-context strip, while the sidebar
-  and settings manage the current workspace; there is no separate Code Agent page;
-  current Compose disables the container-native picker, and the web directory
-  browser only exposes content mounted under `/workspaces`; every selection still
-  passes the allowed-root check. The macOS Finder picker remains a non-default
-  local-development compatibility implementation;
-- approval, required input, and checkpoint history remain attached to the matching
-  assistant message. The common Run control is a single compact composer action:
-  it pauses while running, then changes in place to continue after the Run reaches
-  `paused`; composer text is optional continuation feedback. The separate steer and
-  cancel card no longer crowds the answer, while those backend APIs and audit facts
-  remain available. Any finished Run exposes a Git-like checkpoint rail. Restoring a historical
-  boundary always creates a new Run: it can continue in the current conversation or
-  fork the prefix before the source Run into a new conversation, while preserving
-  the source Run and parent checkpoint. Terminal messages include a changed-file ledger, line counts, expandable
-  Diff, validation state, and safe revert actions. Current `direct` Runs show the
-  source location already written and require digest confirmation to revert;
-  historical `patch_only` / `worktree` records retain their original presentation.
-  Reopening a session restores its
-  latest Run and ChangeSet so `waiting_approval` or Sandbox-only output is not
-  mistaken for a stalled or already-applied change;
-- an auto-growing conversation input with per-session unsent drafts, availability
-  that reflects empty/busy/archived/workspace states, and follow-near-bottom
-  scrolling with an explicit jump-to-latest action when the user reads history;
-- Codex-inspired message hierarchy that keeps user prompts in restrained,
-  right-aligned bubbles while assistant responses use an open reading layout with
-  compact identity, copy, execution, approval, and ChangeSet controls;
-- compact top/session/composer chrome that gives the message stream more room,
-  plus independently collapsible and resizable desktop rails whose visibility
-  and widths are stored as device UI preferences;
-- safe Markdown rendering, response cancellation, responsive navigation, and
-  accessible textual status indicators.
-
-### Persistent sessions and restart recovery
-
-PostgreSQL is the source of truth for restart-safe conversations. Session rows
-store a deterministic or manually edited title, archive state, last-update
-time, workspace and model configuration; `user_preferences` stores defaults
-for future sessions and the last active session. Provider API keys live in the
-server-side Secret Store; database URLs and allowed filesystem roots remain
-server-side configuration. None are part of session or preference records.
-
-`GET /api/v1/sessions` returns recent-first list items with `message_count` and
-`last_message_preview`, supports title/body substring search, active/archived
-filtering and opaque cursor pagination. A newly allocated session stays a local
-draft until its first message is persisted: zero-message rows are omitted from
-history/search and do not replace the last active conversation.
-`PATCH /sessions/{id}` renames,
-archives/restores or changes one conversation; optionally it copies that
-configuration to user defaults without rewriting older sessions. Archived
-conversations remain readable but Chat, message writes and Agent execution
-return `409` until the conversation is restored.
-
-The collapsible, resizable right rail is dedicated to the latest 12 active
-conversations, grouped by today, the previous seven days and older entries;
-full run diagnostics live in the standalone Trace Audit page. The primary
-navigation rail is also collapsible and resizable. Startup recovery checks the URL
-session first, then `last_active_session_id`, then the latest active session;
-stale zero-message candidates are skipped. With no valid session it keeps the
-welcome page and does not create another empty record. Loading a session
-restores messages, summary and its own model,
-workspace and composer mode. Browser `localStorage` is reserved for device UI
-state and at most 20 non-empty per-session drafts; it stores neither user IDs nor
-duplicated conversation configuration. Drafts stay on that device and do not
-enter server-side history until submission succeeds.
-Local single-user mode uses an internal identity, while authenticated mode gets
-identity from the trusted gateway. The health endpoint exposes `session_storage` and
-`persistent_sessions`; memory mode is explicitly labeled temporary in the UI.
-
-### Global model registry
-
-This local single-user application has one global model registry shared by all
-workspaces. The Model Management page can configure OpenAI, DeepSeek,
-Anthropic, and Google once, then register multiple models under each Provider.
-API keys are write-only: PostgreSQL stores only a secret reference and the secret
-value goes to the selected Secret Store. Native runs use the operating-system keyring. Official
-Compose stores Fernet ciphertext plus an owner-only random host key in its private
-persistent volume. Provider environment variables and `.env` are no longer bootstrap
-credentials and keys are never returned by the API. Legacy `env:*` references require
-one UI re-entry after upgrade and are never resolved from the environment.
-
-After a Provider is saved, Model Management calls that Provider's official
-model-list endpoint, filters the text-generation models available to the current
-API key, and marks models that are already registered. Registration now requires
-only a Provider/model selection, a per-model maximum output-token capability,
-plus enabled and automatic-routing preferences. The display name, context,
-capabilities, and cold-start routing profile come from
-Provider metadata and backend priors. A manual model-ID fallback remains for
-catalog gaps, without exposing quality, price, or latency inputs.
-
-The composer exposes the session preference used by Chat, the whole code Agent
-run (including resume), and RAG Ask:
-
-- automatic `smart`, `quality`, `cost`, or `latency` routing;
-- a manually preferred model with an explicit fallback switch and a custom
-  picker sorted by latency, showing exact milliseconds and green/yellow/red
-  latency tiers (`≤1000 ms`, `≤3000 ms`, `>3000 ms`);
-- per-model availability, live-request sample count, last update time, observed
-  P50/P95 first-token and total latency, plus an exact-model fixed-prompt test.
-
-`smart` creates a deterministic, explainable task profile without another LLM
-call. Easy tasks weight cost and latency more heavily, while difficult tasks
-weight the backend quality profile more heavily. Background embedding, conversation
-compression, and memory extraction retain their independent service policy.
-While Model Management is visible, it refreshes registry state every 60 seconds;
-Chat and Agent completion also refresh state. These reads never call a model.
-The per-model latency action and the compatible Provider-level connection test send
-one fixed minimal-reply request. Their persistent probe statistics are separate from
-live traffic, so they do not add live samples or change routing P50.
-
-Periodic probes are disabled by default. Set `MODEL_PROBE_INTERVAL_SECONDS` to at
-least 60 seconds to opt in. Only the API process schedules them, the first pass waits
-one full interval, and a model with real success or failure traffic inside that
-interval is skipped. Probes are serialized per model and stop with the runtime.
-They may incur Provider charges and never participate in `smart`/`latency` ranking:
-
-```dotenv
-# Disabled by default; 900 would check idle models every 15 minutes.
-MODEL_PROBE_INTERVAL_SECONDS=0
-```
+.md, SKILL.md, skill.yaml + prompt.md, argument substitution, hot reload and
+slash commands are supported. Only inline execution is supported; fork requests
+are explicitly rejected. .agents/skills is not read, keeping Codex Skills separate
+from runtime Skills. Skill content never grants tools or overrides authorization.
 
 ## Gemini protocol support
 
@@ -563,14 +322,10 @@ The PostgreSQL product runtime does not read `LLM_PROVIDER`, `LLM_MODEL`, or
 static admission policy. Frontend registration and enable/disable changes update
 the runtime catalog immediately without a restart.
 
-Each registry row stores the context window and a separate maximum output-token
-capability, editable in Model Management. Normal Chat requests
-`LLM_MAX_OUTPUT_TOKENS`; the coding Agent requests phase budgets of
-`AGENT_PLAN_MAX_OUTPUT_TOKENS=4096`, `AGENT_MUTATION_MAX_OUTPUT_TOKENS=16384`,
-and `AGENT_FINAL_MAX_OUTPUT_TOKENS=4096`. The provider receives the minimum of
-the phase request, model capability, remaining context, and Usage Ledger
-authorization. The 16K mutation budget therefore never overrides a smaller
-registered model limit.
+Registry rows store the context window and output limit separately. Normal Cogent calls
+request LLM_MAX_OUTPUT_TOKENS; output-truncation recovery requests up to the model limit,
+capped at 64K. Remaining context and the usage ledger can reduce that request. Retired
+plan/mutation/final phase budgets no longer drive the Cogent loop.
 
 Session and workspace budgets count every ledger record attributed to that
 scope:
@@ -582,9 +337,8 @@ TOKEN_BUDGET_ACTION=reject
 ```
 
 `0` disables a scope. With `reject`, a request that cannot leave at least one
-output token is rejected before the user message or model call is committed,
-and an allowed request's provider output limit is capped to the remaining hard
-budget. APIs return `429` with `code=token_budget_exceeded`. With `downgrade`,
+output token is rejected before generation. An accepted async Run becomes failed with a
+budget error; its user message remains. Allowed calls cap output to the remaining budget. With `downgrade`,
 configure a lower-cost pair that is imported into the registry:
 
 ```dotenv
@@ -612,394 +366,47 @@ provider's final usage remains the actual ledger value.
 
 ## Code Agent flow
 
-The LangGraph chain starts with:
+QueryService freezes identity, model selection, the execution root and tool pool. CogentRuntime
+uses the canonical RegistryClient async stream over existing Provider adapters. Each complete
+response is persisted before batch preflight. Adjacent reads may run concurrently; writes and
+commands remain ordered. Model output ends the turn when no tools remain. The retired graph
+planner, automatic RAG injection and completion contract are no longer part of the runtime.
 
-```text
-setup_workspace
-→ load_project_instructions
-→ classify_request
-→ decide_context_source
-→ retrieve_project_memory (orthogonal to repo/RAG routing)
-   ├─ repo   → plan_exploration → execute_exploration → assess_context
-   │                    ↑ change strategy on zero hits/failures/unread candidates ─┘
-   ├─ rag    → retrieve_knowledge
-   ├─ hybrid → retrieve_knowledge → repository exploration
-   └─ none
-→ merge_evidence
-```
+Modes are default, acceptEdits, plan and bypassPermissions. Platform hard denials always apply;
+approvals bind Run/call/tool/argument hashes and are rechecked before execution. Uncertain
+side effects are blocked rather than automatically repeated. OS sandbox support attempts
+Seatbelt or bubblewrap with networking disabled. The official trusted-repository container
+reports unavailable if bubblewrap is absent and still requires command approval.
 
-The classifier receives a bounded catalog containing only knowledge-base IDs,
-names, descriptions, and tags. It selects `none`, `repo`, `rag`, or `hybrid`
-and at most three managed knowledge bases. Repository evidence still comes from
-live files; document evidence reuses the independent RAG search stack.
-Project memory contributes at most six current-revision active records within a
-3,000-character budget. A generic project-overview request that does not name a
-managed knowledge base is forced to `repo`; it discovers and reads README files,
-project manifests, and entry points instead of filling a live-evidence gap with
-unrelated managed documents. `merge_evidence` preserves all provenance types before
-tool/change planning or answer generation. Before tools are built, the current
-product freezes the registered source root as the server-selected `direct`
-execution root; neither the UI nor `POST /agent/runs` accepts a per-Run location
-choice. Exact tool approval, validation, bounded repair, and Diff/test artifacts
-remain in force. Terminal capture persists the full patch, pre/post hashes, and
-source location as an applied ChangeSet protected by baseline conflict checks, a
-mutation journal, the single-writer guard, and digest-bound safe revert. Historical
-`patch_only` and `worktree` Runs and ChangeSets remain readable.
+MCP chooses eager for small catalogs, native deferred search for supported official Anthropic
+models, and dispatch/ToolSearch otherwise. COGENT_MCP_LOADING can select a strategy; unsupported
+native combinations fall back to dispatch. Loaded tools persist across checkpoints. MCP transport,
+Secret and permission metadata remain owned by the platform.
 
-Running Agent status uses the product run store as its source of truth, while the
-LangGraph checkpointer retains ordered history. The read endpoint normalizes parent,
-timestamp, graph step, next nodes, interrupt metadata, and restore eligibility.
-Restore clones the selected boundary into a fresh `run_id`/`thread_id`, restores the
-frozen Run context and Effective Tool Pool, and invokes its next graph node.
-`rollback` advances the current conversation through a new auditable Run; `fork`
-creates a new conversation. Neither mode rewrites current workspace files—file
-reversal remains a ChangeSet revert operation. Every restored Run freezes an independent
-execution root; a cleaned `patch_only` copy is rebuilt from the currently registered
-source, so graph restoration never masquerades as an implicit historical file snapshot.
-Once the product record reaches a terminal
-state, a late running snapshot cannot overwrite it; resume failures also retain
-the original error and clean up the sandbox. Final metrics include elapsed time,
-node/tool counts, changed files, recovered errors, and provider-reported input,
-output, thinking, and total tokens.
+Provider-owned public thinking is streamed separately from answer text; opaque signatures and
+encrypted data never become visible reasoning. Canonical messages retain tool pairing, source
+provider metadata, cache fields and raw usage. Output truncation retries at most three times up
+to the registered output limit capped at 64K. Context overflow may compact and retry; cumulative
+Token budget rejection remains an error. Large results are registered hash-checked files.
 
-Default exploration budgets:
+Run/Event and runtime snapshots commit atomically. SQLite uses file leases and PostgreSQL uses
+advisory leases; process death releases ownership. Complete tool results replay once. Startup
+requeues durable work, preserves approval/input/pause waits and reconciles final message projection.
+Legacy langgraph-v1 history stays read-only, with unfinished records projected as blocked.
 
-- 4 exploration rounds
-- 6 read-only tools per round
-- 12 distinct source files
-- 32,000 source-evidence characters
-- 16,000 project-instruction characters
+Cogent file memory is independent of RAG/ProjectMemory/UserMemory. Project memory files live in
+.cogent/memory; user files are isolated under ~/.cogent/memory/.users/<identity hash>. MEMORY.md
+is capped at 200 lines/25KB. Restricted maintenance persists validated responses and write plans,
+recovers without repeating completed requests, and removes duplicate/stale index links. Unreferenced
+topic files are retained. No Bash, MCP or ordinary workspace tools are exposed to maintenance.
 
-Exploration exposes auditable strategies such as `targeted_search`,
-`broaden_file_inventory`, and `read_discovered_entries`. Zero hits, tool errors,
-and unread candidates trigger another observation and a changed strategy; an
-empty plan alone is not sufficient evidence. The loop exits only with relevant
-repository evidence or an explicit round/file/character budget exhaustion.
-Repeated calls, line segments, and content do not consume the budget twice; an
-evidence-free exhaustion is recorded as a warning and answered with uncertainty.
+/plan restricts writes to the plan file; /review is read-only. /rewind previews and requires approval,
+rejects hash conflicts, and appends a logical conversation branch. Use a file snapshot ID for files/all,
+or `/rewind <completed-run-id> conversation` for a pure conversation branch. History is not deleted.
 
-### Native tool-calling loop
-
-OpenAI, DeepSeek, Anthropic, and Google adapters send `ToolSpec` definitions through each
-provider's native Function/Tool Calling API. The Agent no longer asks production
-models to manufacture a JSON tool plan in prompt text. Provider-specific
-function calls are normalized to `LLMToolDecision`, including a stable tool-call
-ID; dotted registry names receive provider-safe aliases and are mapped back
-before execution. The fake provider retains deterministic rule planning for
-offline tests.
-
-Create/modify tasks must still call `sandbox.write_file` or
-`sandbox.apply_patch` in an empty workspace; directory inventory uses
-`repo.list_files`. The model-visible `sandbox.run_command` contract lists its
-allowed executable basenames and positions commands as post-change validation.
-A failed pre-change diagnostic command is returned for replanning and does not
-trigger artifact finalization or an empty ChangeSet.
-`change_planning` also has a runtime completion gate: a text-only final answer
-is returned for explicit replanning until a Sandbox mutation succeeds. Three
-unfulfilled attempts become `blocked`, never a zero-file `completed` result.
-For Google Developer API tool-call preflight, the system-instruction text and
-tool schemas are counted as an additional content part because that API rejects
-`CountTokensConfig.system_instruction/tools`; the real generation request still
-uses native system instructions and tools, so a Google fallback does not break
-budgeting.
-On cross-provider fallback, only Google's own original provider items are
-replayed as native function calls with their `thought_signature`; calls and
-results from other providers become explicit text observations, preserving
-evidence without fabricating a Gemini signature.
-Runtime collection of workspace status and diffs synthesizes one assistant
-tool-history turn. DeepSeek thinking mode requires `reasoning_content` on every
-tool turn, so a locally synthesized turn uses an empty string as the
-provider-supported marker for “no private reasoning”; real provider reasoning
-items are still replayed unchanged. OpenAI and Anthropic keep their valid
-synthetic function/tool-use forms, while Google continues to downgrade foreign
-or runtime calls to text rather than fabricating a `thought_signature`.
-Provider JSON error messages are credential-redacted and length-bounded before
-entering Run diagnostics, without retaining the request body.
-
-The production planner may accept one consecutive batch of independent,
-idempotent, approval-free `read_only` calls per turn. The batch is bounded by
-`AGENT_MAX_READ_TOOLS_PER_ROUND` and the remaining hard call budget; the executor
-runs those reads concurrently while replaying results in model-proposed order.
-OpenAI enables `parallel_tool_calls` and Anthropic permits parallel `tool_use`,
-but the harness still checks each ToolSpec and effective permission. Mutations,
-validations, approval-bound tools, user input, and mixed read/write plans remain
-limited to one accepted call per turn; extra calls receive `single_tool_turn`,
-while reads beyond the batch cap receive `read_batch_limit`. Mutation prompts
-still ask for one file and a small `sandbox.apply_patch` at a time instead of
-embedding multiple complete files in one JSON argument. Provider adapters still
-use their native structured-argument formats; this does not claim freeform
-OpenAI `apply_patch` custom-tool support for DeepSeek, Anthropic, or Google.
-
-Malformed tool-argument JSON is retryable. Output-limit finish reasons are
-classified as truncation, and `LLMClient` retries within `LLM_MAX_RETRIES` after
-adding a corrective one-tool/one-file/small-patch instruction and rerunning token
-preflight and authorization. Failed-attempt usage still reaches the unified
-ledger. Run errors retain only safe diagnostics—finish reason, argument length,
-and JSON parse position—not the source-bearing raw argument.
-
-Native models use one bounded observe/decide/act loop. Repository reads,
-Sandbox mutations, validation commands, status, and diffs are selected in model
-order inside the same tool transcript instead of isolated fixed phases:
-
-```text
-native tool call
-→ EffectiveToolPool exposes only this Run's frozen, verified ToolSpec values
-→ PermissionResolver resolves allow/ask/deny from ToolUseContext
-→ ToolRegistry validation and execution
-→ result/error linked by call ID
-→ harness token cap shared by built-in and MCP results; full overflow becomes a Run artifact
-→ provider-native tool result message
-→ model observes and either calls another tool or answers
-```
-
-The default soft budget is 12 rounds/36 calls; it asks the model to converge but
-does not stop execution. Hard limits are 24 rounds/72 calls, 900 seconds, three
-no-progress rounds, and three consecutive failures. A hard stop reserves one
-text finalization that still declares the same tools and forbids calling them
-through the provider's own tool choice, because replayed tool_use/tool_result
-blocks are rejected by providers when a request declares no tools. Exhaustion
-therefore becomes `partial` or `blocked` instead of a false `completed`.
-Configure these with
-`AGENT_SOFT_TOOL_ROUNDS`, `AGENT_MAX_TOOL_ROUNDS`, `AGENT_SOFT_TOOL_CALLS`,
-`AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_ELAPSED_SECONDS`,
-`AGENT_NO_PROGRESS_ROUNDS`, and `AGENT_MAX_CONSECUTIVE_FAILURES`. Model-output
-phase limits use `AGENT_PLAN_MAX_OUTPUT_TOKENS`,
-`AGENT_MUTATION_MAX_OUTPUT_TOKENS`, and `AGENT_FINAL_MAX_OUTPUT_TOKENS`.
-Before any result enters the model transcript, `AGENT_TOOL_RESULT_MAX_TOKENS`
-(default `2000`, minimum `64`) applies unconditionally to built-in and MCP tools alike. An
-oversized result becomes a head/tail placeholder with its original token
-estimate and `artifact_id`; the exact result remains available as a
-`tool_result` Run artifact. Existing per-tool character caps remain a second
-line of defense, and `agent_tool_results_truncated_total` counts these events.
-“Exact” means the canonical JSON of the complete `ToolResult` that reached the
-Agent Harness; it does not promise to recover Provider payload bytes already
-truncated before the Harness. Small results below the per-result limit are not
-externalized eagerly. `plan_tools` creates a content-addressed Artifact only when
-eviction, fold, drop/truncate, or the single forced Provider-overflow recovery is
-actually about to transform that body, and persists the Artifact additions and
-reduced messages in the same LangGraph state update. No database migration is
-required.
-Above `AGENT_NATIVE_CONTEXT_MAX_CHARS` or the unified input allowance minus the
-tool-schema share,
-the harness reduces the transcript in a fixed order. It first replaces older tool
-result bodies with one-line markers while keeping the newest
-`AGENT_TOOL_RESULT_KEEP_RECENT` results complete (default `6`). If still over
-budget, it folds complete assistant/tool groups, re-measures the fold, and then
-drops whole groups or truncates bodies through the shared budget primitives.
-Multi-call assistant turns remain atomic with all matching results. Initial user
-requests, checkpoint restore directions, and pause/resume steering are verbatim and
-non-truncatable; a Run blocks explicitly when those instructions cannot fit.
-
-The model may read those bodies through the read-only, idempotent
-`run.read_artifact` tool. Its only arguments are `artifact_id`,
-`view=page|head_tail`, `offset_chars`, and `max_tokens` (default `800`, range
-`64..2000`); it cannot supply a Run, conversation, Workspace, or actor identity.
-The runtime searches only runtime-created, model-readable Artifacts inherited by
-the selected checkpoint state. It performs no global hash lookup and never asks
-the Run Store, so missing, cross-Run, wrong-type, or hash-corrupt values all fail
-as `artifact_not_found`; an invalid offset returns
-`artifact_offset_out_of_range`. An ID forged inside MCP output grants no access,
-and legacy v1/v2 `RunContextSnapshot` values do not gain the new tool implicitly.
-Read pages are ephemeral and can never become nested Artifacts. Trace/SSE/metric
-metadata records only IDs, call/tool, ranges, character and token counts, hashes,
-and error codes—never body text. Pause/resume, rollback, and fork therefore expose
-exactly the Artifact state inherited from the selected checkpoint.
-
-Folding is capped by `AGENT_NATIVE_MAX_COMPACTIONS` (default `3`). A transcript
-that still cannot converge terminates as
-`blocked/context_compaction_exhausted`. Provider context-length failures normalize
-to `context_overflow` and receive exactly one forced reduction plus one retry.
-Native reduction emits canonical SSE `context` events with a `stage` field; stages
-inherited by a checkpoint branch are marked `replayed` with their source Run and
-checkpoint. Related metrics use the `agent_native_context_*` prefix.
-`AGENT_GRAPH_RECURSION_LIMIT` remains an independent graph safety fuse.
-
-This phase does not expose a manual `/compact` command. Every ordinary CLI input
-creates a new Run, so attaching a force flag to that Run cannot reduce an existing
-Session or an older Run transcript. A real manual command requires the unified budget,
-structured snapshot, and Session compression API to define its instruction semantics,
-before/after token evidence, and observable outcome together; it is deferred to the
-structured-snapshot phase.
-
-One authority resolves and divides the model input allowance in `setup_workspace`.
-It first measures explicit fixed shares for the system prompt and visible tool input
-and output schemas, then assigns `LLM_CONTEXT_EVIDENCE_RATIO` (default `0.25`) and
-`LLM_CONTEXT_HISTORY_RATIO` (default `0.15`) from what remains; the native tool
-transcript receives the exact remainder. The named shares add back up to the one
-allowance derived through `LLM_CONTEXT_INPUT_TOKEN_RATIO`, persist in run state and
-the setup trace, and are read by every later layer without another window ratio.
-
-Evidence and history are fitted field by field while the seed is assembled. Lower
-ranked evidence sources are dropped before the final source's `text` is trimmed,
-history token mode selects full normalized messages newest-first and truncates only the
-last content field that cannot fit—without the static 600-character summary or
-280-character per-message snippets. The RAG character cap is only a fallback when model
-information is unavailable. The system prompt, current request, checkpoint directions,
-and all steering stay verbatim, so seed JSON remains parseable. Provider overflow
-recovery rebuilds optional seed fields at smaller shares before the one forced reduction
-and retry. A window whose fixed overhead leaves no transcript capacity blocks before the
-provider as `context_budget_too_small`.
-
-The production boundary stays finite: Session assembly first freezes
-`RunContextSnapshot.controlled_history` under its message ceiling and token budget.
-Coding Runtime keeps that already-controlled input in checkpoint state without a
-second 12-message slice, and the history share decides the native model view. Direct
-Runtime callers get the same share-based projection; static message and character
-limits apply only when model shares are unavailable.
-
-```dotenv
-AGENT_NATIVE_CONTEXT_MAX_CHARS=48000
-LLM_CONTEXT_EVIDENCE_RATIO=0.25
-LLM_CONTEXT_HISTORY_RATIO=0.15
-AGENT_TOOL_RESULT_MAX_TOKENS=2000
-AGENT_TOOL_RESULT_KEEP_RECENT=6
-AGENT_NATIVE_MAX_COMPACTIONS=3
-```
-
-Every successful or failed result is returned under its call ID. Completed
-`(run_id, call_id)` executions can be replayed from the memory or PostgreSQL
-ledger; changed argument hashes are rejected. PostgreSQL also stores append-only
-Run events. The model can invoke `agent.request_user_input` to enter
-`waiting_input`, while users can pause, continue, cancel, or steer at safe tool
-boundaries. `AGENT_APPROVAL_POLICY=always|on_request|never` controls approvals;
-`never` blocks approval-requiring calls rather than silently authorizing them.
-The composer's "auto-approve" toggle is a per-Run runtime override that relaxes
-the default `on_request` policy to `auto_approve`: approval-requiring write,
-command, and external calls execute directly instead of entering
-`waiting_approval`. Hard denies (process deny rules, Workspace root boundaries,
-and identity RBAC) still apply, and the override only relaxes `on_request` — it
-cannot bypass `always` or `never`. `agent_approval_policy` still accepts only
-`always|on_request|never`; `auto_approve` is a runtime in-chat choice, not a
-configuration value.
-
-`ToolRegistry` validates complete Draft 2020-12 JSON Schemas at registration and
-validates both input and output at execution. A validation failure reports the
-path, the failed constraint, the schema-side expectation, and the type and size
-of the rejected value, so credentials and file contents never travel back to the
-model inside an error string. Tool specs also declare timeout, retry, and
-idempotency behavior. Retries are limited to retryable failures on idempotent
-tools; the same `run_id + call_id` replays a cached result and rejects argument
-changes. A timeout is not a cancellation: tools run on their own daemon thread,
-a timed-out worker is abandoned, and the result says the call may still be
-running; while an abandoned side-effecting call is still alive, further
-side-effecting calls in that Run return `tool_timeout_in_flight` instead of
-racing it. MCP tools use the same registry contract: `structuredContent` is
-preferred, text blocks are normalized, and `isError=true` becomes a stable tool
-failure instead of a successful payload; the execution context travels under the
-reserved `__tool_context__` parameter, so a server-declared `context` argument is
-forwarded untouched.
-
-### MCP lifecycle and transports
-
-MCP uses the exactly pinned official Python SDK `mcp==2.0.0` to negotiate the
-current `2026-07-28` protocol. `stdio` and stateless `streamable_http` are the
-current paths. The fixed `2025-06-18` client is available only as the explicit
-`stdio_2025_06_18` adapter; old HTTP+SSE requires `legacy_sse` plus
-`legacy_compatibility=true` and is never a default fallback. The decision is
-recorded in
-[`docs/adr/0001-mcp-official-python-sdk-v2.md`](docs/adr/0001-mcp-official-python-sdk-v2.md).
-
-`MCPConnectionManager` gives every Server its own connection, event loop,
-connection/request timeouts, idempotent retries, backoff, circuit breaker,
-catalog cache, cancellation, shutdown, and redacted status. One failed Server is
-isolated during startup. Only a failed `required=true` Server makes
-`/api/v1/health` return `503` with `ready=false`; an optional failure degrades
-health without blocking startup. `tools/list` consumes every page, rejects
-repeated cursors or tool names, sorts deterministically, honors
-`ttlMs`/`cacheScope`, and supports explicit refresh. Calls preserve the
-ToolRegistry call ID and expose stable timeout, cancellation, connection,
-circuit, and tool-error codes.
-
-HTTP Servers require an explicit host allowlist. HTTPS is the default;
-redirects and proxy environments are disabled, and private/local resolutions
-are rejected unless explicitly enabled. Credentials enter only through shared
-`SecretStore` references in `header_refs`/`env_refs`, never through snapshots,
-diagnostics, or object representations. Reserved/injected headers, dangerous
-stdio variables, and inherited API keys are blocked. All MCP permission
-annotations pass through the central `PermissionResolver`; missing or high-risk
-hints conservatively become external side effects rather than authorization.
-
-When MCP is enabled, open **MCP Connections** (`/#mcp`) to register,
-edit, test/refresh, enable, disable, or delete a Server. The UI supports current
-stdio, current Streamable HTTP, and both explicit compatibility paths while
-showing per-Server state, protocol version, retry errors, and discovered versus
-registered tool counts. UI writes require at least
-`MCP_CONFIG_PATH=/path/to/mcp.json`; the file may be absent and the first save
-creates it atomically with mode `0600`. With `MCP_ENABLED=true`, a save
-immediately replaces that Server's connection and synchronizes the ToolRegistry.
-Otherwise the configuration is persisted and shown as awaiting restart. Literal
-environment variables/headers are separate from Secret inputs. Secret values go
-only to the shared `SecretStore`; the config file and later GET responses retain
-only references or key names.
-
-The management API consists of `GET /api/v1/mcp/servers`,
-`PUT /api/v1/mcp/servers/{name}`,
-`PATCH /api/v1/mcp/servers/{name}/enabled`,
-`POST /api/v1/mcp/servers/{name}/test`, and
-`DELETE /api/v1/mcp/servers/{name}`. Each mutation affects only its target
-Server; disable/delete closes that connection and atomically removes its dynamic
-tools without rebuilding other Server lifecycles. Under the current
-`AUTH_MODE=single_user`, management writes always belong to the fixed `owner` and
-rely on Compose publishing only a loopback port. Direct unauthenticated loopback
-and trusted local-gateway proofs remain compatibility modes, not the product path.
-
-```json
-{
-  "mcp_servers": {
-    "local-tools": {
-      "transport": "stdio",
-      "command": "python",
-      "args": ["-m", "example_mcp_server"],
-      "env_refs": {"EXAMPLE_TOKEN": "keyring:mcp/example"},
-      "required": false
-    },
-    "remote-tools": {
-      "transport": "streamable_http",
-      "url": "https://mcp.example.com/mcp",
-      "allowed_hosts": ["mcp.example.com"],
-      "header_refs": {"Authorization": "keyring:mcp/remote"},
-      "required": true
-    }
-  }
-}
-```
-
-### Project instructions
-
-The Agent loads `AGENTS.md` from the workspace root toward focused file
-directories. `AGENTS.override.md` replaces `AGENTS.md` in the same directory;
-`CLAUDE.md` is a compatibility fallback only when neither AGENTS file exists,
-so the existing AGENTS precedence is unchanged. Nearer directories are later
-and therefore more specific. Multi-directory tasks retain each rule's scope.
-
-Before queueing, `ExecutionContextFactory` freezes identity, bounded session
-history/summary/model selection, Workspace revision/root/cwd/Git summary, safe
-configuration version, project instructions, and additional directories into a
-deeply immutable, JSON-round-trippable schema-v3 `RunContextSnapshot`, including
-the Effective Tool Pool catalog/pool summaries and hashes. API, Worker, CLI/REPL,
-SDK, and the Agent Loop share this contract. Worker tasks carry
-only `run_id`; after restart they recover the persisted snapshot instead of
-re-reading changed history, model preferences, or instruction files. Missing
-Git, a non-repository directory, an unborn HEAD, or a status-probe failure is a
-diagnostic rather than an unconditional Run failure.
-
-README files and directories are not injected unconditionally. Generic project
-overviews inventory the workspace and prioritize README/project manifests;
-other tasks still read only paths selected by search or file discovery.
-
-Conversation history uses two layers: an incrementally compressed rolling
-summary for older turns plus the latest unsummarized messages. Compression runs
-after successful Chat or Agent responses, preserves the original messages,
-redacts credential-like values, and stores an optimistic-lock version and the
-last summarized message. The summary is bounded, lossy, and injected as
-untrusted historical context; the current request and live evidence retain
-precedence.
-
-Project memory is a separate long-term workspace subsystem. It is neither
-conversation history nor LangGraph checkpoint state, and it does not ingest
-knowledge-base documents automatically. Memories are historical leads:
-system/project instructions, the current request, and live source code always
-take precedence.
+Agent-only and independent RAG evaluations are separated; existing retrieval data and gates remain.
+SQLite and isolated PostgreSQL crash/resume/compaction/lease tests cover the persisted boundaries.
+Real Provider quality and production capacity are separate from deterministic protocol tests.
 
 ## Workspace API
 
@@ -1136,12 +543,10 @@ restorable, and an active source Run must first reach a pause boundary. Run obse
 conversation IDs so late events from a previously viewed session cannot overwrite
 the active one.
 
-Responses expose `context_route`, `selected_knowledge_base_ids`, and
-`context_sources`. Knowledge chunks use `kind=knowledge_chunk` and include
-optional `knowledge_base_id`, `document_id`, and `score` provenance fields.
-The removed `repository_id`, `rag_context`, and per-Run `workspace_mode` Agent
-fields are not accepted. Run status still returns the server-frozen final mode and
-execution root as audit metadata.
+New Cogent results omit context_route, selected_knowledge_base_ids and
+context_sources. Agent requests cannot select knowledge bases. Historical
+payloads remain readable. Checkpoints are inspectable; file/conversation rewind
+uses /rewind with approval and hash verification rather than old graph restore.
 
 A ChangeSet is an audit and recovery boundary after tool approval. It stores the
 untruncated patch, SHA-256, changed paths, pre/post hashes, source/execution roots,
@@ -1239,6 +644,10 @@ tmpfs limits.
 
 ## Project memory
 
+This is the retained standalone platform memory subsystem, not Cogent file memory.
+Its APIs, data, indexes and evaluation semantics remain. Cogent neither injects
+these facts/profiles nor triggers the retired Chat/Agent extraction hooks.
+
 The memory architecture implements **L0 → L1 → L2 → L3**. L0 stores original
 messages and supports explicit search; L1 is governed project knowledge for the
 current workspace/revision; L2 deterministically composes active L1 records into
@@ -1297,9 +706,7 @@ Every eligible candidate receives an explainable final score:
 
 Recency uses `last_confirmed_at` (falling back to `updated_at`) with a
 configurable 180-day half-life. Candidates are globally ranked before the
-six-result/3,000-character budget is applied, and Chat/Agent provenance exposes
-the final score plus all three components. Dense retrieval failure degrades to
-lexical search, and memory failure never fails the main Chat or Agent answer.
+six-result/3,000-character budget is applied by this independent retrieval service.
 
 Management endpoints:
 
@@ -1319,10 +726,7 @@ view; editors can create, edit, confirm, and reject; admins can change mode,
 forget, and repair indexes. Forgetting hard-deletes memory/evidence/vector data
 but intentionally does not erase the source conversation.
 
-`ChatStreamRequest.workspace_id` remains optional for old clients. When present,
-Chat emits `memory_context` before answer tokens and enqueues post-response
-extraction. Agent runs execute `retrieve_project_memory` after context routing
-and enqueue extraction by `run_id` only after a completed result.
+Cogent does not invoke this retrieval/extraction chain; /chat/stream is removed.
 
 ### L0 conversation search and the L2/L3 profile pipeline
 
@@ -1341,11 +745,7 @@ remember requests become active immediately; ordinary preferences are active in
 auto mode and candidates in review mode. Every L1 mutation asynchronously
 rebuilds the workspace's `UserMemoryScene` (L2), then `UserProfileSnapshot` (L3)
 is rebuilt without an LLM from L2 scenes and active user facts, within the
-configured character budget. Chat and Agent inject it only as untrusted historical preferences;
-it cannot override the current request, policy, project instructions,
-permissions, or live evidence. Agent answer output can produce L1 evidence but
-never L3 inference. Credentials, complete environment values, privilege
-escalation requests, and prompt injection are rejected before L1/L3 storage.
+configured character budget. These profiles remain independent platform data and are not injected into Cogent.
 
 ```text
 GET/PATCH /api/v1/users/me/memory-settings
@@ -1363,7 +763,7 @@ The Memory Workbench mirrors the backend layers with L1, L2/L3, and L0
 views. Project and user facts use an asset-list/detail-governance split with
 active/candidate counts, status and kind filters, evidence, versions, and
 contextual actions. The profile view previews the exact deterministic snapshot
-visible to the model, while conversation search pairs user-scoped hits with a
+stored by the independent service (not read by Cogent), while conversation search pairs user-scoped hits with a
 full message detail panel and automatically loads recent messages. The profile
 view exposes L2 scenes and their L1 source counts. L1 extraction is fixed to the
 automatic path, so the UI no longer exposes workspace mode, manual reindex, or
@@ -1397,17 +797,13 @@ The default [`.env.example`](.env.example) describes the official single-node
 Compose combination. [`.env.local-memory.example`](.env.local-memory.example)
 provides a single-process variant where all structured state uses SQLite.
 
-Conversation compression is configured independently:
-
-```dotenv
-CONVERSATION_SUMMARY_ENABLED=true
-CONVERSATION_SUMMARY_TRIGGER_MESSAGES=12
-CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES=6
-CONVERSATION_SUMMARY_MAX_CHARS=2000
-CONVERSATION_SUMMARY_MAX_SOURCE_CHARS=12000
-```
+Cogent compaction is independent of this platform memory subsystem.
 
 ## Independent knowledge base
+
+RAG answer, indexing and evaluation use the independent RAG service and model
+registry, never the Cogent loop. Agent requests selecting knowledge bases are
+rejected. Existing RAG data and indexes are not rebuilt or migrated.
 
 Create catalog metadata before ingesting documents:
 
@@ -1522,6 +918,9 @@ RAG_RERANK_DEFAULT_ENABLED=false
 
 ## Storage and migration
 
+Revision 20260903_0028 adds versioned Cogent state and snapshots; SQLite uses schema v4.
+No live migration was applied in this task. Review and back up the database before approval.
+
 Use Alembic for schema changes:
 
 ```bash
@@ -1616,7 +1015,6 @@ AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
-LANGGRAPH_CHECKPOINTER=postgres
 RAG_VECTOR_STORE=qdrant
 PROJECT_MEMORY_ENABLED=true
 PROJECT_MEMORY_MODE=auto
@@ -1631,7 +1029,7 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and LangGraph checkpoints |
+| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and Cogent runtime snapshots |
 | Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
 | SQLite | Retained compatibility/test adapters; the product may use it only for the not-yet-migrated single-node user-memory implementation |
 | Redis/Celery | Retained multi-Worker extension; not started by current Compose |
@@ -1665,11 +1063,11 @@ this MVP does not promise automatic recovery of every interrupted Run.
 FastAPI `create_app()` and the retained process-local Celery Worker adapter both enter
 the same `ApplicationFactory` through
 `build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
-registry, Workspace, RAG, MCP, Tool Registry, LangGraph checkpointer, Agent
+registry, Workspace, RAG, MCP, Tool Registry, Cogent Agent
 runtime, and business services therefore share one dependency graph. CLI print,
 REPL, and SDK are active thin Query Kernel adapters. A shared non-owning
 `ToolPoolBuilder` is injected into context creation, Query recovery, and the
-decomposed Agent Loop; RuntimeContainer still owns and closes Registry/MCP resources.
+Cogent loop; RuntimeContainer still owns and closes Registry/MCP resources.
 
 The returned `RuntimeContainer` explicitly owns its immutable resolved config,
 redacted snapshot, shared `SecretStore`, `MCPConnectionManager`,

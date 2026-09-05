@@ -10,7 +10,8 @@ from unittest.mock import Mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ai_agent_platform.agents import CodingAgentRuntime, GameAgentRuntime
+from ai_agent_platform.agents import GameAgentRuntime
+from test_cogent_runtime import runtime_for, ScriptedClient, response
 from ai_agent_platform.agents.coding import (
     AgentChangeSummary,
     AgentRunMetrics,
@@ -533,7 +534,6 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 auth_mode="disabled",
                 entrypoint_type="api",
                 tool_registry=kernel["registry"],
-                user_memory_service=user_memory,
             )
             service = QueryService(
                 runtime=kernel["runtime"],
@@ -542,8 +542,7 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 task_queue=queue,
                 execution_context_factory=context_factory,
                 query_uow=kernel["uow"],
-                user_memory_service=user_memory,
-                project_memory_service=project_memory,
+                workspace_authorizer=project_memory,
             )
             record = service.start(
                 QueryParams(
@@ -570,7 +569,7 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 record.context_snapshot.metadata.entrypoint_metadata[
                     "evaluation"
                 ],
-                {"isolated": True, "knowledge_base_ids": []},
+                {"isolated": True},
             )
             messages = kernel["session_service"].list_messages(kernel["session_id"])
             self.assertEqual([item.role for item in messages], ["user"])
@@ -583,8 +582,8 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-            self.assertIn("user_memory_extraction", queue.names)
-            self.assertIn("REAL PROFILE", [
+            self.assertNotIn("user_memory_extraction", queue.names)
+            self.assertNotIn("REAL PROFILE", [
                 item.content
                 for item in ordinary.context_snapshot.session.controlled_history
             ])
@@ -654,7 +653,10 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 persisted_run.context_snapshot.metadata.entrypoint_metadata,
-                {"client": "test-sdk"},
+                {
+                    "client": "test-sdk", "permission_mode": "default",
+                    "sandbox_enabled": True, "sandbox_network_enabled": False,
+                },
             )
             self.assertEqual(
                 persisted_run.context_snapshot.session.model_selection.mode,
@@ -880,7 +882,7 @@ def _kernel(root: Path, on_submit=None) -> dict[str, object]:
         },
     )
     run_store = InMemoryAgentRunStore()
-    runtime = CodingAgentRuntime(tool_registry=registry, run_store=run_store)
+    runtime = runtime_for(root, ScriptedClient(response('done')), registry=registry, store=run_store)
     context_factory = ExecutionContextFactory(
         session_service=session_service,
         workspace_service=workspace_service,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 from typing import Sequence
+from ai_agent_platform.cogent.skills.parser import substitute_arguments
 
 from .discovery import SkillDiscovery
 from .models import (
@@ -70,9 +71,7 @@ class SkillService:
                 discovered_count=0,
                 loaded_chars=0,
             )
-        # Runtime Skills are user-global. Workspace roots are intentionally not
-        # consulted, so the same catalog is available in every Workspace.
-        return self._discovery.discover(project_root=None)
+        return self._discovery.discover(project_root=workspace_root)
 
     def build_context(
         self,
@@ -85,6 +84,7 @@ class SkillService:
         enabled_skills: Sequence[str] | None | object = _DEFAULT_SELECTION,
         available_tools: Sequence[str] | None = None,
         selected_skill_names: Sequence[str] | None = None,
+        arguments: str = "",
     ) -> SkillContextSelection:
         effective_enabled = self._enabled if enabled is None else enabled
         if not effective_enabled or max_chars <= 0:
@@ -114,7 +114,7 @@ class SkillService:
         # the read-only ``agent.load_skill`` tool.
         if explicit_selection is None:
             catalog = self.discover(
-                workspace_root=None,
+                workspace_root=workspace_root,
                 enabled=effective_enabled,
             )
             return SkillContextSelection(
@@ -122,7 +122,7 @@ class SkillService:
                 diagnostics=catalog.diagnostics,
             )
         catalog = self.discover(
-            workspace_root=None,
+            workspace_root=workspace_root,
             enabled=effective_enabled,
         )
         diagnostics = list(catalog.diagnostics)
@@ -159,7 +159,7 @@ class SkillService:
                 )
                 continue
             prefix = _context_prefix(skill.source, skill.qualified_name)
-            full_text = prefix + skill.instructions
+            full_text = prefix + substitute_arguments(skill.instructions, arguments)
             budget = min(skill.context_budget_chars, remaining)
             if budget <= 0:
                 break
@@ -231,7 +231,7 @@ class SkillService:
             else frozenset(available_tools)
         )
         catalog = self.discover(
-            workspace_root=None,
+            workspace_root=workspace_root,
             enabled=effective_enabled,
         )
         diagnostics = list(catalog.diagnostics)
@@ -299,7 +299,7 @@ class SkillService:
 
         if not (self._enabled if enabled is None else enabled):
             raise SkillInvocationError("skill_disabled", "Skills are disabled")
-        discovered = self.discover(workspace_root=None, enabled=True)
+        discovered = self.discover(workspace_root=workspace_root, enabled=True)
         candidate = discovered.get_skill(name)
         if candidate is None:
             raise SkillInvocationError(

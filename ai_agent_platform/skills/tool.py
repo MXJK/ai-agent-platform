@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from ai_agent_platform.cogent.skills.parser import substitute_arguments
 
 from ai_agent_platform.integrations.permissions import ToolExecutionContext
 
@@ -20,6 +21,7 @@ class SkillLoaderTool:
         self,
         *,
         name: str,
+        arguments: str = "",
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
         if self._service is None:
@@ -43,7 +45,7 @@ class SkillLoaderTool:
         return {
             "name": skill.qualified_name,
             "description": skill.description,
-            "instructions": skill.instructions,
+            "instructions": substitute_arguments(skill.instructions, arguments),
             "content_hash": skill.content_hash,
             "required_tools": list(skill.required_tools),
             "notice": (

@@ -209,7 +209,7 @@ def register_run_artifact_tool(registry: ToolRegistry) -> None:
 def _runtime_artifact_tool_boundary(**arguments: Any) -> dict[str, Any]:
     del arguments
     raise RuntimeError(
-        "run.read_artifact must be handled against the active LangGraph state"
+        "run.read_artifact is a historical artifact capability, not a Cogent tool"
     )
 
 

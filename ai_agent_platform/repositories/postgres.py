@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
@@ -12,6 +13,7 @@ from ai_agent_platform.agents.coding.models import (
     AgentRunMetrics,
     AgentRunRecord,
     AgentRunResult,
+    AgentRuntimeSnapshot,
     AgentToolExecution,
     ContextSource,
 )
@@ -698,133 +700,163 @@ class PostgresAgentRunRepository:
         self._database_url = database_url
         _require_psycopg()
 
-    def save(self, record: AgentRunRecord) -> None:
-        Jsonb = _require_jsonb()
+    @contextmanager
+    def run_lease(self, run_id):
+        from ai_agent_platform.cogent.leases import RunLeaseUnavailable
+        # A session advisory lock remains held across the short state transactions;
+        # PostgreSQL releases it when a crashed worker's connection disappears.
         with self._connect() as conn:
-            stored_status = conn.execute(
+            key = int.from_bytes(hashlib.sha256(('cogent:' + run_id).encode()).digest()[:8], 'big', signed=True)
+            acquired = conn.execute('SELECT pg_try_advisory_lock(%s)', (key,)).fetchone()[0]
+            if not acquired:
+                raise RunLeaseUnavailable('Run is owned by another worker')
+            try:
+                yield
+            finally:
+                conn.execute('SELECT pg_advisory_unlock(%s)', (key,))
+
+    def save(self, record: AgentRunRecord) -> None:
+        with self._connect() as conn:
+            self.save_in_transaction(conn, record)
+
+    def save_in_transaction(self, conn, record: AgentRunRecord) -> None:
+        Jsonb = _require_jsonb()
+        stored_status = conn.execute(
+            """
+            INSERT INTO agent_runs (
+                id,
+                thread_id,
+                conversation_id,
+                workspace_id,
+                workspace_root,
+                status,
+                checkpoint_id,
+                latest_node,
+                next_nodes,
+                trace,
+                result,
+                error,
+                pending_approval,
+                errors,
+                control_action,
+                steering_messages,
+                pending_compaction,
+                run_context_snapshot,
+                runtime_engine,
+                runtime_state_version,
+                runtime_state_json,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                NOW(),
+                NOW()
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                thread_id = EXCLUDED.thread_id,
+                conversation_id = EXCLUDED.conversation_id,
+                workspace_id = EXCLUDED.workspace_id,
+                workspace_root = EXCLUDED.workspace_root,
+                status = EXCLUDED.status,
+                checkpoint_id = EXCLUDED.checkpoint_id,
+                latest_node = EXCLUDED.latest_node,
+                next_nodes = EXCLUDED.next_nodes,
+                trace = EXCLUDED.trace,
+                result = EXCLUDED.result,
+                error = EXCLUDED.error,
+                pending_approval = EXCLUDED.pending_approval,
+                errors = EXCLUDED.errors,
+                control_action = EXCLUDED.control_action,
+                steering_messages = EXCLUDED.steering_messages,
+                pending_compaction = EXCLUDED.pending_compaction,
+                run_context_snapshot = EXCLUDED.run_context_snapshot,
+                runtime_engine = EXCLUDED.runtime_engine,
+                runtime_state_version = EXCLUDED.runtime_state_version,
+                runtime_state_json = EXCLUDED.runtime_state_json,
+                updated_at = NOW()
+            WHERE
+                agent_runs.status NOT IN (
+                    'completed', 'partial', 'blocked', 'cancelled', 'failed'
+                )
+            RETURNING status
+            """,
+            (
+                record.run_id,
+                record.thread_id,
+                record.conversation_id,
+                record.workspace_id,
+                record.workspace_root,
+                record.status,
+                record.checkpoint_id,
+                record.latest_node,
+                Jsonb(record.next_nodes),
+                Jsonb(record.trace),
+                Jsonb(_agent_result_to_json(record.result)),
+                record.error,
+                Jsonb(record.pending_approval),
+                Jsonb(record.errors),
+                record.control_action,
+                Jsonb(record.steering_messages),
+                Jsonb(record.pending_compaction),
+                Jsonb(
+                    record.context_snapshot.to_dict()
+                    if record.context_snapshot is not None
+                    else None
+                ),
+                record.runtime_engine,
+                record.runtime_state_version,
+                Jsonb(record.runtime_state),
+            ),
+        ).fetchone()
+        if stored_status is None:
+            return
+        for event_key, event in events_for_record(record):
+            conn.execute(
                 """
-                INSERT INTO agent_runs (
-                    id,
-                    thread_id,
-                    conversation_id,
-                    workspace_id,
-                    workspace_root,
-                    status,
-                    checkpoint_id,
-                    latest_node,
-                    next_nodes,
-                    trace,
-                    result,
-                    error,
-                    pending_approval,
-                    errors,
-                    control_action,
-                    steering_messages,
-                    pending_compaction,
-                    run_context_snapshot,
-                    created_at,
-                    updated_at
+                INSERT INTO agent_run_events (
+                    run_id, event_key, type, status, node, summary, output
                 )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    NOW(),
-                    NOW()
+                SELECT %s, %s, %s, %s, %s, %s, %s
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM agent_runs
+                    WHERE id = %s AND status = %s
                 )
-                ON CONFLICT (id) DO UPDATE SET
-                    thread_id = EXCLUDED.thread_id,
-                    conversation_id = EXCLUDED.conversation_id,
-                    workspace_id = EXCLUDED.workspace_id,
-                    workspace_root = EXCLUDED.workspace_root,
-                    status = EXCLUDED.status,
-                    checkpoint_id = EXCLUDED.checkpoint_id,
-                    latest_node = EXCLUDED.latest_node,
-                    next_nodes = EXCLUDED.next_nodes,
-                    trace = EXCLUDED.trace,
-                    result = EXCLUDED.result,
-                    error = EXCLUDED.error,
-                    pending_approval = EXCLUDED.pending_approval,
-                    errors = EXCLUDED.errors,
-                    control_action = EXCLUDED.control_action,
-                    steering_messages = EXCLUDED.steering_messages,
-                    pending_compaction = EXCLUDED.pending_compaction,
-                    run_context_snapshot = EXCLUDED.run_context_snapshot,
-                    updated_at = NOW()
-                WHERE
-                    agent_runs.status NOT IN (
-                        'completed', 'partial', 'blocked', 'cancelled', 'failed'
-                    )
-                RETURNING status
+                ON CONFLICT (run_id, event_key) DO NOTHING
                 """,
                 (
                     record.run_id,
-                    record.thread_id,
-                    record.conversation_id,
-                    record.workspace_id,
-                    record.workspace_root,
+                    event_key,
+                    event.type,
+                    event.status,
+                    event.node,
+                    event.summary,
+                    Jsonb(event.output),
+                    record.run_id,
                     record.status,
-                    record.checkpoint_id,
-                    record.latest_node,
-                    Jsonb(record.next_nodes),
-                    Jsonb(record.trace),
-                    Jsonb(_agent_result_to_json(record.result)),
-                    record.error,
-                    Jsonb(record.pending_approval),
-                    Jsonb(record.errors),
-                    record.control_action,
-                    Jsonb(record.steering_messages),
-                    Jsonb(record.pending_compaction),
-                    Jsonb(
-                        record.context_snapshot.to_dict()
-                        if record.context_snapshot is not None
-                        else None
-                    ),
                 ),
-            ).fetchone()
-            if stored_status is None:
-                return
-            for event_key, event in events_for_record(record):
-                conn.execute(
-                    """
-                    INSERT INTO agent_run_events (
-                        run_id, event_key, type, status, node, summary, output
-                    )
-                    SELECT %s, %s, %s, %s, %s, %s, %s
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM agent_runs
-                        WHERE id = %s AND status = %s
-                    )
-                    ON CONFLICT (run_id, event_key) DO NOTHING
-                    """,
-                    (
-                        record.run_id,
-                        event_key,
-                        event.type,
-                        event.status,
-                        event.node,
-                        event.summary,
-                        Jsonb(event.output),
-                        record.run_id,
-                        record.status,
-                    ),
-                )
+            )
 
     def get(self, run_id: str) -> AgentRunRecord:
         with self._connect() as conn:
@@ -848,7 +880,10 @@ class PostgresAgentRunRepository:
                     control_action,
                     steering_messages,
                     pending_compaction,
-                    run_context_snapshot
+                    run_context_snapshot,
+                    runtime_engine,
+                    runtime_state_version,
+                    runtime_state_json
                 FROM agent_runs
                 WHERE id = %s
                 """,
@@ -883,7 +918,10 @@ class PostgresAgentRunRepository:
                     control_action,
                     steering_messages,
                     pending_compaction,
-                    run_context_snapshot
+                    run_context_snapshot,
+                    runtime_engine,
+                    runtime_state_version,
+                    runtime_state_json
                 FROM agent_runs
                 WHERE conversation_id = %s
                 ORDER BY created_at DESC, id DESC
@@ -915,7 +953,10 @@ class PostgresAgentRunRepository:
                     control_action,
                     steering_messages,
                     pending_compaction,
-                    run_context_snapshot
+                    run_context_snapshot,
+                    runtime_engine,
+                    runtime_state_version,
+                    runtime_state_json
                 FROM agent_runs
                 ORDER BY created_at DESC, id DESC
                 LIMIT %s
@@ -1063,6 +1104,79 @@ class PostgresAgentRunRepository:
                     Jsonb(execution.response),
                 ),
             )
+
+    def save_runtime_snapshot(self, snapshot: AgentRuntimeSnapshot) -> None:
+        with self._connect() as conn:
+            self._save_snapshot_in_transaction(conn, snapshot)
+
+    def _save_snapshot_in_transaction(self, conn, snapshot: AgentRuntimeSnapshot) -> None:
+        Jsonb = _require_jsonb()
+        conn.execute(
+            """
+            INSERT INTO agent_runtime_snapshots (
+                run_id, snapshot_id, sequence, boundary, runtime_engine,
+                runtime_state_version, state, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+            ON CONFLICT (run_id, snapshot_id) DO NOTHING
+            """,
+            (
+                snapshot.run_id,
+                snapshot.snapshot_id,
+                snapshot.sequence,
+                snapshot.boundary,
+                snapshot.runtime_engine,
+                snapshot.runtime_state_version,
+                Jsonb(snapshot.state),
+                snapshot.created_at,
+            ),
+        )
+        conn.execute(
+            """
+            DELETE FROM agent_runtime_snapshots
+            WHERE run_id = %s AND snapshot_id NOT IN (
+                SELECT snapshot_id FROM agent_runtime_snapshots
+                WHERE run_id = %s ORDER BY sequence DESC LIMIT 100
+            )
+            """,
+            (snapshot.run_id, snapshot.run_id),
+        )
+
+    def save_runtime_boundary(self, record, snapshot) -> None:
+        with self._connect() as conn:
+            self.save_in_transaction(conn, record)
+            self._save_snapshot_in_transaction(conn, snapshot)
+
+    def list_runtime_snapshots(
+        self,
+        run_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRuntimeSnapshot]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, snapshot_id, sequence, boundary, runtime_engine,
+                       runtime_state_version, state, created_at
+                FROM (
+                    SELECT * FROM agent_runtime_snapshots
+                    WHERE run_id = %s ORDER BY sequence DESC LIMIT %s
+                ) snapshots ORDER BY sequence ASC
+                """,
+                (run_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [
+            AgentRuntimeSnapshot(
+                run_id=str(row[0]),
+                snapshot_id=str(row[1]),
+                sequence=int(row[2]),
+                boundary=str(row[3]),
+                runtime_engine=str(row[4]),
+                runtime_state_version=int(row[5]),
+                state=dict(row[6] or {}),
+                created_at=(row[7].isoformat() if row[7] is not None else None),
+            )
+            for row in rows
+        ]
 
     def _connect(self):
         psycopg = _require_psycopg()
@@ -2011,7 +2125,13 @@ def _token_usage_from_row(row: tuple[Any, ...]) -> TokenUsageRecord:
 
 
 def _agent_result_to_json(result: AgentRunResult | None) -> dict[str, Any] | None:
-    return asdict(result) if result is not None else None
+    if result is None:
+        return None
+    payload = asdict(result)
+    if result.graph_engine == "cogent-v1":
+        for key in ("context_route", "selected_knowledge_base_ids", "context_sources"):
+            payload.pop(key, None)
+    return payload
 
 
 def _agent_result_from_json(data: dict[str, Any] | None) -> AgentRunResult | None:
@@ -2086,6 +2206,9 @@ def _agent_run_from_row(row: tuple[Any, ...]) -> AgentRunRecord:
             if len(row) > 17 and row[17] is not None
             else None
         ),
+        runtime_engine=(str(row[18]) if len(row) > 18 else "langgraph-v1"),
+        runtime_state_version=(int(row[19]) if len(row) > 19 else 0),
+        runtime_state=(dict(row[20] or {}) if len(row) > 20 else {}),
     )
 
 

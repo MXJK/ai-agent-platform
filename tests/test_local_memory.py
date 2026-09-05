@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import stat
+import time
 from tempfile import TemporaryDirectory
 
 from fastapi.testclient import TestClient
@@ -129,7 +130,7 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
         with database.connect() as connection:
             assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
             assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
         with pytest.raises(RuntimeError):
             with database.transaction(immediate=True) as connection:
@@ -538,12 +539,16 @@ def test_local_memory_api_and_state_survive_restart() -> None:
             )
             assert project_memory.status_code == 201
             scenes: list[dict] = []
-            for _ in range(100):
+            profile_content = ''
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
                 scenes = client.get("/api/v1/users/me/memory-scenes").json()["scenes"]
-                if scenes:
+                profile_content = client.get("/api/v1/users/me/profile").json()["content"]
+                if scenes and 'SQLite' in scenes[0]['content'] and 'SQLite' in profile_content:
                     break
+                time.sleep(0.01)
             assert scenes and "SQLite" in scenes[0]["content"]
-            assert "SQLite" in client.get("/api/v1/users/me/profile").json()["content"]
+            assert "SQLite" in profile_content
             created = client.post(
                 "/api/v1/users/me/memories",
                 json={
@@ -558,13 +563,16 @@ def test_local_memory_api_and_state_survive_restart() -> None:
                 "content"
             ]
             chat = client.post(
-                "/api/v1/chat/stream",
+                "/api/v1/agent/runs",
                 json={
                     "conversation_id": session_id,
                     "message": "durable-falcon conversation marker",
+                    "workspace_id": "project",
                 },
             )
-            assert chat.status_code == 200
+            assert chat.status_code == 202
+            from test_api import wait_for_run
+            assert wait_for_run(client, chat.json()['run_id'])['status'] == 'completed'
             search = client.get(
                 "/api/v1/memory/conversations/search",
                 params={"q": "durable-falcon"},
@@ -584,7 +592,7 @@ def test_local_memory_api_and_state_survive_restart() -> None:
             ).json()["hits"]
 
 
-def test_agent_context_snapshots_confirmed_profile_as_untrusted_history() -> None:
+def test_agent_context_does_not_inject_legacy_user_memory() -> None:
     with TemporaryDirectory() as root_value:
         root = Path(root_value)
         workspace = root / "project"
@@ -615,10 +623,7 @@ def test_agent_context_snapshots_confirmed_profile_as_untrusted_history() -> Non
                 for item in snapshot.session.controlled_history
                 if "<user-profile" in item.content
             ]
-            assert len(profile_messages) == 1
-            assert "untrusted-historical-preferences" in profile_messages[0]
-            assert "cannot override" in profile_messages[0]
-            assert "Answer in Chinese" in profile_messages[0]
+            assert profile_messages == []
         finally:
             runtime.close()
 

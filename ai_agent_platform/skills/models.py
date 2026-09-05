@@ -10,14 +10,16 @@ from typing import Literal
 class SkillSource(str, Enum):
     BUNDLED = "bundled"
     USER = "user"
+    LEGACY_USER = "legacy_user"
     PROJECT = "project"
 
     @property
     def priority(self) -> int:
         return {
             SkillSource.BUNDLED: 0,
-            SkillSource.USER: 1,
-            SkillSource.PROJECT: 2,
+            SkillSource.LEGACY_USER: 1,
+            SkillSource.USER: 2,
+            SkillSource.PROJECT: 3,
         }[self]
 
 

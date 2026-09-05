@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any, Protocol
 
-from ai_agent_platform.agents.coding.planner import json_object_from_llm
+from ai_agent_platform.integrations.structured_output import json_object_from_llm
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.project_memory.models import MEMORY_KINDS
 

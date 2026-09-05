@@ -53,6 +53,37 @@
 }
 
 /* Conversation workbench */
+.cogent-thinking {
+  margin-block: 12px;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.cogent-thinking summary {
+  cursor: pointer;
+  padding-block: 8px;
+}
+
+.cogent-thinking summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+
+.cogent-thinking pre {
+  font-family: var(--font-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+  margin-block: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cogent-thinking, .cogent-thinking * {
+    animation: none;
+    transition: none;
+  }
+}
+
 .mobile-more-nav,
 .mobile-more-menu,
 .mobile-nav-backdrop,

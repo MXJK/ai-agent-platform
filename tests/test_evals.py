@@ -45,8 +45,15 @@ class EvalRunnerTests(unittest.TestCase):
     def test_default_eval_suite_passes_offline(self) -> None:
         report = run_eval_suite(load_eval_suite())
 
-        self.assertTrue(report.passed)
+        self.assertTrue(report.passed, format_report(report))
         self.assertEqual(report.passed_count, report.total_count)
+        self.assertIsNone(report.retrieval_metrics)
+        self.assertTrue(all(case.case_type == 'agent' for case in report.results))
+
+    def test_standalone_rag_suite_preserves_retrieval_gates(self):
+        from pathlib import Path
+        report = run_eval_suite(load_eval_suite(Path('evals/platform_rag_cases.json')))
+        self.assertTrue(report.passed, format_report(report))
         self.assertIsNotNone(report.retrieval_metrics)
         self.assertGreater(report.retrieval_metrics.recall_at_k, 0.0)
         self.assertEqual(report.retrieval_metrics.evaluated_cases, 4)

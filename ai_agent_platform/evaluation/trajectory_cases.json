@@ -1,5 +1,5 @@
 {
-  "suite_id": "l1_trajectory_v2",
+  "suite_id": "cogent_trajectory_v3",
   "workspace_id": "workspace_l1",
   "metric_thresholds": {
     "max_invalid_action_rate": 0.05,
@@ -126,22 +126,18 @@
       "message": "create_order 接口在哪里实现？",
       "expected_status": "completed",
       "required_tools": [
-        "repo.search_code",
-        "repo.read_file"
+        "Grep",
+        "ReadFile"
       ],
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "order_constraints": [
         [
-          "repo.search_code",
-          "repo.read_file"
-        ],
-        [
-          "repo.read_file",
-          "code_explainer"
+          "Grep",
+          "ReadFile"
         ]
       ],
       "max_steps": 10,
@@ -156,18 +152,18 @@
       "message": "这个项目是干什么的？",
       "expected_status": "completed",
       "required_tools": [
-        "repo.list_files",
-        "repo.read_file"
+        "Glob",
+        "ReadFile"
       ],
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "order_constraints": [
         [
-          "repo.list_files",
-          "repo.read_file"
+          "Glob",
+          "ReadFile"
         ]
       ],
       "max_steps": 10,
@@ -181,28 +177,31 @@
       "id": "l1_change_request_pauses_before_writing",
       "message": "帮我实现 OrderService 支持优惠券参数并补测试",
       "expected_status": "waiting_approval",
-      "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
-      ],
       "max_steps": 12,
       "reference_steps": 4,
       "max_steps_by_provider": {
         "deepseek": 36
-      }
+      },
+      "forbidden_executed_tools": [
+        "WriteFile",
+        "EditFile",
+        "Bash"
+      ],
+      "required_pending_tools": [
+        "WriteFile"
+      ]
     },
     {
       "id": "l1_read_failure_switches_target",
       "message": "订单服务的下单流程是怎么走的？",
       "expected_status": "completed",
       "required_tools": [
-        "repo.read_file"
+        "ReadFile"
       ],
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "max_steps": 12,
       "reference_steps": 4,
@@ -220,9 +219,9 @@
       "message": "refund_webhook 的重试策略在哪里定义？",
       "expected_status": "completed",
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "max_steps": 12,
       "reference_steps": 2,
@@ -236,9 +235,9 @@
       "message": "这些 service 之间是怎么协作的？",
       "expected_status": "completed",
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "max_steps": 14,
       "reference_steps": 5,
@@ -252,9 +251,9 @@
       "message": "把仓库里每个 service 模块的职责都逐一说明一遍",
       "expected_status": "completed",
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "max_steps": 24,
       "reference_steps": 13,
@@ -268,9 +267,9 @@
       "message": "legacy_pipeline_stage 一共有哪些阶段，各自做什么？",
       "expected_status": "completed",
       "forbidden_tools": [
-        "sandbox.write_file",
-        "sandbox.apply_patch",
-        "sandbox.run_command"
+        "WriteFile",
+        "EditFile",
+        "Bash"
       ],
       "max_steps": 24,
       "reference_steps": 6,

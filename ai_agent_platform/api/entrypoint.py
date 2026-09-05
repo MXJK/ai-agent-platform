@@ -14,8 +14,8 @@ from ai_agent_platform.main import LazyASGIApp, app, create_app
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ai-agent-api",
-        description="Run the ai-agent-platform HTTP adapter with uvicorn.",
+        prog="cogent-api",
+        description="Run the Cogent HTTP adapter with uvicorn.",
     )
     parser.add_argument(
         "--host",

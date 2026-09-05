@@ -96,6 +96,7 @@ class AgentSDK:
         *,
         approved: bool = True,
         message: str = "",
+        answers: list[dict] | None = None,
         actor_user_id: str | None = None,
         cursor: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
@@ -114,6 +115,7 @@ class AgentSDK:
             run_id=run_id,
             approved=approved,
             message=message,
+            answers=answers,
             actor_user_id=actor_user_id,
         )
         return self._query_service.iter_events(

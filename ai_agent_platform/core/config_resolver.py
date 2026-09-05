@@ -207,7 +207,6 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "eval_workspace_root",
         "workspace_store",
         "workspace_allowed_roots",
-        "langgraph_checkpointer",
         "model_registry_store",
         "model_secret_backend",
         "chroma_persist_directory",

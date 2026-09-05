@@ -12,48 +12,6 @@ const PANEL_WIDTHS = {
   inspector: { cssVariable: "--inspector-width", min: 240, max: 440, defaultValue: 288 },
 };
 const responseTimers = new WeakMap();
-const COMPOSER_BUILTIN_COMMANDS = [
-  {
-    kind: "builtin",
-    command: "compact",
-    title: "压缩当前 Agent 上下文",
-    description: "在安全边界压缩当前 Run，可附带需要重点保留的内容。",
-    action: "compact",
-    keywords: ["context", "上下文", "压缩"],
-  },
-  {
-    kind: "builtin",
-    command: "agent",
-    title: "切换到代码 Agent",
-    description: "读取工作区并按权限运行工具。",
-    action: "agent",
-    keywords: ["code", "代码", "工具"],
-  },
-  {
-    kind: "builtin",
-    command: "chat",
-    title: "切换到快速对话",
-    description: "使用流式对话，不运行代码工具。",
-    action: "chat",
-    keywords: ["ask", "对话", "快速"],
-  },
-  {
-    kind: "builtin",
-    command: "new",
-    title: "新建会话",
-    description: "保留当前会话并开始一个新上下文。",
-    action: "new",
-    keywords: ["session", "会话"],
-  },
-  {
-    kind: "builtin",
-    command: "tools",
-    title: "打开工具管理",
-    description: "统一管理全局 Skill 与 MCP Server。",
-    action: "tools",
-    keywords: ["skill", "mcp", "server", "tool", "工具"],
-  },
-];
 let composerDraftSaveTimer = null;
 let conversationFollowFrame = null;
 let modelRegistryRefreshTimer = null;
@@ -177,8 +135,7 @@ const state = {
   slashRequestGeneration: 0,
   followConversation: true,
   currentView: "chat",
-  composerMode: "chat",
-  autoApprove: false,
+  permissionMode: "default",
   chatController: null,
   agentPollGeneration: 0,
   changeSetRequestGeneration: 0,
@@ -1242,7 +1199,7 @@ function renderResponseMetrics(contentNode, metrics) {
     values.push(["Provider 合计", `${formatTokenCount(metrics.total_tokens)} tokens`]);
   }
   if (metrics.node_count !== undefined) {
-    values.push(["阶段", formatTokenCount(metrics.node_count)]);
+    values.push(["过程记录", formatTokenCount(metrics.node_count)]);
   }
   if (metrics.tool_call_count !== undefined) {
     values.push(["工具", formatTokenCount(metrics.tool_call_count)]);
@@ -1377,7 +1334,7 @@ function saveUiPreferences() {
         rerankEnabled: state.rerankEnabled,
         knowledgeBaseId: $("kb-id-input")?.value || "",
         knowledgeTab: state.activeKnowledgeTab,
-        autoApprove: state.autoApprove,
+        permissionMode: state.permissionMode,
         composerDrafts,
       }),
     );
@@ -1466,7 +1423,10 @@ function slashQueryContext() {
 }
 
 function composerSlashItems() {
-  const builtin = COMPOSER_BUILTIN_COMMANDS.map((item) => ({ ...item }));
+  const builtin = (state.slashCapabilities.commands || []).map((item) => ({
+    kind: "builtin", command: item.name, title: item.description,
+    description: item.usage, action: item.name, aliases: item.aliases || [], keywords: [],
+  }));
   const skills = (state.slashCapabilities.skill_commands || []).map((command) => ({
     kind: "skill",
     command: command.name,
@@ -1679,46 +1639,9 @@ function insertSlashCommand(item) {
 }
 
 async function runBuiltinComposerCommand(item, remaining = "") {
+  setComposerValue(`/${item.command} ${remaining}`.trim(), { focus: true });
   closeSlashCommandMenu();
-  if (item.action === "agent" || item.action === "chat") {
-    await persistComposerMode(item.action);
-    setComposerValue(remaining, { focus: true });
-    if (remaining.trim()) await submitComposerMessage();
-    return;
-  }
-  if (item.action === "new") {
-    const draft = remaining.trim();
-    clearComposerInput();
-    if (canSwitchSession()) {
-      await createSession();
-      if (draft) setComposerValue(draft, { focus: true });
-    }
-    return;
-  }
-  if (item.action === "compact") {
-    const runId = state.latestRunId;
-    if (!runId || !["running", "paused"].includes(state.latestRunStatus)) {
-      showToast("当前没有可压缩的运行中或已暂停 Agent Run", "warning");
-      return;
-    }
-    clearComposerInput();
-    const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/compact`, {
-      method: "POST",
-      body: JSON.stringify({ instruction: remaining.trim() }),
-    });
-    renderAgentRun(body);
-    showToast("上下文压缩请求已排队，将在安全边界执行", "success");
-    if (!TERMINAL_RUN_STATUSES.has(agentRunStatus(body))) {
-      watchRunUntilTerminal({ preserveChat: true }).catch((error) =>
-        showToast(humanizeError(error), "error"),
-      );
-    }
-    return;
-  }
-  if (["tools", "mcp"].includes(item.action)) {
-    clearComposerInput();
-    switchView("tools");
-  }
+  await runAgentFromComposer();
 }
 
 function selectSlashItem(index = state.slashActiveIndex) {
@@ -1731,9 +1654,6 @@ function selectSlashItem(index = state.slashActiveIndex) {
     return;
   }
   insertSlashCommand(item);
-  if (state.composerMode !== "agent") {
-    persistComposerMode("agent");
-  }
 }
 
 function splitSlashArguments(value) {
@@ -1751,8 +1671,8 @@ function parseComposerSlashInvocation(value) {
   if (!match) return null;
   const commandName = match[1].toLowerCase();
   const remaining = match[2] || "";
-  const builtin = COMPOSER_BUILTIN_COMMANDS.find(
-    (item) => item.command === commandName,
+  const builtin = composerSlashItems().find(
+    (item) => item.kind === "builtin" && (item.command === commandName || item.aliases.includes(commandName)),
   );
   if (builtin) return { item: builtin, remaining };
   const skill = (state.slashCapabilities.skill_commands || []).find((item) =>
@@ -2254,7 +2174,6 @@ function setActiveWorkspace(workspaceId) {
   renderWorkspaceCatalog();
   if (
     state.conversationId
-    && state.composerMode === "agent"
     && workspaceIsReady(currentWorkspace())
   ) {
     loadSlashCapabilities().catch((error) => {
@@ -2269,79 +2188,27 @@ function applyConfigurationToInputs(source, defaults = false) {
   $("model-input").value = value("model");
   $("thinking-level-input").value = value("thinking_level");
   setActiveWorkspace(value("workspace_id"));
-  updateComposerMode(value("composer_mode") || "chat");
+  updateComposer();
   renderWorkspaceManager();
   updateContextSummary();
 }
-function updateComposerMode(mode = $("composer-mode-input").value) {
-  state.composerMode = mode === "agent" ? "agent" : "chat";
-  $("composer-mode-input").value = state.composerMode;
-  const isAgent = state.composerMode === "agent";
-  $("composer-mode-description").textContent = isAgent
-    ? (state.autoApprove
-      ? "读取工作区并自动执行工具；写操作已开启自动审批。"
-      : "读取工作区并运行工具；高风险操作等待审批。")
-    : "流式回答，不执行代码工具。";
-  $("chat-message-input").placeholder = isAgent
-    ? "描述代码任务，键入 / 使用 Skill 或 MCP，Enter 交给 Agent…"
-    : "输入消息，键入 / 使用命令，Enter 发送…";
-  $("send-chat-btn").innerHTML = isAgent
-    ? `交给 Agent ${iconMarkup("arrow-right")}`
-    : `发送 ${iconMarkup("arrow-up")}`;
-  if (state.conversationId && isAgent && workspaceIsReady(currentWorkspace())) {
-    loadSlashCapabilities().catch((error) => {
-      state.slashError = `能力加载失败：${humanizeError(error)}`;
-    });
-  }
+function updateComposer() {
+  $("composer-mode-description").textContent = "Cogent 统一处理对话和代码任务；权限边界始终生效。";
+  $("chat-message-input").placeholder = "描述任务，键入 / 使用命令、Skill 或 MCP，Enter 发送…";
+  $("send-chat-btn").innerHTML = `发送 ${iconMarkup("arrow-right")}`;
+  const permission = $("permission-mode-input");
+  if (permission) permission.value = state.permissionMode;
   updateComposerAvailability();
-}
-
-function syncAutoApproveControl() {
-  const toggle = $("auto-approve-toggle");
-  if (toggle) toggle.checked = state.autoApprove;
-}
-
-async function persistComposerMode(mode) {
-  updateComposerMode(mode);
-  try {
-    if (
-      state.composerMode === "agent"
-      && workspaceIsReady(currentWorkspace())
-    ) {
-      await loadSlashCapabilities();
-    }
-    if (state.currentSession) {
-      state.currentSession = await fetchJson(
-        `/sessions/${encodeURIComponent(state.currentSession.id)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            configuration: { composer_mode: state.composerMode },
-            save_configuration_as_default: true,
-          }),
-        },
-      );
-      replaceSessionInLists(state.currentSession);
-    } else {
-      state.preferences = await fetchJson("/users/me/preferences", {
-        method: "PATCH",
-        body: JSON.stringify({ default_composer_mode: state.composerMode }),
-      });
-    }
-  } catch (error) {
-    showToast(humanizeError(error), "error");
-  }
 }
 
 function updateComposerAvailability() {
   const archived = Boolean(state.currentSession?.archived_at);
   const streaming = Boolean(state.chatController);
-  const agentNeedsWorkspace = state.composerMode === "agent"
-    && !workspaceIsReady(currentWorkspace());
+  const agentNeedsWorkspace = !workspaceIsReady(currentWorkspace());
   const empty = !$("chat-message-input").value.trim();
   $("archived-session-notice").hidden = !archived;
   $("chat-message-input").disabled = archived;
-  $("composer-mode-input").disabled = archived || streaming;
+  $("permission-mode-input").disabled = archived || streaming;
   const runControl = updateComposerRunControl({ archived });
   $("send-chat-btn").disabled = Boolean(runControl)
     || archived
@@ -4474,7 +4341,7 @@ function resetChatView() {
       <div class="welcome-content">
         <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
         <h2>从一个具体问题开始</h2>
-        <p>先理解上下文，再选择快速回答或代码 Agent；涉及写入时会暂停等待审批。</p>
+        <p>由 Cogent 理解上下文并完成任务；需要确认的操作会在执行前暂停。</p>
         <div class="prompt-grid" aria-label="推荐问题">
           <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
           <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
@@ -5246,7 +5113,7 @@ function agentRunConversationId(body) {
 }
 
 function agentRunTrace(body) {
-  return body?.trace || body?.result?.trace || [];
+  return (body?.trace?.length ? body.trace : body?.result?.trace) || [];
 }
 
 function chatContentForRun(runId) {
@@ -6017,7 +5884,6 @@ async function submitComposerMessage() {
   const submission = composerSubmission($("chat-message-input").value);
   if (
     submission.invocation?.item.kind === "builtin"
-    && submission.invocation.item.action === "compact"
   ) {
     await runBuiltinComposerCommand(
       submission.invocation.item,
@@ -6036,24 +5902,7 @@ async function submitComposerMessage() {
     }
     return;
   }
-  if (submission.invocation?.item.kind === "builtin") {
-    await runBuiltinComposerCommand(
-      submission.invocation.item,
-      submission.invocation.remaining,
-    );
-    return;
-  }
-  if (
-    ["skill", "mcp"].includes(submission.invocation?.item.kind)
-    && state.composerMode !== "agent"
-  ) {
-    await persistComposerMode("agent");
-  }
-  if (state.composerMode === "agent") {
-    await runAgentFromComposer();
-    return;
-  }
-  await streamChat();
+  await runAgentFromComposer();
 }
 
 function renderAgentChatResponse(
@@ -6065,9 +5914,10 @@ function renderAgentChatResponse(
   const result = body?.result || {};
   const actualStatus = body?.status || result.status || "running";
   const status = holdAnswer ? "running" : actualStatus;
-  const trace = visibleTrace || body?.trace || result.trace || [];
+  const trace = visibleTrace || (body?.trace?.length ? body.trace : result.trace) || [];
   const streamEvents = body?.stream_events || [];
   const streamedAnswer = String(body?.streamed_answer || "");
+  renderCogentThinking(contentNode, streamEvents, result.metrics);
   const elapsedMs = result.metrics?.elapsed_ms ?? Math.round(performance.now() - startedAt);
   renderExecutionProcess(contentNode, {
     trace,
@@ -6076,7 +5926,7 @@ function renderAgentChatResponse(
     fallbackNode: body?.latest_node || "setup_workspace",
     fallbackSummary: actualStatus === "queued"
       ? "Agent 任务已进入执行队列。"
-      : "Agent 正在运行 LangGraph 工作流。",
+      : "Cogent 正在执行当前任务。",
     events: streamEvents,
     activityOnly: true,
   });
@@ -6143,6 +5993,39 @@ function renderAgentChatResponse(
   }
 }
 
+function cogentThinkingPresentation(events, metrics = {}) {
+  const text = (events || [])
+    .filter((event) => event.type === "thinking_delta")
+    .map((event) => String(event.output?.text || ""))
+    .join("");
+  const usage = (events || []).filter((event) => event.type === "usage");
+  const tokens = metrics?.thoughts_tokens || usage.reduce(
+    (total, event) => total + Number(event.output?.thoughts_tokens || 0), 0,
+  );
+  return { text, tokens, visible: Boolean(text || tokens) };
+}
+
+function renderCogentThinking(contentNode, events, metrics) {
+  const presentation = cogentThinkingPresentation(events, metrics);
+  const bubble = contentNode.closest(".chat-bubble");
+  if (!bubble) return;
+  let details = bubble.querySelector(".cogent-thinking");
+  if (!details && !presentation.visible) return;
+  if (!details) {
+    details = document.createElement("details");
+    details.className = "cogent-thinking";
+    const summary = document.createElement("summary");
+    summary.textContent = "思考摘要";
+    details.append(summary, document.createElement("pre"));
+    bubble.insertBefore(details, contentNode);
+  }
+  details.hidden = !presentation.visible;
+  details.querySelector("summary").textContent = presentation.tokens
+    ? `思考摘要 · ${formatTokenCount(presentation.tokens)} tokens` : "思考摘要";
+  details.querySelector("pre").textContent = presentation.text
+    || "Provider 仅返回思考用量，未提供可展示的摘要。";
+}
+
 function createAgentProgressPresenter(
   contentNode,
   startedAt,
@@ -6155,7 +6038,7 @@ function createAgentProgressPresenter(
     update(body) {
       pending = pending.then(async () => {
         const result = body?.result || {};
-        const fullTrace = body?.trace || result.trace || [];
+        const fullTrace = (body?.trace?.length ? body.trace : result.trace) || [];
         if (body?.stream_events) {
           visibleTrace.splice(0, visibleTrace.length, ...fullTrace);
           renderAgentChatResponse(contentNode, body, startedAt, { visibleTrace });
@@ -6203,7 +6086,7 @@ async function runAgentFromComposer() {
   }
 
   const sendButton = $("send-chat-btn");
-  const modeInput = $("composer-mode-input");
+  const modeInput = $("permission-mode-input");
   sendButton.disabled = true;
   sendButton.setAttribute("aria-busy", "true");
   modeInput.disabled = true;
@@ -6294,262 +6177,6 @@ async function runAgentFromComposer() {
   }
 }
 
-async function streamChat() {
-  const input = $("chat-message-input");
-  const submission = composerSubmission(input.value);
-  const message = submission.message;
-  if (!message) {
-    input.setAttribute("aria-invalid", "true");
-    showToast("请输入一条消息", "warning");
-    input.focus();
-    return;
-  }
-
-  const sendButton = $("send-chat-btn");
-  const stopButton = $("stop-chat-btn");
-  const modeInput = $("composer-mode-input");
-  sendButton.disabled = true;
-  sendButton.setAttribute("aria-busy", "true");
-  modeInput.disabled = true;
-  stopButton.classList.remove("hidden");
-  $("chat-output").setAttribute("aria-busy", "true");
-  setChatStatus("正在准备", "running");
-  setTrace([]);
-  state.chatController = new AbortController();
-  let assistantContent = null;
-  let answer = "";
-  let latestUsage = null;
-  const startedAt = performance.now();
-  const chatTrace = [];
-  let requestAccepted = false;
-
-  try {
-    const conversationId = await ensureSession();
-    appendChatMessage("user", message);
-    assistantContent = appendChatMessage("assistant");
-    renderExecutionProcess(assistantContent, {
-      trace: chatTrace,
-      status: "running",
-      fallbackNode: "model_request",
-      fallbackSummary: "正在建立模型请求并等待首个响应。",
-    });
-    startResponseTimer(assistantContent, startedAt);
-    clearComposerInput();
-    const payload = {
-      conversation_id: conversationId,
-      message,
-      ...(state.activeWorkspaceId
-        ? { workspace_id: state.activeWorkspaceId }
-        : {}),
-      ...optionalModelFields(),
-    };
-    const events = [];
-    await postSse(
-      "/chat/stream",
-      payload,
-      (eventName, data) => {
-        requestAccepted = true;
-        events.push({ event: eventName, data });
-        if (events.length <= 200) {
-          setRaw(events);
-        }
-        if (eventName === "meta") {
-          const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          const budget =
-            data.budget_decision === "downgraded" ? " · 已按预算降级" : "";
-          const routeLabel = data.routing_pending
-            ? `${data.routing_policy || "quality"} 路由${budget}`
-            : `${data.provider} · ${data.model}${thinking}${budget}`;
-          setChatStatus(routeLabel, "running");
-          chatTrace.push({
-            step: 1,
-            node: "model_request",
-            summary: data.routing_pending
-              ? `正在按 ${data.routing_policy || "quality"} 策略筛选模型。`
-              : `已请求 ${data.provider} / ${data.model}${thinking}。`,
-            output: data,
-          });
-          renderExecutionProcess(assistantContent, {
-            trace: chatTrace,
-            status: "running",
-            elapsedMs: performance.now() - startedAt,
-          });
-        } else if (eventName === "route") {
-          const thinking = data.thinking_level ? ` · ${data.thinking_level}` : "";
-          const failures = data.route_trace?.failures?.length || 0;
-          const budget =
-            data.budget_decision === "downgraded" ? " · 已按预算降级" : "";
-          setChatStatus(
-            `${data.provider} · ${data.model}${thinking}${budget}`,
-            "running",
-          );
-          chatTrace.push({
-            step: chatTrace.length + 1,
-            node: "model_route",
-            summary: data.budget_decision === "downgraded"
-              ? `预算治理已降级并选择 ${data.provider} / ${data.model}。`
-              : failures
-              ? `已回退并选择 ${data.provider} / ${data.model}（${failures} 次前置失败）。`
-              : `已选择 ${data.provider} / ${data.model}。`,
-            output: data.route_trace || {},
-          });
-          renderExecutionProcess(assistantContent, {
-            trace: chatTrace,
-            status: "running",
-            elapsedMs: performance.now() - startedAt,
-          });
-        } else if (eventName === "context") {
-          const pressure = [];
-          if (data.synchronous_compactions) {
-            pressure.push(`同步压缩 ${data.synchronous_compactions} 次`);
-          }
-          if (data.dropped_messages) {
-            pressure.push(`丢弃最旧 ${data.dropped_messages} 条`);
-          }
-          if (data.truncated_messages) {
-            pressure.push(`截断 ${data.truncated_messages} 条`);
-          }
-          chatTrace.push({
-            step: chatTrace.length + 1,
-            node: "assemble_context",
-            summary: `上下文 ≈ ${formatTokenCount(data.estimated_tokens || 0)} / ${
-              data.budget_tokens
-                ? formatTokenCount(data.budget_tokens)
-                : "未设预算"
-            } tokens${data.includes_summary ? " · 含滚动摘要" : ""}${
-              pressure.length ? ` · ${pressure.join("、")}` : ""
-            }。`,
-            output: data,
-          });
-          renderExecutionProcess(assistantContent, {
-            trace: chatTrace,
-            status: "running",
-            elapsedMs: performance.now() - startedAt,
-          });
-        } else if (eventName === "memory_context") {
-          const count = (data.items || []).length;
-          chatTrace.push({
-            step: chatTrace.length + 1,
-            node: "retrieve_project_memory",
-            summary: `已加载 ${count} 条工作区项目记忆。`,
-            output: data,
-          });
-          renderExecutionProcess(assistantContent, {
-            trace: chatTrace,
-            status: "running",
-            elapsedMs: performance.now() - startedAt,
-          });
-        } else if (eventName === "delta") {
-          answer += data.text || "";
-          assistantContent.innerHTML = renderMarkdown(answer);
-          if (!chatTrace.some((step) => step.node === "stream_response")) {
-            chatTrace.push({
-              step: chatTrace.length + 1,
-              node: "stream_response",
-              summary: "模型正在流式生成最终回答。",
-              output: {},
-            });
-            renderExecutionProcess(assistantContent, {
-              trace: chatTrace,
-              status: "running",
-              elapsedMs: performance.now() - startedAt,
-            });
-          }
-        } else if (eventName === "usage") {
-          latestUsage = data;
-          const thoughts = data.thoughts_tokens
-            ? ` · ${data.thoughts_tokens} thinking`
-            : "";
-          setChatStatus(`${data.total_tokens || 0} tokens${thoughts}`, "running");
-          renderResponseMetrics(assistantContent, data);
-        } else if (eventName === "done") {
-          latestUsage = data;
-          renderExecutionProcess(assistantContent, {
-            trace: chatTrace,
-            status: "done",
-            elapsedMs: data.elapsed_ms,
-          });
-          renderResponseMetrics(assistantContent, data);
-          setChatStatus(`已完成 · ${formatDuration(data.elapsed_ms)}`, "completed");
-        } else if (eventName === "error") {
-          latestUsage = data;
-          const streamError = new Error(data.message || data.code || "模型响应失败");
-          streamError.code = data.code || "llm_provider_error";
-          streamError.finishReason = data.finish_reason || "";
-          streamError.preservePartial = Boolean(data.partial_response && answer);
-          throw streamError;
-        }
-      },
-      state.chatController.signal,
-    );
-    if (!answer) {
-      assistantContent.innerHTML = "<p>模型没有返回文本内容。</p>";
-    }
-    await refreshMessages(false, false);
-    await Promise.allSettled([
-      refreshCurrentSessionMetadata(),
-      refreshRecentSessions(),
-    ]);
-  } catch (error) {
-    if (!requestAccepted && !input.value.trim()) {
-      setComposerValue(message);
-    }
-    if (error.name === "AbortError") {
-      if (assistantContent) {
-        assistantContent.innerHTML = `${assistantContent.innerHTML}<p><em>生成已由你停止。</em></p>`;
-      }
-      setChatStatus("已停止", "neutral");
-    } else {
-      if (assistantContent) {
-        const detail = error.code === "max_output_tokens"
-          ? "回答达到输出额度上限，已保留生成的部分内容。可提高额度或降低 Gemini 思考等级后重试。"
-          : humanizeError(error);
-        const recovery = failureRecoveryMarkup(detail, {
-          code: error.code || "llm_provider_error",
-        });
-        assistantContent.innerHTML = error.preservePartial
-          ? `${renderMarkdown(answer)}${recovery}`
-          : recovery;
-      }
-      setChatStatus(
-        error.code === "max_output_tokens" ? "输出已截断" : "生成失败",
-        error.code === "max_output_tokens" ? "warning" : "failed",
-      );
-      showToast(
-        error.code === "max_output_tokens" ? "回答达到输出额度上限" : humanizeError(error),
-        error.code === "max_output_tokens" ? "warning" : "error",
-      );
-    }
-    if (assistantContent) {
-      const elapsedMs = Math.round(performance.now() - startedAt);
-      renderExecutionProcess(assistantContent, {
-        trace: chatTrace,
-        status: "failed",
-        elapsedMs,
-      });
-      renderResponseMetrics(assistantContent, {
-        elapsed_ms: elapsedMs,
-        ...(latestUsage || {}),
-      });
-    }
-  } finally {
-    if (assistantContent) {
-      stopResponseTimer(assistantContent);
-    }
-    state.chatController = null;
-    sendButton.disabled = false;
-    sendButton.removeAttribute("aria-busy");
-    modeInput.disabled = false;
-    stopButton.classList.add("hidden");
-    $("chat-output").removeAttribute("aria-busy");
-    await refreshTokenUsageData();
-    refreshModelRegistryTelemetry();
-    updateComposerAvailability();
-    if (!input.disabled) {
-      input.focus();
-    }
-  }
-}
 
 async function postSse(path, payload, onEvent, signal) {
   const startedAt = performance.now();
@@ -6681,7 +6308,7 @@ async function runAgent({
       workspace_id: workspace.id,
       ...optionalModelFields(),
       focus_files: focusFiles,
-      ...(state.autoApprove ? { approval_policy: "auto_approve" } : {}),
+      permission_mode: state.permissionMode,
       ...(skillName ? {
         skill_name: skillName,
         skill_arguments: skillArguments,
@@ -6735,12 +6362,12 @@ function activeRunPresentation(body) {
       : "暂停与取消会在下一个安全边界生效"],
     waiting_approval: ["APPROVAL REQUIRED", "Agent 等待你的确认", "请在对话内查看工具计划并批准或拒绝"],
     waiting_input: ["INPUT REQUIRED", "Agent 等待新的方向", "补充信息后可从当前 checkpoint 继续"],
-    paused: ["RUN PAUSED", "Agent 已暂停", "执行状态已保留，可继续运行或选择历史 checkpoint"],
-    completed: ["RUN COMPLETE", "Agent 已完成", "可查看 checkpoint 历史并从任意可恢复节点创建新 Run"],
-    partial: ["RUN PARTIAL", "Agent 部分完成", "可查看结果，或从历史 checkpoint 创建新 Run"],
-    blocked: ["RUN BLOCKED", "Agent 运行受阻", "可查看 checkpoint 历史并尝试新的执行方向"],
+    paused: ["RUN PAUSED", "Agent 已暂停", "执行状态已保留，可继续运行"],
+    completed: ["RUN COMPLETE", "Agent 已完成", "执行快照已保留；输入 /rewind 查看可回退的文件记录"],
+    partial: ["RUN PARTIAL", "Agent 部分完成", "可查看结果并在同一会话发起新 Run"],
+    blocked: ["RUN BLOCKED", "Agent 运行受阻", body?.legacy_read_only ? "旧运行时已退役；可在本会话发起新的 Cogent Run" : "请查看运行记录，确认下一步操作"],
     cancelled: ["RUN CANCELLED", "Agent 已取消", "历史 checkpoint 仍然保留"],
-    failed: ["RUN FAILED", "Agent 运行失败", body?.error || "可从失败前的 checkpoint 创建新 Run"],
+    failed: ["RUN FAILED", "Agent 运行失败", body?.error || "执行记录已保留，可在同一会话发起新 Run"],
   };
   return presentations[status] || ["AGENT RUN", humanizeStatus(status), "可查看当前执行记录"];
 }
@@ -6886,7 +6513,7 @@ async function openCheckpointHistory(runId = state.latestRunId) {
   state.selectedCheckpointId = "";
   $("checkpoint-direction-input").value = "";
   $("checkpoint-history-list").innerHTML = '<div class="empty-state">正在读取 checkpoint…</div>';
-  $("checkpoint-history-status").textContent = "正在读取执行图历史…";
+  $("checkpoint-history-status").textContent = "正在读取持久化快照…";
   $("checkpoint-history-dialog").showModal();
   try {
     const response = await fetchJson(
@@ -9593,19 +9220,11 @@ function bindEvents() {
   $("send-chat-btn").addEventListener("click", submitComposerMessage);
   $("stop-chat-btn").addEventListener("click", stopChat);
   $("agent-run-control-btn").addEventListener("click", handleComposerRunControl);
-  $("composer-mode-input").addEventListener("change", (event) => {
-    persistComposerMode(event.target.value);
-  });
-  $("auto-approve-toggle").addEventListener("change", (event) => {
-    state.autoApprove = Boolean(event.target.checked);
+  $("permission-mode-input").addEventListener("change", (event) => {
+    state.permissionMode = event.target.value;
     queueUiPreferenceSave();
     updateComposerAvailability();
-    showToast(
-      state.autoApprove
-        ? "已开启自动审批：Agent 的写操作将直接执行，不再逐次请求确认"
-        : "已恢复请求批准：Agent 的写操作会先请求你的确认",
-      "info",
-    );
+    showToast("已更新 Cogent 权限模式；工作区和平台的安全限制不会被绕过。", "info");
   });
   $("auto-model-toggle").addEventListener("change", async (event) => {
     state.modelPreference.mode = event.target.checked ? "auto" : "manual";
@@ -10082,8 +9701,8 @@ async function init() {
   const initialView = document.querySelector(`[data-view-panel="${requestedView}"]`)
     ? requestedView
     : preferredView;
-  state.composerMode = "chat";
-  state.autoApprove = preferences.autoApprove === true;
+  state.permissionMode = ["default", "acceptEdits", "plan", "bypassPermissions"].includes(preferences.permissionMode)
+    ? preferences.permissionMode : "default";
   state.rerankEnabled = preferences.rerankEnabled === true;
   state.preferredKnowledgeBaseId = preferences.knowledgeBaseId || "";
   state.activeKnowledgeTab = ["documents", "ask", "settings"].includes(preferences.knowledgeTab)
@@ -10091,8 +9710,7 @@ async function init() {
     : "documents";
   setKnowledgeTab(state.activeKnowledgeTab);
   renderRerankControl();
-  syncAutoApproveControl();
-  updateComposerMode(state.composerMode);
+  updateComposer();
   switchView(initialView, !location.hash);
   setSidebarVisible(!preferences.sidebarHidden);
   setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);

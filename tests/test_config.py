@@ -305,7 +305,6 @@ class SettingsTests(unittest.TestCase):
             settings.workspace_allowed_roots,
             ("/srv/code", "/opt/workspaces"),
         )
-        self.assertEqual(settings.langgraph_checkpointer, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.rag_lexical_weight, 0.45)
         self.assertEqual(settings.rag_reranker_provider, "sentence_transformer")
@@ -503,7 +502,6 @@ class SettingsTests(unittest.TestCase):
             change_set_store="postgres",
             document_store="postgres",
             workspace_store="postgres",
-            langgraph_checkpointer="postgres",
             rag_vector_store="qdrant",
         )
 

@@ -12,7 +12,7 @@ from typing import Iterator
 from ai_agent_platform.text_search import fts_index_text
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class LocalStateDatabase:
@@ -57,8 +57,35 @@ class LocalStateDatabase:
                     conn.execute("PRAGMA user_version = 2")
                     current = 2
                 if current < 3:
-                    conn.executescript(_SCHEMA_V3)
+                    _add_column_if_missing(
+                        conn,
+                        "agent_runs",
+                        "pending_compaction_json",
+                        "TEXT",
+                    )
                     conn.execute("PRAGMA user_version = 3")
+                    current = 3
+                if current < 4:
+                    _add_column_if_missing(
+                        conn,
+                        "agent_runs",
+                        "runtime_engine",
+                        "TEXT NOT NULL DEFAULT 'langgraph-v1'",
+                    )
+                    _add_column_if_missing(
+                        conn,
+                        "agent_runs",
+                        "runtime_state_version",
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    _add_column_if_missing(
+                        conn,
+                        "agent_runs",
+                        "runtime_state_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                    conn.executescript(_SCHEMA_V4)
+                    conn.execute("PRAGMA user_version = 4")
                 conn.commit()
             if self.path.exists():
                 try:
@@ -141,6 +168,19 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> None:
+    columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 _SCHEMA_V1 = r"""
@@ -244,7 +284,11 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     errors_json TEXT NOT NULL,
     control_action TEXT,
     steering_messages_json TEXT NOT NULL,
+    pending_compaction_json TEXT,
     run_context_snapshot_json TEXT,
+    runtime_engine TEXT NOT NULL DEFAULT 'langgraph-v1',
+    runtime_state_version INTEGER NOT NULL DEFAULT 0,
+    runtime_state_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -273,6 +317,19 @@ CREATE TABLE IF NOT EXISTS agent_tool_executions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(run_id, call_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_runtime_snapshots (
+    run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    boundary TEXT NOT NULL,
+    runtime_engine TEXT NOT NULL,
+    runtime_state_version INTEGER NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, snapshot_id),
+    UNIQUE(run_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS workspace_members (
@@ -469,8 +526,21 @@ CREATE INDEX IF NOT EXISTS idx_local_user_memory_scenes_scope
 """
 
 
-_SCHEMA_V3 = r"""
-ALTER TABLE agent_runs ADD COLUMN pending_compaction_json TEXT;
+_SCHEMA_V4 = r"""
+CREATE TABLE IF NOT EXISTS agent_runtime_snapshots (
+    run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    boundary TEXT NOT NULL,
+    runtime_engine TEXT NOT NULL,
+    runtime_state_version INTEGER NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, snapshot_id),
+    UNIQUE(run_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_local_runtime_snapshots_run_sequence
+    ON agent_runtime_snapshots(run_id, sequence DESC);
 """
 
 

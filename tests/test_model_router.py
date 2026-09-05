@@ -648,44 +648,36 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         self.assertEqual(primary.stream_calls, [])
         self.assertEqual(fallback.stream_calls, [])
 
-    def test_chat_sse_exposes_complete_route_trace(self) -> None:
-        primary = ScriptedFakeProvider(
-            [
-                _StreamScript(
-                    events=[],
-                    error_after=LLMProviderError(
-                        "rate limited",
-                        retryable=True,
-                        code="rate_limit",
-                    ),
-                )
-            ]
-        )
-        backup = ScriptedFakeProvider([_success_script("backup-model")])
-        settings = Settings(llm_max_retries=0)
+    def test_cogent_sse_exposes_complete_route_trace(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from test_api import wait_for_run
+        primary = ScriptedFakeProvider()
+        primary.tool_error = LLMProviderError('rate limited', retryable=True, code='rate_limit')
+        backup = ScriptedFakeProvider()
         llm_client = self.client(primary, backup)
-
-        with TestClient(
-            create_app(settings=settings, llm_client=llm_client)
-        ) as api:
-            session_id = api.post(
-                "/api/v1/sessions",
-                json={"user_id": "router-test"},
-            ).json()["id"]
-            response = api.post(
-                "/api/v1/chat/stream",
-                json={
-                    "conversation_id": session_id,
-                    "message": "route this",
-                    "routing_policy": "quality",
-                },
-            )
-
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(llm_max_retries=0, workspace_allowed_roots=(str(Path(temp_dir).resolve()),))
+            with TestClient(create_app(settings=settings, llm_client=llm_client)) as api:
+                api.app.state.runtime.cogent_runtime._memory_service = None
+                session_id = api.post('/api/v1/sessions', json={'user_id': 'router-test'}).json()['id']
+                api.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
+                started = api.post('/api/v1/agent/runs', json={
+                    'conversation_id': session_id, 'workspace_id': 'project',
+                    'message': 'route this', 'routing_policy': 'quality'})
+                started.raise_for_status()
+                body = wait_for_run(api, started.json()['run_id'])
+                self.assertEqual(body['status'], 'completed', body)
+                response = api.get(f"/api/v1/agent/runs/{body['run_id']}/events/stream")
+                events = api.get(f"/api/v1/agent/runs/{body['run_id']}/events").json()['events']
         self.assertEqual(response.status_code, 200)
-        self.assertIn("event: route", response.text)
+        self.assertIn('event: route', response.text)
         self.assertIn('"selection_reason"', response.text)
-        self.assertIn('"code": "rate_limit"', response.text)
-        self.assertIn('"provider": "backup_fake"', response.text)
+        route = next(item['output'] for item in events if item['type'] == 'route')
+        self.assertEqual(route['failures'][0]['code'], 'rate_limit')
+        self.assertEqual(route['final_model']['provider'], 'backup_fake')
+        self.assertEqual(primary.tool_calls, ['primary-model'])
+        self.assertEqual(backup.tool_calls, ['backup-model'])
 
     def test_timeouts_open_circuit_then_half_open_success_recovers(self) -> None:
         timeout = lambda: LLMProviderError(
