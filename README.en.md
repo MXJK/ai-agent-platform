@@ -392,6 +392,12 @@ Token budget rejection remains an error. Large results are registered hash-check
 Run/Event and runtime snapshots commit atomically. SQLite uses file leases and PostgreSQL uses
 advisory leases; process death releases ownership. Complete tool results replay once. Startup
 requeues durable work, preserves approval/input/pause waits and reconciles final message projection.
+Approval feedback, pause-resume text and mid-batch steering are durably queued until every
+tool result is present. Outbound transcripts require contiguous assistant/tool batches;
+missing, duplicate or orphan results fail locally before a Provider request. Recovery may
+reorder already recorded results around user feedback without fabricating results or repeating tools.
+Bash retains the configured executable allowlist and accepts one program plus arguments;
+use Glob/Grep/ReadFile for inspection instead of shell pipelines or command chaining.
 Legacy langgraph-v1 history stays read-only, with unfinished records projected as blocked.
 
 Cogent file memory is independent of RAG/ProjectMemory/UserMemory. Project memory files live in

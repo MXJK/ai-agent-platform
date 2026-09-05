@@ -34,7 +34,8 @@ def build_registry_messages(messages: list[Message]) -> list[dict[str, Any]]:
             item['provider_items'] = [deepcopy(block.native) for block in message.thinking_blocks
                                       if block.native and block.provider == message.provider]
         result.append(item)
-    return result
+    from .tool_transcript import ordered_tool_messages
+    return ordered_tool_messages(result)
 
 def build_anthropic_messages(messages: list[Message]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []

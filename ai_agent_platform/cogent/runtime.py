@@ -37,6 +37,7 @@ from ai_agent_platform.cogent.prompts import PROMPT_VERSION, build_system_prompt
 from ai_agent_platform.cogent.prompts import COMPACTION_PROMPT
 from ai_agent_platform.cogent.context.manager import compute_compact_threshold, extract_summary
 from ai_agent_platform.cogent.context.platform import compact_prefix, token_estimate
+from ai_agent_platform.cogent.tool_transcript import ordered_tool_messages, tool_call_ids, ToolMessagePairingError
 from ai_agent_platform.cogent.sandbox import create_sandbox
 from ai_agent_platform.cogent.state import (
     RUNTIME_ENGINE,
@@ -382,7 +383,7 @@ class CogentRuntime:
                 self._resume_input(state, pending, input_response, feedback)
             elif pending.get("type") == "run_pause":
                 if feedback and feedback.strip():
-                    state.messages.append({"role": "user", "content": feedback.strip()})
+                    self._append_user_message(state, feedback.strip())
             else:
                 self._resume_approval(
                     state,
@@ -617,6 +618,7 @@ class CogentRuntime:
                 return controlled
             record = self.get_run(record.run_id)
             if not state.response_ready:
+                self._finish_tool_messages(state)
                 specs = adapter.list_specs()
                 state.visible_tool_count = len(specs)
                 state.tool_schema_tokens = token_estimate([{'role': 'system', 'content': json.dumps(
@@ -668,6 +670,7 @@ class CogentRuntime:
                 state.request_count += 1
                 self._record_usage(state, decision)
                 state.pending_calls = [self._call_dict(item) for item in decision.tool_calls]
+                tool_call_ids(state.pending_calls)
                 for call in decision.tool_calls:
                     if call.name in adapter.mcp_specs():
                         adapter.loaded_mcp_tools.add(call.name)
@@ -797,6 +800,7 @@ class CogentRuntime:
         context: ToolUseContext,
     ) -> AgentRunResult | None:
         calls = [ToolCall(**item) for item in state.pending_calls]
+        tool_call_ids(state.pending_calls)
         prepared: list[PreparedCall] = []
         denied: list[tuple[ToolCall, str]] = []
         asks: list[tuple[PreparedCall, PermissionDecision | None, str]] = []
@@ -959,7 +963,7 @@ class CogentRuntime:
             if result is None and existing is not None and existing.response is not None:
                 result = self._tool_result_from_response(existing.response)
             if result is None:
-                continue
+                raise ToolMessagePairingError("A completed tool batch has no recorded result for a call")
             response = result.to_response()
             ordered_results.append(response)
             if call.call_id not in state.completed_call_ids:
@@ -985,6 +989,7 @@ class CogentRuntime:
         )
         state.pending_calls = []
         state.response_ready = False
+        self._finish_tool_messages(state)
         approved_keys = {self._approval_key(call) for call in calls}
         state.consumed_approvals.extend(sorted(approved_keys.intersection(visible_approvals)))
         state.approvals = [
@@ -1111,7 +1116,7 @@ class CogentRuntime:
             raise PermissionError("persisted approval plan does not match runtime state")
         if not approved:
             if feedback and feedback.strip():
-                state.messages.append({"role": "user", "content": feedback.strip()})
+                self._append_user_message(state, feedback.strip())
             return
         required = {
             str(item.get("call_id") or ""): item
@@ -1166,7 +1171,20 @@ class CogentRuntime:
                 state.sandbox.pop("previous_permission_mode", "default")
             )
         if feedback and feedback.strip():
-            state.messages.append({"role": "user", "content": feedback.strip()})
+            self._append_user_message(state, feedback.strip())
+
+    @staticmethod
+    def _append_user_message(state: CogentState, content: str) -> None:
+        target = state.deferred_user_messages if state.pending_calls else state.messages
+        target.append({"role": "user", "content": content})
+
+    @staticmethod
+    def _finish_tool_messages(state: CogentState) -> None:
+        if state.pending_calls:
+            raise ToolMessagePairingError("Cannot request a model response while tools are pending")
+        state.messages = ordered_tool_messages(state.messages, restore_delayed_results=True)
+        state.messages.extend(state.deferred_user_messages)
+        state.deferred_user_messages = []
 
     @staticmethod
     def _resume_input(
@@ -1267,10 +1285,8 @@ class CogentRuntime:
             )
             return self._result(paused, state, answer="")
         if current.steering_messages:
-            state.messages.extend(
-                {"role": "user", "content": item}
-                for item in current.steering_messages
-            )
+            for item in current.steering_messages:
+                self._append_user_message(state, item)
             current = self._persist(
                 replace(current, steering_messages=[]),
                 state,

@@ -294,12 +294,17 @@ def test_resume_boundary_survives_restart(durable_store, tmp_path, monkeypatch, 
     monkeypatch.setattr(runtime, '_persist', crash)
     with pytest.raises(SimulatedCrash):
         runtime.resume(run_id=record.run_id, approved=True, approved_by='owner',
-                       **({'input_response': {'name': 'Sam'}} if kind == 'input' else {}))
+                       **({'input_response': {'name': 'Sam'}} if kind == 'input' else {'feedback': '用户已在对话中确认执行计划'}))
     restarted = runtime_for(tmp_path, ScriptedClient(response('Done.')), registry=registry, store=durable_store)
     result = restarted.recover(record.run_id)
     assert result.status == 'completed'
     assert len(result.tool_results) == 1
     assert effects == (['write'] if kind == 'approval' else [])
+    state = restarted.get_run(record.run_id).runtime_state
+    assert state['deferred_user_messages'] == []
+    if kind == 'approval':
+        assert [m['role'] for m in state['messages'][-4:]] == ['assistant', 'tool', 'user', 'assistant']
+        assert state['messages'][-2]['content'] == '用户已在对话中确认执行计划'
 
 
 def test_compaction_checkpoint_restart_retains_summary_and_recent_pairs(durable_store, tmp_path):

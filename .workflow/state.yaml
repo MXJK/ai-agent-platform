@@ -1,8 +1,8 @@
 project_id: "ai-agent-platform"
 status: "done"
-active_task: "COGENT-AGENT-REFACTOR"
-next_action: "Start or refresh the local Cogent installation using README Compose commands; verify reference licenses before any external distribution."
+active_task: "COGENT-RUNTIME-RELIABILITY"
+next_action: "Use a new Agent Run on the patched local app; retain failed historical Runs for audit."
 blockers: []
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-04T23:19:13+08:00"
+updated_at: "2026-09-05T14:27:50+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

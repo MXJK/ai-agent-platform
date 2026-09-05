@@ -20,6 +20,7 @@ class CogentState:
     permission_mode: str = "default"
     sandbox: dict[str, Any] = field(default_factory=dict)
     pending_calls: list[dict[str, Any]] = field(default_factory=list)
+    deferred_user_messages: list[dict[str, Any]] = field(default_factory=list)
     approvals: list[dict[str, str]] = field(default_factory=list)
     consumed_approvals: list[str] = field(default_factory=list)
     completed_call_ids: list[str] = field(default_factory=list)
@@ -53,6 +54,7 @@ class CogentState:
             "permission_mode": self.permission_mode,
             "sandbox": self.sandbox,
             "pending_calls": self.pending_calls,
+            "deferred_user_messages": self.deferred_user_messages,
             "approvals": self.approvals,
             "consumed_approvals": self.consumed_approvals,
             "completed_call_ids": self.completed_call_ids,
@@ -88,6 +90,7 @@ class CogentState:
             permission_mode=str(raw.get("permission_mode") or "default"),
             sandbox=dict(raw.get("sandbox") or {}),
             pending_calls=list(raw.get("pending_calls") or []),
+            deferred_user_messages=list(raw.get("deferred_user_messages") or []),
             approvals=list(raw.get("approvals") or []),
             consumed_approvals=list(raw.get("consumed_approvals") or []),
             completed_call_ids=list(raw.get("completed_call_ids") or []),

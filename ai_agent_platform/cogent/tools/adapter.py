@@ -404,7 +404,9 @@ def _visible_spec(name: str, source: ToolSpec) -> ToolSpec:
         "EditFile": "Replace one exact, unique string in an existing UTF-8 file.",
         "Glob": "Find workspace files matching a glob pattern.",
         "Grep": "Search workspace text with a regular expression or phrase.",
-        "Bash": "Run an allowed command in the execution workspace.",
+        "Bash": (source.description.replace("repo.list_files", "Glob")
+                 + " Pass one executable with arguments; shell pipelines, redirection, "
+                   "and command chaining are not supported. Use Glob/Grep/ReadFile for inspection."),
         "Diff": "Show the current Run's workspace diff.",
         "AskUserQuestion": source.description,
         "LoadSkill": source.description,
