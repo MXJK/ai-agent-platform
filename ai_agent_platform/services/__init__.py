@@ -42,6 +42,11 @@ from .workspace_service import (
     WorkspaceService,
     WorkspaceValidationError,
 )
+from .workspace_access import (
+    WorkspaceAccessDeniedError,
+    WorkspaceAccessService,
+    WorkspaceAccessValidationError,
+)
 from .conversation_compression import (
     ConversationCompressor,
     LLMConversationCompressor,
@@ -87,6 +92,9 @@ __all__ = [
     "WorkspaceNotFoundError",
     "WorkspaceRootConflictError",
     "WorkspaceService",
+    "WorkspaceAccessDeniedError",
+    "WorkspaceAccessService",
+    "WorkspaceAccessValidationError",
     "ConversationCompressor",
     "LLMConversationCompressor",
     "RuleBasedConversationCompressor",

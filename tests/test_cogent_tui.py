@@ -1,7 +1,7 @@
 import asyncio
 
 from fastapi.testclient import TestClient
-from textual.widgets import Collapsible, Static
+from textual.widgets import Collapsible, Markdown, Static
 
 from ai_agent_platform.cli import CliApplication, build_parser
 from ai_agent_platform.cogent.tui import CogentApp
@@ -25,7 +25,17 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
             app = CogentApp(application)
             async with app.run_test(size=(100, 40)) as pilot:
                 await pilot.pause()
+                assert "Cogent" in str(app.query_one("#title-bar", Static).content)
+                assert app.query_one("#chat-input", ChatInput).placeholder == "Send a message…"
+                assert "embedded runtime" in str(
+                    app.query_one("#model-label", Static).content
+                )
                 assert any(item['name'] == 'help' for item in app.capabilities['commands'])
+                await app.submit('/models')
+                assert any(
+                    "embedded test runtime" in str(item.content)
+                    for item in app.query(".system-message")
+                )
                 await app.submit('/help')
                 await app.workers.wait_for_complete()
                 assert app.run_status == 'completed'
@@ -34,6 +44,7 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                 await app.workers.wait_for_complete()
                 run = app.active_run_id
                 assert 'fake model reply' in app.answer_text[run]
+                assert isinstance(app.answers[run], Markdown)
                 await app.render_event(AgentEvent(999, run, 'running', 'thinking_delta', '', {'text': 'Visible summary'}))
                 await app.render_event(AgentEvent(1000, run, 'running', 'thinking_completed', '', {'text': 'Visible summary', 'signature': 'never show'}))
                 panel = app.thinking[run]

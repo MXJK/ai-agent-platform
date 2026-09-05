@@ -272,16 +272,17 @@ class CeleryTaskQueueTests(unittest.TestCase):
                 run_id="run_branch",
             )
             queue.submit(
-                "memory_extraction",
+                "cogent_memory_extract",
                 lambda: None,
-                workspace_id="workspace_main",
-                source_type="agent_run",
-                source_id="run_1",
+                parent_run_id="run_1",
+                user_message="remember this",
+                answer="saved",
             )
             queue.submit(
-                "memory_index_outbox",
+                "cogent_memory_consolidate",
                 lambda: None,
-                trigger_id="mem_1:1",
+                parent_run_id="run_1",
+                force=True,
             )
             queue.submit(
                 "conversation_compression",
@@ -300,11 +301,11 @@ class CeleryTaskQueueTests(unittest.TestCase):
         )
         self.assertEqual(
             calls[2].args,
-            ("ai_agent_platform.memory_extraction",),
+            ("ai_agent_platform.cogent_memory_extract",),
         )
         self.assertEqual(
             calls[3].args,
-            ("ai_agent_platform.memory_index_outbox",),
+            ("ai_agent_platform.cogent_memory_consolidate",),
         )
         self.assertEqual(
             calls[4].args,

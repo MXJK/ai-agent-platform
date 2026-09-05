@@ -4,15 +4,13 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
+from ai_agent_platform.domain import QueryLifecycle
+from ai_agent_platform.agents.coding.models import AgentRunNotFoundError
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.model_registry import (
     ModelRegistryService,
     ModelSelection,
     model_selection_scope,
-)
-from ai_agent_platform.project_memory import (
-    MemoryAccessDeniedError,
-    ProjectMemoryService,
 )
 from ai_agent_platform.repositories import (
     SessionArchivedError,
@@ -41,6 +39,7 @@ from ai_agent_platform.services import (
     SessionService,
     WorkspaceNotFoundError,
     WorkspaceService,
+    WorkspaceAccessDeniedError,
     summarize_token_usage,
 )
 
@@ -61,7 +60,7 @@ def create_sessions_router(
     session_service: SessionService,
     settings: Settings | None = None,
     workspace_service: WorkspaceService | None = None,
-    memory_service: ProjectMemoryService | None = None,
+    memory_service=None,
     model_registry: ModelRegistryService | None = None,
     llm_client: LLMClient | None = None,
     query_service: QueryService | None = None,
@@ -120,6 +119,23 @@ def create_sessions_router(
     def get_session(session_id: str, http_request: Request) -> SessionResponse:
         session = _owned_session(session_id, http_request)
         return SessionResponse.from_domain(session)
+
+    @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_session(session_id: str, http_request: Request) -> None:
+        session = _owned_session(session_id, http_request)
+        if query_service is not None:
+            try:
+                latest = query_service.get_latest_run_for_actor(
+                    session_id, session.user_id)
+            except AgentRunNotFoundError:
+                latest = None
+            if latest is not None and latest.status not in QueryLifecycle.TERMINAL_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail="conversation has an active or suspended Run",
+                )
+        if not session_service.delete_session(session_id):
+            raise HTTPException(status_code=404, detail="session not found")
 
     @router.patch("/sessions/{session_id}", response_model=SessionResponse)
     def update_session(
@@ -459,7 +475,7 @@ def create_sessions_router(
                 actor_user_id=actor_user_id,
                 required_role="viewer",
             )
-        except MemoryAccessDeniedError as exc:
+        except WorkspaceAccessDeniedError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     return router

@@ -15,7 +15,7 @@ COMMANDS = (
     CommandDefinition('clear', '建立空白的后续对话，不删除历史', '/clear'),
     CommandDefinition('compact', '压缩对话并保留近期工具配对', '/compact [保留重点]'),
     CommandDefinition('mcp', '查看当前工作区的 MCP 工具', '/mcp'),
-    CommandDefinition('session', '查看当前会话信息', '/session'),
+    CommandDefinition('session', '管理持久化会话', '/session list|resume <id>|new|delete <id>'),
     CommandDefinition('skill', '列出或执行 inline Skill', '/skill [name] [arguments]', ('skills',)),
     CommandDefinition('tools', '查看当前运行的工具能力', '/tools'),
     CommandDefinition('permissions', '查看或设置 Cogent 权限模式', '/permissions [mode]'),
@@ -23,7 +23,7 @@ COMMANDS = (
     CommandDefinition('plan', '只读规划并仅写入当前计划文件', '/plan [任务]'),
     CommandDefinition('review', '只读审查当前 Git diff', '/review [重点]'),
     CommandDefinition('sandbox', '查看当前 OS sandbox 状态', '/sandbox'),
-    CommandDefinition('memory', '查看独立的 Cogent 文件记忆', '/memory'),
+    CommandDefinition('memory', '管理 Cogent 文件记忆', '/memory list|edit|clear|consolidate [user|project]'),
     CommandDefinition('rewind', '预览并审批对话或文件回退', '/rewind [snapshot-id|run-id] [all|conversation|files]'),
 )
 LOCAL_COMMANDS = frozenset({'help', 'status', 'clear', 'compact', 'mcp', 'session', 'skill', 'tools', 'permissions', 'sandbox', 'memory', 'rewind'})

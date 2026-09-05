@@ -44,6 +44,11 @@ from ai_agent_platform.cogent.state import (
     RUNTIME_STATE_VERSION,
     CogentState,
 )
+from ai_agent_platform.integrations.model_router import (
+    MAX_MODEL_OUTPUT_RECOVERIES,
+    MAX_MODEL_OUTPUT_RETRIES,
+    MODEL_OUTPUT_TOKEN_CEILING,
+)
 from ai_agent_platform.cogent.tools import CogentToolAdapter, PreparedCall
 from ai_agent_platform.cogent.commands.catalog import LOCAL_COMMANDS, command_capabilities
 from ai_agent_platform.domain import QueryLifecycle, RunContextSnapshot
@@ -140,11 +145,13 @@ class CogentRuntime:
         )
         previous = self._run_store.get_latest_for_conversation(conversation_id)
         if (previous is not None and previous.runtime_engine == RUNTIME_ENGINE
-                and previous.status == "completed" and previous.workspace_root == workspace_root):
+                and previous.status in QueryLifecycle.TERMINAL_STATUSES
+                and previous.workspace_root == workspace_root):
             prior = CogentState.from_mapping(previous.runtime_state)
             state.messages = prior.messages
             state.active_skill = prior.active_skill
             state.recalled_memory = prior.recalled_memory
+            state.surfaced_memories = prior.surfaced_memories
             state.compact_boundaries = prior.compact_boundaries
             state.usage_anchor = prior.usage_anchor
             state.file_history_cursor = prior.file_history_cursor
@@ -264,7 +271,16 @@ class CogentRuntime:
             command = (run_context.metadata.entrypoint_metadata.get("cogent_command") if run_context else None)
             if self._memory_service is not None and not command:
                 try:
-                    state.recalled_memory = self._memory_service.recall(record, user_input)
+                    recall_with_versions = getattr(
+                        self._memory_service, 'recall_with_versions', None)
+                    if callable(recall_with_versions):
+                        recalled, surfaced = recall_with_versions(
+                            record, user_input, state.surfaced_memories)
+                        state.recalled_memory = recalled
+                        state.surfaced_memories.update(surfaced)
+                    else:
+                        state.recalled_memory = self._memory_service.recall(
+                            record, user_input)
                 except (OSError, ValueError):
                     state.recalled_memory = ''
             state.system_prompt = build_system_prompt(
@@ -651,11 +667,66 @@ class CogentRuntime:
                 try:
                     decision = self._decide(
                         list(state.messages), specs, alias_tools=specs,
-                        use_model_max_output_tokens=state.recovery_count > 0,
-                        model_output_tokens_cap=64_000, on_delta=on_delta,
+                        max_output_tokens=(
+                            MODEL_OUTPUT_TOKEN_CEILING
+                            if state.recovery_count > 0
+                            else None
+                        ),
+                        model_output_tokens_cap=MODEL_OUTPUT_TOKEN_CEILING, on_delta=on_delta,
                         on_thinking=on_summary, offline_evaluation=self._is_offline_eval(record),
                     )
                 except LLMProviderError as exc:
+                    if exc.retryable and exc.code in {
+                        "tool_output_truncated",
+                        "tool_arguments_truncated",
+                    }:
+                        state.request_count += 1
+                        state.last_stop_reason = str(exc.finish_reason or "length")
+                        state.retry_on_resume = False
+                        if exc.usage is not None:
+                            self._record_failed_usage(state, exc.usage)
+                        if state.recovery_count < MAX_MODEL_OUTPUT_RETRIES:
+                            state.recovery_count += 1
+                            state.messages.append(
+                                {
+                                    "role": "user",
+                                    "cogent_continuation": True,
+                                    "content": (
+                                        "The previous model turn reached its output limit before "
+                                        "producing a complete tool call. Retry with exactly one tool "
+                                        "call. Keep its arguments substantially smaller, change one "
+                                        "file at a time, and prefer a focused patch."
+                                    ),
+                                }
+                            )
+                            self._emit(
+                                record.run_id,
+                                "retry",
+                                "running",
+                                "Cogent is recovering a truncated tool turn.",
+                                {
+                                    "attempt": state.recovery_count,
+                                    "maximum": MAX_MODEL_OUTPUT_RETRIES,
+                                    "recoveries_after_escalation": MAX_MODEL_OUTPUT_RECOVERIES,
+                                    "finish_reason": state.last_stop_reason,
+                                    "next_max_output_tokens": MODEL_OUTPUT_TOKEN_CEILING,
+                                },
+                            )
+                            record = self._persist(
+                                record,
+                                state,
+                                boundary="tool_output_recovery",
+                            )
+                            continue
+                        return self._complete(
+                            record,
+                            state,
+                            status="partial",
+                            answer=self._final_answer(state.messages),
+                            terminal_reason="output_limit_exhausted",
+                            tool_access=adapter._tools,
+                            context=context,
+                        )
                     if exc.code not in {'context_overflow', 'context_length_exceeded', 'context_window_exceeded'}:
                         raise
                     state.context_recovery_count += 1
@@ -707,7 +778,7 @@ class CogentRuntime:
                     self._emit_displayable_thinking(record.run_id, decision.provider, decision.provider_items or [])
 
             if not state.pending_calls:
-                if state.last_stop_reason.casefold() in {"length", "max_tokens", "max_output_tokens"} and state.recovery_count < 3:
+                if state.last_stop_reason.casefold() in {"length", "max_tokens", "max_output_tokens"} and state.recovery_count < MAX_MODEL_OUTPUT_RETRIES:
                     state.recovery_count += 1
                     state.response_ready = False
                     state.messages.append(
@@ -725,7 +796,12 @@ class CogentRuntime:
                         "retry",
                         "running",
                         "Cogent is recovering an output-limited response.",
-                        {"attempt": state.recovery_count, "maximum": 3},
+                        {
+                            "attempt": state.recovery_count,
+                            "maximum": MAX_MODEL_OUTPUT_RETRIES,
+                            "recoveries_after_escalation": MAX_MODEL_OUTPUT_RECOVERIES,
+                            "next_max_output_tokens": MODEL_OUTPUT_TOKEN_CEILING,
+                        },
                     )
                     record = self._persist(record, state, boundary="output_recovery")
                     continue
@@ -1423,7 +1499,7 @@ class CogentRuntime:
                 pass
         if status == 'completed' and terminal_reason == 'model_completed' and self._memory_service is not None:
             try:
-                self._memory_service.extract(terminal,
+                self._memory_service.schedule_extract(terminal,
                     record.context_snapshot.session.user_message if record.context_snapshot is not None else '', answer)
             except (OSError, ValueError, PermissionError):
                 self._emit(record.run_id, 'memory_maintenance_skipped', status,
@@ -1561,7 +1637,8 @@ class CogentRuntime:
     def _adapter(self, record, state, tools):
         from .tool_results import ToolResultFiles
         from .mcp.loading_strategy import decide_and_apply
-        adapter = CogentToolAdapter(tools, result_files=ToolResultFiles(record.workspace_root, state.tool_result_files))
+        adapter = CogentToolAdapter(tools, result_files=ToolResultFiles(
+            record.workspace_root, state.tool_result_files, record.conversation_id))
         if not state.mcp_loading_mode:
             resolver = getattr(self._llm, 'resolve_context_budget', None)
             budget = resolver() if callable(resolver) else None
@@ -1670,7 +1747,8 @@ class CogentRuntime:
         if not force_spill and len(raw) <= self._tool_result_max_chars:
             return response
         from .tool_results import ToolResultFiles
-        return ToolResultFiles(record.workspace_root, state.tool_result_files).persist(record.run_id, response)
+        return ToolResultFiles(record.workspace_root, state.tool_result_files,
+                               record.conversation_id).persist(record.run_id, response)
 
     def _emit(
         self,
@@ -1756,6 +1834,21 @@ class CogentRuntime:
             model=decision.model,
             cache_capability=usage.cache_capability,
         )
+
+    @staticmethod
+    def _record_failed_usage(state: CogentState, usage: Any) -> None:
+        current = state.usage
+        for field in ("input_tokens", "output_tokens", "thoughts_tokens", "total_tokens"):
+            value = usage.total_tokens if field == "total_tokens" else getattr(usage, field)
+            current[field] = int(current.get(field) or 0) + int(value or 0)
+        for source, target in (
+            ("cached_input_tokens", "cached_input_tokens"),
+            ("uncached_input_tokens", "uncached_input_tokens"),
+            ("cache_write_tokens", "cache_write_tokens"),
+        ):
+            value = getattr(usage, source)
+            if value is not None:
+                current[target] = int(current.get(target) or 0) + int(value)
 
     @staticmethod
     def _output_exhausted(decision: Any) -> bool:

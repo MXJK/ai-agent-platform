@@ -119,9 +119,17 @@ class ComposerToolResponse(BaseModel):
     input_schema: dict[str, Any]
 
 
+class ComposerCommandResponse(BaseModel):
+    name: str
+    description: str
+    usage: str
+    aliases: list[str]
+
+
 class ComposerCapabilitiesResponse(BaseModel):
     conversation_id: str
     workspace_id: str
+    commands: list[ComposerCommandResponse]
     skill_commands: list[ComposerSkillCommandResponse]
     mcp_tools: list[ComposerToolResponse]
     diagnostics: list[str]

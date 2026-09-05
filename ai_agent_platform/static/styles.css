@@ -84,6 +84,38 @@
   }
 }
 
+.memory-file-toolbar {
+  align-items: end;
+}
+
+.memory-file-toolbar .button {
+  min-height: 38px;
+  justify-content: center;
+}
+
+.memory-index-content {
+  max-height: 260px;
+  margin: 12px 0 0;
+  padding: 14px;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font: 12px/1.65 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 680px) {
+  .memory-file-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-file-toolbar .button {
+    width: 100%;
+  }
+}
+
 .mobile-more-nav,
 .mobile-more-menu,
 .mobile-nav-backdrop,
@@ -3969,25 +4001,6 @@ textarea:focus {
   flex-wrap: wrap;
   justify-content: flex-end;
   margin-top: 10px;
-}
-
-.model-output-control {
-  display: flex;
-  align-items: end;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.model-output-control label {
-  display: grid;
-  flex: 1;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 10px;
-}
-
-.model-output-control input {
-  min-height: 30px;
 }
 
 .registered-model-card .button {

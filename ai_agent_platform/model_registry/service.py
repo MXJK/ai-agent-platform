@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any, Callable, Iterable, NoReturn
 
 from ai_agent_platform.integrations.model_router import (
+    MODEL_OUTPUT_TOKEN_CEILING,
     ModelCapabilities,
     ModelConfig,
     ModelRouter,
@@ -235,7 +236,6 @@ class ModelRegistryService:
         *,
         provider: str,
         model: str,
-        max_output_tokens: int | None = None,
         enabled: bool = True,
         auto_eligible: bool = True,
     ) -> dict[str, Any]:
@@ -255,11 +255,7 @@ class ModelRegistryService:
             model=profile.model,
             display_name=profile.display_name,
             context_window_tokens=profile.context_window_tokens,
-            max_output_tokens=(
-                max_output_tokens
-                if max_output_tokens is not None
-                else profile.max_output_tokens
-            ),
+            max_output_tokens=profile.max_output_tokens,
             tool_calling=profile.tool_calling,
             structured_output=profile.structured_output,
             input_cost_per_million=profile.input_cost_per_million,
@@ -277,9 +273,9 @@ class ModelRegistryService:
         model_name = str(values["model"]).strip()
         if self._repository.get_model_by_key(provider, model_name) is not None:
             raise ModelRegistryConflictError(f"model already exists: {provider}:{model_name}")
-        values.setdefault(
-            "max_output_tokens",
-            build_registration_profile(provider, model_name).max_output_tokens,
+        values["max_output_tokens"] = min(
+            int(values["context_window_tokens"]),
+            MODEL_OUTPUT_TOKEN_CEILING,
         )
         now = _now()
         model = _registered_model(
@@ -306,8 +302,9 @@ class ModelRegistryService:
             "context_window_tokens": values.get(
                 "context_window_tokens", existing.context_window_tokens
             ),
-            "max_output_tokens": values.get(
-                "max_output_tokens", existing.max_output_tokens
+            "max_output_tokens": min(
+                int(values.get("context_window_tokens", existing.context_window_tokens)),
+                MODEL_OUTPUT_TOKEN_CEILING,
             ),
             "tool_calling": values.get("tool_calling", existing.tool_calling),
             "structured_output": values.get(
@@ -474,7 +471,10 @@ class ModelRegistryService:
                     provider=model.provider,
                     model=model.model,
                     context_window_tokens=model.context_window_tokens,
-                    max_output_tokens=model.max_output_tokens,
+                    max_output_tokens=min(
+                        model.context_window_tokens,
+                        MODEL_OUTPUT_TOKEN_CEILING,
+                    ),
                     capabilities=ModelCapabilities(
                         tool_calling=model.tool_calling,
                         structured_output=model.structured_output,
@@ -789,15 +789,9 @@ class ModelRegistryService:
                     model=config.model,
                     display_name=config.model,
                     context_window_tokens=config.context_window_tokens,
-                    max_output_tokens=(
-                        config.max_output_tokens
-                        or min(
-                            config.context_window_tokens,
-                            build_registration_profile(
-                                config.provider,
-                                config.model,
-                            ).max_output_tokens,
-                        )
+                    max_output_tokens=min(
+                        config.context_window_tokens,
+                        MODEL_OUTPUT_TOKEN_CEILING,
                     ),
                     tool_calling=config.capabilities.tool_calling,
                     structured_output=config.capabilities.structured_output,
@@ -917,7 +911,10 @@ class ModelRegistryService:
                 "structured_output": model.structured_output,
             },
             "context_window_tokens": model.context_window_tokens,
-            "max_output_tokens": model.max_output_tokens,
+            "max_output_tokens": min(
+                model.context_window_tokens,
+                MODEL_OUTPUT_TOKEN_CEILING,
+            ),
             "input_cost_per_million": model.input_cost_per_million,
             "output_cost_per_million": model.output_cost_per_million,
             "quality_score": model.quality_score,

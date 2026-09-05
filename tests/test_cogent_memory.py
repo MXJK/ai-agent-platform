@@ -1,12 +1,16 @@
 import json
 from dataclasses import replace
+import time
 
 import pytest
 
 from ai_agent_platform.cogent.memory.service import MemoryService
+from ai_agent_platform.cogent.memory.auto_memory import parse_frontmatter
 from ai_agent_platform.cogent.managed_files import ManagedFiles
 from ai_agent_platform.cogent.state import RUNTIME_ENGINE
 from ai_agent_platform.integrations.tools import ToolCall
+from ai_agent_platform.model_registry.selection import current_model_selection
+from ai_agent_platform.usage_ledger import current_model_usage_context
 from test_cogent_runtime import runtime_for, start, ScriptedClient, response
 
 
@@ -193,3 +197,168 @@ def test_consolidation_prunes_stale_index_links_and_duplicates(tmp_path):
     index = root.read('MEMORY.md').decode()
     assert 'gone.md' not in index
     assert index.count('preference.md') == 1
+
+
+def test_incremental_extraction_uses_database_cursor_without_late_assistant_duplicate(tmp_path):
+    from types import SimpleNamespace
+
+    client = ScriptedClient(response('{"memories": []}'), response('{"memories": []}'))
+    service, record = service_for(tmp_path, client)
+    history = [SimpleNamespace(id='m1', role='user', content='first request')]
+    service.session_service = SimpleNamespace(list_messages=lambda _session_id: list(history))
+
+    service.extract(record, 'first request', 'first answer')
+    history.extend([
+        SimpleNamespace(id='m2', role='assistant', content='first answer'),
+        SimpleNamespace(id='m3', role='user', content='second request'),
+    ])
+    service.extract(record, 'second request', 'second answer')
+
+    first = json.loads(client.requests[0][-1]['content'])['conversation']
+    second = json.loads(client.requests[1][-1]['content'])['conversation']
+    assert [item['content'] for item in first] == ['first request', 'first answer']
+    assert [item['content'] for item in second] == ['second request', 'second answer']
+
+
+def test_consolidation_can_delete_topic_without_replacement(tmp_path):
+    client = ScriptedClient(response(json.dumps({
+        'memories': [], 'delete_memories': ['project/obsolete.md'],
+    })))
+    service, record = service_for(tmp_path, client)
+    service.apply(record, {'memories': [entry('obsolete', 'project', 'old')]})
+    for index in range(5):
+        service.record_session(replace(record, conversation_id=f'session-{index}'))
+
+    assert service.maybe_consolidate(record, force=True)
+    assert service.roots(record)['project'].read('obsolete.md') is None
+    assert 'obsolete.md' not in service.roots(record)['project'].read('MEMORY.md').decode()
+
+
+def test_manual_consolidation_scope_limits_model_writes(tmp_path):
+    client = ScriptedClient(response(json.dumps({'memories': [
+        entry('user-topic', 'feedback', 'user preference'),
+        entry('project-topic', 'project', 'project decision'),
+    ]})))
+    service, record = service_for(tmp_path, client)
+    for index in range(5):
+        service.record_session(replace(record, conversation_id=f'session-{index}'))
+
+    with pytest.raises(PermissionError, match='outside the maintenance scope'):
+        service.maybe_consolidate(record, force=True, scope='project')
+    assert service.roots(record)['project'].read('project-topic.md') is None
+    assert service.roots(record)['user'].read('user-topic.md') is None
+    maintenance = next(item for item in service.store.list_recent(limit=20)
+                       if item.runtime_state.get('operation') == 'consolidate')
+    assert maintenance.runtime_state['allowed_scopes'] == ['project']
+    assert maintenance.status == 'failed'
+
+
+def test_recall_selector_has_independent_timeout(tmp_path):
+    def slow_selector(*_args):
+        time.sleep(0.2)
+        return response('{"selected_memories": ["user/preference.md"]}')
+
+    service, record = service_for(tmp_path, ScriptedClient(slow_selector))
+    service.recall_timeout_seconds = 0.02
+    service.apply(record, {'memories': [entry()]})
+    started = time.monotonic()
+    recalled = service.recall(record, 'verification')
+    assert time.monotonic() - started < 0.15
+    assert 'user memory index' in recalled
+    assert 'Run tests before handoff.' not in recalled
+
+
+def test_recall_skips_unchanged_surfaced_topics_and_reloads_changed_version(tmp_path):
+    client = ScriptedClient(
+        response('{"selected_memories": ["user/preference.md"]}'),
+        response('{"selected_memories": ["user/preference.md"]}'),
+    )
+    service, record = service_for(tmp_path, client)
+    service.apply(record, {'memories': [entry()]})
+
+    first, surfaced = service.recall_with_versions(record, 'verification', {})
+    second, repeated = service.recall_with_versions(record, 'verification', surfaced)
+    assert 'Run tests before handoff.' in first
+    assert 'Run tests before handoff.' not in second
+    assert repeated == {}
+    assert len(client.requests) == 1
+
+    service.apply(record, {'memories': [entry(body='Run full tests and browser QA.')]})
+    third, changed = service.recall_with_versions(record, 'verification', surfaced)
+    assert 'Run full tests and browser QA.' in third
+    assert changed['user/preference.md'] != surfaced['user/preference.md']
+    assert len(client.requests) == 2
+
+
+def test_background_memory_request_inherits_parent_model_and_usage_scope(tmp_path):
+    from types import SimpleNamespace
+
+    observed = {}
+    def inspect_scope(*_args):
+        observed['model'] = current_model_selection()
+        observed['usage'] = current_model_usage_context()
+        return response('{"memories": []}')
+
+    service, record = service_for(tmp_path, ScriptedClient(inspect_scope))
+    model = SimpleNamespace(to_dict=lambda: {
+        'mode': 'manual', 'routing_policy': 'quality',
+        'preferred_model_id': 'model-1', 'preferred_provider': 'openai',
+        'preferred_model': 'gpt-test', 'thinking_level': 'high',
+        'fallback_enabled': False,
+    })
+    record = replace(record, context_snapshot=SimpleNamespace(
+        identity=SimpleNamespace(actor_user_id='alice', workspace_role='admin'),
+        session=SimpleNamespace(model_selection=model)))
+    service.extract(record, 'nothing durable', 'acknowledged')
+    assert observed['model'].preferred_model_id == 'model-1'
+    assert observed['usage'].session_id == record.conversation_id
+    assert observed['usage'].workspace_id == record.workspace_id
+    assert observed['usage'].operation == 'cogent_memory_extract'
+
+
+def test_consolidation_uses_restricted_tool_loop_and_stages_writes(tmp_path):
+    client = ScriptedClient(
+        response('', ToolCall('memory.write', entry('tool-staged', 'project', 'durable'), 'stage-1')),
+        response('{}'),
+    )
+    service, record = service_for(tmp_path, client)
+    for index in range(5):
+        service.record_session(replace(record, conversation_id=f'session-{index}'))
+    assert service.maybe_consolidate(record, force=True)
+    assert service.roots(record)['project'].read('tool-staged.md') is not None
+    maintenance = next(item for item in service.store.list_recent(limit=20)
+        if item.runtime_state.get('operation') == 'consolidate')
+    assert maintenance.runtime_state['iterations'] == 2
+    assert set(maintenance.runtime_state['allowed_tools']) == {
+        'memory.read', 'memory.search', 'memory.write', 'memory.edit',
+        'memory.delete', 'session.search', 'source.read',
+    }
+
+
+def test_consolidation_does_not_overwrite_manual_change_after_model_read(tmp_path):
+    service, record = service_for(tmp_path)
+    service.apply(record, {'memories': [entry('decision', 'project', 'original')]})
+    for index in range(5):
+        service.record_session(replace(record, conversation_id=f'session-{index}'))
+    root = service.roots(record)['project']
+
+    def concurrent_edit(*_args):
+        root.write('decision.md', b'manual correction')
+        return response(json.dumps({'memories': [],
+            'delete_memories': ['project/decision.md']}))
+
+    service.client = ScriptedClient(concurrent_edit)
+    with pytest.raises(Exception, match='changed'):
+        service.maybe_consolidate(record, force=True)
+    assert root.read('decision.md') == b'manual correction'
+
+
+def test_frontmatter_accepts_nested_legacy_type_and_top_level_type():
+    nested = parse_frontmatter(
+        '---\nname: legacy\ndescription: old format\nmetadata:\n  type: feedback\n---\nbody\n'
+    )
+    current = parse_frontmatter(
+        '---\nname: current\ndescription: new format\ntype: project\n---\nbody\n'
+    )
+    assert nested.type == 'feedback'
+    assert current.type == 'project'

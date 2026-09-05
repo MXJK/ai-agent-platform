@@ -472,7 +472,7 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
         self.assertEqual(retry["wait_source"], "exponential_backoff")
         self.assertEqual(retry["delay_seconds"], 0.3)
 
-    def test_tool_output_truncation_skips_same_model_retry_by_default(self) -> None:
+    def test_tool_output_truncation_is_returned_to_runtime_without_fallback(self) -> None:
         primary = ScriptedFakeProvider()
         primary.tool_error = LLMProviderError(
             "tool turn exhausted its output",
@@ -488,14 +488,14 @@ class ModelFallbackAndCircuitTests(unittest.TestCase):
             settings=Settings(llm_max_retries=2),
         )
 
-        with collect_llm_usage() as usage:
-            decision = client.decide_tools(_messages(), [])
+        with collect_llm_usage() as usage, self.assertRaises(LLMProviderError) as raised:
+            client.decide_tools(_messages(), [])
 
-        self.assertEqual(decision.model, "backup-model")
+        self.assertEqual(raised.exception.code, "tool_output_truncated")
         self.assertEqual(primary.tool_calls, ["primary-model"])
-        self.assertEqual(backup.tool_calls, ["backup-model"])
-        self.assertEqual(usage.request_count, 2)
-        self.assertEqual(usage.retry_count, 1)
+        self.assertEqual(backup.tool_calls, [])
+        self.assertEqual(usage.request_count, 1)
+        self.assertEqual(usage.retry_count, 0)
 
     def test_runtime_unavailable_catalog_model_is_filtered_before_provider_call(self) -> None:
         primary = ScriptedFakeProvider([_success_script("primary-model")])

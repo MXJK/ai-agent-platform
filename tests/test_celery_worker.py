@@ -9,8 +9,8 @@ from ai_agent_platform.workers.celery_app import (
     execute_conversation_compression,
     execute_agent_resume,
     execute_agent_run,
-    execute_memory_extraction,
-    execute_memory_index_outbox,
+    execute_cogent_memory_extract,
+    execute_cogent_memory_consolidate,
 )
 
 
@@ -27,8 +27,10 @@ class CeleryWorkerTests(unittest.TestCase):
         self.assertIn("ai_agent_platform.agent_run", celery_app.tasks)
         self.assertIn("ai_agent_platform.agent_resume", celery_app.tasks)
         self.assertIn("ai_agent_platform.agent_checkpoint_restore", celery_app.tasks)
-        self.assertIn("ai_agent_platform.memory_extraction", celery_app.tasks)
-        self.assertIn("ai_agent_platform.memory_index_outbox", celery_app.tasks)
+        self.assertIn("ai_agent_platform.cogent_memory_extract", celery_app.tasks)
+        self.assertIn("ai_agent_platform.cogent_memory_consolidate", celery_app.tasks)
+        self.assertNotIn("ai_agent_platform.memory_extraction", celery_app.tasks)
+        self.assertNotIn("ai_agent_platform.memory_index_outbox", celery_app.tasks)
         self.assertIn("ai_agent_platform.conversation_compression", celery_app.tasks)
         self.assertNotIn("ai_agent_platform.repository_index", celery_app.tasks)
 
@@ -58,39 +60,40 @@ class CeleryWorkerTests(unittest.TestCase):
         self.assertEqual(calls[2][0], "checkpoint")
         self.assertEqual(calls[2][1]["run_id"], "run_branch")
 
-    def test_memory_extraction_handler_delegates_json_payload(self) -> None:
+    def test_file_memory_extraction_handler_delegates_json_payload(self) -> None:
         calls: list[dict[str, object]] = []
         services = SimpleNamespace(
-            project_memory_service=SimpleNamespace(
-                extract_and_store=lambda **kwargs: calls.append(kwargs),
+            file_memory_service=SimpleNamespace(
+                execute_extract_task=lambda **kwargs: calls.append(kwargs),
             )
         )
         with patch(
             "ai_agent_platform.workers.celery_app.get_worker_services",
             return_value=services,
         ):
-            execute_memory_extraction.run(
-                workspace_id="project",
-                source_type="agent_run",
-                source_id="run_1",
+            execute_cogent_memory_extract.run(
+                parent_run_id="run_1",
+                user_message="remember",
+                answer="saved",
             )
 
-        self.assertEqual(calls[0]["source_id"], "run_1")
+        self.assertEqual(calls[0]["parent_run_id"], "run_1")
 
-    def test_memory_index_outbox_handler_delegates_json_payload(self) -> None:
+    def test_file_memory_consolidation_handler_delegates_json_payload(self) -> None:
         calls: list[dict[str, object]] = []
         services = SimpleNamespace(
-            project_memory_service=SimpleNamespace(
-                process_index_outbox=lambda **kwargs: calls.append(kwargs),
+            file_memory_service=SimpleNamespace(
+                execute_consolidate_task=lambda **kwargs: calls.append(kwargs),
             )
         )
         with patch(
             "ai_agent_platform.workers.celery_app.get_worker_services",
             return_value=services,
         ):
-            execute_memory_index_outbox.run(trigger_id="mem_1:1")
+            execute_cogent_memory_consolidate.run(
+                parent_run_id="run_1", force=True)
 
-        self.assertEqual(calls, [{"trigger_id": "mem_1:1"}])
+        self.assertEqual(calls, [{"parent_run_id": "run_1", "force": True}])
 
     def test_conversation_compression_handler_delegates_json_payload(self) -> None:
         calls: list[dict[str, object]] = []

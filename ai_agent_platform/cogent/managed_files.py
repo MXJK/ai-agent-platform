@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import os
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -48,6 +49,10 @@ class ManagedFiles:
                     return data
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ValueError('Managed file path contains a symbolic link') from exc
+            raise
 
     def write(self, relative: str, data: bytes):
         with self.parent(relative, create=True) as (parent, name):
@@ -65,6 +70,14 @@ class ManagedFiles:
                     os.unlink(temp, dir_fd=parent)
                 except FileNotFoundError:
                     pass
+
+    def delete(self, relative: str) -> None:
+        with self.parent(relative) as (parent, name):
+            try:
+                os.unlink(name, dir_fd=parent)
+                os.fsync(parent)
+            except FileNotFoundError:
+                return
 
     @contextmanager
     def lock(self, relative: str):

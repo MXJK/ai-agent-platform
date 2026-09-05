@@ -10,10 +10,6 @@ from ai_agent_platform.integrations import (
     DirectoryPickerError,
     DirectoryPickerUnavailableError,
 )
-from ai_agent_platform.project_memory import (
-    MemoryAccessDeniedError,
-    ProjectMemoryService,
-)
 from ai_agent_platform.schemas import (
     WorkspaceDirectoryBrowseResponse,
     WorkspaceDirectoryPickRequest,
@@ -31,6 +27,7 @@ from ai_agent_platform.services import (
     WorkspaceNotFoundError,
     WorkspaceRootConflictError,
     WorkspaceService,
+    WorkspaceAccessDeniedError,
     WorkspaceValidationError,
     summarize_token_usage,
 )
@@ -44,7 +41,7 @@ _NATIVE_PICKER_LOCAL_ONLY_DETAIL = (
 def create_workspaces_router(
     workspace_service: WorkspaceService,
     *,
-    memory_service: ProjectMemoryService | None = None,
+    memory_service=None,
     session_service: SessionService | None = None,
     settings: Settings | None = None,
     directory_picker: DirectoryPicker | None = None,
@@ -136,7 +133,7 @@ def create_workspaces_router(
                         actor_user_id=request_user_id(http_request, settings),
                         required_role="admin",
                     )
-                except MemoryAccessDeniedError as exc:
+                except WorkspaceAccessDeniedError as exc:
                     raise HTTPException(status_code=403, detail=str(exc)) from exc
         try:
             workspace = workspace_service.register(
@@ -184,7 +181,7 @@ def create_workspaces_router(
                     actor_user_id=request_user_id(http_request, settings),
                     required_role="admin",
                 )
-            except MemoryAccessDeniedError as exc:
+            except WorkspaceAccessDeniedError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         try:
             workspace_service.remove(workspace_id)
@@ -207,7 +204,7 @@ def create_workspaces_router(
                         workspace_id=workspace.id,
                         actor_user_id=actor_user_id,
                     )
-                except MemoryAccessDeniedError:
+                except WorkspaceAccessDeniedError:
                     continue
                 visible.append(workspace)
             workspaces = visible
@@ -237,7 +234,7 @@ def create_workspaces_router(
                     workspace_id=workspace_id,
                     actor_user_id=request_user_id(http_request, settings),
                 )
-            except MemoryAccessDeniedError as exc:
+            except WorkspaceAccessDeniedError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         return _workspace_response(
             workspace,
@@ -270,7 +267,7 @@ def create_workspaces_router(
                     workspace_id=workspace_id,
                     actor_user_id=request_user_id(http_request, settings),
                 )
-            except MemoryAccessDeniedError as exc:
+            except WorkspaceAccessDeniedError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         records = (
             session_service.list_workspace_token_usage(workspace_id)

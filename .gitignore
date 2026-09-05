@@ -12,6 +12,7 @@ __pycache__/
 !.env.local-memory.example
 !.env.production.example
 .chroma/
+.cogent/
 INTERVIEW_NOTES.md
 INTERVIEW_NOTES/
 gateway/gateway

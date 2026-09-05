@@ -1230,7 +1230,7 @@ class ProjectMemoryServiceTests(unittest.TestCase):
 
 
 class ProjectMemoryApiTests(unittest.TestCase):
-    def test_memory_api_lifecycle_and_removed_chat_route(self) -> None:
+    def test_file_memory_api_lifecycle_and_retired_routes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             workspace = root / "project"
@@ -1248,48 +1248,61 @@ class ProjectMemoryApiTests(unittest.TestCase):
                     headers=headers,
                     json={"mode": "auto"},
                 )
-                self.assertEqual(settings_response.json()["mode"], "auto")
-                created = client.post(
+                self.assertEqual(settings_response.status_code, 410)
+                retired = client.post(
                     "/api/v1/workspaces/project/memories",
                     headers=headers,
+                    json={"kind": "decision", "title": "retired", "content": "retired"},
+                )
+                self.assertEqual(retired.status_code, 410)
+                created = client.post(
+                    "/api/v1/memory/files",
+                    headers=headers,
                     json={
-                        "kind": "decision",
-                        "title": "Storage authority",
-                        "content": "PostgreSQL is the source of truth.",
-                        "importance": 5,
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "storage-authority",
+                        "type": "project",
+                        "description": "Storage authority",
+                        "body": "PostgreSQL is the source of truth.",
                     },
                 )
                 self.assertEqual(created.status_code, 201)
                 memory = created.json()
-                updated = client.patch(
-                    f"/api/v1/workspaces/project/memories/{memory['id']}",
+                updated = client.put(
+                    "/api/v1/memory/files",
                     headers=headers,
                     json={
-                        "version": memory["version"],
-                        "kind": memory["kind"],
-                        "title": memory["title"],
-                        "content": "PostgreSQL remains the source of truth.",
-                        "importance": 5,
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "storage-authority",
+                        "type": "project",
+                        "description": "Storage authority",
+                        "body": "PostgreSQL remains the source of truth.",
+                        "expected_hash": memory["sha256"],
                     },
                 )
                 self.assertEqual(updated.status_code, 200)
-                stale_update = client.patch(
-                    f"/api/v1/workspaces/project/memories/{memory['id']}",
+                stale_update = client.put(
+                    "/api/v1/memory/files",
                     headers=headers,
                     json={
-                        "version": memory["version"],
-                        "kind": memory["kind"],
-                        "title": memory["title"],
-                        "content": "A stale write must fail.",
-                        "importance": 5,
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "storage-authority",
+                        "type": "project",
+                        "description": "Storage authority",
+                        "body": "A stale write must fail.",
+                        "expected_hash": memory["sha256"],
                     },
                 )
                 self.assertEqual(stale_update.status_code, 409)
                 listed = client.get(
-                    "/api/v1/workspaces/project/memories",
+                    "/api/v1/memory/files",
                     headers=headers,
+                    params={"workspace_id": "project", "scope": "project"},
                 )
-                self.assertEqual(len(listed.json()["memories"]), 1)
+                self.assertEqual(len(listed.json()["files"]), 1)
 
                 session_id = client.post(
                     "/api/v1/sessions",
@@ -1306,21 +1319,28 @@ class ProjectMemoryApiTests(unittest.TestCase):
                 self.assertEqual(old_client.status_code, 404)
                 self.assertNotIn("event: memory_context", old_client.text)
 
-                deleted = client.delete(
-                    f"/api/v1/workspaces/project/memories/{memory['id']}",
+                deleted = client.request(
+                    "DELETE",
+                    "/api/v1/memory/files",
                     headers=headers,
+                    json={
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "storage-authority",
+                        "expected_hash": updated.json()["sha256"],
+                    },
                 )
                 self.assertEqual(deleted.status_code, 204)
                 self.assertEqual(
                     client.get(
-                        "/api/v1/workspaces/project/memories",
+                        "/api/v1/memory/files",
                         headers=headers,
-                    ).json()["memories"],
+                        params={"workspace_id": "project", "scope": "project"},
+                    ).json()["files"],
                     [],
                 )
 
-    def test_agent_does_not_recall_standalone_project_memory(self) -> None:
-        from test_api import wait_for_run
+    def test_file_memory_is_scoped_to_its_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             project = root / 'project'
@@ -1332,20 +1352,20 @@ class ProjectMemoryApiTests(unittest.TestCase):
                 for workspace_id, path in (('project', project), ('other', other)):
                     client.put(f'/api/v1/workspaces/{workspace_id}', headers=headers,
                         json={'root_path': str(path)}).raise_for_status()
-                client.post('/api/v1/workspaces/project/memories', headers=headers, json={
-                    'kind': 'decision', 'title': 'Private project decision',
-                    'content': 'LEGACY_MEMORY_SECRET_SENTINEL', 'importance': 5}).raise_for_status()
-                for workspace_id in ('project', 'other'):
-                    session = client.post('/api/v1/sessions', headers=headers, json={'user_id': 'alice'}).json()['id']
-                    started = client.post('/api/v1/agent/runs', headers=headers, json={
-                        'conversation_id': session, 'workspace_id': workspace_id, 'message': '项目数据库的事实源是什么？'})
-                    body = wait_for_run(client, started.json()['run_id'])
-                    self.assertEqual(body['status'], 'completed')
-                    state = client.app.state.query_service._runtime.get_run(body['run_id']).runtime_state
-                    self.assertNotIn('LEGACY_MEMORY_SECRET_SENTINEL', str(state))
-                stored = client.get('/api/v1/workspaces/project/memories', headers=headers).json()['memories']
-                self.assertEqual(len(stored), 1)
-                self.assertEqual(stored[0]['content'], 'LEGACY_MEMORY_SECRET_SENTINEL')
+                client.post('/api/v1/memory/files', headers=headers, json={
+                    'workspace_id': 'project', 'scope': 'project',
+                    'name': 'private-project-decision', 'type': 'project',
+                    'description': 'Private project decision',
+                    'body': 'FILE_MEMORY_SECRET_SENTINEL'}).raise_for_status()
+                project_files = client.get('/api/v1/memory/files', headers=headers,
+                    params={'workspace_id': 'project', 'scope': 'project'}).json()['files']
+                other_files = client.get('/api/v1/memory/files', headers=headers,
+                    params={'workspace_id': 'other', 'scope': 'project'}).json()['files']
+                self.assertEqual(len(project_files), 1)
+                self.assertIn('FILE_MEMORY_SECRET_SENTINEL', project_files[0]['text'])
+                self.assertEqual(other_files, [])
+                self.assertEqual(client.get('/api/v1/workspaces/project/memories',
+                    headers=headers).status_code, 410)
 
     def test_trusted_identity_blocks_spoofing_and_cross_user_access(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1399,13 +1419,15 @@ class ProjectMemoryApiTests(unittest.TestCase):
                 )
                 self.assertEqual(duplicate.status_code, 409)
                 created = client.post(
-                    "/api/v1/workspaces/project/memories",
+                    "/api/v1/memory/files",
                     headers=alice_headers,
                     json={
-                        "kind": "constraint",
-                        "title": "Safe boundary",
-                        "content": "Never persist credentials.",
-                        "importance": 5,
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "safe-boundary",
+                        "type": "project",
+                        "description": "Safe boundary",
+                        "body": "Never persist credentials.",
                     },
                 )
                 self.assertEqual(created.status_code, 201)
@@ -1433,8 +1455,9 @@ class ProjectMemoryApiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     client.get(
-                        "/api/v1/workspaces/project/memories",
+                        "/api/v1/memory/files",
                         headers=bob_headers,
+                        params={"workspace_id": "project", "scope": "project"},
                     ).status_code,
                     403,
                 )

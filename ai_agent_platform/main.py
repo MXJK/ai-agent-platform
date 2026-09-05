@@ -81,8 +81,8 @@ def create_app(
         app.state.usage_ledger = runtime.usage_ledger
         app.state.workspace_service = runtime.workspace_service
         app.state.knowledge_base_service = runtime.knowledge_base_service
-        app.state.project_memory_service = runtime.project_memory_service
-        app.state.user_memory_service = runtime.user_memory_service
+        app.state.workspace_access_service = runtime.workspace_access_service
+        app.state.file_memory_service = runtime.file_memory_service
         app.state.task_queue = runtime.task_queue
         app.state.model_registry = runtime.model_registry
         static_dir = Path(__file__).parent / "static"
@@ -95,8 +95,8 @@ def create_app(
                 query_service=runtime.query_service,
                 change_set_service=runtime.change_set_service,
                 workspace_service=runtime.workspace_service,
-                project_memory_service=runtime.project_memory_service,
-                user_memory_service=runtime.user_memory_service,
+                workspace_access_service=runtime.workspace_access_service,
+                file_memory_service=runtime.file_memory_service,
                 settings=settings,
                 metrics=runtime.metrics,
                 task_queue=runtime.task_queue,

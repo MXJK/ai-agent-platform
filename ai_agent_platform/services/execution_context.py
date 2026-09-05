@@ -239,7 +239,8 @@ class ExecutionContextFactory:
             else self._max_instruction_chars
         )
         resolved_cwd = _resolve_cwd(workspace_root, cwd)
-        _resolve_execution_cwd(workspace_root, execution_root, cwd)
+        resolved_execution_cwd = _resolve_execution_cwd(
+            workspace_root, execution_root, cwd)
         normalized_focus = tuple(
             _validate_focus_path(workspace_root, item) for item in focus_files
         )
@@ -328,11 +329,13 @@ class ExecutionContextFactory:
                 workspace_root=workspace_root,
                 focus_files=unique(instruction_focus),
                 max_chars=1,
+                work_dir=resolved_cwd,
             )
         file_instructions = load_project_instructions(
             workspace_root=execution_root,
             focus_files=unique(instruction_focus),
             max_chars=instruction_char_limit,
+            work_dir=resolved_execution_cwd,
         )
         instruction_snapshots = [
             InstructionSourceSnapshot(
@@ -345,6 +348,7 @@ class ExecutionContextFactory:
                 content_hash=item.content_hash,
                 truncated=item.truncated,
                 priority=_instruction_file_priority(item.path),
+                dependencies=item.dependencies,
             )
             for item in file_instructions
         ]
@@ -1081,7 +1085,9 @@ def _preview_execution_workspace(
 
 def _instruction_file_priority(path: str) -> int:
     name = Path(path).name
-    if name == "AGENTS.override.md":
+    if name == "COGENT.local.md":
+        return 500
+    if path.endswith(".cogent/COGENT.md"):
         return 400
     if name == "AGENTS.md":
         return 300

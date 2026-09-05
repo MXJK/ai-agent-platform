@@ -16,6 +16,15 @@ TaskComplexity = Literal["low", "medium", "high"]
 RetryWaitSource = Literal["exponential_backoff", "retry_after"]
 
 
+# Output allocation is a runtime policy, not hand-authored model metadata.
+# Ordinary turns use a modest budget and output-limit recovery may escalate to
+# this shared ceiling; context headroom and the Usage Ledger still clamp it.
+DEFAULT_MODEL_OUTPUT_TOKENS = 8_192
+MODEL_OUTPUT_TOKEN_CEILING = 64_000
+MAX_MODEL_OUTPUT_RECOVERIES = 3
+MAX_MODEL_OUTPUT_RETRIES = 1 + MAX_MODEL_OUTPUT_RECOVERIES
+
+
 @dataclass(frozen=True)
 class ModelCapabilities:
     tool_calling: bool = False

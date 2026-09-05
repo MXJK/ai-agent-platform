@@ -34,6 +34,7 @@ class ContextSource:
     reason: str
     content_hash: str
     truncated: bool = False
+    dependencies: tuple[str, ...] = ()
     knowledge_base_id: str | None = None
     document_id: str | None = None
     score: float | None = None

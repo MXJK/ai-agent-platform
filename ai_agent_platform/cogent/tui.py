@@ -4,11 +4,13 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, AsyncIterator
 
+from rich.text import Text as RichText
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Collapsible, Footer, Header, Static
+from textual.theme import Theme
+from textual.widgets import Button, Collapsible, Markdown, Static
 
 from ai_agent_platform.domain import AgentEvent, QueryCommand, QueryLifecycle
 from .commands.completion import CompletionPopup
@@ -20,75 +22,121 @@ if TYPE_CHECKING:
 
 class CogentApp(App):
     TITLE = "Cogent"
+    INLINE_PADDING = 0
     BINDINGS = [
         Binding("ctrl+c", "cancel_run", "Cancel Run", priority=True),
         Binding("ctrl+p", "pause_run", "Pause", priority=True),
+        Binding("ctrl+o", "toggle_tool_blocks", "Toggle tools", priority=True),
         Binding("ctrl+q", "close", "Exit", priority=True),
     ]
     CSS = """
-    Screen { layout: vertical; }
-    #conversation { height: 1fr; padding: 0 2; }
-    .user-message { margin-top: 1; color: $text-muted; }
-    .answer, ToolCallBlock { height: auto; margin-bottom: 1; }
-    #activity { height: auto; padding: 0 2; color: $text-muted; }
-    #approval { height: auto; max-height: 16; padding: 1 2; }
+    Screen { background: #1a1a1a; }
+    #title-bar { dock: top; width: 100%; height: 3; padding: 0 1; }
+    #chat-area { height: 1fr; min-height: 12; padding: 0 1; }
+    .message { padding: 0 2; width: 100%; height: auto; }
+    .user-message { margin-top: 1; color: $text; }
+    .answer { height: auto; margin-bottom: 1; color: $text; }
+    .system-message { height: auto; color: $text-muted; padding: 0 2; }
+    ToolCallBlock { height: auto; margin-bottom: 1; padding: 0 2; }
+    .tool-block-error { color: $error; }
+    #approval { height: auto; max-height: 16; padding: 1 2; border-top: solid #303030; }
     #approval-actions { height: auto; }
     #pending { height: auto; max-height: 10; overflow-y: auto; }
-    #composer { height: 5; margin: 0 2; }
-    CompletionPopup { margin: 0 2; }
-    .tool-block-error { color: $error; }
+    #input-area { dock: bottom; height: auto; max-height: 22; padding: 0 1; border-top: solid #303030; }
+    #chat-input { height: auto; min-height: 3; max-height: 10; border: none; }
+    #status-bar { height: 1; width: 100%; padding: 0 1; border-top: solid #303030; }
+    #activity { width: 1fr; height: 1; color: $text-muted; }
+    #credential-label { width: auto; height: 1; color: $text-muted; padding: 0 1; }
+    #model-label { width: auto; height: 1; text-align: right; color: $text-muted; }
+    CompletionPopup { margin: 0 1; }
     """
 
     def __init__(self, application: CliApplication, **kwargs):
         super().__init__(**kwargs)
         self.application = application
-        self.sdk = application.sdk
         self.active_run_id: str | None = None
         self.run_status = ""
         self.busy = False
         self.seen_events: set[tuple[str, int]] = set()
         self.tools: dict[tuple[str, str], ToolCallBlock] = {}
-        self.answers: dict[str, Static] = {}
+        self.answers: dict[str, Markdown] = {}
         self.answer_text: dict[str, str] = {}
         self.thinking: dict[str, Collapsible] = {}
         self.thinking_text: dict[str, str] = {}
         self.pending: dict = {}
         self.capabilities: dict = {}
 
-    @property
-    def actor(self):
-        return self.application.user_id if self.application.runtime.settings.auth_mode != "disabled" else None
-
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
-        yield VerticalScroll(id="conversation")
-        yield Static("Ready · /help lists shared commands", id="activity", markup=False)
+        yield Static(self._make_banner(), id="title-bar")
+        yield VerticalScroll(id="chat-area")
         with Vertical(id="approval"):
             yield Static(id="pending", markup=False)
             with Horizontal(id="approval-actions"):
                 yield Button("Approve once", id="approve", variant="warning")
                 yield Button("Reject", id="reject")
                 yield Button("Continue", id="continue")
-        yield CompletionPopup()
-        yield ChatInput(id="composer")
-        yield Footer()
+        with Vertical(id="input-area"):
+            yield ChatInput(id="chat-input")
+            with Horizontal(id="status-bar"):
+                yield Static("Connecting…", id="activity", markup=False)
+                yield Static("", id="credential-label", markup=False)
+                yield Static("", id="model-label", markup=False)
+            yield CompletionPopup()
+
+    @staticmethod
+    def _make_banner(
+        model: str = "connecting",
+        workspace: str = "shared server",
+    ) -> RichText:
+        text = RichText()
+        text.append("  ◇  Cogent\n", style="bold #875fff")
+        text.append("     ", style="#875fff")
+        text.append(f"{model}\n", style="color(242)")
+        text.append("     ", style="#875fff")
+        text.append(workspace, style="color(242)")
+        return text
 
     async def on_mount(self) -> None:
-        self.application._prepare_context()
-        self.sub_title = self.application.workspace_root
+        self.register_theme(
+            Theme(
+                name="cogent-terminal",
+                primary="#875fff",
+                background="#1a1a1a",
+                surface="#1a1a1a",
+                panel="#1a1a1a",
+                dark=True,
+            )
+        )
+        self.theme = "cogent-terminal"
         self.query_one("#approval").display = False
-        self.query_one(ChatInput).load_history(self.application.workspace_root)
-        self.query_one(ChatInput).focus()
-        await self.refresh_capabilities()
+        composer = self.query_one(ChatInput)
+        composer.placeholder = "Send a message…"
+        try:
+            await self.application.prepare_context()
+            self.sub_title = self.application.workspace_id
+            self.query_one("#title-bar", Static).update(
+                self._make_banner(
+                    self.application.model_summary,
+                    f"{self.application.workspace_id} · {self.application.api_url}",
+                )
+            )
+            self.query_one("#credential-label", Static).update(
+                self.application.credential_summary
+            )
+            self.query_one("#model-label", Static).update(
+                self.application.model_summary
+            )
+            composer.load_history(str(self.application.local_cwd))
+            composer.focus()
+            self.show_activity("Ready · /help · /models")
+            await self.refresh_capabilities()
+        except Exception as exc:
+            composer.disabled = True
+            self.show_activity(str(exc))
 
     async def refresh_capabilities(self):
         try:
-            self.capabilities = await asyncio.to_thread(
-                self.sdk.query_service.composer_capabilities,
-                conversation_id=self.application.session_id,
-                workspace_id=self.application.workspace_id,
-                actor_user_id=self.actor,
-            )
+            self.capabilities = await self.application.capabilities()
         except (ValueError, RuntimeError, PermissionError) as exc:
             self.show_activity(str(exc))
 
@@ -102,6 +150,28 @@ class CogentApp(App):
         if text.strip() == "/exit":
             await self.action_close()
             return
+        if text.strip() == "/models":
+            await self.query_one("#chat-area", VerticalScroll).mount(
+                Static(
+                    self.application.registry_text(),
+                    classes="system-message",
+                    markup=False,
+                )
+            )
+            return
+        if text.startswith(("/memory", "/session")):
+            try:
+                output = await self.application.execute_management_command(text)
+                if output is not None:
+                    await self.query_one("#chat-area", VerticalScroll).mount(
+                        Static(output, classes="system-message", markup=False)
+                    )
+                    self.show_activity("Ready")
+                    await self.refresh_capabilities()
+                    return
+            except (ValueError, RuntimeError, PermissionError) as exc:
+                self.show_activity(str(exc))
+                return
         if self.busy:
             self.show_activity("Run in progress · pause or cancel before submitting another request")
             self.query_one(ChatInput).load_text(text)
@@ -113,9 +183,11 @@ class CogentApp(App):
             self.show_activity("Review the pending request, then approve, reject, continue, or cancel")
             self.query_one(ChatInput).load_text(text)
             return
-        await self.query_one("#conversation").mount(Static(text, classes="user-message", markup=False))
+        await self.query_one("#chat-area").mount(
+            Static(f"❯ {text}", classes="message user-message", markup=False)
+        )
         try:
-            events = self.sdk.query(self.application._query_params(text, mode="tui"))
+            events = self.application.query(text, mode="tui")
         except (ValueError, RuntimeError, PermissionError) as exc:
             self.show_activity(str(exc))
             return
@@ -128,7 +200,7 @@ class CogentApp(App):
             async for event in events:
                 await self.render_event(event)
             if self.active_run_id:
-                result = self.sdk.result(self.active_run_id, actor_user_id=self.actor)
+                result = await self.application.result(self.active_run_id)
                 self.run_status = result.status
                 self.pending = dict(result.output_dict().get("pending") or {})
                 await self.show_pending()
@@ -151,11 +223,11 @@ class CogentApp(App):
         self.application.last_run_id = event.run_id
         self.run_status = event.status
         output = event.output_dict()
-        feed = self.query_one("#conversation", VerticalScroll)
+        feed = self.query_one("#chat-area", VerticalScroll)
         if event.type == "answer_delta":
             text = str(output.get("text") or "")
             if event.run_id not in self.answers:
-                node = Static("", classes="answer", markup=False)
+                node = Markdown("", classes="message answer")
                 self.answers[event.run_id] = node
                 await feed.mount(node)
             self.answer_text[event.run_id] = self.answer_text.get(event.run_id, "") + text
@@ -209,7 +281,11 @@ class CogentApp(App):
         if not self.active_run_id or self.busy:
             return
         try:
-            events = self.sdk.resume(self.active_run_id, approved=approved, message=message, actor_user_id=self.actor)
+            events = self.application.resume(
+                self.active_run_id,
+                approved=approved,
+                message=message,
+            )
         except (ValueError, RuntimeError, PermissionError) as exc:
             self.show_activity(str(exc))
             return
@@ -220,17 +296,23 @@ class CogentApp(App):
     async def action_cancel_run(self):
         if self.active_run_id and self.run_status not in QueryLifecycle.TERMINAL_STATUSES:
             try:
-                result = self.sdk.control(self.active_run_id, QueryCommand.CANCEL, actor_user_id=self.actor)
+                result = await self.application.control(
+                    self.active_run_id,
+                    QueryCommand.CANCEL,
+                )
                 self.run_status = result.status
                 await self.show_pending()
                 self.show_activity(f"Cancellation requested · {self.active_run_id}")
             except (ValueError, RuntimeError, PermissionError) as exc:
                 self.show_activity(str(exc))
 
-    def action_pause_run(self):
+    async def action_pause_run(self):
         if self.active_run_id and self.run_status == "running":
             try:
-                self.sdk.control(self.active_run_id, QueryCommand.PAUSE, actor_user_id=self.actor)
+                await self.application.control(
+                    self.active_run_id,
+                    QueryCommand.PAUSE,
+                )
                 self.show_activity("Pause requested; waiting for a safe boundary")
             except (ValueError, RuntimeError, PermissionError) as exc:
                 self.show_activity(str(exc))
@@ -238,6 +320,10 @@ class CogentApp(App):
     async def action_close(self):
         await self.action_cancel_run()
         self.exit()
+
+    def action_toggle_tool_blocks(self):
+        for block in self.tools.values():
+            block.on_click()
 
     def complete(self, prefix: str | None):
         popup = self.query_one(CompletionPopup)
@@ -248,6 +334,8 @@ class CogentApp(App):
         pairs = [(f"/{item['name']}  {item.get('description', '')}", f"/{item['name']}") for item in items if item['name'].startswith(prefix)]
         if "exit".startswith(prefix):
             pairs.append(("/exit  Exit Cogent CLI", "/exit"))
+        if "models".startswith(prefix):
+            pairs.append(("/models  Show server models and credential status", "/models"))
         popup.show_pairs(pairs[:8]) if pairs else popup.hide()
 
     def on_chat_input_slash_menu_update(self, event: ChatInput.SlashMenuUpdate):

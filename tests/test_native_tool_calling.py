@@ -8,6 +8,7 @@ from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import LLMClient, LLMProviderError, LLMUsage, _anthropic_tool_messages, _deepseek_tool_messages, _effective_model_output_limit, collect_llm_usage, _google_tool_contents, _json_arguments, _openai_tool_input
 from ai_agent_platform.integrations.model_router import ModelCapabilities, ModelConfig, ModelRouter
 from ai_agent_platform.integrations.tools import ToolSpec
+from ai_agent_platform.model_registry.selection import ModelSelection, model_selection_scope
 
 def _tool_spec(name: str='repo.read_file') -> ToolSpec:
     return ToolSpec(name=name, description='Read one file.', input_schema={'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path'], 'additionalProperties': False}, output_schema={'type': 'object'}, provider='local')
@@ -19,7 +20,7 @@ class NativeProviderMappingTests(unittest.TestCase):
 
     def test_effective_output_limit_uses_phase_model_and_context_minimum(self) -> None:
         model = ModelConfig(provider='deepseek', model='deepseek-test', context_window_tokens=10000, max_output_tokens=8192)
-        self.assertEqual(_effective_model_output_limit(model, input_tokens=1000, requested_output_tokens=16384), 8192)
+        self.assertEqual(_effective_model_output_limit(model, input_tokens=1000, requested_output_tokens=16384), 9000)
         self.assertEqual(_effective_model_output_limit(model, input_tokens=9500, requested_output_tokens=16384), 500)
 
     def test_runtime_artifact_tool_history_is_safe_for_every_provider(self) -> None:
@@ -86,7 +87,7 @@ class NativeProviderMappingTests(unittest.TestCase):
         self.assertIsInstance(error.json_error_position, int)
         self.assertNotIn('unterminated', str(error))
 
-    def test_deepseek_retries_truncated_arguments_and_records_failed_usage(self) -> None:
+    def test_deepseek_returns_truncated_arguments_to_runtime_and_records_usage(self) -> None:
 
         class RecordingLedger:
 
@@ -103,7 +104,7 @@ class NativeProviderMappingTests(unittest.TestCase):
         ledger = RecordingLedger()
         router = ModelRouter([ModelConfig(provider='deepseek', model='deepseek-v4-flash', context_window_tokens=128000, max_output_tokens=8192, capabilities=ModelCapabilities(tool_calling=True, structured_output=True))])
         client = LLMClient(Settings(llm_provider='deepseek', llm_model='deepseek-v4-flash', llm_max_retries=1, llm_retry_policy_json='{"tool_output_truncated": 1}'), usage_ledger=ledger, model_router=router, credential_resolver=lambda provider: 'test-key' if provider == 'deepseek' else None)
-        responses = [{'model': 'deepseek-v4-flash', 'choices': [{'finish_reason': 'length', 'message': {'content': None, 'tool_calls': [{'id': 'truncated_1', 'function': {'name': 'sandbox_apply_patch', 'arguments': '{"patch":"*** Begin Patch'}}]}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 4096}}, {'model': 'deepseek-v4-flash', 'choices': [{'finish_reason': 'tool_calls', 'message': {'content': None, 'tool_calls': [{'id': 'recovered_1', 'function': {'name': 'sandbox_apply_patch', 'arguments': '{"patch":"small patch"}'}}]}}], 'usage': {'prompt_tokens': 24, 'completion_tokens': 12}}]
+        responses = [{'model': 'deepseek-v4-flash', 'choices': [{'finish_reason': 'length', 'message': {'content': None, 'tool_calls': [{'id': 'truncated_1', 'function': {'name': 'sandbox_apply_patch', 'arguments': '{"patch":"*** Begin Patch'}}]}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 4096}}]
         payloads: list[dict[str, object]] = []
 
         def fake_post(url, *, headers, payload):
@@ -111,18 +112,17 @@ class NativeProviderMappingTests(unittest.TestCase):
             payloads.append(payload)
             return responses.pop(0)
         with patch.object(client, '_post_json', side_effect=fake_post), patch('ai_agent_platform.integrations.llm.time.sleep'), collect_llm_usage() as usage:
-            decision = client.decide_tools([{'role': 'user', 'content': 'create the app'}], [_tool_spec('sandbox.apply_patch')], max_output_tokens=16384)
-        self.assertEqual(decision.tool_calls[0].call_id, 'recovered_1')
-        self.assertEqual(decision.tool_calls[0].arguments, {'patch': 'small patch'})
-        self.assertEqual([item['max_tokens'] for item in payloads], [8192, 8192])
-        self.assertTrue(any(('exactly one tool call' in str(message.get('content') or '') for message in payloads[1]['messages'])))
-        self.assertEqual(len(ledger.records), 2)
-        self.assertEqual(usage.input_tokens, 44)
-        self.assertEqual(usage.output_tokens, 4108)
-        self.assertEqual(usage.request_count, 2)
-        self.assertEqual(usage.retry_count, 1)
+            with self.assertRaises(LLMProviderError) as raised:
+                client.decide_tools([{'role': 'user', 'content': 'create the app'}], [_tool_spec('sandbox.apply_patch')], max_output_tokens=8192)
+        self.assertEqual(raised.exception.code, 'tool_arguments_truncated')
+        self.assertEqual([item['max_tokens'] for item in payloads], [8192])
+        self.assertEqual(len(ledger.records), 1)
+        self.assertEqual(usage.input_tokens, 20)
+        self.assertEqual(usage.output_tokens, 4096)
+        self.assertEqual(usage.request_count, 1)
+        self.assertEqual(usage.retry_count, 0)
 
-    def test_finalization_uses_selected_models_declared_output_limit(self) -> None:
+    def test_finalization_ignores_selected_models_authored_output_limit(self) -> None:
         router = ModelRouter([ModelConfig(provider='deepseek', model='deepseek-v4-flash', context_window_tokens=128000, max_output_tokens=8192, capabilities=ModelCapabilities(tool_calling=True))])
         client = LLMClient(Settings(llm_provider='deepseek', llm_model='deepseek-v4-flash', llm_max_output_tokens=2048), model_router=router, credential_resolver=lambda provider: 'test-key' if provider == 'deepseek' else None)
         payloads: list[dict[str, object]] = []
@@ -132,9 +132,35 @@ class NativeProviderMappingTests(unittest.TestCase):
             payloads.append(payload)
             return {'model': 'deepseek-v4-flash', 'choices': [{'finish_reason': 'stop', 'message': {'content': '完整最终回答'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 8}}
         with patch.object(client, '_post_json', side_effect=fake_post):
-            decision = client.finalize_tools([{'role': 'user', 'content': 'summarize the result'}], reason='completed', use_model_max_output_tokens=True)
+            decision = client.finalize_tools([{'role': 'user', 'content': 'summarize the result'}], reason='completed')
         self.assertEqual(decision.text, '完整最终回答')
-        self.assertEqual(payloads[0]['max_tokens'], 8192)
+        self.assertEqual(payloads[0]['max_tokens'], 2048)
+
+    def test_thinking_mode_uses_shared_64k_output_default(self) -> None:
+        router = ModelRouter([ModelConfig(provider='deepseek', model='deepseek-v4-flash', context_window_tokens=128000, max_output_tokens=8192, capabilities=ModelCapabilities(tool_calling=True, structured_output=True))])
+        client = LLMClient(Settings(llm_provider='deepseek', llm_model='deepseek-v4-flash', llm_max_output_tokens=8192), model_router=router, credential_resolver=lambda provider: 'test-key' if provider == 'deepseek' else None)
+        payloads: list[dict[str, object]] = []
+
+        def fake_post(url, *, headers, payload):
+            del url, headers
+            payloads.append(payload)
+            return {'model': 'deepseek-v4-flash', 'choices': [{'finish_reason': 'stop', 'message': {'content': 'done'}}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 2}}
+
+        with model_selection_scope(ModelSelection(thinking_level='low')):
+            with patch.object(client, '_post_json', side_effect=fake_post):
+                client.decide_tools([{'role': 'user', 'content': 'analyze this'}], [])
+
+        self.assertEqual(payloads[0]['max_tokens'], 64_000)
+
+    def test_chat_request_uses_8k_normally_and_64k_for_thinking(self) -> None:
+        client = LLMClient(Settings(llm_provider='fake', llm_model='demo-stream-model'))
+        messages = [{'role': 'user', 'content': 'analyze this'}]
+
+        normal = client.prepare_chat_request(messages)
+        thinking = client.prepare_chat_request(messages, thinking_level='high')
+
+        self.assertEqual(normal.max_output_tokens, 8_192)
+        self.assertEqual(thinking.max_output_tokens, 64_000)
 
     def test_finalization_falls_back_to_default_when_model_has_no_output_limit(self) -> None:
         router = ModelRouter([ModelConfig(provider='deepseek', model='deepseek-chat', context_window_tokens=128000, capabilities=ModelCapabilities(tool_calling=True))])
@@ -146,7 +172,7 @@ class NativeProviderMappingTests(unittest.TestCase):
             payloads.append(payload)
             return {'model': 'deepseek-chat', 'choices': [{'finish_reason': 'stop', 'message': {'content': '完成'}}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 2}}
         with patch.object(client, '_post_json', side_effect=fake_post):
-            client.finalize_tools([{'role': 'user', 'content': 'summarize'}], reason='completed', use_model_max_output_tokens=True)
+            client.finalize_tools([{'role': 'user', 'content': 'summarize'}], reason='completed')
         self.assertEqual(payloads[0]['max_tokens'], 3072)
 
     def test_glm_native_tool_decision_uses_chat_completions_layer(self) -> None:

@@ -43,8 +43,6 @@ from ai_agent_platform.evaluation import (
 )
 from ai_agent_platform.evaluation.service import EvalService
 from ai_agent_platform.local_state import LocalStateDatabase
-from ai_agent_platform.memory import UserMemoryService
-from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
 from ai_agent_platform.model_registry import (
     EncryptedFileSecretStore,
     InMemoryModelRegistryRepository,
@@ -53,13 +51,12 @@ from ai_agent_platform.model_registry import (
     ModelRegistryService,
     PostgresModelRegistryRepository,
 )
-from ai_agent_platform.project_memory.factory import create_project_memory_service
-from ai_agent_platform.project_memory.service import ProjectMemoryService
 from ai_agent_platform.repositories import (
     InMemoryChangeSetRepository,
     InMemoryEvalRepository,
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
+    InMemoryProjectMemoryRepository,
     InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
     PostgresChangeSetRepository,
@@ -67,9 +64,11 @@ from ai_agent_platform.repositories import (
     PostgresDocumentRepository,
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
+    PostgresProjectMemoryRepository,
     PostgresWorkspaceRepository,
     SQLiteAgentRunRepository,
     SQLiteSessionRepository,
+    SQLiteProjectMemoryRepository,
     SQLiteWorkspaceRepository,
     create_query_unit_of_work,
 )
@@ -83,6 +82,7 @@ from ai_agent_platform.services import (
     WorkspaceService,
     ExecutionContextFactory,
     ExecutionWorkspaceRuntime,
+    WorkspaceAccessService,
     create_conversation_compressor,
 )
 from ai_agent_platform.skills import (
@@ -142,8 +142,8 @@ class RuntimeContainer:
     secret_store: Any = field(default=None, repr=False)
     game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
-    project_memory_service: ProjectMemoryService | None = None
-    user_memory_service: UserMemoryService | None = None
+    workspace_access_service: WorkspaceAccessService | None = None
+    file_memory_service: Any = None
     permission_resolver: PermissionResolver | None = None
     change_set_service: ChangeSetService | None = None
     rag_service: RAGService | None = None
@@ -331,94 +331,19 @@ class ApplicationFactory:
                     or (str(Path.home().resolve()),)
                 ),
             )
-            container.project_memory_service = self.create_project_memory_service(
-                settings,
-                workspace_service=container.workspace_service,
-                llm_client=container.llm_client,
-                metrics=container.metrics,
-                usage_ledger=container.usage_ledger,
-                local_state_database=container.local_state_database,
-                credential_resolver=(
-                    container.model_registry.credential_for_provider
-                ),
-            )
+            container.workspace_access_service = self.create_workspace_access_service(
+                settings, workspace_service=container.workspace_service,
+                local_state_database=container.local_state_database)
             recovered_workspace_count = _recover_single_user_workspace_ownership(
                 settings,
                 workspace_service=container.workspace_service,
-                project_memory_service=container.project_memory_service,
+                workspace_access_service=container.workspace_access_service,
             )
             if recovered_workspace_count:
                 logger.info(
                     "ensured fixed single-user ownership for persisted workspaces",
                     extra={"workspace_count": recovered_workspace_count},
                 )
-            container.project_memory_service.set_index_outbox_submitter(
-                lambda trigger_id: container.task_queue.submit(
-                    "memory_index_outbox",
-                    container.project_memory_service.process_index_outbox,
-                    trigger_id=trigger_id,
-                )
-            )
-            container.project_memory_service.resume_index_outbox()
-            container.user_memory_service = UserMemoryService(
-                repository=(
-                    SQLiteUserMemoryRepository(
-                        database=container.local_state_database
-                    )
-                    if container.local_state_database is not None
-                    else None
-                ),
-                enabled=settings.user_memory_enabled,
-                default_mode=settings.user_memory_mode,
-                max_context_chars=settings.user_profile_max_context_chars,
-            )
-
-            def refresh_layered_memory(
-                *, workspace_id: str, actor_user_id: str
-            ) -> None:
-                workspace = container.workspace_service.get(workspace_id)
-                memories = []
-                while True:
-                    page = container.project_memory_service.list_memories(
-                        workspace_id=workspace_id,
-                        actor_user_id=actor_user_id,
-                        status="active",
-                        limit=200,
-                        offset=len(memories),
-                    )
-                    memories.extend(page)
-                    if len(page) < 200:
-                        break
-                container.user_memory_service.refresh_project_scene(
-                    user_id=actor_user_id,
-                    workspace_id=workspace_id,
-                    workspace_title=Path(workspace.root_path).name or workspace.id,
-                    memories=memories,
-                )
-
-            container.project_memory_service.set_layered_memory_submitter(
-                lambda workspace_id, actor_user_id: container.task_queue.submit(
-                    "layered_memory_refresh",
-                    refresh_layered_memory,
-                    workspace_id=workspace_id,
-                    actor_user_id=actor_user_id,
-                )
-            )
-            if settings.auth_mode == "single_user":
-                for workspace in container.workspace_service.list():
-                    if settings.project_memory_mode == "auto":
-                        container.project_memory_service.update_settings(
-                            workspace_id=workspace.id,
-                            actor_user_id=settings.single_user_id.strip(),
-                            mode="auto",
-                        )
-                    if container.user_memory_service.enabled:
-                        container.task_queue.submit(
-                            "layered_memory_startup_refresh",
-                            refresh_layered_memory,
-                            workspace_id=workspace.id,
-                            actor_user_id=settings.single_user_id.strip(),
-                        )
             container.permission_resolver = PermissionResolver()
             container.execution_workspace_runtime = ExecutionWorkspaceRuntime(
                 runtime_parent=settings.sandbox_workspace_parent,
@@ -429,7 +354,7 @@ class ApplicationFactory:
             container.change_set_service = ChangeSetService(
                 repository=container.change_set_store,
                 workspace_service=container.workspace_service,
-                authorize=container.project_memory_service.authorize,
+                authorize=container.workspace_access_service.authorize,
                 live_writes_enabled=settings.live_workspace_writes_enabled,
                 apply_mode=settings.change_set_apply_mode,
                 auth_mode=settings.auth_mode,
@@ -439,7 +364,7 @@ class ApplicationFactory:
                 branch_prefix=settings.change_set_branch_prefix,
                 command_timeout_seconds=settings.sandbox_command_timeout_seconds,
                 permission_resolver=container.permission_resolver,
-                role_for=container.project_memory_service.role_for,
+                role_for=container.workspace_access_service.role_for,
             )
             container.rag_service = rag_service or self.create_rag_service(
                 settings,
@@ -612,10 +537,19 @@ class ApplicationFactory:
                 default_model=settings.llm_model,
                 default_thinking_level=settings.llm_thinking_level,
             )
+            if container.cogent_runtime is not None:
+                container.file_memory_service = container.cogent_runtime._memory_service
+                container.file_memory_service.session_service = container.session_service
+                container.file_memory_service.task_queue = container.task_queue
+                memory_toolkit = getattr(
+                    container.tool_registry, "_file_memory_toolkit", None
+                )
+                if memory_toolkit is not None:
+                    memory_toolkit.bind(container.file_memory_service)
             container.execution_context_factory = ExecutionContextFactory(
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
-                workspace_authorizer=container.project_memory_service,
+                workspace_authorizer=container.workspace_access_service,
                 auth_mode=settings.auth_mode,
                 entrypoint_type=role,
                 max_context_messages=settings.llm_max_context_messages,
@@ -654,7 +588,7 @@ class ApplicationFactory:
                 runtime=container.coding_agent_runtime,
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
-                workspace_authorizer=container.project_memory_service,
+                workspace_authorizer=container.workspace_access_service,
                 metrics=container.metrics,
                 task_queue=container.task_queue,
                 max_context_messages=settings.llm_max_context_messages,
@@ -678,7 +612,7 @@ class ApplicationFactory:
                 query_service=container.query_service,
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
-                memory_service=container.project_memory_service,
+                memory_service=container.workspace_access_service,
                 model_registry=container.model_registry,
                 fault_controller=container.tool_fault_controller,
             )
@@ -909,26 +843,24 @@ class ApplicationFactory:
     def create_game_agent_runtime(self) -> GameAgentRuntime:
         return GameAgentRuntime()
 
-    def create_project_memory_service(
+    def create_workspace_access_service(
         self,
         settings: Settings,
         *,
         workspace_service: WorkspaceService,
-        llm_client: LLMClient,
-        metrics: MetricsRegistry,
-        usage_ledger: UsageLedgerService,
         local_state_database: LocalStateDatabase | None = None,
-        credential_resolver: Callable[[str], str | None] | None = None,
-    ) -> ProjectMemoryService:
-        return create_project_memory_service(
-            settings,
-            workspace_service=workspace_service,
-            llm_client=llm_client,
-            metrics=metrics,
-            usage_ledger=usage_ledger,
-            local_state_database=local_state_database,
-            credential_resolver=credential_resolver,
-        )
+    ) -> WorkspaceAccessService:
+        if settings.workspace_access_store == 'postgres':
+            repository = PostgresProjectMemoryRepository(
+                database_url=settings.database_url)
+        elif settings.workspace_access_store == 'sqlite':
+            if local_state_database is None:
+                raise ValueError('SQLite workspace access requires local state')
+            repository = SQLiteProjectMemoryRepository(database=local_state_database)
+        else:
+            repository = InMemoryProjectMemoryRepository()
+        return WorkspaceAccessService(repository=repository,
+                                      workspace_service=workspace_service)
 
     def create_rag_service(
         self,
@@ -984,6 +916,10 @@ class ApplicationFactory:
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
             execution_workspace_runtime=execution_workspace_runtime,
         )
+        if session_repository is not None:
+            from ai_agent_platform.tools.memory import register_memory_tools
+
+            register_memory_tools(registry, session_repository)
         if settings.tool_allowlist is not None:
             registry.restrict_to(settings.tool_allowlist)
         return registry
@@ -1074,7 +1010,11 @@ class ApplicationFactory:
             execution_workspace_runtime=execution_workspace_runtime,
             max_parallel_reads=settings.agent_max_parallel_tools_per_step,
             tool_result_max_chars=50_000,
-            memory_service=MemoryService(client=cogent_client, run_store=run_store),
+            memory_service=MemoryService(
+                client=cogent_client,
+                run_store=run_store,
+                user_root=Path(settings.cogent_user_memory_root).expanduser(),
+            ),
         )
 
 
@@ -1125,14 +1065,13 @@ def build_runtime(
 
 
 def _uses_local_state(settings: Settings) -> bool:
-    return settings.user_memory_enabled or any(
+    return any(
         value == "sqlite"
         for value in (
             settings.session_repository,
             settings.agent_run_store,
             settings.workspace_store,
-            settings.project_memory_store,
-            settings.project_memory_vector_store,
+            settings.workspace_access_store,
         )
     )
 
@@ -1141,14 +1080,14 @@ def _recover_single_user_workspace_ownership(
     settings: Settings,
     *,
     workspace_service: WorkspaceService,
-    project_memory_service: ProjectMemoryService,
+    workspace_access_service: Any,
 ) -> int:
     """Make the fixed local owner authoritative over persisted workspaces."""
     if settings.auth_mode != "single_user":
         return 0
     workspaces = workspace_service.list_including_removed()
     for workspace in workspaces:
-        project_memory_service.ensure_workspace_admin(
+        workspace_access_service.ensure_workspace_admin(
             workspace_id=workspace.id,
             actor_user_id=settings.single_user_id.strip(),
         )

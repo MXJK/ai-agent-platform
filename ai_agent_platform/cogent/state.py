@@ -29,6 +29,7 @@ class CogentState:
     compact_boundaries: list[dict[str, Any]] = field(default_factory=list)
     active_skill: str = ""
     recalled_memory: str = ""
+    surfaced_memories: dict[str, str] = field(default_factory=dict)
     recovery_count: int = 0
     context_recovery_count: int = 0
     request_count: int = 0
@@ -63,6 +64,7 @@ class CogentState:
             "compact_boundaries": self.compact_boundaries,
             "active_skill": self.active_skill,
             "recalled_memory": self.recalled_memory,
+            "surfaced_memories": self.surfaced_memories,
             "recovery_count": self.recovery_count,
             "context_recovery_count": self.context_recovery_count,
             "request_count": self.request_count,
@@ -99,6 +101,7 @@ class CogentState:
             compact_boundaries=list(raw.get("compact_boundaries") or []),
             active_skill=str(raw.get("active_skill") or ""),
             recalled_memory=str(raw.get("recalled_memory") or ""),
+            surfaced_memories=dict(raw.get("surfaced_memories") or {}),
             recovery_count=int(raw.get("recovery_count") or 0),
             context_recovery_count=int(raw.get("context_recovery_count") or 0),
             request_count=int(raw.get("request_count") or 0),

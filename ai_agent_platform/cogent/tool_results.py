@@ -8,9 +8,11 @@ from .managed_files import ManagedFiles
 
 
 class ToolResultFiles:
-    def __init__(self, workspace_root: str, references: dict):
+    def __init__(self, workspace_root: str, references: dict,
+                 conversation_id: str=''):
         self.files = ManagedFiles(Path(workspace_root).resolve())
         self.references = references
+        self.conversation_id = conversation_id
 
     def persist(self, run_id: str, response: dict) -> dict:
         if not run_id or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in run_id):
@@ -18,7 +20,10 @@ class ToolResultFiles:
         raw = json.dumps(response, ensure_ascii=False, indent=2, default=str).encode()
         digest = hashlib.sha256(raw).hexdigest()
         key = hashlib.sha256(str(response.get('call_id') or 'result').encode()).hexdigest()
-        relative = f'.cogent/sessions/{run_id}/tool-results/{key}.json'
+        session_id = self.conversation_id or run_id
+        if any(character not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for character in session_id):
+            raise ValueError('Invalid session ID for tool-result persistence')
+        relative = f'.cogent/sessions/{session_id}/runs/{run_id}/tool-results/{key}.json'
         existing = self.files.read(relative, limit=max(len(raw), 8_000_000))
         if existing is not None and existing != raw:
             raise ValueError('A persisted tool result changed unexpectedly')

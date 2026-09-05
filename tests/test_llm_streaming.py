@@ -169,7 +169,7 @@ class GoogleStreamingTests(unittest.TestCase):
         fake_client = _FakeClient.instances[-1]
         self.assertEqual(fake_client.client_kwargs["http_options"].timeout, 7500)
         config = fake_client.generate_kwargs["config"]
-        self.assertEqual(config.max_output_tokens, 4096)
+        self.assertEqual(config.max_output_tokens, 64_000)
         self.assertEqual(config.thinking_config.thinking_level, "MEDIUM")
         self.assertTrue(fake_client.closed)
 

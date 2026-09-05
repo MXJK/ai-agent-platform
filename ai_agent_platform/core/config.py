@@ -19,12 +19,7 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "workspace_store": "sqlite",
         "model_registry_store": "memory",
         "rag_vector_store": "memory",
-        "project_memory_store": "sqlite",
-        "project_memory_vector_store": "sqlite",
-        "project_memory_enabled": True,
-        "project_memory_mode": "auto",
-        "user_memory_enabled": True,
-        "user_memory_mode": "auto",
+        "workspace_access_store": "sqlite",
         "rag_reranker_provider": "none",
         "task_queue_backend": "in_process",
     },
@@ -37,12 +32,7 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "workspace_store": "postgres",
         "model_registry_store": "postgres",
         "rag_vector_store": "qdrant",
-        "project_memory_store": "postgres",
-        "project_memory_vector_store": "qdrant",
-        "project_memory_enabled": False,
-        "project_memory_mode": "off",
-        "user_memory_enabled": False,
-        "user_memory_mode": "off",
+        "workspace_access_store": "postgres",
         "task_queue_backend": "celery",
     },
 }
@@ -91,8 +81,7 @@ _RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
             "workspace_store",
             "model_registry_store",
             "rag_vector_store",
-            "project_memory_store",
-            "project_memory_vector_store",
+            "workspace_access_store",
             "task_queue_backend",
         }
     }
@@ -152,7 +141,7 @@ class Settings:
     llm_context_input_token_ratio: float = 0.6
     llm_context_evidence_ratio: float = 0.25
     llm_context_history_ratio: float = 0.15
-    llm_max_output_tokens: int = 4096
+    llm_max_output_tokens: int = 8192
     llm_thinking_level: str = "low"
     llm_model_catalog_json: str | None = None
     llm_model_context_window_tokens: int = 128000
@@ -183,6 +172,10 @@ class Settings:
     qdrant_url: str = field(default="http://localhost:6333", repr=False)
     qdrant_api_key: str | None = field(default=None, repr=False)
     qdrant_collection_name: str = "knowledge_chunks"
+    workspace_access_store: str = "memory"
+    cogent_user_memory_root: str = "~/.cogent/memory"
+    # Deprecated database-memory settings are parsed for configuration-file
+    # compatibility but are no longer read by runtime business logic.
     project_memory_enabled: bool = False
     project_memory_mode: str = "off"
     project_memory_store: str = "memory"
@@ -289,16 +282,16 @@ class Settings:
     agent_native_context_keep_messages: int = 10
     agent_tool_result_keep_recent: int = 6
     agent_native_max_compactions: int = 3
-    agent_plan_max_output_tokens: int = 4096
-    agent_mutation_max_output_tokens: int = 16384
-    agent_final_max_output_tokens: int = 4096
+    agent_plan_max_output_tokens: int = 8192
+    agent_mutation_max_output_tokens: int = 64000
+    agent_final_max_output_tokens: int = 8192
     agent_tool_result_max_tokens: int = 2000
     agent_snip_enabled: bool = True
     agent_snip_pressure_ratio: float = 0.60
     agent_snip_keep_recent_groups: int = 4
     agent_micro_compact_idle_seconds: int = 3600
     agent_micro_compact_keep_recent_results: int = 5
-    agent_compaction_max_output_tokens: int = 4096
+    agent_compaction_max_output_tokens: int = 8192
     agent_compaction_safety_buffer_tokens: int = 2048
     agent_compaction_min_reclaimable_tokens: int = 2048
     agent_graph_recursion_limit: int = 128
@@ -456,6 +449,11 @@ class Settings:
                 "sentence_transformer_reranker_device must not be empty"
             )
         _require_choice(
+            "workspace_access_store",
+            self.workspace_access_store,
+            {"memory", "postgres", "sqlite"},
+        )
+        _require_choice(
             "project_memory_mode",
             self.project_memory_mode,
             {"off", "shadow", "review", "auto"},
@@ -482,6 +480,8 @@ class Settings:
         )
         if not self.single_user_id.strip() or len(self.single_user_id) > 256:
             raise ValueError("single_user_id must contain 1-256 non-blank characters")
+        if not self.cogent_user_memory_root.strip():
+            raise ValueError("cogent_user_memory_root must not be empty")
         _require_choice(
             "native_directory_picker_mode",
             self.native_directory_picker_mode,
@@ -551,10 +551,9 @@ class Settings:
                 self.session_repository,
                 self.agent_run_store,
                 self.workspace_store,
-                self.project_memory_store,
-                self.project_memory_vector_store,
+                self.workspace_access_store,
             )
-        ) or self.user_memory_enabled
+        )
         if sqlite_selected and self.task_queue_backend != "in_process":
             raise ValueError(
                 "SQLite local state requires TASK_QUEUE_BACKEND=in_process"
@@ -1212,6 +1211,12 @@ class Settings:
             qdrant_api_key=_env("QDRANT_API_KEY", None, dotenv),
             qdrant_collection_name=_env(
                 "QDRANT_COLLECTION_NAME", cls.qdrant_collection_name, dotenv
+            ),
+            workspace_access_store=_env(
+                "WORKSPACE_ACCESS_STORE", cls.workspace_access_store, dotenv
+            ),
+            cogent_user_memory_root=_env(
+                "COGENT_USER_MEMORY_ROOT", cls.cogent_user_memory_root, dotenv
             ),
             project_memory_enabled=_bool_env(
                 "PROJECT_MEMORY_ENABLED",

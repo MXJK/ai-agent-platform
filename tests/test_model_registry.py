@@ -61,7 +61,6 @@ def _registered_payload(provider: str = "openai") -> dict:
         "model": "test-model",
         "display_name": "Test Model",
         "context_window_tokens": 128_000,
-        "max_output_tokens": 16_384,
         "tool_calling": True,
         "structured_output": True,
         "input_cost_per_million": 0.25,
@@ -227,6 +226,47 @@ class ModelRegistryServiceTests(unittest.TestCase):
         )
         self.assertEqual(created["status"], "unknown")
 
+    def test_existing_authored_output_limit_is_normalized_to_shared_policy(self) -> None:
+        repository = InMemoryModelRegistryRepository()
+        now = datetime.now(timezone.utc)
+        repository.upsert_connection(
+            ProviderConnection(
+                provider="openai",
+                display_name="OpenAI",
+                secret_ref=None,
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        repository.upsert_model(
+            RegisteredModel(
+                id="mdl_legacy_limit",
+                provider="openai",
+                model="legacy-limit-model",
+                display_name="Legacy Limit",
+                context_window_tokens=128_000,
+                max_output_tokens=12_345,
+                tool_calling=True,
+                structured_output=True,
+                input_cost_per_million=1.0,
+                output_cost_per_million=4.0,
+                quality_score=0.8,
+                configured_latency_ms=500,
+                enabled=True,
+                auto_eligible=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        service = ModelRegistryService(repository, self.secrets, initial_models=[])
+
+        model_view = service.registry_view()["models"][0]
+        model_config = service.model_configs()[0]
+
+        self.assertEqual(model_view["max_output_tokens"], 64_000)
+        self.assertEqual(model_config.max_output_tokens, 64_000)
+
     def test_new_provider_secret_is_removed_when_connection_write_fails(self) -> None:
         repository = _FailingConnectionRepository()
         repository.fail_connection_writes = True
@@ -377,11 +417,11 @@ class ModelRegistryServiceTests(unittest.TestCase):
 
         self.assertEqual(evolving["display_name"], "Doubao-Seed-Evolving")
         self.assertEqual(evolving["context_window_tokens"], 1_024_000)
-        self.assertEqual(evolving["max_output_tokens"], 256_000)
+        self.assertEqual(evolving["max_output_tokens"], 64_000)
         self.assertEqual(turbo["context_window_tokens"], 256_000)
-        self.assertEqual(turbo["max_output_tokens"], 256_000)
+        self.assertEqual(turbo["max_output_tokens"], 64_000)
         self.assertEqual(lite["context_window_tokens"], 256_000)
-        self.assertEqual(lite["max_output_tokens"], 128_000)
+        self.assertEqual(lite["max_output_tokens"], 64_000)
 
         with self.assertRaisesRegex(ValueError, "unsupported doubao model"):
             self.service.register_model(
@@ -555,7 +595,12 @@ class ModelRegistryApiTests(unittest.TestCase):
                     "enabled": True,
                 },
             ).raise_for_status()
-            payload = _registered_payload(provider="anthropic")
+            payload = {
+                "provider": "anthropic",
+                "model": "test-model",
+                "enabled": True,
+                "auto_eligible": True,
+            }
             model = client.post(
                 "/api/v1/model-registry/models",
                 json=payload,
@@ -653,6 +698,15 @@ class ModelRegistryApiTests(unittest.TestCase):
                     json={
                         "provider": "openai",
                         "model": "gpt-5-mini",
+                        "enabled": True,
+                        "auto_eligible": True,
+                    },
+                )
+                rejected_manual_limit = client.post(
+                    "/api/v1/model-registry/models",
+                    json={
+                        "provider": "openai",
+                        "model": "gpt-5-manual-limit",
                         "max_output_tokens": 32_768,
                         "enabled": True,
                         "auto_eligible": True,
@@ -663,19 +717,20 @@ class ModelRegistryApiTests(unittest.TestCase):
                     json={
                         "enabled": True,
                         "auto_eligible": True,
-                        "max_output_tokens": 24_576,
                     },
                 )
 
         self.assertEqual(catalog.status_code, 200)
         self.assertEqual(catalog.json()["models"][0]["model"], "gpt-5-mini")
-        self.assertEqual(catalog.json()["models"][0]["max_output_tokens"], 128_000)
+        self.assertEqual(catalog.json()["models"][0]["max_output_tokens"], 64_000)
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.json()["display_name"], "GPT-5 Mini")
         self.assertEqual(created.json()["context_window_tokens"], 400_000)
-        self.assertEqual(created.json()["max_output_tokens"], 32_768)
+        self.assertEqual(created.json()["max_output_tokens"], 64_000)
+        self.assertEqual(rejected_manual_limit.status_code, 422)
+        self.assertIn("max_output_tokens", rejected_manual_limit.text)
         self.assertEqual(updated.status_code, 200)
-        self.assertEqual(updated.json()["max_output_tokens"], 24_576)
+        self.assertEqual(updated.json()["max_output_tokens"], 64_000)
         discover.assert_called_once_with("openai", "sk-never-return-this")
 
     def test_frontend_registration_and_session_preference_are_persisted(self) -> None:
@@ -714,7 +769,12 @@ class ModelRegistryApiTests(unittest.TestCase):
                 )
                 model = client.post(
                     "/api/v1/model-registry/models",
-                    json=_registered_payload(),
+                    json={
+                        "provider": "openai",
+                        "model": "test-model",
+                        "enabled": True,
+                        "auto_eligible": True,
+                    },
                 ).json()
                 preference = client.put(
                     f"/api/v1/sessions/{session_id}/model-preference",
@@ -777,12 +837,12 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertIn('data-view-panel="models"', frontend)
         self.assertIn('id="discovered-model-select"', frontend)
         self.assertIn('id="manual-model-id-input"', frontend)
-        self.assertIn('id="registered-model-output-limit-input"', frontend)
+        self.assertNotIn('id="registered-model-output-limit-input"', frontend)
         self.assertIn('id="model-probe-policy-note"', frontend)
         self.assertNotIn('id="registered-model-quality-input"', frontend)
         self.assertNotIn('id="registered-model-latency-input"', frontend)
         self.assertIn("available-models", frontend_js)
-        self.assertIn("save-output-limit", frontend_js)
+        self.assertNotIn("save-output-limit", frontend_js)
         self.assertIn("test-latency", frontend_js)
         self.assertIn("/test`,", frontend_js)
         self.assertIn("60_000", frontend_js)

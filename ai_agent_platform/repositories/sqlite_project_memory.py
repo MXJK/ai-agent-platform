@@ -72,6 +72,13 @@ class SQLiteProjectMemoryRepository:
             )
         return memory_ids
 
+    def delete_workspace_access(self, *, workspace_id: str) -> None:
+        with self.database.transaction(immediate=True) as conn:
+            conn.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+
     def ensure_member(self, *, workspace_id: str, user_id: str, role: str) -> WorkspaceMember:
         with self.database.transaction(immediate=True) as conn:
             row = conn.execute(

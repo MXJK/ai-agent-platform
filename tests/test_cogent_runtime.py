@@ -11,7 +11,7 @@ from ai_agent_platform.cogent.runtime import CogentRuntime
 from ai_agent_platform.cogent.state import CogentState
 from ai_agent_platform.cogent.tools import CogentToolAdapter
 from ai_agent_platform.cogent.tools.base import Tool
-from ai_agent_platform.integrations.llm import LLMToolDecision, LLMUsage
+from ai_agent_platform.integrations.llm import LLMProviderError, LLMToolDecision, LLMUsage
 from ai_agent_platform.integrations.permissions import PermissionResolver
 from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder
 from ai_agent_platform.integrations.tools import ToolCall, ToolRegistry
@@ -25,9 +25,11 @@ class ScriptedClient:
     def __init__(self, *steps):
         self.steps = list(steps)
         self.requests = []
+        self.request_kwargs = []
 
     def decide_tools(self, messages, tools, **kwargs):
         self.requests.append(messages)
+        self.request_kwargs.append(dict(kwargs))
         step = self.steps.pop(0)
         if callable(step):
             return step(messages, tools, kwargs)
@@ -123,6 +125,25 @@ def test_new_run_in_same_conversation_keeps_canonical_tool_pairs(tmp_path):
     assert any(item.get('tool_calls') for item in messages)
     assert any(item.get('role') == 'tool' and item.get('call_id') == 'read-1' for item in messages)
     assert effects == ['read']
+
+
+@pytest.mark.parametrize('terminal_status', ['completed', 'partial', 'blocked', 'cancelled', 'failed'])
+def test_new_run_inherits_history_from_every_terminal_status(tmp_path, terminal_status):
+    runtime = runtime_for(tmp_path, ScriptedClient())
+    prior = start(runtime, tmp_path)
+    state = CogentState.from_mapping(prior.runtime_state)
+    state.messages = [
+        {'role': 'user', 'content': 'keep this request'},
+        {'role': 'assistant', 'content': 'keep this answer'},
+    ]
+    runtime._run_store.save(replace(
+        prior, status=terminal_status, next_nodes=[], runtime_state=state.to_dict()))
+
+    following = start(runtime, tmp_path)
+    restored = CogentState.from_mapping(following.runtime_state)
+    assert restored.messages == state.messages
+    assert restored.approvals == []
+    assert restored.pending_calls == []
 
 
 def test_cancel_waiting_approval_is_immediately_terminal_without_side_effects(tmp_path):
@@ -263,6 +284,77 @@ def test_output_recovery_preserves_answer_fragments(tmp_path):
     runtime = runtime_for(tmp_path, client)
     result = execute(runtime, tmp_path, start(runtime, tmp_path))
     assert result.answer == "Part one.\nPart two."
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["tool_output_truncated", "tool_arguments_truncated"],
+)
+def test_truncated_tool_turn_uses_persisted_64k_recovery(tmp_path, error_code):
+    usage = LLMUsage(
+        input_tokens=41_654,
+        output_tokens=4_096,
+        thoughts_tokens=4_096,
+        reported_total_tokens=45_750,
+    )
+
+    def truncated(messages, tools, kwargs):
+        raise LLMProviderError(
+            "model tool turn reached its output limit (finish_reason=length)",
+            retryable=True,
+            code=error_code,
+            finish_reason="length",
+            usage=usage,
+        )
+
+    client = ScriptedClient(truncated, response("Recovered."))
+    runtime = runtime_for(tmp_path, client)
+    record = start(runtime, tmp_path)
+    result = execute(runtime, tmp_path, record)
+
+    assert result.status == "completed"
+    assert result.answer == "Recovered."
+    assert client.request_kwargs[0]["max_output_tokens"] is None
+    assert client.request_kwargs[1]["max_output_tokens"] == 64_000
+    assert "exactly one tool call" in client.requests[1][-1]["content"]
+    retries = [event for event in runtime.list_events(record.run_id) if event.type == "retry"]
+    assert retries[-1].output == {
+        "attempt": 1,
+        "maximum": 4,
+        "recoveries_after_escalation": 3,
+        "finish_reason": "length",
+        "next_max_output_tokens": 64_000,
+    }
+    restored = runtime.get_run(record.run_id)
+    assert restored.runtime_state["recovery_count"] == 1
+    assert restored.runtime_state["usage"]["output_tokens"] == 4_096
+
+
+def test_truncated_tool_turn_exhaustion_returns_partial(tmp_path):
+    def truncated(messages, tools, kwargs):
+        raise LLMProviderError(
+            "tool output exhausted",
+            retryable=True,
+            code="tool_output_truncated",
+            finish_reason="length",
+            usage=LLMUsage(input_tokens=10, output_tokens=8_192),
+        )
+
+    client = ScriptedClient(*([truncated] * 5))
+    runtime = runtime_for(tmp_path, client)
+    record = start(runtime, tmp_path)
+    result = execute(runtime, tmp_path, record)
+
+    assert result.status == "partial"
+    assert result.terminal_reason == "output_limit_exhausted"
+    assert len(client.requests) == 5
+    assert client.request_kwargs[0]["max_output_tokens"] is None
+    assert all(
+        item["max_output_tokens"] == 64_000
+        for item in client.request_kwargs[1:]
+    )
+    restored = runtime.get_run(record.run_id)
+    assert restored.runtime_state["recovery_count"] == 4
 
 
 def test_private_reasoning_is_never_emitted(tmp_path):

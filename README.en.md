@@ -35,8 +35,7 @@ existing web directory browser registers projects below that root without trying
 to open the host Finder from a container.
 
 The official `RUNTIME_PROFILE=custom` combination reuses the existing PostgreSQL
-repositories, Qdrant vector stores, and `in_process` task queue. Project memory is
-enabled, and independent user memory is enabled. Cogent does not inject either service. Provider API keys are entered only in Model
+repositories, Qdrant vector stores, and `in_process` task queue. Cogent file memory and database-backed session recovery are enabled. Provider API keys are entered only in Model
 Management; Compose encrypts them in the private persistent `app_state` volume while
 PostgreSQL stores only opaque references. Its model catalog starts empty; register and
 enable a Provider connection and a tool-capable model in the UI before sending a task.
@@ -77,22 +76,32 @@ Explicit `-f docker-compose.yml` avoids machine-specific development overrides.
 
 ## CLI, REPL, SDK, and process entrypoints
 
-Install locally with `python3 -m venv .venv`, `.venv/bin/python -m pip install -r requirements.txt`
-and `.venv/bin/python -m pip install --no-deps -e .`. Activate `.venv` before using the commands below.
-Local configuration does not automatically connect to Compose stores. To share the container setup,
-use `docker compose -f docker-compose.yml exec app cogent --workspace /workspaces/your-project`.
-
-The published commands are `cogent` and `cogent-api`; old script names are removed.
+Start the one Cogent service shared with the web UI, then sync the terminal dependencies:
 
 ```bash
-cogent --workspace /absolute/path/to/project
-cogent --workspace /absolute/path/to/project --print "Explain the entrypoints"
-cogent-api --host 127.0.0.1 --port 8000
+docker compose up -d
+uv sync
 ```
 
-The default interface is Textual. Noninteractive output, the compatibility REPL,
-AgentSDK.query(), and the web API all use QueryService. Web clients submit to
-POST /api/v1/agent/runs and subscribe to Run SSE. /api/v1/chat/stream returns 404.
+The public `cogent` CLI is an HTTP/SSE client of the web backend; it does not
+assemble a second Runtime. Models, Provider credential status, Workspaces,
+Sessions, Runs, MCP, Skills, permissions, and memory all come from the same
+server. Plaintext credentials remain in the server Secret Store; the terminal
+only shows whether each credential is configured and healthy.
+
+```bash
+uv run cogent
+uv run cogent --workspace-id project
+uv run cogent --workspace-id project --print "Explain the entrypoints"
+```
+
+The default endpoint is `http://127.0.0.1:8000/api/v1`; set `COGENT_API_URL` or
+pass `--api-url` when it differs. The CLI automatically selects a sole/default
+Workspace or a unique Workspace matching the current directory; otherwise pass
+`--workspace-id`. `/models` shows the server model and credential status.
+Textual, noninteractive output, and the compatibility REPL use the same HTTP/SSE
+QueryService boundary as the web UI. The embedded `AgentSDK.query()` remains
+available for Python callers. `/api/v1/chat/stream` returns 404.
 
 Shared commands: /help, /status, /clear, /compact, /mcp, /memory, /session,
 /skill (also /skills), /tools, /permissions, /resume, /plan, /review, /rewind,
@@ -106,7 +115,7 @@ single-node product contract in service-owned environment values:
 | Boundary | Current MVP |
 | --- | --- |
 | Structured facts, checkpoints, model registry | PostgreSQL |
-| Document and project-memory vectors | Qdrant |
+| Document RAG vectors | Qdrant |
 | Agent, compression, and memory tasks | Bounded queue in the API process |
 | Identity | Fixed `single_user` owner |
 | Workspace | `/workspaces` bind mount and direct source edits |
@@ -400,11 +409,12 @@ Bash retains the configured executable allowlist and accepts one program plus ar
 use Glob/Grep/ReadFile for inspection instead of shell pipelines or command chaining.
 Legacy langgraph-v1 history stays read-only, with unfinished records projected as blocked.
 
-Cogent file memory is independent of RAG/ProjectMemory/UserMemory. Project memory files live in
-.cogent/memory; user files are isolated under ~/.cogent/memory/.users/<identity hash>. MEMORY.md
-is capped at 200 lines/25KB. Restricted maintenance persists validated responses and write plans,
-recovers without repeating completed requests, and removes duplicate/stale index links. Unreferenced
-topic files are retained. No Bash, MCP or ordinary workspace tools are exposed to maintenance.
+Cogent file memory is independent of RAG and replaces the retired ProjectMemory/UserMemory
+runtime paths. Project files live in `.cogent/memory`; user files are isolated under
+`COGENT_USER_MEMORY_ROOT/.users/<identity-hash>`. `MEMORY.md` is capped at 200 lines/25KB.
+Restricted maintenance persists validated responses and write plans, checks old hashes during
+recovery, and may merge duplicate topics, correct conflicts, or delete superseded content without
+overwriting manual edits. Maintenance receives no Bash, MCP, or ordinary Workspace write tools.
 
 /plan restricts writes to the plan file; /review is read-only. /rewind previews and requires approval,
 rejects hash conflicts, and appends a logical conversation branch. Use a file snapshot ID for files/all,
@@ -648,162 +658,55 @@ read-only container root and the caller's non-root UID/GID, drops Linux
 capabilities, enables `no-new-privileges`, and applies PID, CPU, memory, and
 tmpfs limits.
 
-## Project memory
+## Memory and layered instructions
 
-This is the retained standalone platform memory subsystem, not Cogent file memory.
-Its APIs, data, indexes and evaluation semantics remain. Cogent neither injects
-these facts/profiles nor triggers the retired Chat/Agent extraction hooks.
+Cogent now uses one layered-instruction, file-memory, database-session, and background-governance system. The old `ProjectMemory`, `UserMemory`, candidate approval, vector memory, scene, and profile pipelines no longer run. Their historical database tables remain in the migration chain, but current code neither reads nor writes them and performs no import. Retired management APIs return `410 Gone`. Independent RAG keeps its own documents, indexes, and query boundary.
 
-The memory architecture implements **L0 → L1 → L2 → L3**. L0 stores original
-messages and supports explicit search; L1 is governed project knowledge for the
-current workspace/revision; L2 deterministically composes active L1 records into
-a user/workspace scene; and L3 combines those scenes with active user facts into
-a bounded profile. Live source, `.workflow/tasks`, Agent Runs, checkpoints, and
-ChangeSets remain authoritative for task progress; L2 only summarizes active L1.
-See the editable
-[`architecture overview`](docs/architecture/local-layered-memory-overview.drawio)
-and its [`PNG`](docs/architecture/local-layered-memory-overview.png); the same
-directory also contains editable context-assembly, write-governance, and
-persistence detail diagrams.
+### Layered instructions
 
-Project memory is shared by authorized members of one `workspace_id`. Supported
-kinds are `architecture_fact`, `constraint`, `decision`, `convention`,
-`task_outcome`, and `incident_lesson`. Full source files, temporary discussion,
-assistant speculation, credentials, private keys, tokens, connection strings,
-and complete environment-variable values are rejected.
+Every new Run loads these sources from lower to higher priority and freezes source paths, expanded dependencies, hashes, priorities, and truncation in its instruction snapshot:
 
-Modes are:
+1. `~/.cogent/COGENT.md` and `~/.cogent/AGENTS.md`;
+2. `COGENT.md`, `AGENTS.md`, and `.cogent/COGENT.md` at each directory from the Git root to the working directory;
+3. `COGENT.local.md` in the working directory.
 
-- `off`: no extraction or retrieval;
-- `shadow`: extract review candidates but do not inject them;
-- `review`: retrieve only active records, normally after human confirmation;
-- `auto`: extracted candidates that pass safety and quality gates become active.
+Without a Git root, traversal starts at the registered Workspace root and never escapes it. `focus_files` still discovers module rules and records their applicable directories. `CLAUDE.md` and `AGENTS.override.md` are no longer auto-discovered; use `COGENT.md` or `COGENT.local.md`.
 
-User-created records and explicit “remember/记住” requests are active with
-confidence `1.0`. Extractions below `PROJECT_MEMORY_CANDIDATE_THRESHOLD` are
-discarded; review mode keeps eligible candidates reviewable, while auto mode
-activates them directly and promotes existing candidates when selected. Equal canonical content adds evidence; authoritative
-conflicts supersede the old record, while uncertain conflicts remain
-candidates. Source-backed mutable facts are hash-checked before injection and
-become `stale` after the source changes. Long-unconfirmed records are
-down-ranked rather than deleted solely because of age.
+A standalone `@./path`, `@../path`, `@~/path`, or `@/absolute/path` line expands recursively. Expansion skips code fences, detects cycles, stops after five levels, and records clear missing or denied markers. Absolute and home-relative syntax grants no extra filesystem access. High-priority content wins the instruction budget. New Runs reload files; a paused Run resumes with its frozen snapshot.
 
-Extraction deduplicates additional evidence by source kind, source ID, and path
-before selecting at most five sources. The first complete span/hash is retained;
-different hits in the same file are not spliced together. PostgreSQL ignores
-duplicate evidence IDs and existing source unique-key conflicts while other
-errors still roll back the transaction. This does not automatically replay old
-failed jobs; a completed job with zero stored candidates added no memories.
+### User and project file memory
 
-Retrieval combines dense and lexical recall using weighted RRF, then reloads
-every result from the configured L1 source of truth to verify workspace,
-revision, status, expiry, and version. PostgreSQL/Qdrant remain available for
-distributed deployments. The single-process local profile uses SQLite FTS5
-BM25 and float32 vector BLOBs carrying model, dimensions, and memory version;
-cosine similarity is computed over the small current workspace/revision set.
-FTS5 and vector failures degrade to bounded `LIKE` and lexical-only recall.
-Every eligible candidate receives an explainable final score:
+Project topics live in `<workspace>/.cogent/memory/`. User topics live in `COGENT_USER_MEMORY_ROOT/.users/<identity-hash>/`, with `~/.cogent/memory` as the default root. Each scope has a bounded `MEMORY.md` index and Markdown topic files:
 
-```text
-0.65 × normalized relevance
-+ 0.20 × exponential recency
-+ 0.15 × normalized importance
-```
+- user scope accepts `user` and `feedback`; project scope accepts `project` and `reference`;
+- `MEMORY.md` is capped at 200 lines and 25KB;
+- new frontmatter writes top-level `type`, while reads also accept legacy `metadata.type`;
+- manual and automatic writes share path, type, role, symlink, size, and content-hash validation; stale writes return `409` and clients never provide arbitrary paths;
+- remembered content is correctable context and cannot grant permission or override current user instructions, project instructions, or live source.
 
-Recency uses `last_confirmed_at` (falling back to `updated_at`) with a
-configurable 180-day half-life. Candidates are globally ranked before the
-six-result/3,000-character budget is applied by this independent retrieval service.
+Each Run loads both indexes and asks the selected model to prefetch at most five relevant topics within eight seconds. Displayed topic versions are recorded to avoid repeated injection. The Agent also exposes restricted `memory.list_files`, `memory.read_index`, `memory.write_file`, and `memory.delete_file` tools; writes and deletes retain Workspace role and approval checks.
+
+After an answer, a background task reads the unextracted database message window, deduplicates it against a persisted cursor and topic manifest, and routes facts to the correct scope. The cursor advances only after a successful write or an explicit empty result. Model errors and hash conflicts retain the retry boundary. Tasks inherit the parent model, identity, and Usage Ledger and never copy conversation text to JSONL.
+
+Automatic consolidation requires 24 hours since the previous success, new activity in at least five sessions, and a ten-minute scan throttle. Manual consolidation may skip the time gate. A separate internal Run, capped at fifteen turns, can read session evidence and source but can write only the owning user/project memory directories. Durable write plans, old-hash checks, and locks make update/delete/index changes crash-recoverable without overwriting manual edits. Failures do not move the last-success timestamp.
+
+### Sessions, attachments, and recovery
+
+Messages, summaries, Sessions, Runs, tool ledgers, and maintenance state continue in configured SQLite or PostgreSQL stores. No JSONL session copy is created. New tool attachments use `.cogent/sessions/<session-id>/runs/<run-id>/tool-results/`; persisted legacy attachment references remain readable.
+
+Continuation rebuilds `summary + complete retained tail + later messages` from the last valid compaction boundary, preserving order, tool calls/results, required Provider fields, approvals, unanswered questions, and attachment references. Completed, failed, cancelled, and partial terminal Runs can all contribute safe history. Uncertain writes are never replayed automatically. Selecting a session neither approves nor resumes a suspended Run; `/resume` keeps its Run-recovery meaning. Legacy `langgraph-v1` sessions remain read-only and there is no copied 30-day deletion policy.
 
 Management endpoints:
 
 ```text
-GET/PATCH /api/v1/workspaces/{workspace_id}/memory-settings
-GET/POST  /api/v1/workspaces/{workspace_id}/memories
-GET/PATCH /api/v1/workspaces/{workspace_id}/memories/{memory_id}
-POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/confirm
-POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/reject
-DELETE    /api/v1/workspaces/{workspace_id}/memories/{memory_id}
-GET       /api/v1/workspaces/{workspace_id}/memory-jobs
-POST      /api/v1/workspaces/{workspace_id}/memories/reindex
+GET/POST/PUT/DELETE /api/v1/memory/files
+GET                 /api/v1/memory/index
+GET/POST            /api/v1/memory/maintenance
+GET                 /api/v1/memory/conversations/search
+DELETE              /api/v1/sessions/{session_id}
 ```
 
-PATCH/confirm/reject require the current `version`. Viewers can retrieve and
-view; editors can create, edit, confirm, and reject; admins can change mode,
-forget, and repair indexes. Forgetting hard-deletes memory/evidence/vector data
-but intentionally does not erase the source conversation.
-
-Cogent does not invoke this retrieval/extraction chain; /chat/stream is removed.
-
-### L0 conversation search and the L2/L3 profile pipeline
-
-L0 indexes the original `messages` table rather than copying another log.
-SQLite uses aligned CJK n-grams on writes and queries and rebuilds old FTS data
-during the v2 migration; PostgreSQL uses escaped `ILIKE` substring matching.
-An empty query lists recent messages. Both listing and search are user-scoped,
-can constrain workspace/session, and are never injected automatically. They are available through
-`GET /api/v1/memory/conversations/search` and the read-only
-`memory.search_conversations` tool.
-
-L3 is a separate `UserMemory` domain with `profile_fact`,
-`communication_preference`, `tooling_preference`, `workflow_preference`,
-`standing_goal`, and `personal_constraint`. Manual and explicitly global
-remember requests become active immediately; ordinary preferences are active in
-auto mode and candidates in review mode. Every L1 mutation asynchronously
-rebuilds the workspace's `UserMemoryScene` (L2), then `UserProfileSnapshot` (L3)
-is rebuilt without an LLM from L2 scenes and active user facts, within the
-configured character budget. These profiles remain independent platform data and are not injected into Cogent.
-
-```text
-GET/PATCH /api/v1/users/me/memory-settings
-GET       /api/v1/users/me/memory-scenes
-GET/POST  /api/v1/users/me/memories
-GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
-POST      /api/v1/users/me/memories/{memory_id}/confirm
-POST      /api/v1/users/me/memories/{memory_id}/reject
-GET       /api/v1/users/me/profile
-POST      /api/v1/users/me/profile/rebuild
-GET       /api/v1/memory/conversations/search
-```
-
-The Memory Workbench mirrors the backend layers with L1, L2/L3, and L0
-views. Project and user facts use an asset-list/detail-governance split with
-active/candidate counts, status and kind filters, evidence, versions, and
-contextual actions. The profile view previews the exact deterministic snapshot
-stored by the independent service (not read by Cogent), while conversation search pairs user-scoped hits with a
-full message detail panel and automatically loads recent messages. The profile
-view exposes L2 scenes and their L1 source counts. L1 extraction is fixed to the
-automatic path, so the UI no longer exposes workspace mode, manual reindex, or
-refresh controls; opening the view loads it automatically.
-
-The Docker MVP enables the complete pipeline: PostgreSQL stores L0/L1 facts,
-Qdrant stores rebuildable L1 vectors, and a mounted SQLite v2 database stores
-L2 scenes and L3 profiles:
-
-```dotenv
-PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=auto
-PROJECT_MEMORY_STORE=postgres
-PROJECT_MEMORY_VECTOR_STORE=qdrant
-PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
-PROJECT_MEMORY_AUTO_THRESHOLD=0.85
-PROJECT_MEMORY_RECALL_LIMIT=20
-PROJECT_MEMORY_RESULT_LIMIT=6
-PROJECT_MEMORY_MAX_CONTEXT_CHARS=3000
-PROJECT_MEMORY_QDRANT_COLLECTION=project_memories
-PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
-PROJECT_MEMORY_RECENCY_WEIGHT=0.20
-PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
-PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
-USER_MEMORY_ENABLED=true
-USER_MEMORY_MODE=auto
-USER_PROFILE_MAX_CONTEXT_CHARS=1500
-```
-
-The default [`.env.example`](.env.example) describes the official single-node
-Compose combination. [`.env.local-memory.example`](.env.local-memory.example)
-provides a single-process variant where all structured state uses SQLite.
-
-Cogent compaction is independent of this platform memory subsystem.
+The web workbench provides user memory, project memory, conversation search, index views, topic CRUD, and manual consolidation. CLI/TUI commands are `/memory list|edit|clear|consolidate [user|project]` and `/session list|resume <id>|new|delete <id>`. Sessions with an active or suspended Run cannot be deleted.
 
 ## Independent knowledge base
 
@@ -1022,12 +925,8 @@ CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 RAG_VECTOR_STORE=qdrant
-PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=auto
-USER_MEMORY_ENABLED=true
-USER_MEMORY_MODE=auto
-PROJECT_MEMORY_STORE=postgres
-PROJECT_MEMORY_VECTOR_STORE=qdrant
+WORKSPACE_ACCESS_STORE=postgres
+COGENT_USER_MEMORY_ROOT=/home/app/.cogent/memory
 WORKSPACE_ALLOWED_ROOTS=/workspaces
 ```
 
@@ -1035,9 +934,9 @@ The persistent runtime assigns one responsibility to each database:
 
 | Component | Responsibility |
 | --- | --- |
-| PostgreSQL | Sessions/messages, user defaults, per-session configuration and rolling summaries, Agent runs/events/tool ledger/ChangeSets plus immutable model and Run-context snapshots, workspace/knowledge-base catalogs, project-memory facts/evidence/jobs/outbox/audit, document/chunk metadata, lexical search, and Cogent runtime snapshots |
-| Qdrant | Separate knowledge and project-memory vector collections; project-memory payload is minimal and rebuildable |
-| SQLite | Retained compatibility/test adapters; the product may use it only for the not-yet-migrated single-node user-memory implementation |
+| PostgreSQL | Sessions/messages, user defaults, summaries, Agent Runs/Events/tool ledger/ChangeSets, model and Run-context snapshots, Workspace access, document metadata, lexical search, and Cogent/maintenance Run state |
+| Qdrant | Rebuildable vectors for the independent document knowledge base; Cogent file memory does not use a vector store |
+| SQLite | Local-profile Sessions, Runs, Workspace access, and maintenance state; file-memory content remains Markdown |
 | Redis/Celery | Retained multi-Worker extension; not started by current Compose |
 | Chroma | Retained embedded vector alternative; not selected by current Compose |
 
@@ -1057,21 +956,22 @@ have no host ports. Database credentials come from the user's local `.env` and
 are injected only into the private Compose network. Adminer, Gateway, Redis, and
 Celery are absent from the current service set.
 
-The in-process queue registers Agent run/resume, conversation compression, memory
-extraction, and project-memory index-Outbox tasks with the same task semantics as
+The in-process queue registers Agent run/resume, conversation compression, incremental memory
+extraction, and file-memory consolidation tasks with the same task semantics as
 the retained Celery adapter. Workspace, configuration, and tool context are still
 frozen before execution. Restarting the App interrupts work that is running or
-queued at that moment; persisted Runs, events, and Outbox evidence remain, but
+queued at that moment; persisted Runs, events, and maintenance write plans remain, but
 this MVP does not promise automatic recovery of every interrupted Run.
 
 ### Runtime assembly and lifecycle
 
-FastAPI `create_app()` and the retained process-local Celery Worker adapter both enter
-the same `ApplicationFactory` through
+FastAPI `create_app()`, the retained process-local Celery Worker adapter, and
+the embedded SDK enter the same `ApplicationFactory` through
 `build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
-registry, Workspace, RAG, MCP, Tool Registry, Cogent Agent
-runtime, and business services therefore share one dependency graph. CLI print,
-REPL, and SDK are active thin Query Kernel adapters. A shared non-owning
+registry, Workspace, RAG, MCP, Tool Registry, Cogent Agent runtime, and business
+services therefore share one dependency graph. The public Textual/print/REPL CLI
+instead uses HTTP/SSE to reach the one Runtime already owned by FastAPI, sharing
+the web configuration, Secret Store, and persisted Runs. A shared non-owning
 `ToolPoolBuilder` is injected into context creation, Query recovery, and the
 Cogent loop; RuntimeContainer still owns and closes Registry/MCP resources.
 
@@ -1143,8 +1043,8 @@ The same L1 suite also runs **inside the app against a registered model**, from
 the 评测 page: pick a registered provider/model pair, run it, and the page shows
 lifecycle counts, citation metrics, token/time totals and averages, alerts,
 history, and per-case evidence. The explicit evaluation context excludes real
-profile/history, user/project memory, and global knowledge bases, then removes
-temporary sessions, workspace state, and files. A real-model run is billed by
+real user file memory/history and global knowledge bases, then removes
+temporary sessions, workspace state, and isolated file memory. A real-model run is billed by
 token and only one may run at a time. Baselines are manually pinned and keyed by
 provider + model + suite + evaluator version; legacy rows are not compared with
 evaluator v2. Critical runs require an explicit forced pin. The endpoints

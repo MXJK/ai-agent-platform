@@ -86,12 +86,6 @@ class _RecordingFactory(ApplicationFactory):
     def create_workspace_store(self, settings):
         return super().create_workspace_store(self.local_settings)
 
-    def create_project_memory_service(self, settings, **kwargs):
-        return super().create_project_memory_service(
-            self.local_settings,
-            **kwargs,
-        )
-
     def create_rag_service(self, settings, **kwargs):
         return super().create_rag_service(self.local_settings, **kwargs)
 
@@ -205,7 +199,8 @@ class RuntimeBootstrapTests(unittest.TestCase):
                 "model_registry",
                 "game_agent_runtime",
                 "workspace_service",
-                "project_memory_service",
+                "workspace_access_service",
+                "file_memory_service",
                 "change_set_service",
                 "rag_service",
                 "knowledge_base_service",

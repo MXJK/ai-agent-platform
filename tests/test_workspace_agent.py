@@ -160,7 +160,7 @@ class RepositoryToolTests(unittest.TestCase):
 
 class ProjectInstructionTests(unittest.TestCase):
 
-    def test_nested_override_and_multi_directory_scopes(self) -> None:
+    def test_nested_cogent_and_agents_multi_directory_scopes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / 'AGENTS.md').write_text('root rules', encoding='utf-8')
@@ -168,14 +168,14 @@ class ProjectInstructionTests(unittest.TestCase):
             frontend = root / 'frontend'
             backend.mkdir()
             frontend.mkdir()
-            (backend / 'AGENTS.md').write_text('ignored backend', encoding='utf-8')
+            (backend / 'AGENTS.md').write_text('backend rules', encoding='utf-8')
             (backend / 'AGENTS.override.md').write_text('backend override', encoding='utf-8')
             (frontend / 'AGENTS.md').write_text('frontend rules', encoding='utf-8')
             (backend / 'app.py').write_text('', encoding='utf-8')
             (frontend / 'app.js').write_text('', encoding='utf-8')
             sources = load_project_instructions(workspace_root=str(root), focus_files=['backend/app.py', 'frontend/app.js'], max_chars=16000)
-            self.assertEqual([source.path for source in sources], ['AGENTS.md', 'backend/AGENTS.override.md', 'frontend/AGENTS.md'])
-            self.assertNotIn('ignored backend', [source.text for source in sources])
+            self.assertEqual([source.path for source in sources], ['AGENTS.md', 'backend/AGENTS.md', 'frontend/AGENTS.md'])
+            self.assertNotIn('backend override', [source.text for source in sources])
             self.assertIn('backend', sources[1].reason)
             self.assertIn('frontend', sources[2].reason)
 
@@ -186,3 +186,25 @@ class ProjectInstructionTests(unittest.TestCase):
             sources = load_project_instructions(workspace_root=str(root), focus_files=[], max_chars=32)
             self.assertEqual(sum((len(item.text) for item in sources)), 32)
             self.assertTrue(sources[0].truncated)
+
+    def test_working_directory_chain_and_local_override_are_loaded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            module = root / 'backend' / 'payments'
+            module.mkdir(parents=True)
+            (root / 'COGENT.md').write_text('root cogent', encoding='utf-8')
+            (root / 'backend' / 'AGENTS.md').write_text('backend agents', encoding='utf-8')
+            (module / '.cogent').mkdir()
+            (module / '.cogent' / 'COGENT.md').write_text('payment cogent', encoding='utf-8')
+            (module / 'COGENT.local.md').write_text('local payment override', encoding='utf-8')
+
+            sources = load_project_instructions(
+                workspace_root=str(root), work_dir=str(module),
+                focus_files=[], max_chars=16_000)
+
+            self.assertEqual([item.path for item in sources], [
+                'COGENT.md', 'backend/AGENTS.md',
+                'backend/payments/.cogent/COGENT.md',
+                'backend/payments/COGENT.local.md',
+            ])
+            self.assertEqual(sources[-1].text, 'local payment override')

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -6,6 +7,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from ai_agent_platform.agents.coding.models import AgentRunRecord
+from ai_agent_platform.cogent.state import RUNTIME_ENGINE
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import (
     LLMProviderError,
@@ -53,6 +56,170 @@ def upload_document(
 
 
 class ApiTests(unittest.TestCase):
+    def test_file_memory_crud_index_conflict_and_retired_routes(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            client.put(
+                "/api/v1/workspaces/project",
+                json={"root_path": temp_dir},
+            ).raise_for_status()
+            payload = {
+                "workspace_id": "project",
+                "scope": "project",
+                "name": "database-decisions",
+                "type": "project",
+                "description": "Database persistence decisions",
+                "body": "Sessions remain in SQLite.",
+            }
+            created = client.post("/api/v1/memory/files", json=payload)
+            listed = client.get(
+                "/api/v1/memory/files",
+                params={"workspace_id": "project", "scope": "project"},
+            )
+            index = client.get(
+                "/api/v1/memory/index",
+                params={"workspace_id": "project", "scope": "project"},
+            )
+            conflict = client.put(
+                "/api/v1/memory/files",
+                json={**payload, "body": "changed", "expected_hash": "0" * 64},
+            )
+            retired = client.get("/api/v1/workspaces/project/memories")
+            deleted = client.request(
+                "DELETE",
+                "/api/v1/memory/files",
+                json={
+                    "workspace_id": "project",
+                    "scope": "project",
+                    "name": "database-decisions",
+                    "expected_hash": created.json()["sha256"],
+                },
+            )
+
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["type"], "project")
+        self.assertEqual([item["name"] for item in listed.json()["files"]],
+                         ["database-decisions"])
+        self.assertIn("database-decisions.md", index.json()["content"])
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(retired.status_code, 410)
+        self.assertEqual(deleted.status_code, 204)
+
+    def test_file_memory_rejects_symlink_topics_without_hiding_valid_files(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            root = Path(temp_dir)
+            client.put(
+                "/api/v1/workspaces/project",
+                json={"root_path": temp_dir},
+            ).raise_for_status()
+            valid = {
+                "workspace_id": "project",
+                "scope": "project",
+                "name": "valid-topic",
+                "type": "project",
+                "description": "Valid topic",
+                "body": "This topic must remain visible.",
+            }
+            client.post("/api/v1/memory/files", json=valid).raise_for_status()
+            outside = root / "outside.md"
+            outside.write_text("outside", encoding="utf-8")
+            memory_dir = root / ".cogent" / "memory"
+            (memory_dir / "linked-topic.md").symlink_to(outside)
+
+            listed = client.get(
+                "/api/v1/memory/files",
+                params={"workspace_id": "project", "scope": "project"},
+            )
+            write = client.put(
+                "/api/v1/memory/files",
+                json={**valid, "name": "linked-topic"},
+            )
+            delete = client.request(
+                "DELETE",
+                "/api/v1/memory/files",
+                json={
+                    "workspace_id": "project",
+                    "scope": "project",
+                    "name": "linked-topic",
+                },
+            )
+            outside_content = outside.read_text(encoding="utf-8")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual([item["name"] for item in listed.json()["files"]],
+                         ["valid-topic"])
+        self.assertEqual(write.status_code, 400)
+        self.assertEqual(delete.status_code, 400)
+        self.assertEqual(outside_content, "outside")
+
+    def test_file_memory_viewer_can_read_but_cannot_mutate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                llm_provider="fake",
+                embedding_provider="local",
+                workspace_allowed_roots=(temp_dir,),
+                auth_mode="trusted_header",
+                gateway_trust_secret="test-secret",
+            )
+            app = create_app(settings=settings)
+            owner_headers = {
+                "X-Authenticated-User": "owner",
+                "X-Gateway-Auth": "test-secret",
+            }
+            viewer_headers = {
+                "X-Authenticated-User": "viewer",
+                "X-Gateway-Auth": "test-secret",
+            }
+            payload = {
+                "workspace_id": "project",
+                "scope": "project",
+                "name": "readable-topic",
+                "type": "project",
+                "description": "Readable topic",
+                "body": "Viewers may read this topic.",
+            }
+            with TestClient(app) as client:
+                client.put(
+                    "/api/v1/workspaces/project",
+                    headers=owner_headers,
+                    json={"root_path": temp_dir},
+                ).raise_for_status()
+                created = client.post(
+                    "/api/v1/memory/files", headers=owner_headers, json=payload
+                )
+                created.raise_for_status()
+                app.state.workspace_access_service._repository.ensure_member(
+                    workspace_id="project", user_id="viewer", role="viewer"
+                )
+                listed = client.get(
+                    "/api/v1/memory/files",
+                    headers=viewer_headers,
+                    params={"workspace_id": "project", "scope": "project"},
+                )
+                index = client.get(
+                    "/api/v1/memory/index",
+                    headers=viewer_headers,
+                    params={"workspace_id": "project", "scope": "project"},
+                )
+                write = client.put(
+                    "/api/v1/memory/files", headers=viewer_headers,
+                    json={**payload, "body": "unauthorized change"},
+                )
+                delete = client.request(
+                    "DELETE", "/api/v1/memory/files", headers=viewer_headers,
+                    json={
+                        "workspace_id": "project",
+                        "scope": "project",
+                        "name": "readable-topic",
+                        "expected_hash": created.json()["sha256"],
+                    },
+                )
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertIn("Viewers may read", listed.json()["files"][0]["text"])
+        self.assertEqual(index.status_code, 200)
+        self.assertEqual(write.status_code, 403)
+        self.assertEqual(delete.status_code, 403)
+
     def test_single_user_sessions_always_belong_to_fixed_owner(self) -> None:
         with TemporaryDirectory() as temp_dir:
             with self._client(
@@ -86,8 +253,8 @@ class ApiTests(unittest.TestCase):
             def create_workspace_store(self, settings):
                 return self.store
 
-            def create_project_memory_service(self, settings, **kwargs):
-                service = super().create_project_memory_service(settings, **kwargs)
+            def create_workspace_access_service(self, settings, **kwargs):
+                service = super().create_workspace_access_service(settings, **kwargs)
                 for workspace_id in self.workspace_ids:
                     service.ensure_workspace_admin(
                         workspace_id=workspace_id,
@@ -133,7 +300,7 @@ class ApiTests(unittest.TestCase):
                     "/api/v1/workspaces/removed",
                     json={"root_path": str(restored_root)},
                 )
-                memory_service = app.state.project_memory_service
+                access_service = app.state.workspace_access_service
 
                 self.assertEqual(listed.status_code, 200)
                 self.assertEqual(
@@ -153,14 +320,14 @@ class ApiTests(unittest.TestCase):
                 )
                 for workspace_id in ("active", "removed"):
                     self.assertEqual(
-                        memory_service.role_for(
+                        access_service.role_for(
                             workspace_id=workspace_id,
                             actor_user_id="owner",
                         ),
                         "admin",
                     )
                     self.assertEqual(
-                        memory_service.role_for(
+                        access_service.role_for(
                             workspace_id=workspace_id,
                             actor_user_id="legacy-user",
                         ),
@@ -185,7 +352,7 @@ class ApiTests(unittest.TestCase):
             )
             try:
                 self.assertIsNone(
-                    disabled_app.state.project_memory_service.role_for(
+                    disabled_app.state.workspace_access_service.role_for(
                         workspace_id="active",
                         actor_user_id="owner",
                     )
@@ -737,11 +904,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260904-cogent-r2',
+            '/static/styles.css?v=20260905-output-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260904-cogent-r2',
+            '/static/app.js?v=20260905-output-r1',
             response.text,
         )
         self.assertNotIn('id="composer-mode-input"', response.text)
@@ -753,7 +920,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('data-memory-tab="conversations"', response.text)
         self.assertIn('class="memory-layer-rail"', response.text)
         self.assertIn("项目记忆", response.text)
-        self.assertIn("个人记忆", response.text)
+        self.assertIn("用户记忆", response.text)
         self.assertIn("对话记录", response.text)
         self.assertNotIn('class="memory-tab-code"', response.text)
         self.assertIn('id="new-project-memory-btn"', response.text)
@@ -766,6 +933,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="conversation-memory-detail"', response.text)
         self.assertNotIn('id="user-memory-scenes"', response.text)
         self.assertNotIn('fetchJson("/users/me/memory-scenes")', script_response.text)
+        self.assertIn('fetchJson("/memory/files"', script_response.text)
+        self.assertIn('fetchJson(`/memory/index?', script_response.text)
+        self.assertIn('await refreshMemoryWorkbench();', script_response.text)
         self.assertIn('id="slash-command-options"', response.text)
         self.assertIn('id="jump-to-latest-btn"', response.text)
         self.assertIn('aria-autocomplete="list"', response.text)
@@ -1356,7 +1526,7 @@ Inspect the requested code before reporting findings.
             runtime._llm = ScriptedClient(*[
                 response('partial segment', stop_reason='max_tokens',
                     usage=LLMUsage(input_tokens=12, output_tokens=900, thoughts_tokens=1100))
-                for _ in range(4)])
+                for _ in range(5)])
             session = client.post('/api/v1/sessions', json={'user_id': 'tester'}).json()['id']
             client.put('/api/v1/workspaces/project', json={'root_path': temp_dir}).raise_for_status()
             started = client.post('/api/v1/agent/runs', json={
@@ -1364,9 +1534,9 @@ Inspect the requested code before reporting findings.
             body = wait_for_run(client, started.json()['run_id'])
             self.assertEqual(body['status'], 'partial')
             self.assertEqual(body['result']['terminal_reason'], 'output_limit_exhausted')
-            self.assertEqual(body['result']['metrics']['thoughts_tokens'], 4400)
+            self.assertEqual(body['result']['metrics']['thoughts_tokens'], 5500)
             events = client.get(f"/api/v1/agent/runs/{body['run_id']}/events").json()['events']
-            self.assertEqual(sum(item['type'] == 'retry' for item in events), 3)
+            self.assertEqual(sum(item['type'] == 'retry' for item in events), 4)
             self.assertFalse(any(item['type'] == 'turn_completed' for item in events))
 
     def test_chat_stream_rejects_missing_session_and_oversized_message(self) -> None:
@@ -1837,6 +2007,38 @@ Inspect the requested code before reporting findings.
             response = client.get("/api/v1/agent/runs/run_missing")
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.json()["detail"], "agent run not found")
+
+    def test_session_delete_rejects_active_run_and_allows_terminal_history(self) -> None:
+        with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
+            session_id = client.post(
+                "/api/v1/sessions", json={"user_id": "demo_user"}
+            ).json()["id"]
+            record = AgentRunRecord(
+                run_id="run_delete_guard",
+                thread_id="run_delete_guard",
+                conversation_id=session_id,
+                workspace_id="project",
+                workspace_root=temp_dir,
+                status="running",
+                checkpoint_id=None,
+                latest_node="model_action",
+                next_nodes=["model_action"],
+                trace=[],
+                runtime_engine=RUNTIME_ENGINE,
+                runtime_state={"owner": "demo_user"},
+            )
+            runtime = client.app.state.query_service._runtime
+            runtime.restore_record(record)
+
+            active = client.delete(f"/api/v1/sessions/{session_id}")
+            runtime.restore_record(replace(record, status="failed", next_nodes=[]))
+            terminal = client.delete(f"/api/v1/sessions/{session_id}")
+            missing = client.get(f"/api/v1/sessions/{session_id}")
+
+        self.assertEqual(active.status_code, 409)
+        self.assertIn("active or suspended", active.json()["detail"])
+        self.assertEqual(terminal.status_code, 204)
+        self.assertEqual(missing.status_code, 404)
 
     def test_persistent_session_preferences_listing_and_archive_lifecycle(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -12,9 +12,9 @@ from ai_agent_platform.api.routes import (
     create_mcp_registry_router,
     create_skill_registry_router,
     create_memory_router,
+    create_retired_memory_router,
     create_sessions_router,
     create_workspaces_router,
-    create_project_memories_router,
 )
 from ai_agent_platform.core import MetricsRegistry, Settings, TaskQueue
 from ai_agent_platform.integrations import (
@@ -31,8 +31,6 @@ from ai_agent_platform.services import (
     SessionService,
     WorkspaceService,
 )
-from ai_agent_platform.project_memory import ProjectMemoryService
-from ai_agent_platform.memory import UserMemoryService
 from ai_agent_platform.skills import SkillRegistryService
 
 
@@ -43,8 +41,8 @@ def create_api_router(
     query_service: QueryService,
     change_set_service: ChangeSetService,
     workspace_service: WorkspaceService,
-    project_memory_service: ProjectMemoryService,
-    user_memory_service: UserMemoryService,
+    workspace_access_service,
+    file_memory_service,
     settings: Settings,
     metrics: MetricsRegistry,
     task_queue: TaskQueue,
@@ -69,7 +67,7 @@ def create_api_router(
             session_service,
             settings,
             workspace_service=workspace_service,
-            memory_service=project_memory_service,
+            memory_service=workspace_access_service,
             model_registry=model_registry,
             llm_client=llm_client,
             query_service=query_service,
@@ -86,18 +84,17 @@ def create_api_router(
     router.include_router(
         create_workspaces_router(
             workspace_service,
-            memory_service=project_memory_service,
+            memory_service=workspace_access_service,
             session_service=session_service,
             settings=settings,
             directory_picker=directory_picker,
         )
     )
     router.include_router(
-        create_project_memories_router(project_memory_service, settings)
+        create_memory_router(session_service, file_memory_service,
+            workspace_service, workspace_access_service, query_service, settings)
     )
-    router.include_router(
-        create_memory_router(session_service, user_memory_service, settings)
-    )
+    router.include_router(create_retired_memory_router())
     router.include_router(
         create_knowledge_bases_router(
             knowledge_base_service,

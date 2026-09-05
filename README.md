@@ -22,7 +22,7 @@ MCP 管理和独立 RAG 保留。内部 Python 包仍是 `ai_agent_platform`。
 - [模型白名单与 Token 预算](#模型白名单与-token-预算)
 - [代码 Agent 流程](#代码-agent-流程)
 - [工作区 API](#工作区-api)
-- [项目记忆](#项目记忆)
+- [记忆与分层指令](#记忆与分层指令)
 - [独立知识库](#独立知识库)
 - [存储与数据库迁移](#存储与数据库迁移)
 - [保留的扩展实现](#保留的扩展实现)
@@ -50,7 +50,7 @@ PostgreSQL 和 Qdrant 只在私有 Compose 网络可达。`WORKSPACE_HOST_PATH` 
 不会尝试从容器打开 macOS Finder。
 
 默认 `RUNTIME_PROFILE=custom` 组合现有 PostgreSQL Repository、Qdrant Vector Store 和
-`in_process` TaskQueue。独立项目记忆和用户记忆开启；Provider API Key 只从模型管理页
+`in_process` TaskQueue。Cogent 文件记忆和数据库会话恢复开启；Provider API Key 只从模型管理页
 录入，Compose 将其加密保存到私有 `app_state` 持久卷，PostgreSQL 只保存不透明引用。
 持久化模型目录首次启动为空：请在模型管理页保存 Provider 连接，注册并启用支持工具调用的模型。Fake 仅用于内存测试。
 
@@ -87,27 +87,30 @@ docker compose -f docker-compose.yml logs --tail=80 app
 
 ## CLI、REPL、SDK 与进程入口
 
-在源码目录安装开发入口：
+先启动与网页共用的唯一 Cogent 服务，再同步本地终端依赖：
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m pip install --no-deps -e .
-source .venv/bin/activate
+docker compose up -d
+uv sync
 ```
 
-入口为 `cogent` 和 `cogent-api`，也支持 `python -m ai_agent_platform.cli`。
-本机入口读取本机配置，不会自动连接 Compose 内部数据库；官方持久化使用推荐前面的 Docker 网页路径。
-容器内可直接运行 `docker compose -f docker-compose.yml exec app cogent --workspace /workspaces/项目目录`。
+入口为 `cogent` 和 `cogent-api`。公开 CLI 是网页后端的 HTTP/SSE 客户端，不在终端进程
+中装配第二套 Runtime；模型注册、Provider 密钥状态、Workspace、Session、Run、MCP、Skill、
+权限和记忆均来自网页使用的同一个服务端。密钥明文始终留在服务端 Secret Store，终端只显示
+是否已经配置及健康状态。
 
 ```bash
-cogent --workspace /absolute/path/to/project
-cogent --workspace /absolute/path/to/project --print "解释入口结构"
-cogent-api --host 127.0.0.1 --port 8000
+uv run cogent
+uv run cogent --workspace-id project
+uv run cogent --workspace-id project --print "解释入口结构"
 ```
 
-默认启动 Textual TUI；非交互输出、兼容 REPL 和 AgentSDK.query() 同样经过 QueryService。
-Web 通过 POST /api/v1/agent/runs 与 Run SSE 订阅相同事件，/api/v1/chat/stream 返回 404。
+默认连接 `http://127.0.0.1:8000/api/v1` 并启动 Textual TUI；端口变化时设置
+`COGENT_API_URL` 或传 `--api-url`。若网页端只有一个 Workspace、已有默认 Workspace，或当前
+目录名能唯一匹配服务端 Workspace，CLI 会自动选择；否则使用 `--workspace-id` 明确选择。
+`/models` 查看服务端模型与凭据配置状态。非交互输出与兼容 REPL 也走同一 HTTP/SSE 边界；
+嵌入式 `AgentSDK.query()` 仍供 Python 调用。Web 与 CLI 都通过 POST /api/v1/agent/runs 和
+Run SSE 使用同一 QueryService，`/api/v1/chat/stream` 返回 404。
 审批、追问、取消、暂停和压缩共享运行时能力，不维护另一套 CLI Agent 循环。
 
 共享命令为 /help、/status、/clear、/compact、/mcp、/memory、/session、
@@ -122,7 +125,7 @@ Web 通过 POST /api/v1/agent/runs 与 Run SSE 订阅相同事件，/api/v1/chat
 | 边界 | 当前 MVP |
 | --- | --- |
 | 结构化事实、Checkpoint、模型注册表 | PostgreSQL |
-| 文档与项目记忆向量 | Qdrant |
+| 文档 RAG 向量 | Qdrant |
 | Agent、压缩和记忆任务 | API 进程内有界队列 |
 | 身份 | 固定 `single_user` owner |
 | Workspace | `/workspaces` bind mount + `direct` 源码修改 |
@@ -211,7 +214,7 @@ Skill 内容是声明式上下文，不能授予工具、提升权限或越过 W
 
 普通对话、代码任务、Skill、MCP 和 slash command 共用 Cogent Run，不再提供快速对话模式。
 会话页面显示文本、活动、工具结果、审批、追问和可折叠思考区；模型选择界面保留原有行为。
-知识库/RAG、项目记忆和个人记忆保留独立页面与 API，不注入 Agent。
+知识库/RAG 保持独立；分层指令、用户级与项目级文件记忆由 Cogent 统一加载和治理。
 
 ### 持久化会话与重启恢复
 
@@ -234,8 +237,9 @@ API 返回。升级后若连接仍是遗留 `env:*` 引用，页面会要求重�
 
 保存 Provider 后，模型管理页会调用该 Provider 的官方模型列表接口，过滤出当前
 API Key 可用的文本生成模型供用户选择，并标记已经注册的条目。注册只需要选择
-Provider/模型、模型最大输出 token 以及是否启用、是否参与自动路由；显示名称、上下文、
-能力和冷启动路由画像由 Provider 元数据与后端先验合成。发现接口暂时没有目标模型时仍可手动
+Provider/模型以及是否启用、是否参与自动路由；显示名称、上下文、能力和冷启动路由画像
+由 Provider 元数据与后端先验合成。模型输出不再接受手写的逐模型上限：所有模型普通请求
+统一使用 8192 tokens，thinking 模式与输出截断恢复统一使用 64000。发现接口暂时没有目标模型时仍可手动
 填写模型 ID，但不再要求用户填写质量、价格或延迟。豆包是显式白名单例外：发现与手动注册
 都只接受 `doubao-seed-evolving`、`doubao-seed-2.1-turbo` 和
 `doubao-seed-2.0-lite`，避免把方舟目录中的历史、内部或其他模态条目暴露为 Chat 模型。
@@ -368,9 +372,12 @@ PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
 `LLM_MODEL_CATALOG_JSON` 形成启动候选，也不会维护第二份静态准入策略；前端的
 注册、启用和停用状态立即影响运行时目录，无需重启。
 
-模型注册记录分别保存上下文窗口和最大输出 token。Cogent 普通模型调用使用
-`LLM_MAX_OUTPUT_TOKENS`，截断恢复请求注册能力上限但最多 64K；上下文空间和 Usage Ledger
-仍可进一步下调。旧规划/变更/最终回答阶段预算不再决定 Cogent 的模型循环。
+模型注册记录继续保留旧 `max_output_tokens` 列和响应字段以兼容现有数据库与客户端，但后端
+统一归一为 64000，不再接受 API/UI 手工填写，也不参与逐模型请求裁剪。Cogent 普通模型调用
+默认使用 8192，显式 thinking 模式默认使用 64000；工具轮以 `length` / `max_tokens` 截断时，
+持久化恢复边界并将后续请求升至 64000；首次升级后最多再继续恢复三次。上下文空间和 Usage Ledger 仍可进一步下调；恢复耗尽返回
+`partial/output_limit_exhausted`，不会把可恢复的截断直接标成 failed。旧规划/变更/最终回答
+阶段预算不再决定 Cogent 的模型循环。
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
@@ -416,8 +423,8 @@ MiniMax、豆包）在预检阶段采用保守估算，最终仍以 Provider 返
    文件查看和目录检索使用 ReadFile、Glob、Grep，审批不能把白名单外命令变为可执行命令。
 6. 没有工具调用时结束；默认无语义迭代总配额，取消、暂停、超时、预算和权限仍生效。
 
-输出截断最多恢复三次，耗尽为 `partial/output_limit_exhausted`；上下文溢出在可压缩时恢复，
-否则 `partial/context_overflow`。大结果保存在 `.cogent/sessions/<run>/tool-results`，只允许
+输出截断首次升至 64K，之后最多继续恢复三次，耗尽为 `partial/output_limit_exhausted`；上下文溢出在可压缩时恢复，
+否则 `partial/context_overflow`。大结果保存在 `.cogent/sessions/<session-id>/runs/<run-id>/tool-results`，只允许
 读取登记且哈希匹配的结果。压缩保留近期工具对，失败保持原历史。
 
 权限模式：default、acceptEdits、plan、bypassPermissions；规则来自用户、项目和项目本地文件。
@@ -429,10 +436,11 @@ MCP 自动选择 eager、小目录全量加载；大目录在支持的官方 Ant
 降级为 dispatch。原生搜索传递 deferred schema，普通工具执行仍受同一权限控制。
 加载集合存入 Run 状态并在恢复/后续会话重建。
 
-Cogent 项目记忆根为 `.cogent/memory`，用户记忆按身份隔离于 `~/.cogent/memory/.users/<hash>`。
-MEMORY.md 限制 200 行/25KB。自动整理有 24 小时、至少 5 会话、扫描节流及锁门控；内部维护 Run
-只处理这两处记忆，不获得普通 Workspace、Bash 或 MCP 权限。验证后的模型响应持久化，恢复不重调模型；
-写入前核对整个计划和旧哈希，整理会去除重复/失效索引项，未引用的主题文件不会擅自删除。
+Cogent 项目记忆根为 `.cogent/memory`，用户记忆按身份隔离于
+`COGENT_USER_MEMORY_ROOT/.users/<hash>`。`MEMORY.md` 限制 200 行/25KB。自动整理有
+24 小时、至少 5 会话、扫描节流及锁门控；内部维护 Run 只处理这两处记忆，不获得普通
+Workspace、Bash 或 MCP 权限。验证后的模型响应和写入计划均持久化；恢复时核对旧哈希，
+可以合并重复主题、纠正矛盾并删除已被替代的内容，同时避免覆盖人工修改。
 
 /plan 仅允许读取与写当前计划；ExitPlanMode 要审批。/review 只读审查 Git diff。
 /rewind 先列出文件快照和已完成 Run：`/rewind <run-id> conversation` 可纯对话回退，
@@ -484,7 +492,7 @@ curl http://localhost:8000/api/v1/sessions/{session_id}/token-usage
 改写旧根路径。
 
 工作区响应中的 `available` 表示已保存路径当前是否仍可读取。`DELETE` 是软移除：它只
-让工作区退出可选列表，不删除本地文件，也不级联删除历史会话、用量或项目记忆；再次
+让工作区退出可选列表，不删除本地文件，也不级联删除历史会话、用量或文件记忆；再次
 以相同 ID 注册即可恢复。相同路径恢复保持原 revision，只有根路径真正变化时才递增
 `workspaces.revision`，旧 revision 的记忆不再参与检索。管理员可以明确确认一条旧
 记录，把它复制到当前 revision；历史记录本身不会变化。每一条 `agent_runs` 都保留
@@ -619,152 +627,87 @@ Docker Socket，也不声称支持不可信仓库。
 挂载为 `/workspace`，并禁用网络、使用只读容器根目录和调用方的非 root UID/GID，移除
 Linux capability，启用 `no-new-privileges`，限制 PID、CPU、内存及 tmpfs。
 
-## 项目记忆
+## 记忆与分层指令
 
-本节是保留的独立平台记忆系统，不是 Cogent 文件记忆。治理 API、数据、索引和评测保留；
-普通 Cogent 对话既不注入这些事实/画像，也不再触发旧 Chat/Agent 自动抽取链。
+Cogent 使用同一套分层指令、文件记忆、数据库会话和后台治理机制。旧
+`ProjectMemory`、`UserMemory`、候选审批、向量记忆、项目场景和用户画像运行链路已经
+停止；历史数据库表仍保留，但新代码不读取、写入或导入其中的数据。旧管理 API 统一返回
+`410 Gone`，并提示改用文件记忆 API。独立 RAG 仍保持自己的文档、索引和查询边界。
 
-当前记忆架构采用 **L0 → L1 → L2 → L3**：L0 保存原始消息并支持按需搜索；L1 是当前
-Workspace/revision 的原子项目事实；L2 按用户和 Workspace 将 active L1 确定性聚合为
-可追溯的项目场景；L3 再把 L2 场景与用户级 active 事实合成为有界画像。任务进度和
-执行状态仍以实时源码、`.workflow/tasks`、Agent Run、checkpoint 和 ChangeSet 为准，L2
-只总结已生效 L1，不充当第二套任务状态。架构总览见
-[`local-layered-memory-overview.drawio`](docs/architecture/local-layered-memory-overview.drawio)
-和对应的 [`PNG`](docs/architecture/local-layered-memory-overview.png)；同目录还提供上下文组装、
-写入治理和持久化三个可编辑细节图。
+### 分层指令
 
-项目记忆由同一个 `workspace_id` 的授权成员共享，支持以下类型：
+每次新 Run 从低优先级到高优先级加载以下文件，并把来源、展开依赖、内容哈希、优先级和
+截断状态冻结到 Run 指令快照：
 
-- `architecture_fact`；
-- `constraint`；
-- `decision`；
-- `convention`；
-- `task_outcome`；
-- `incident_lesson`。
+1. `~/.cogent/COGENT.md`、`~/.cogent/AGENTS.md`；
+2. 从 Git 根目录到当前工作目录，每层的 `COGENT.md`、`AGENTS.md`、`.cogent/COGENT.md`；
+3. 当前工作目录的 `COGENT.local.md`。
 
-完整源码文件、临时讨论、助手推测、凭据、私钥、Token、连接字符串和完整环境变量值
-都会被拒绝。
+没有 Git 根目录时以已登记 Workspace 为根，遍历和引用都不能越过授权目录。`focus_files`
+仍会发现各模块目录中的规则，并标注其适用目录，避免兄弟模块互相覆盖。旧
+`CLAUDE.md`、`AGENTS.override.md` 不再自动发现；分别改名为 `COGENT.md` 或
+`COGENT.local.md`。
 
-支持四种模式：
+独立一行的 `@./path`、`@../path`、`@~/path` 和 `@/absolute/path` 会递归展开。展开跳过
+代码围栏，最多五层，检测循环，并在缺失、越权、软链接或非普通文件时保留清晰提示。
+绝对路径和 `~/` 只改变寻址方式，不增加读取权限。指令超预算时优先保留高优先级内容并在
+快照中标记省略。新 Run 重新加载文件；暂停 Run 恢复使用原冻结快照。
 
-- `off`：不抽取也不检索；
-- `shadow`：抽取待审候选，但不注入上下文；
-- `review`：只检索活跃记录，通常需要人工确认；
-- `auto`：通过敏感信息检查和候选质量门槛的抽取结果直接转为活跃状态。
+### 用户级与项目级文件记忆
 
-用户创建的记录和明确的“记住”请求以 `1.0` 置信度直接生效。自动抽取结果低于
-`PROJECT_MEMORY_CANDIDATE_THRESHOLD` 会被丢弃；`review` 下保留为 candidate，`auto`
-下直接 active。切换到 `auto` 时，当前 revision 已有 candidate 也会被激活。敏感信息、
-凭据式内容和 Prompt Injection 仍会在任何模式下被拒绝。
+项目主题保存在 `<workspace>/.cogent/memory/`；用户主题保存在
+`COGENT_USER_MEMORY_ROOT/.users/<identity-hash>/`，默认根为 `~/.cogent/memory`。
+两层都由 `MEMORY.md` 索引和 Markdown 主题文件组成：
 
-规范化内容相同会追加证据；权威冲突会替代旧记录，不确定冲突继续作为候选。带源码
-依据的可变事实会在注入前检查哈希，源码变化后转为 `stale`。长期未确认的记录只会
-降低排序，不会仅因时间流逝被删除。
+- 用户级类型为 `user`、`feedback`，可在同一身份的不同项目间复用；
+- 项目级类型为 `project`、`reference`，仅对当前 Workspace 生效；
+- `MEMORY.md` 最多 200 行和 25KB；主题 frontmatter 使用顶层 `type`，读取时兼容旧的
+  `metadata.type`；
+- 创建、编辑、删除和自动维护共用路径、类型、权限、软链接和内容哈希校验，冲突返回
+  `409`，客户端不能提交任意文件路径；
+- 历史记忆只是可纠正的上下文，不能授予权限，也不能覆盖当前用户指令、项目指令或实时源码。
 
-提炼时，附加来源按“来源类型 + 来源任务 ID + 文件路径”去重，保留首条完整证据，
-再取最多五条；同一文件的不同命中片段不会拼接行号或哈希。PostgreSQL 写入同时跳过
-重复证据 ID 和已有来源唯一键冲突，其他错误仍使事务回滚。修复不会自动重放历史
-失败任务；`completed` 且保存 0 条只表示本次没有落库记忆，不代表新增了记忆。
+每个新 Run 先加载两层索引，再让当前模型在八秒内选择最多五个相关主题；已展示主题的
+版本会记录在 Run 状态中，避免同一会话反复注入。主 Agent 也可使用受限的
+`memory.list_files`、`memory.read_index`、`memory.write_file` 和
+`memory.delete_file` 工具；写入和删除继续执行 Workspace 角色与审批规则。
 
-检索使用加权 RRF 合并稠密与词法召回，然后从配置的 L1 事实源重新加载每条结果，
-验证工作区、revision、状态、过期时间和版本。PostgreSQL/Qdrant 仍可用于分布式部署；
-单进程本地 profile 则使用 SQLite FTS5 BM25、标准库 `sqlite3` 和带模型/维度/记忆版本
-的 float32 BLOB，在当前小型 workspace/revision 数据集内计算余弦相似度。FTS5 或向量
-失败分别降级为受限 `LIKE` 或纯词法召回。每个候选都有可解释的最终分数：
+回答完成后，后台任务从数据库读取尚未提炼的消息窗口，用持久化消息游标和主题 manifest
+去重，再按类型写入用户或项目主题。只有成功写入，或模型明确返回“无内容可保存”，才推进
+游标；模型失败和哈希冲突会保留原位置重试。后台任务继承父 Run 的模型、身份和 Usage
+Ledger，不阻塞回答，也不把对话正文复制为 JSONL。
 
-```text
-0.65 × 归一化相关性
-+ 0.20 × 指数时间新鲜度
-+ 0.15 × 归一化重要性
-```
+治理任务距上次成功至少 24 小时、至少五个不同会话有新增活动，并以十分钟扫描节流自动
+触发。手动整理可跳过时间门。维护使用最多十五轮的独立内部 Run，关闭递归提炼和治理；它
+只能读会话证据与源码，只能写所属用户和项目记忆目录。更新、删除和索引变更先持久化写入
+计划，再在互斥锁内核对旧哈希，因此进程重启可继续，人工修改不会被覆盖。失败不会更新
+“上次成功整理”时间。
 
-时间新鲜度使用 `last_confirmed_at`（缺失时回退到 `updated_at`），默认半衰期为 180
-天。独立检索服务先全局排序，再应用六条结果和 3,000 字符预算。
+### 会话、附件与恢复
 
-管理接口：
+消息、摘要、Session、Run、工具账本和维护状态继续写入配置的 SQLite 或 PostgreSQL，
+没有 JSONL 会话副本。新增工具附件位于
+`.cogent/sessions/<session-id>/runs/<run-id>/tool-results/`；旧 Run 已保存的附件引用仍可读。
 
-```text
-GET/PATCH /api/v1/workspaces/{workspace_id}/memory-settings
-GET/POST  /api/v1/workspaces/{workspace_id}/memories
-GET/PATCH /api/v1/workspaces/{workspace_id}/memories/{memory_id}
-POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/confirm
-POST      /api/v1/workspaces/{workspace_id}/memories/{memory_id}/reject
-DELETE    /api/v1/workspaces/{workspace_id}/memories/{memory_id}
-GET       /api/v1/workspaces/{workspace_id}/memory-jobs
-POST      /api/v1/workspaces/{workspace_id}/memories/reindex
-```
+会话续接从最后一次有效压缩边界恢复“摘要 + 完整保留尾部 + 后续消息”，保留顺序、工具
+调用与结果、Provider 必需字段、审批、待回答问题和附件引用。失败、取消、`partial` 等所有
+安全终态都可以继承历史；结果不确定的写操作不会自动重放。选择会话不会批准或恢复挂起
+Run，`/resume` 仍只表示恢复 Run。旧 `langgraph-v1` 会话保持只读，也没有 30 天自动删除
+策略。
 
-PATCH、confirm 和 reject 必须携带当前 `version`。Viewer 可以检索和查看；Editor 可以
-创建、编辑、确认和拒绝；Admin 可以修改模式、遗忘记录和修复索引。遗忘操作会硬删除
-记忆、证据和向量数据，但不会删除来源会话。
-
-Cogent 不调用本节的检索或抽取链；旧 /chat/stream 已删除。
-
-### L0 对话搜索与 L2/L3 画像流水线
-
-L0 不复制第二份聊天日志。SQLite 对原始 `messages` 使用写入/查询对齐的 CJK n-gram
-FTS5 索引，升级到 schema v2 时会重建旧索引；PostgreSQL 使用受转义的 `ILIKE` 子串
-检索。空关键词返回最近消息，因此前端进入 L0 即可看到内容；非空查询、最近消息列表
-都始终按当前用户隔离，并可进一步限定 workspace/session。历史命中不会自动跨会话
-注入。
-
-L3 使用独立的 `UserMemory` 领域，固定为 `profile_fact`、
-`communication_preference`、`tooling_preference`、`workflow_preference`、
-`standing_goal` 和 `personal_constraint`。手工记录和明确的全局“记住/所有项目/以后”
-请求直接 active；普通偏好在 `auto` 下也直接 active，在 `review` 下保留为 candidate。
-每次 L1 新增、编辑、状态变化或删除都会异步重建对应的 `UserMemoryScene`（L2），再从
-L2 场景和 active 用户事实确定性重建最多 1,500 字符的 `UserProfileSnapshot`（L3），
-不调用 LLM。这些画像仅保留为平台独立数据；Cogent 不读取或注入它们。
-
-L3 管理接口：
+管理入口：
 
 ```text
-GET/PATCH /api/v1/users/me/memory-settings
-GET       /api/v1/users/me/memory-scenes
-GET/POST  /api/v1/users/me/memories
-GET/PATCH/DELETE /api/v1/users/me/memories/{memory_id}
-POST      /api/v1/users/me/memories/{memory_id}/confirm
-POST      /api/v1/users/me/memories/{memory_id}/reject
-GET       /api/v1/users/me/profile
-POST      /api/v1/users/me/profile/rebuild
-GET       /api/v1/memory/conversations/search
+GET/POST/PUT/DELETE /api/v1/memory/files
+GET                 /api/v1/memory/index
+GET/POST            /api/v1/memory/maintenance
+GET                 /api/v1/memory/conversations/search
+DELETE              /api/v1/sessions/{session_id}
 ```
 
-前端“记忆工作台”按用户可直接查看和治理的对象划分为“项目记忆 / 个人记忆 / 对话记录”：
-项目记忆和个人事实均使用左侧资产列表、右侧详情治理的双栏布局，显示 active/candidate
-统计、状态/类型筛选、证据、版本和可用操作；个人摘要单独预览独立保存的确定性
-快照（Cogent 不读取）；对话记录展示用户隔离的最近消息、搜索命中与原文详情。L2 场景仍在后台参与画像
-生成和来源追溯，但不作为独立前端资产展示。L1 固定自动提炼，前端不再暴露工作区模式、
-手动重建索引或刷新控件；进入页面即自动加载。
-
-当前 Docker MVP 默认启用完整流水线：PostgreSQL 保存 L0 会话和 L1 事实、证据、任务与
-Outbox，Qdrant 保存可重建 L1 向量，SQLite v3 保存 L2 场景、L3 用户画像和 Agent pending compact：
-
-```dotenv
-PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=auto
-PROJECT_MEMORY_STORE=postgres
-PROJECT_MEMORY_VECTOR_STORE=qdrant
-PROJECT_MEMORY_CANDIDATE_THRESHOLD=0.60
-PROJECT_MEMORY_AUTO_THRESHOLD=0.85
-PROJECT_MEMORY_RECALL_LIMIT=20
-PROJECT_MEMORY_RESULT_LIMIT=6
-PROJECT_MEMORY_MAX_CONTEXT_CHARS=3000
-PROJECT_MEMORY_QDRANT_COLLECTION=project_memories
-PROJECT_MEMORY_RELEVANCE_WEIGHT=0.65
-PROJECT_MEMORY_RECENCY_WEIGHT=0.20
-PROJECT_MEMORY_IMPORTANCE_WEIGHT=0.15
-PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS=180
-USER_MEMORY_ENABLED=true
-USER_MEMORY_MODE=auto
-USER_PROFILE_MAX_CONTEXT_CHARS=1500
-```
-
-默认 [`.env.example`](.env.example) 使用官方单实例 Compose 组合。
-[`.env.local-memory.example`](.env.local-memory.example) 提供全部结构化数据均落 SQLite 的
-单进程变体；Compose 则只把用户级 L2/L3 放在挂载到 `app_state` 的 SQLite 中。
-
-Cogent 会话压缩与本节平台记忆无关；其近期保留、成对工具消息及摘要边界由新内核管理。
+网页记忆工作台提供用户记忆、项目记忆、对话记录、索引查看、主题 CRUD 和手动整理。
+CLI/TUI 使用 `/memory list|edit|clear|consolidate [user|project]` 与
+`/session list|resume <id>|new|delete <id>`；删除正在执行或挂起 Run 的会话会被拒绝。
 
 ## 独立知识库
 
@@ -916,8 +859,8 @@ RAG_RERANK_DEFAULT_ENABLED=false
   审阅并显式授权应用。
 - `20260813_0021`：为消息添加 `source_run_id` 与每 Run/role 唯一约束，使 Query start 的
   用户消息/Run 事务和最终助手消息的恢复幂等都具有数据库约束；这是既有迁移；本次仅在隔离验收数据库执行迁移链，用户数据库需按升级步骤处理。
-- `20260820_0022`：为每个已注册模型添加 `max_output_tokens` 能力上限；现有 DeepSeek
-  记录回填为 8192、fake 为 4096，其余为 16384。该迁移随代码交付但未在当前数据库执行。
+- `20260820_0022`：历史迁移曾为每个已注册模型添加 `max_output_tokens` 列并按 Provider
+  回填。该列现仅作为数据库/API 兼容字段，运行时统一归一为 64000，旧手写值不再参与请求。
 - `20260825_0025`：新增 `model_probe_stats`，将固定短提示的手动/周期探测与真实业务请求
   延迟样本分表持久化；该迁移随代码交付，未在当前数据库执行。
 - `20260831_0026`：为 `agent_runs` 添加 `pending_compaction` JSONB，持久化当前 Run 唯一的
@@ -936,12 +879,8 @@ CHANGE_SET_STORE=postgres
 DOCUMENT_STORE=postgres
 WORKSPACE_STORE=postgres
 RAG_VECTOR_STORE=qdrant
-PROJECT_MEMORY_ENABLED=true
-PROJECT_MEMORY_MODE=auto
-USER_MEMORY_ENABLED=true
-USER_MEMORY_MODE=auto
-PROJECT_MEMORY_STORE=postgres
-PROJECT_MEMORY_VECTOR_STORE=qdrant
+WORKSPACE_ACCESS_STORE=postgres
+COGENT_USER_MEMORY_ROOT=/home/app/.cogent/memory
 WORKSPACE_ALLOWED_ROOTS=/workspaces
 ```
 
@@ -949,9 +888,9 @@ WORKSPACE_ALLOWED_ROOTS=/workspaces
 
 | 组件 | 职责 |
 | --- | --- |
-| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent 运行/事件/工具账本/ChangeSet、不可变模型与 Run 上下文快照、工作区/知识库目录、项目记忆事实/证据/任务/Outbox/审计、文档/分块元数据、词法搜索和 Cogent runtime snapshot |
-| Qdrant | 相互独立的知识库和项目记忆向量集合；项目记忆载荷最小且可重建 |
-| SQLite | 保留的兼容/测试 Adapter；当前产品只可选用于尚未迁移的单实例用户记忆 |
+| PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent Run/Event/工具账本/ChangeSet、模型与 Run 上下文快照、工作区授权、文档元数据、词法搜索和 Cogent/维护 Run 状态 |
+| Qdrant | 独立知识库的可重建文档向量；Cogent 文件记忆不使用向量库 |
+| SQLite | 本地 profile 的会话、Run、工作区授权与维护状态；文件记忆正文仍是 Markdown |
 | Redis/Celery | 保留的多 Worker 扩展实现；当前 Compose 不启动 |
 | Chroma | 保留的可选嵌入式向量实现；当前 Compose 不选择 |
 
@@ -969,17 +908,18 @@ docker compose ps
 数据库凭据来自用户本机 `.env`，并只注入私有 Compose 网络。Adminer、Gateway、Redis 和
 Celery 不在当前服务集合中。
 
-进程内队列注册 Agent 启动/恢复、会话压缩、记忆抽取和项目记忆索引 Outbox 消费任务，
+进程内队列注册 Agent 启动/恢复、会话压缩、增量记忆提炼和文件记忆治理任务，
 并复用与 Celery Adapter 相同的任务语义。运行开始前仍冻结 Workspace、配置和工具上下文；
 应用重启会中断当时正在执行或排队的任务，这是当前单实例 MVP 的明确边界。持久化 Run、
-事件和 Outbox 仍保留恢复与幂等证据，但当前版本不承诺自动恢复所有被重启打断的运行。
+事件和维护写入计划仍保留恢复与幂等证据，但当前版本不承诺自动恢复所有被重启打断的运行。
 
 ### 运行时装配与生命周期
 
-FastAPI `create_app()` 与保留的 Celery Worker 进程适配器都通过
+FastAPI `create_app()`、保留的 Celery Worker 进程适配器和嵌入式 SDK 通过
 `build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
-Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、Cogent runtime 和业务 Service 因此使用同一依赖图；正式 CLI print、REPL
-和 SDK 也复用该容器与 Query Kernel。启动配置在进入工厂前只解析进程基线；Workspace
+Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、Cogent runtime 和业务 Service 因此使用同一依赖图。正式 Textual/print/REPL CLI 不再装配容器，而是经 HTTP/SSE
+连接 FastAPI 已持有的唯一 Runtime，因此与网页共享服务端配置、Secret Store 和持久 Run。
+启动配置在进入工厂前只解析进程基线；Workspace
 项目覆盖、配置指令和 Effective Tool Pool 在 Run 入队前按已鉴权主 Workspace root
 解析并冻结。共享 `ToolPoolBuilder` 注入 ExecutionContextFactory、QueryService 与拆分后的
 Agent Loop，但不拥有或关闭 Registry/MCP 资源。
@@ -1062,7 +1002,7 @@ Top-5 违规从 `1.000` 降到 `0.500`、冲突首选从 `0.333` 提到 `0.667`�
 succeeded / failed / suppressed / denied / pending approval 分层；只有能按 `call_id`
 关联到真实 `ToolResult` 的调用才算 executed。无效动作率按“实际执行的精确重复 +
 被抑制调用”除以“实际执行 + 被抑制”计算；没有分母时显示 `n/a`。
-`run_memory_evals.py` 是项目记忆质量门槛。
+`run_memory_evals.py` 保留为旧数据库记忆实现的历史评测入口，不属于当前 Cogent 文件记忆验收。
 30 条 RAG pilot 是虚构 AuroraDesk 知识库上的用户风格问题，不是真实生产查询或正式
 holdout；其分数只能作为当前检索设置的起始基线。离线 Agent 套件使用 fake provider，
 通过率不能当作最终答案质量证据。
@@ -1070,8 +1010,8 @@ holdout；其分数只能作为当前检索设置的起始基线。离线 Agent 
 同一套 L1 还能在应用内对着**已注册的真实模型**跑，入口是前端"评测"页：选一个
 已注册的 Provider + Model 点运行，页面展示调用生命周期、三项引用指标、Token/耗时、
 越界与相对基线的回归预警、历史和单例详情。评测使用显式隔离标志：不注入真实用户
-画像/会话历史，不读写用户或项目记忆，不暴露全局知识库，只允许 suite 声明的 fixture
-KB；case 结束删除临时 session，run 结束删除 workspace、临时成员和项目记忆状态。
+真实用户文件记忆/会话历史，不暴露全局知识库，只允许 suite 声明的 fixture
+KB；case 结束删除临时 session，run 结束删除 workspace、临时成员和隔离文件记忆。
 Provider 凭据仍由应用内模型注册表解析，Secret 不进入评测记录。
 
 真实模型运行按 Token 计费，一次只允许一个评测，本仓库不会自动发起。基线必须人工

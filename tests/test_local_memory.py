@@ -110,12 +110,8 @@ def _local_settings(root: Path) -> Settings:
         session_repository="sqlite",
         agent_run_store="sqlite",
         workspace_store="sqlite",
-        project_memory_store="sqlite",
-        project_memory_vector_store="sqlite",
-        project_memory_enabled=True,
-        project_memory_mode="review",
-        user_memory_enabled=True,
-        user_memory_mode="review",
+        workspace_access_store="sqlite",
+        cogent_user_memory_root=str(root / "user-memory"),
         workspace_allowed_roots=(str(root),),
         model_secret_backend="memory",
         rag_reranker_provider="none",
@@ -511,7 +507,7 @@ def test_sqlite_agent_runs_list_recent_in_reverse_creation_order() -> None:
         ]
 
 
-def test_local_memory_api_and_state_survive_restart() -> None:
+def test_file_memory_and_database_sessions_survive_restart() -> None:
     with TemporaryDirectory() as root_value:
         root = Path(root_value)
         workspace = root / "project"
@@ -529,39 +525,30 @@ def test_local_memory_api_and_state_survive_restart() -> None:
                 json={"root_path": str(workspace)},
             ).status_code == 200
             project_memory = client.post(
-                "/api/v1/workspaces/project/memories",
+                "/api/v1/memory/files",
                 json={
-                    "kind": "architecture_fact",
-                    "title": "本地存储",
-                    "content": "项目使用 SQLite 保存本地状态",
-                    "importance": 4,
+                    "workspace_id": "project",
+                    "scope": "project",
+                    "name": "local-storage",
+                    "type": "project",
+                    "description": "Local storage decision",
+                    "body": "项目使用 SQLite 保存会话状态",
                 },
             )
             assert project_memory.status_code == 201
-            scenes: list[dict] = []
-            profile_content = ''
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                scenes = client.get("/api/v1/users/me/memory-scenes").json()["scenes"]
-                profile_content = client.get("/api/v1/users/me/profile").json()["content"]
-                if scenes and 'SQLite' in scenes[0]['content'] and 'SQLite' in profile_content:
-                    break
-                time.sleep(0.01)
-            assert scenes and "SQLite" in scenes[0]["content"]
-            assert "SQLite" in profile_content
             created = client.post(
-                "/api/v1/users/me/memories",
+                "/api/v1/memory/files",
                 json={
-                    "kind": "communication_preference",
-                    "title": "回答语言",
-                    "content": "请使用中文回答",
-                    "importance": 5,
+                    "workspace_id": "project",
+                    "scope": "user",
+                    "name": "answer-language",
+                    "type": "feedback",
+                    "description": "Answer language",
+                    "body": "请使用中文回答",
                 },
             )
             assert created.status_code == 201
-            assert "中文" in client.get("/api/v1/users/me/profile").json()[
-                "content"
-            ]
+            assert client.get("/api/v1/users/me/profile").status_code == 410
             chat = client.post(
                 "/api/v1/agent/runs",
                 json={
@@ -583,16 +570,19 @@ def test_local_memory_api_and_state_survive_restart() -> None:
             assert restarted.get(
                 f"/api/v1/sessions/{session_id}"
             ).status_code == 200
-            assert "中文" in restarted.get("/api/v1/users/me/profile").json()[
-                "content"
-            ]
+            project_files = restarted.get("/api/v1/memory/files", params={
+                "workspace_id": "project", "scope": "project"}).json()["files"]
+            user_files = restarted.get("/api/v1/memory/files", params={
+                "workspace_id": "project", "scope": "user"}).json()["files"]
+            assert "SQLite" in project_files[0]["text"]
+            assert "中文" in user_files[0]["text"]
             assert restarted.get(
                 "/api/v1/memory/conversations/search",
                 params={"q": "durable-falcon"},
             ).json()["hits"]
 
 
-def test_agent_context_does_not_inject_legacy_user_memory() -> None:
+def test_legacy_user_profile_is_absent_from_agent_context() -> None:
     with TemporaryDirectory() as root_value:
         root = Path(root_value)
         workspace = root / "project"
@@ -603,15 +593,8 @@ def test_agent_context_does_not_inject_legacy_user_memory() -> None:
             runtime.workspace_service.register(
                 workspace_id="project", root_path=str(workspace)
             )
-            runtime.project_memory_service.ensure_workspace_admin(
+            runtime.workspace_access_service.ensure_workspace_admin(
                 workspace_id="project", actor_user_id="demo_user"
-            )
-            runtime.user_memory_service.create_manual(
-                user_id="demo_user",
-                kind="communication_preference",
-                title="answer language",
-                content="Answer in Chinese",
-                importance=5,
             )
             snapshot = runtime.execution_context_factory.preview(
                 conversation_id=session.id,

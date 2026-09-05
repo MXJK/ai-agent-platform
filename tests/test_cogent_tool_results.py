@@ -9,9 +9,9 @@ from test_cogent_runtime import ScriptedClient, execute, response, runtime_for, 
 
 def test_result_files_are_durable_scoped_and_hash_verified(tmp_path):
     refs = {}
-    store = ToolResultFiles(str(tmp_path), refs)
+    store = ToolResultFiles(str(tmp_path), refs, 'session_fixture')
     preview = store.persist('run_fixture', {'call_id': 'large', 'text': 'one\ntwo'})
-    assert preview['path'].startswith('.cogent/sessions/run_fixture/tool-results/')
+    assert preview['path'].startswith('.cogent/sessions/session_fixture/runs/run_fixture/tool-results/')
     restored = ToolResultFiles(str(tmp_path), json.loads(json.dumps(refs)))
     assert 'two' in restored.read(preview['path'])['content']
     with pytest.raises(PermissionError):

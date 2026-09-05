@@ -32,15 +32,27 @@ class ProviderConnectionResponse(BaseModel):
 class RegisteredModelCreateRequest(BaseModel):
     provider: ProviderName
     model: str = Field(min_length=1, max_length=128)
-    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     enabled: bool = True
     auto_eligible: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_manual_output_limit(cls, value):
+        if isinstance(value, dict) and "max_output_tokens" in value:
+            raise ValueError("max_output_tokens uses the shared model output policy")
+        return value
 
 
 class RegisteredModelUpdateRequest(BaseModel):
     enabled: bool
     auto_eligible: bool
-    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_manual_output_limit(cls, value):
+        if isinstance(value, dict) and "max_output_tokens" in value:
+            raise ValueError("max_output_tokens uses the shared model output policy")
+        return value
 
 
 class DiscoveredModelResponse(BaseModel):

@@ -317,10 +317,19 @@ class ShellAdapterE2ETests(unittest.TestCase):
 
     def test_console_parser_and_api_entrypoint_own_process_concerns(self) -> None:
         args = build_parser().parse_args(
-            ["--workspace", ".", "print", "hello", "world"]
+            [
+                "--api-url",
+                "http://127.0.0.1:9000",
+                "--workspace-id",
+                "project",
+                "print",
+                "hello",
+                "world",
+            ]
         )
         self.assertEqual(args.mode, "print")
         self.assertEqual(args.message, ["hello", "world"])
+        self.assertEqual(args.workspace_id, "project")
         pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"
         )
@@ -345,45 +354,38 @@ class ShellAdapterE2ETests(unittest.TestCase):
                 api_entrypoint.main(["--host", "0.0.0.0"])
         run.assert_not_called()
 
-    def test_cli_main_validates_environment_checkpoints_and_closes_runtime(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            resolved = ResolvedConfig.from_settings(
-                Settings(
-                    workspace_allowed_roots=(str(root),),
-                    model_secret_backend="memory",
-                    auth_mode="trusted_header",
-                    gateway_trust_secret="test-only-secret",
-                    live_workspace_writes_enabled=True,
-                )
+    def test_cli_main_uses_shared_http_backend_without_building_runtime(self) -> None:
+        application = SimpleNamespace()
+        with (
+            patch(
+                "ai_agent_platform.cli.RemoteCliApplication",
+                return_value=application,
+            ) as create_application,
+            patch(
+                "ai_agent_platform.cli._run_remote_mode",
+                new=AsyncMock(return_value=0),
+            ) as run_mode,
+            patch("ai_agent_platform.cli.build_runtime") as build,
+        ):
+            exit_code = cli_main(
+                [
+                    "--api-url",
+                    "http://127.0.0.1:9000",
+                    "--workspace-id",
+                    "project",
+                    "print",
+                    "hello",
+                ]
             )
-            runtime = RuntimeContainer(settings=resolved.settings, role="cli")
-            stderr = io.StringIO()
-            with (
-                patch("ai_agent_platform.cli.ConfigResolver") as resolver,
-                patch("ai_agent_platform.cli.build_runtime", return_value=runtime) as build,
-                patch(
-                    "ai_agent_platform.cli._run_mode",
-                    new=AsyncMock(return_value=0),
-                ) as run_mode,
-                patch("sys.stderr", stderr),
-            ):
-                resolver.from_default_locations.return_value.resolve_process.return_value = (
-                    resolved
-                )
-                exit_code = cli_main(
-                    ["--workspace", str(root), "print", "hello"]
-                )
 
         self.assertEqual(exit_code, 0)
-        build.assert_called_once_with(resolved, role="cli")
-        self.assertTrue(runtime.closed)
-        self.assertEqual(
-            [item.name for item in runtime.startup_timeline],
-            ["cli_ready"],
-        )
+        build.assert_not_called()
+        create_application.assert_called_once()
+        kwargs = create_application.call_args.kwargs
+        self.assertEqual(kwargs["api_url"], "http://127.0.0.1:9000")
+        self.assertEqual(kwargs["workspace_id"], "project")
+        self.assertIs(run_mode.await_args.args[1], application)
         self.assertTrue(run_mode.await_args.kwargs["install_sigint"])
-        self.assertIn("live workspace writes are enabled", stderr.getvalue())
 
     def test_cli_safe_environment_rejects_paths_outside_process_allowlist(self) -> None:
         with TemporaryDirectory() as allowed_dir, TemporaryDirectory() as other_dir:
@@ -597,7 +599,7 @@ def _run_sdk(root: Path, message: str) -> tuple[str, list[dict[str, object]]]:
             workspace_id="workspace",
             root_path=str(root),
         )
-        runtime.project_memory_service.ensure_workspace_admin(  # type: ignore[union-attr]
+        runtime.workspace_access_service.ensure_workspace_admin(  # type: ignore[union-attr]
             workspace_id="workspace",
             actor_user_id="user",
         )

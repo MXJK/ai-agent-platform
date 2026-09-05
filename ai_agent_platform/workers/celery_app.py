@@ -129,33 +129,31 @@ def execute_agent_checkpoint_restore(task, **payload: Any) -> None:
     )
 
 
-@celery_app.task(bind=True, name="ai_agent_platform.memory_extraction")
-def execute_memory_extraction(task, **payload: Any) -> None:
-    source_id = str(payload["source_id"])
+@celery_app.task(bind=True, name="ai_agent_platform.cogent_memory_extract")
+def execute_cogent_memory_extract(task, **payload: Any) -> None:
+    parent_run_id = str(payload["parent_run_id"])
     execute_reliable_task(
         task=task,
-        task_name="memory_extraction",
-        task_reference=source_id,
+        task_name="cogent_memory_extract",
+        task_reference=parent_run_id,
         settings=settings,
         handler=lambda: (
-            get_worker_services().project_memory_service.extract_and_store(**payload)
+            get_worker_services().file_memory_service.execute_extract_task(**payload)
         ),
         failure_handler=lambda error, attempt, max_attempts: None,
     )
 
 
-@celery_app.task(bind=True, name="ai_agent_platform.memory_index_outbox")
-def execute_memory_index_outbox(task, **payload: Any) -> None:
-    trigger_id = str(payload["trigger_id"])
+@celery_app.task(bind=True, name="ai_agent_platform.cogent_memory_consolidate")
+def execute_cogent_memory_consolidate(task, **payload: Any) -> None:
+    parent_run_id = str(payload["parent_run_id"])
     execute_reliable_task(
         task=task,
-        task_name="memory_index_outbox",
-        task_reference=trigger_id,
+        task_name="cogent_memory_consolidate",
+        task_reference=parent_run_id,
         settings=settings,
         handler=lambda: (
-            get_worker_services().project_memory_service.process_index_outbox(
-                **payload
-            )
+            get_worker_services().file_memory_service.execute_consolidate_task(**payload)
         ),
         failure_handler=lambda error, attempt, max_attempts: None,
     )

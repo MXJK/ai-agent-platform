@@ -300,7 +300,7 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             (root / "AGENTS.md").write_text("root rules", encoding="utf-8")
             child = root / "src"
             child.mkdir()
-            (child / "CLAUDE.md").write_text("compat rules", encoding="utf-8")
+            (child / "COGENT.md").write_text("module rules", encoding="utf-8")
             (child / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
             service = _workspace_service(root, ("main", root))
             sessions = _SessionService()
@@ -345,7 +345,7 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             self.assertNotIn("alice:password", encoded)
             self.assertEqual(
                 [item.path for item in snapshot.instructions.sources],
-                ["AGENTS.md", "src/CLAUDE.md"],
+                ["AGENTS.md", "src/COGENT.md"],
             )
             self.assertEqual(snapshot.identity.workspace_role, "editor")
             self.assertEqual(snapshot.session.summary.content, "frozen summary")
@@ -359,7 +359,7 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             config_copy["new"] = "value"
             self.assertNotIn("new", snapshot.project.project_config)
 
-    def test_agents_priority_remains_above_claude_compatibility(self) -> None:
+    def test_cogent_layer_order_ignores_retired_compatibility_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "AGENTS.md").write_text("agents", encoding="utf-8")
@@ -367,7 +367,8 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             child = root / "src"
             child.mkdir()
             (child / "AGENTS.md").write_text("regular", encoding="utf-8")
-            (child / "AGENTS.override.md").write_text("override", encoding="utf-8")
+            (child / ".cogent").mkdir()
+            (child / ".cogent" / "COGENT.md").write_text("private", encoding="utf-8")
             (child / "CLAUDE.md").write_text("child claude", encoding="utf-8")
             (child / "app.py").touch()
             factory = _factory(root)
@@ -380,7 +381,7 @@ class ExecutionContextFactoryTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item.path for item in snapshot.instructions.sources],
-                ["AGENTS.md", "src/AGENTS.override.md"],
+                ["AGENTS.md", "src/AGENTS.md", "src/.cogent/COGENT.md"],
             )
 
     def test_user_selected_tool_preference_is_frozen_without_granting_access(self) -> None:
@@ -664,7 +665,7 @@ Inspect the requested files before answering.
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / ".ai-agent-platform").mkdir()
-            (root / "AGENTS.override.md").write_text("OVERRIDE", encoding="utf-8")
+            (root / "COGENT.local.md").write_text("OVERRIDE", encoding="utf-8")
             (root / ".ai-agent-platform" / "config.json").write_text(
                 json.dumps(
                     {
@@ -741,7 +742,7 @@ Inspect the requested files before answering.
 
             (root / "AGENTS.md").write_text("stable", encoding="utf-8")
             with patch(
-                "ai_agent_platform.agents.coding.context._same_stable_file",
+                "ai_agent_platform.cogent.memory.instructions._same_stable_file",
                 return_value=False,
             ), self.assertRaisesRegex(InstructionSecurityError, "changed while"):
                 factory.create(**values)

@@ -166,8 +166,8 @@ class CeleryTaskQueue:
         "agent_checkpoint_restore": (
             "ai_agent_platform.agent_checkpoint_restore"
         ),
-        "memory_extraction": "ai_agent_platform.memory_extraction",
-        "memory_index_outbox": "ai_agent_platform.memory_index_outbox",
+        "cogent_memory_extract": "ai_agent_platform.cogent_memory_extract",
+        "cogent_memory_consolidate": "ai_agent_platform.cogent_memory_consolidate",
         "conversation_compression": "ai_agent_platform.conversation_compression",
     }
 

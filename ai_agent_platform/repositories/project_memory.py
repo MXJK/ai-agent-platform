@@ -79,6 +79,14 @@ class InMemoryProjectMemoryRepository:
             ]
             return memory_ids
 
+    def delete_workspace_access(self, *, workspace_id: str) -> None:
+        with self._lock:
+            self._members = {
+                key: member
+                for key, member in self._members.items()
+                if member.workspace_id != workspace_id
+            }
+
     def ensure_member(
         self, *, workspace_id: str, user_id: str, role: str
     ) -> WorkspaceMember:
@@ -456,6 +464,15 @@ class PostgresProjectMemoryRepository:
                 (workspace_id,),
             )
         return memory_ids
+
+    def delete_workspace_access(self, *, workspace_id: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM workspace_members WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+            conn.commit()
 
     def ensure_member(
         self, *, workspace_id: str, user_id: str, role: str

@@ -22,6 +22,7 @@ from jsonschema import Draft202012Validator
 
 from ai_agent_platform.core import Settings, parse_llm_retry_policy_json
 from ai_agent_platform.integrations.model_router import (
+    MODEL_OUTPUT_TOKEN_CEILING,
     ModelCapabilities,
     ModelConfig,
     ModelRouteTrace,
@@ -454,6 +455,10 @@ class LLMClient:
         self._usage_ledger = usage_ledger
 
     def _retry_limit(self, error: LLMProviderError) -> int:
+        if error.code in {"tool_output_truncated", "tool_arguments_truncated"}:
+            # The persisted Agent runtime owns the 8K -> 64K transition.
+            # Replaying inside this transport layer would reuse the same cap.
+            return 0
         keys = [error.code]
         if error.code in _LLM_TIMEOUT_ERROR_CODES:
             keys.append("llm_timeout")
@@ -463,11 +468,6 @@ class LLMClient:
         for key in keys:
             if key in self._retry_policy:
                 return self._retry_policy[key]
-        if error.code == "tool_output_truncated":
-            # Replaying the same long tool transcript with the same output cap
-            # usually repeats an all-reasoning, no-tool response. Prefer the
-            # next eligible candidate unless an operator explicitly opts in.
-            return 0
         return self._settings.llm_max_retries
 
     def _retry_delay(
@@ -570,6 +570,17 @@ class LLMClient:
             for model in self._model_router.models
         )
 
+    def _default_output_tokens(self, thinking_level: str | None = None) -> int:
+        selection = current_model_selection()
+        selected_thinking_level = (
+            thinking_level
+            if thinking_level is not None
+            else selection.thinking_level if selection is not None else None
+        )
+        if selected_thinking_level:
+            return MODEL_OUTPUT_TOKEN_CEILING
+        return self._settings.llm_max_output_tokens
+
     def decide_tools(
         self,
         messages: list[dict[str, Any]],
@@ -582,7 +593,6 @@ class LLMClient:
         min_context_tokens: int = 0,
         alias_tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
-        use_model_max_output_tokens: bool = False,
         model_output_tokens_cap: int | None = None,
         disable_tool_calls: bool = False,
         on_delta: Callable[[str], None] | None = None,
@@ -606,7 +616,7 @@ class LLMClient:
         routing_output_tokens = (
             max_output_tokens
             if max_output_tokens is not None
-            else self._settings.llm_max_output_tokens
+            else self._default_output_tokens()
         )
         if routing_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
@@ -657,7 +667,6 @@ class LLMClient:
                     requirements=requirements,
                     trace=trace,
                     requested_max_output_tokens=routing_output_tokens,
-                    use_model_max_output_tokens=use_model_max_output_tokens,
                     model_output_tokens_cap=model_output_tokens_cap,
                 )
             except LLMProviderError as exc:
@@ -702,7 +711,6 @@ class LLMClient:
                             requirements=requirements,
                             trace=trace,
                             requested_max_output_tokens=routing_output_tokens,
-                            use_model_max_output_tokens=use_model_max_output_tokens,
                             model_output_tokens_cap=model_output_tokens_cap,
                         )
                         trace = request_plan.route_trace or trace
@@ -796,6 +804,15 @@ class LLMClient:
                 retryable=candidate_error.retryable,
                 after_stream_start=stream_started,
             )
+            if candidate_error.code in {
+                "tool_output_truncated",
+                "tool_arguments_truncated",
+            }:
+                # Output exhaustion is a budget condition. Cogent owns the
+                # persisted 8K -> 64K recovery transition, so do not spend the
+                # same small budget on every fallback candidate first.
+                candidate_error.route_trace = trace.to_dict()
+                raise candidate_error
             if stream_started:
                 candidate_error.route_trace = trace.to_dict()
                 raise candidate_error
@@ -825,6 +842,7 @@ class LLMClient:
             provider=provider,
             model=model,
             routing_policy=routing_policy,
+            thinking_level=thinking_level,
             structured_output=structured_output,
             min_context_tokens=min_context_tokens,
         )
@@ -1092,7 +1110,6 @@ class LLMClient:
         reason: str,
         tools: list[ToolSpec] | None = None,
         max_output_tokens: int | None = None,
-        use_model_max_output_tokens: bool = False,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMToolDecision:
         """Produce one final, text-only turn over the complete tool transcript.
@@ -1122,7 +1139,6 @@ class LLMClient:
             final_tools,
             alias_tools=final_tools,
             max_output_tokens=max_output_tokens,
-            use_model_max_output_tokens=use_model_max_output_tokens,
             disable_tool_calls=True,
             **({"on_delta": on_delta} if on_delta is not None else {}),
         )
@@ -1154,7 +1170,7 @@ class LLMClient:
             if input_token_ratio is not None
             else self._settings.llm_context_input_token_ratio
         )
-        reserved_output = self._settings.llm_max_output_tokens
+        reserved_output = self._default_output_tokens()
         window = self._settings.llm_model_context_window_tokens
         resolved_provider: str | None = None
         resolved_model: str | None = None
@@ -1201,6 +1217,7 @@ class LLMClient:
         provider: str | None = None,
         model: str | None = None,
         routing_policy: RoutingPolicy | None = None,
+        thinking_level: str | None = None,
         structured_output: bool = False,
         min_context_tokens: int = 0,
     ) -> LLMRequestPlan:
@@ -1224,14 +1241,15 @@ class LLMClient:
             tool_calling=False,
             structured_output=structured_output,
         )
+        output_tokens = self._default_output_tokens(thinking_level)
         requirements = RoutingRequirements(
             structured_output=structured_output,
             min_context_tokens=max(
                 min_context_tokens,
-                estimated_input_tokens + self._settings.llm_max_output_tokens,
+                estimated_input_tokens + output_tokens,
             ),
             estimated_input_tokens=estimated_input_tokens,
-            expected_output_tokens=self._settings.llm_max_output_tokens,
+            expected_output_tokens=output_tokens,
             task_complexity=complexity,
             complexity_reasons=complexity_reasons,
         )
@@ -1259,6 +1277,7 @@ class LLMClient:
                     requirements=requirements,
                     trace=trace,
                     fallback_candidates=candidates[index + 1 :],
+                    requested_max_output_tokens=output_tokens,
                 )
             except LLMProviderError as exc:
                 if exc.code == "token_budget_exceeded":
@@ -1301,8 +1320,12 @@ class LLMClient:
         selected_model = self._settings.llm_model
         route_trace: dict[str, Any] | None = None
         messages = [{"role": "user", "content": prompt}]
-        plan = self.prepare_chat_request(messages)
         selection = current_model_selection()
+        selected_thinking_level = selection.thinking_level if selection else None
+        plan = self.prepare_chat_request(
+            messages,
+            thinking_level=selected_thinking_level,
+        )
 
         def flush_delta() -> None:
             nonlocal pending_chars, last_delta_at
@@ -1317,7 +1340,7 @@ class LLMClient:
 
         for event in self.stream_chat(
             messages,
-            thinking_level=(selection.thinking_level if selection else None),
+            thinking_level=selected_thinking_level,
             request_plan=plan,
         ):
             if event.type == "route":
@@ -2077,6 +2100,7 @@ class LLMClient:
         trace: ModelRouteTrace,
         fallback_candidates: tuple[ModelConfig, ...],
         usage_context: Any = None,
+        requested_max_output_tokens: int | None = None,
     ) -> LLMRequestPlan:
         return self._authorize_candidate(
             candidate=candidate,
@@ -2084,6 +2108,7 @@ class LLMClient:
             trace=trace,
             fallback_candidates=fallback_candidates,
             usage_context=usage_context,
+            requested_max_output_tokens=requested_max_output_tokens,
             count_tokens=lambda provider, model: self._count_input_tokens(
                 messages,
                 provider=provider,
@@ -2101,7 +2126,6 @@ class LLMClient:
         requirements: RoutingRequirements,
         trace: ModelRouteTrace,
         requested_max_output_tokens: int,
-        use_model_max_output_tokens: bool = False,
         model_output_tokens_cap: int | None = None,
     ) -> LLMRequestPlan:
         return self._authorize_candidate(
@@ -2110,7 +2134,6 @@ class LLMClient:
             trace=trace,
             fallback_candidates=(),
             requested_max_output_tokens=requested_max_output_tokens,
-            use_model_max_output_tokens=use_model_max_output_tokens,
             model_output_tokens_cap=model_output_tokens_cap,
             count_tokens=lambda provider, model: self._count_tool_input_tokens(
                 messages,
@@ -2131,7 +2154,6 @@ class LLMClient:
         count_tokens: Callable[[str, str], tuple[int, str]],
         usage_context: Any = None,
         requested_max_output_tokens: int | None = None,
-        use_model_max_output_tokens: bool = False,
         model_output_tokens_cap: int | None = None,
     ) -> LLMRequestPlan:
         usage_context = usage_context or current_model_usage_context()
@@ -2146,11 +2168,9 @@ class LLMClient:
             if requested_max_output_tokens is not None
             else self._settings.llm_max_output_tokens
         )
-        requested_output_tokens = (
-            candidate.max_output_tokens or configured_output_tokens
-            if use_model_max_output_tokens
-            else configured_output_tokens
-        )
+        # Per-model authored limits are retained only for storage/API
+        # compatibility. Runtime allocation is provider-independent.
+        requested_output_tokens = configured_output_tokens
         if model_output_tokens_cap is not None:
             if model_output_tokens_cap <= 0:
                 raise ValueError("model_output_tokens_cap must be positive")
@@ -2210,10 +2230,7 @@ class LLMClient:
                     target_candidate,
                     input_tokens=input_tokens,
                     requested_output_tokens=(
-                        target_candidate.max_output_tokens
-                        or configured_output_tokens
-                        if use_model_max_output_tokens
-                        else configured_output_tokens
+                        configured_output_tokens
                     ),
                 )
                 try:
@@ -3760,8 +3777,14 @@ def _effective_model_output_limit(
             "model context window has no room for output tokens",
             code="context_window_too_small",
         )
-    model_limit = candidate.max_output_tokens or requested_output_tokens
-    return max(1, min(requested_output_tokens, model_limit, context_remaining))
+    return max(
+        1,
+        min(
+            requested_output_tokens,
+            MODEL_OUTPUT_TOKEN_CEILING,
+            context_remaining,
+        ),
+    )
 
 
 def _usage_from_mapping(value: Any) -> LLMUsage | None:

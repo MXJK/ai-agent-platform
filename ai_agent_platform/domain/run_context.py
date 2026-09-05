@@ -125,6 +125,7 @@ class InstructionSourceSnapshot:
     content_hash: str
     truncated: bool
     priority: int
+    dependencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,7 @@ class RunContextSnapshot:
                         "content_hash": item.content_hash,
                         "truncated": item.truncated,
                         "priority": item.priority,
+                        "dependencies": list(item.dependencies),
                     }
                     for item in self.instructions.sources
                 ],
@@ -522,6 +524,10 @@ class RunContextSnapshot:
                         content_hash=str(_mapping(item).get("content_hash") or ""),
                         truncated=bool(_mapping(item).get("truncated", False)),
                         priority=int(_mapping(item).get("priority", 0)),
+                        dependencies=tuple(
+                            str(value)
+                            for value in (_mapping(item).get("dependencies") or [])
+                        ),
                     )
                     for item in instruction_sources
                 ),

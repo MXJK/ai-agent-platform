@@ -14,19 +14,23 @@ def parse_frontmatter(content: str) -> MemoryFile:
     m = _FRONTMATTER_RE.match(content)
     if not m:
         return mf
+    metadata = False
     for line in m.group(1).split('\n'):
         colon = line.find(':')
         if colon < 0:
             continue
         key = line[:colon].strip()
         val = line[colon + 1:].strip()
+        if key == 'metadata' and not val:
+            metadata = True
+            continue
         if len(val) >= 2 and (val.startswith('"') and val.endswith('"') or (val.startswith("'") and val.endswith("'"))):
             val = val[1:-1]
         if key == 'name':
             mf.name = val
         elif key == 'description':
             mf.description = val
-        elif key == 'type' and val in VALID_TYPES:
+        elif key == 'type' and val in VALID_TYPES and (metadata or not mf.type):
             mf.type = val
     return mf
 MAX_ENTRYPOINT_LINES = 200
