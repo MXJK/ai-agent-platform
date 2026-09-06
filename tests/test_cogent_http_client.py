@@ -139,6 +139,7 @@ def test_http_client_uses_server_registry_session_workspace_and_sse():
                         conversation_id=context.session_id,
                         workspace_id=context.workspace_id,
                         message="hello",
+                        permission_mode="acceptEdits",
                     )
                 )
             ]
@@ -153,6 +154,7 @@ def test_http_client_uses_server_registry_session_workspace_and_sse():
     asyncio.run(scenario())
     run_request = next(item for item in requests if item[:2] == ("POST", "/api/v1/agent/runs"))
     assert run_request[2]["workspace_id"] == "project"
+    assert run_request[2]["permission_mode"] == "acceptEdits"
     assert "api_key" not in json.dumps(requests)
 
 

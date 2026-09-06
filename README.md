@@ -102,6 +102,7 @@ uv sync
 ```bash
 uv run cogent
 uv run cogent --workspace-id project
+uv run cogent --workspace-id project --permission-mode acceptEdits
 uv run cogent --workspace-id project --print "解释入口结构"
 ```
 
@@ -115,7 +116,9 @@ Run SSE 使用同一 QueryService，`/api/v1/chat/stream` 返回 404。
 
 共享命令为 /help、/status、/clear、/compact、/mcp、/memory、/session、
 /skill（兼容 /skills）、/tools、/permissions、/resume、/plan、/review、
-/rewind、/sandbox；/exit 仅用于 CLI 本地退出。
+/rewind、/sandbox；/exit 仅用于 CLI 本地退出。CLI 可用 `--permission-mode` 设置启动模式、
+`/permissions [default|acceptEdits|plan|bypassPermissions]` 查看或切换，并在 TUI 中用
+Shift+Tab 按相同顺序循环；状态栏显示将用于下一次 Run 的模式。
 
 ## 分层运行时配置
 
@@ -427,9 +430,14 @@ MiniMax、豆包）在预检阶段采用保守估算，最终仍以 Provider 返
 否则 `partial/context_overflow`。大结果保存在 `.cogent/sessions/<session-id>/runs/<run-id>/tool-results`，只允许
 读取登记且哈希匹配的结果。压缩保留近期工具对，失败保持原历史。
 
-权限模式：default、acceptEdits、plan、bypassPermissions；规则来自用户、项目和项目本地文件。
-硬拒绝不能被 bypass 或旧审批覆盖。OS sandbox 尝试 Seatbelt/bubblewrap，默认禁网；不可用时
-Bash 不能因此自动获准。官方容器没有 bubblewrap 时显示不可用，仍需命令审批和平台限制。
+权限模式在 Web 选择器、CLI 和最终工具执行中使用同一矩阵：default 为读自动、写和命令确认；
+acceptEdits 为读写自动、命令确认；plan 通过系统提示保持只读规划，当前计划文件自动写入，意外的
+其他写入或命令仍转为确认；MCP 调用统一按命令类处理，即便远端标注为只读也不会让
+default、acceptEdits 或 plan 自动信任；bypassPermissions 让获准能力跳过普通确认。用户、项目和项目本地规则
+仍按 deny > ask > allow 裁决。模式级 allow 只跳过 HITL，不跳过进程能力、Workspace/RBAC、
+项目工具选择、Secret、受保护路径、命令白名单或危险命令等硬拒绝。严格的 always/never 中央策略
+也不会被模式放宽。OS sandbox 尝试 Seatbelt/bubblewrap 并默认禁网；不可用状态会明确展示，
+但 bypassPermissions 仍按其模式语义跳过普通确认，底层硬拒绝继续执行。
 
 MCP 自动选择 eager、小目录全量加载；大目录在支持的官方 Anthropic 模型上使用原生搜索，
 其他模型使用 dispatch/ToolSearch。也可用 `COGENT_MCP_LOADING` 显式设置；不兼容 native 自动

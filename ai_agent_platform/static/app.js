@@ -146,6 +146,13 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+const PERMISSION_MODE_HINTS = {
+  default: "只读自动执行；写入和命令逐次确认",
+  acceptEdits: "只读和文件编辑自动执行；命令逐次确认",
+  plan: "只读规划；仅计划文件自动写入，其他写入和命令需确认",
+  bypassPermissions: "允许的读写和命令跳过普通确认；硬性安全边界仍生效",
+};
+
 function iconMarkup(name) {
   return `<svg class="app-icon" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
 }
@@ -2198,6 +2205,8 @@ function updateComposer() {
   $("send-chat-btn").innerHTML = `发送 ${iconMarkup("arrow-right")}`;
   const permission = $("permission-mode-input");
   if (permission) permission.value = state.permissionMode;
+  const permissionHint = $("permission-mode-hint");
+  if (permissionHint) permissionHint.textContent = PERMISSION_MODE_HINTS[state.permissionMode];
   updateComposerAvailability();
 }
 
@@ -8950,7 +8959,7 @@ function bindEvents() {
   $("permission-mode-input").addEventListener("change", (event) => {
     state.permissionMode = event.target.value;
     queueUiPreferenceSave();
-    updateComposerAvailability();
+    updateComposer();
     showToast("已更新 Cogent 权限模式；工作区和平台的安全限制不会被绕过。", "info");
   });
   $("auto-model-toggle").addEventListener("change", async (event) => {

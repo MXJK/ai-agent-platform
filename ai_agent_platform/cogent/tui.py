@@ -27,6 +27,7 @@ class CogentApp(App):
         Binding("ctrl+c", "cancel_run", "Cancel Run", priority=True),
         Binding("ctrl+p", "pause_run", "Pause", priority=True),
         Binding("ctrl+o", "toggle_tool_blocks", "Toggle tools", priority=True),
+        Binding("shift+tab", "cycle_permission_mode", "Cycle permission mode", priority=True),
         Binding("ctrl+q", "close", "Exit", priority=True),
     ]
     CSS = """
@@ -47,6 +48,7 @@ class CogentApp(App):
     #status-bar { height: 1; width: 100%; padding: 0 1; border-top: solid #303030; }
     #activity { width: 1fr; height: 1; color: $text-muted; }
     #credential-label { width: auto; height: 1; color: $text-muted; padding: 0 1; }
+    #mode-label { width: auto; height: 1; color: $text-muted; padding: 0 1; }
     #model-label { width: auto; height: 1; text-align: right; color: $text-muted; }
     CompletionPopup { margin: 0 1; }
     """
@@ -79,6 +81,7 @@ class CogentApp(App):
             yield ChatInput(id="chat-input")
             with Horizontal(id="status-bar"):
                 yield Static("Connecting…", id="activity", markup=False)
+                yield Static("", id="mode-label", markup=False)
                 yield Static("", id="credential-label", markup=False)
                 yield Static("", id="model-label", markup=False)
             yield CompletionPopup()
@@ -126,6 +129,7 @@ class CogentApp(App):
             self.query_one("#model-label", Static).update(
                 self.application.model_summary
             )
+            self._update_permission_mode_label()
             composer.load_history(str(self.application.local_cwd))
             composer.focus()
             self.show_activity("Ready · /help · /models")
@@ -188,11 +192,22 @@ class CogentApp(App):
         )
         try:
             events = self.application.query(text, mode="tui")
+            self._update_permission_mode_label()
         except (ValueError, RuntimeError, PermissionError) as exc:
             self.show_activity(str(exc))
             return
         self.busy = True
         self.consume(events)
+
+    def action_cycle_permission_mode(self) -> None:
+        message = self.application.cycle_permission_mode()
+        self._update_permission_mode_label()
+        self.show_activity(message)
+
+    def _update_permission_mode_label(self) -> None:
+        self.query_one("#mode-label", Static).update(
+            f"mode: {self.application.permission_mode} · Shift+Tab"
+        )
 
     @work(group="query-stream", exclusive=True)
     async def consume(self, events: AsyncIterator[AgentEvent]):
@@ -212,6 +227,7 @@ class CogentApp(App):
             self.show_activity(f"Request failed: {exc}")
         finally:
             self.busy = False
+            self._update_permission_mode_label()
             await self.refresh_capabilities()
 
     async def render_event(self, event: AgentEvent):

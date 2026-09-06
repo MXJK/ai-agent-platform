@@ -56,10 +56,15 @@ def runtime_for(root, client, *, store=None, registry=None, approval_policy="on_
     return runtime
 
 
-def start(runtime, root):
+def start(runtime, root, permission_mode="default"):
     record = runtime.create_queued_run(
         conversation_id="conversation-test", workspace_id="workspace-test", workspace_root=str(root)
     )
+    if permission_mode != "default":
+        state = CogentState.from_mapping(record.runtime_state)
+        state.permission_mode = permission_mode
+        record = replace(record, runtime_state=state.to_dict())
+        runtime._run_store.save(record)
     return record
 
 
@@ -78,6 +83,10 @@ def register_read(registry, calls):
 
 def register_write(registry, handler):
     registry.register("sandbox.write_file", handler, permission_level="write_safe", requires_approval=True)
+
+
+def register_command(registry, handler):
+    registry.register("sandbox.run_command", handler, permission_level="write_safe", requires_approval=True)
 
 
 def test_multi_round_pairing_raw_usage_and_immutable_snapshots(tmp_path):
@@ -377,6 +386,109 @@ def checker(root, mode=PermissionMode.DEFAULT, rules=()):
     return PermissionChecker(DangerousCommandDetector(), PathSandbox(str(root)), engine, mode=mode)
 
 
+@pytest.mark.parametrize(
+    ("mode", "category", "effect"),
+    [
+        (PermissionMode.DEFAULT, "read", "allow"),
+        (PermissionMode.DEFAULT, "write", "ask"),
+        (PermissionMode.DEFAULT, "command", "ask"),
+        (PermissionMode.ACCEPT_EDITS, "read", "allow"),
+        (PermissionMode.ACCEPT_EDITS, "write", "allow"),
+        (PermissionMode.ACCEPT_EDITS, "command", "ask"),
+        (PermissionMode.PLAN, "read", "allow"),
+        (PermissionMode.PLAN, "write", "ask"),
+        (PermissionMode.PLAN, "command", "ask"),
+        (PermissionMode.BYPASS, "read", "allow"),
+        (PermissionMode.BYPASS, "write", "allow"),
+        (PermissionMode.BYPASS, "command", "allow"),
+    ],
+)
+def test_permission_mode_matrix_matches_reference(mode, category, effect):
+    from ai_agent_platform.cogent.permissions import mode_decide
+
+    assert mode_decide(mode, category) == effect
+
+
+@pytest.mark.parametrize(
+    ("mode", "tool_name", "arguments", "expected_status", "expected_effect"),
+    [
+        ("default", "WriteFile", {"file_path": "a.py", "content": "x"}, "waiting_approval", []),
+        ("acceptEdits", "WriteFile", {"file_path": "a.py", "content": "x"}, "completed", ["write"]),
+        ("acceptEdits", "Bash", {"command": "python -V"}, "waiting_approval", []),
+        ("plan", "WriteFile", {"file_path": "a.py", "content": "x"}, "waiting_approval", []),
+        ("plan", "WriteFile", {"file_path": ".cogent/plans/conversation-test.md", "content": "plan"}, "completed", ["write"]),
+        ("plan", "Bash", {"command": "python -V"}, "waiting_approval", []),
+        ("bypassPermissions", "WriteFile", {"file_path": "a.py", "content": "x"}, "completed", ["write"]),
+        ("bypassPermissions", "Bash", {"command": "python -V"}, "completed", ["command"]),
+    ],
+)
+def test_permission_modes_control_end_to_end_execution(
+    tmp_path, mode, tool_name, arguments, expected_status, expected_effect
+):
+    effects = []
+    registry = ToolRegistry(PermissionResolver())
+    register_write(registry, lambda **kwargs: effects.append("write") or {})
+    register_command(registry, lambda **kwargs: effects.append("command") or {})
+    runtime = runtime_for(
+        tmp_path,
+        ScriptedClient(
+            response("", ToolCall(tool_name, arguments, "call-1")),
+            response("Done."),
+        ),
+        registry=registry,
+    )
+
+    result = execute(runtime, tmp_path, start(runtime, tmp_path, mode))
+
+    assert result.status == expected_status
+    assert effects == expected_effect
+
+
+@pytest.mark.parametrize(
+    ("approval_policy", "expected_status"),
+    [("always", "waiting_approval"), ("never", "completed")],
+)
+def test_permission_modes_do_not_weaken_strict_central_policy(
+    tmp_path, approval_policy, expected_status
+):
+    effects = []
+    registry = ToolRegistry(PermissionResolver())
+    register_write(registry, lambda **kwargs: effects.append("write") or {})
+    runtime = runtime_for(
+        tmp_path,
+        ScriptedClient(
+            response("", ToolCall("WriteFile", {"file_path": "a.py", "content": "x"}, "write-1")),
+            response("Done."),
+        ),
+        registry=registry,
+        approval_policy=approval_policy,
+    )
+
+    result = execute(
+        runtime,
+        tmp_path,
+        start(runtime, tmp_path, "bypassPermissions"),
+    )
+
+    assert result.status == expected_status
+    assert effects == []
+    if approval_policy == "never":
+        assert result.tool_results[0]["error_code"] == "permission_denied"
+
+
+def test_plan_mode_prompt_enforces_plan_first_workflow(tmp_path):
+    client = ScriptedClient(response("Plan ready."))
+    runtime = runtime_for(tmp_path, client)
+
+    result = execute(runtime, tmp_path, start(runtime, tmp_path, "plan"))
+
+    assert result.status == "completed"
+    system_prompt = client.requests[0][0]["content"]
+    assert "Plan mode is active" in system_prompt
+    assert ".cogent/plans/conversation-test.md" in system_prompt
+    assert "call ExitPlanMode" in system_prompt
+
+
 @pytest.mark.parametrize("command", ["sed -i x a.py", "find . -exec touch x ;", "npx evil", "git diff --output=x", "pwd\ntouch x", "xargs sh", "tee x"])
 def test_mutating_commands_are_not_in_read_only_allowlist(command):
     assert not is_safe_command(command)
@@ -387,20 +499,24 @@ def test_deny_rule_precedes_safe_command(tmp_path):
     assert permission.check(Tool("Bash", "command"), {"command": "pwd"}).effect == "deny"
 
 
-def test_plan_requires_exact_plan_path_and_cannot_be_overridden(tmp_path):
+def test_plan_automatically_allows_only_the_exact_plan_path(tmp_path):
     permission = checker(tmp_path, PermissionMode.PLAN, [Rule("WriteFile", "*", "allow")])
     permission.plan_file_path = str(tmp_path / ".cogent/plans/current.md")
     assert permission.check(Tool("WriteFile", "write"), {"file_path": ".cogent/plans/current.md"}).effect == "allow"
-    for path in ("current.md", ".cogent/plans/other.md", "nested/.cogent/plans/current.md", "../current.md"):
-        assert permission.check(Tool("WriteFile", "write"), {"file_path": path}).effect == "deny"
-    assert permission.check(Tool("Bash", "command"), {"command": "pwd"}).effect == "deny"
+    permission = checker(tmp_path, PermissionMode.PLAN)
+    permission.plan_file_path = str(tmp_path / ".cogent/plans/current.md")
+    for path in ("current.md", ".cogent/plans/other.md", "nested/.cogent/plans/current.md"):
+        assert permission.check(Tool("WriteFile", "write"), {"file_path": path}).effect == "ask"
+    assert permission.check(Tool("WriteFile", "write"), {"file_path": "../current.md"}).effect == "deny"
+    assert permission.check(Tool("Bash", "command"), {"command": "python -V"}).effect == "ask"
+    assert permission.check(Tool("Bash", "command"), {"command": "pwd"}).effect == "allow"
 
 
-def test_bypass_does_not_override_protected_paths_or_missing_os_sandbox(tmp_path):
+def test_bypass_does_not_override_protected_paths_or_workspace_boundary(tmp_path):
     permission = checker(tmp_path, PermissionMode.BYPASS)
     assert permission.check(Tool("WriteFile", "write"), {"file_path": ".cogent/permissions.yaml"}).effect == "deny"
     assert permission.check(Tool("WriteFile", "write"), {"file_path": "../outside"}).effect == "deny"
-    assert permission.check(Tool("Bash", "command"), {"command": "touch a.py"}).effect == "ask"
+    assert permission.check(Tool("Bash", "command"), {"command": "touch a.py"}).effect == "allow"
 
 
 def test_mcp_permissions_match_identity_not_filesystem_path(tmp_path):

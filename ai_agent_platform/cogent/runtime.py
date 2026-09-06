@@ -291,6 +291,7 @@ class CogentRuntime:
                 tools=adapter.list_specs(),
                 memory=state.recalled_memory,
                 active_skill=state.active_skill,
+                plan_file_path=self._plan_file_path(record),
             )
             state.prompt_version = PROMPT_VERSION
             prior_messages = state.messages[1:] if state.messages else self._canonical_history(history)
@@ -645,6 +646,7 @@ class CogentRuntime:
                     permission_mode=state.permission_mode,
                     sandbox_status=str(state.sandbox.get("status") or "unavailable"),
                     tools=specs, memory=state.recalled_memory, active_skill=state.active_skill,
+                    plan_file_path=self._plan_file_path(record),
                 )
                 state.messages[0] = {"role": "system", "content": state.system_prompt}
                 if self._needs_compaction(state, record):
@@ -1139,8 +1141,14 @@ class CogentRuntime:
         if cogent.effect == "deny" or (cogent.effect == "ask" and not approved):
             return ToolResult(call_id=item.visible_call.call_id, name=item.visible_call.name,
                               ok=False, error=cogent.reason, error_code="permission_denied")
+        effective_context = self._planning_context(
+            context,
+            state,
+            item,
+            cogent.effect,
+        )
         if item.execution_call is not None:
-            decision = adapter._tools.resolve_permission(item.execution_call, context, phase="execute")
+            decision = adapter._tools.resolve_permission(item.execution_call, effective_context, phase="execute")
             if decision.effect != "allow":
                 return ToolResult(call_id=item.visible_call.call_id, name=item.visible_call.name,
                                   ok=False, error=decision.reason, error_code="permission_denied")
@@ -1166,7 +1174,7 @@ class CogentRuntime:
                 "arguments": item.visible_call.arguments,
             },
         )
-        result = adapter.execute(item, context)
+        result = adapter.execute(item, effective_context)
         if file_history is not None:
             file_history.finish(history_operation, after=self._execution_workspace_runtime.history_files(context))
         self._run_store.save_tool_execution(AgentToolExecution(
@@ -1692,7 +1700,9 @@ class CogentRuntime:
         item: PreparedCall,
         cogent_effect: str,
     ) -> ToolUseContext:
-        del state, item, cogent_effect
+        del state, item
+        if cogent_effect == "allow" and context.approval_policy == "on_request":
+            return replace(context, approval_policy="auto_approve")
         return context
 
     @staticmethod
@@ -1723,10 +1733,18 @@ class CogentRuntime:
             sandbox_enabled=bool(state.sandbox.get("enabled") and state.sandbox.get("available")),
         )
         if state.permission_mode == "plan":
-            checker.plan_file_path = str(
-                root / ".cogent" / "plans" / f"{record.conversation_id}.md"
-            )
+            checker.plan_file_path = self._plan_file_path(record)
         return checker
+
+    @staticmethod
+    def _plan_file_path(record: AgentRunRecord) -> str:
+        root = Path(
+            record.context_snapshot.execution_workspace.execution_root
+            if record.context_snapshot is not None
+            and record.context_snapshot.execution_workspace is not None
+            else record.workspace_root
+        )
+        return str(root / ".cogent" / "plans" / f"{record.conversation_id}.md")
 
     @staticmethod
     def _execution_groups(items: list[PreparedCall]) -> Iterable[list[PreparedCall]]:

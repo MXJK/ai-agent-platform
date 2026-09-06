@@ -427,6 +427,54 @@ class MCPProviderTests(unittest.TestCase):
                 "read_only",
             )
 
+    def test_bypass_mode_skips_ordinary_mcp_confirmation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _create_app_with_fake_mcp(temp_dir, server_name="bypass_demo")
+            app.state.runtime.cogent_runtime._llm = ScriptedClient(
+                response(
+                    "",
+                    ToolCall(
+                        "mcp__bypass_demo__echo",
+                        {"text": "hello MCP"},
+                        "echo-bypass-1",
+                    ),
+                ),
+                response("Done."),
+            )
+            app.state.runtime.cogent_runtime._memory_service = None
+
+            with TestClient(app) as client:
+                session_id = client.post(
+                    "/api/v1/sessions",
+                    json={"user_id": "user_1"},
+                ).json()["id"]
+                client.put(
+                    "/api/v1/workspaces/workspace_main",
+                    json={"root_path": temp_dir},
+                )
+                run_response = client.post(
+                    "/api/v1/agent/runs",
+                    json={
+                        "conversation_id": session_id,
+                        "message": "please echo hello MCP using the echo tool",
+                        "workspace_id": "workspace_main",
+                        "permission_mode": "bypassPermissions",
+                    },
+                )
+                completed = wait_for_agent_run(
+                    client,
+                    run_response.json()["run_id"],
+                    terminal_statuses=("completed", "failed"),
+                )
+
+            self.assertEqual(run_response.status_code, 202)
+            self.assertEqual(completed["status"], "completed")
+            self.assertIsNone(completed["pending_approval"])
+            result_by_name = {
+                item["name"]: item for item in completed["result"]["tool_results"]
+            }
+            self.assertTrue(result_by_name["mcp__bypass_demo__echo"]["ok"])
+
     def test_agent_routes_non_read_only_mcp_tool_to_approval(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _create_app_with_fake_mcp(temp_dir, server_name="approval_demo")

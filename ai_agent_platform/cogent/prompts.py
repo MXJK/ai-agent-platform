@@ -5,14 +5,44 @@ from pathlib import Path
 from typing import Iterable
 from ai_agent_platform.domain import RunContextSnapshot
 from ai_agent_platform.integrations.tools import ToolSpec
-PROMPT_VERSION = 'cogent-system-v1'
+PROMPT_VERSION = 'cogent-system-v2'
 
-def build_system_prompt(*, snapshot: RunContextSnapshot | None, workspace_root: str, permission_mode: str, sandbox_status: str, tools: Iterable[ToolSpec], memory: str='', active_skill: str='') -> str:
+
+def _permission_mode_prompt(permission_mode: str, plan_file_path: str) -> str:
+    if permission_mode == 'acceptEdits':
+        return (
+            '# Permission mode\nacceptEdits mode is active. Read and file-edit '
+            'tools may run without confirmation. Shell commands still require user '
+            'confirmation. All platform hard-deny boundaries remain active.'
+        )
+    if permission_mode == 'plan':
+        return (
+            '# Plan mode\nPlan mode is active. The user does not want execution yet. '
+            'Inspect and reason with read-only operations. Do not edit files or run '
+            'mutating commands, except that you may incrementally write the current '
+            f'plan file at {plan_file_path or "the configured plan path"}. '
+            'When the plan is complete, call ExitPlanMode and wait for the user to '
+            'confirm before implementation. If you nevertheless request another '
+            'write or command, the permission layer will require user confirmation.'
+        )
+    if permission_mode == 'bypassPermissions':
+        return (
+            '# Permission mode\nbypassPermissions mode is active. Permitted reads, '
+            'writes, and commands may run without ordinary confirmation. Process, '
+            'Workspace/RBAC, project, Secret, protected-path, command-allowlist, and '
+            'dangerous-operation hard denies remain active.'
+        )
+    return (
+        '# Permission mode\ndefault mode is active. Read-only operations may run '
+        'without confirmation; file writes and commands require user confirmation.'
+    )
+
+def build_system_prompt(*, snapshot: RunContextSnapshot | None, workspace_root: str, permission_mode: str, sandbox_status: str, tools: Iterable[ToolSpec], memory: str='', active_skill: str='', plan_file_path: str='') -> str:
     tool_rows = [{'name': item.name, 'description': item.description, 'permission': item.permission_level} for item in tools]
     instructions = []
     if snapshot is not None:
         instructions = [f'[{item.kind}] {item.path}\n{item.text}' for item in snapshot.instructions.sources if item.text.strip()]
-    sections = ['You are Cogent, a coding agent that completes user requests inside an authorized workspace.', 'Work until the requested outcome is complete. Inspect before editing, preserve unrelated changes, use the available tools for repository facts, and validate material changes.', 'Tool calls are capabilities, not suggestions. Follow the permission result exactly. Never claim a write or command succeeded unless its tool result confirms it.', 'Do not reveal hidden reasoning, protocol fields, signatures, encrypted content, secrets, or complete environment-variable values. You may provide concise user-visible reasoning summaries only when the selected provider explicitly supplies them for display.', 'When no tool call is needed, answer directly and clearly. When tools are needed, keep every tool call paired with its result before continuing.', '# Environment\n' + json.dumps({'date': date.today().isoformat(), 'workspace': str(Path(workspace_root)), 'permission_mode': permission_mode, 'sandbox': sandbox_status}, ensure_ascii=False, indent=2), '# Tools\n' + json.dumps(tool_rows, ensure_ascii=False, indent=2)]
+    sections = ['You are Cogent, a coding agent that completes user requests inside an authorized workspace.', 'Work until the requested outcome is complete. Inspect before editing, preserve unrelated changes, use the available tools for repository facts, and validate material changes.', 'Tool calls are capabilities, not suggestions. Follow the permission result exactly. Never claim a write or command succeeded unless its tool result confirms it.', 'Do not reveal hidden reasoning, protocol fields, signatures, encrypted content, secrets, or complete environment-variable values. You may provide concise user-visible reasoning summaries only when the selected provider explicitly supplies them for display.', 'When no tool call is needed, answer directly and clearly. When tools are needed, keep every tool call paired with its result before continuing.', _permission_mode_prompt(permission_mode, plan_file_path), '# Environment\n' + json.dumps({'date': date.today().isoformat(), 'workspace': str(Path(workspace_root)), 'permission_mode': permission_mode, 'sandbox': sandbox_status}, ensure_ascii=False, indent=2), '# Tools\n' + json.dumps(tool_rows, ensure_ascii=False, indent=2)]
     if instructions:
         sections.append('# Workspace instructions\n' + '\n\n'.join(instructions))
     if active_skill.strip():

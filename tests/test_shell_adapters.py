@@ -322,6 +322,8 @@ class ShellAdapterE2ETests(unittest.TestCase):
                 "http://127.0.0.1:9000",
                 "--workspace-id",
                 "project",
+                "--permission-mode",
+                "acceptEdits",
                 "print",
                 "hello",
                 "world",
@@ -330,6 +332,7 @@ class ShellAdapterE2ETests(unittest.TestCase):
         self.assertEqual(args.mode, "print")
         self.assertEqual(args.message, ["hello", "world"])
         self.assertEqual(args.workspace_id, "project")
+        self.assertEqual(args.permission_mode, "acceptEdits")
         pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"
         )
@@ -373,6 +376,8 @@ class ShellAdapterE2ETests(unittest.TestCase):
                     "http://127.0.0.1:9000",
                     "--workspace-id",
                     "project",
+                    "--permission-mode",
+                    "bypassPermissions",
                     "print",
                     "hello",
                 ]
@@ -384,6 +389,7 @@ class ShellAdapterE2ETests(unittest.TestCase):
         kwargs = create_application.call_args.kwargs
         self.assertEqual(kwargs["api_url"], "http://127.0.0.1:9000")
         self.assertEqual(kwargs["workspace_id"], "project")
+        self.assertEqual(kwargs["permission_mode"], "bypassPermissions")
         self.assertIs(run_mode.await_args.args[1], application)
         self.assertTrue(run_mode.await_args.kwargs["install_sigint"])
 

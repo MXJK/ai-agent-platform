@@ -48,19 +48,17 @@ class PermissionChecker:
             return Decision('deny', f'Permission rules could not be loaded: {exc}')
         if rule == 'deny':
             return Decision('deny', 'Permission rule denies this operation')
-        if self.mode == PermissionMode.PLAN:
-            if tool.category == 'command':
-                return Decision('deny', 'Plan mode does not permit shell execution')
-            if tool.category == 'write' and (not (tool.name in {'WriteFile', 'EditFile'} and path is not None and self._is_plan_file(path))):
-                return Decision('deny', 'Plan mode only permits writing the current plan file')
         if rule == 'ask':
             return Decision('ask', 'Permission rule requires confirmation')
-        if tool.category == 'command' and self.mode == PermissionMode.BYPASS and (not self.sandbox_enabled):
-            return Decision('ask', 'OS sandbox is unavailable; command confirmation is required')
         if rule == 'allow':
             return Decision('allow', 'Permission rule allows this operation')
-        if self.mode == PermissionMode.PLAN:
-            return Decision('allow', 'Operation is within the current plan boundary')
+        if (
+            self.mode == PermissionMode.PLAN
+            and tool.name in {'WriteFile', 'EditFile'}
+            and path is not None
+            and self._is_plan_file(path)
+        ):
+            return Decision('allow', 'Plan mode permits writing the current plan file')
         if tool.category == 'command' and is_safe_command(content):
             return Decision('allow', 'Known read-only command')
         return Decision(mode_decide(self.mode, tool.category), f'Permission mode: {self.mode.value}')

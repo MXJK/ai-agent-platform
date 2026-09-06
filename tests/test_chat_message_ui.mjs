@@ -90,6 +90,25 @@ test("Run creation failure preserves the optimistic UI through an error callback
   assert.equal(harness.events.includes("submitted"), false);
 });
 
+test("Web composer submits each selected Cogent permission mode", async () => {
+  let submittedPayload = null;
+  const harness = loadAgentSubmissionHarness(async (_events, path, options) => {
+    if (path === "/agent/runs") submittedPayload = JSON.parse(options.body);
+    return { run_id: "run_1", conversation_id: "sess_1", status: "queued" };
+  });
+
+  for (const mode of ["default", "acceptEdits", "plan", "bypassPermissions"]) {
+    vm.runInContext(`state.permissionMode = ${JSON.stringify(mode)}`, harness.context);
+    await harness.run();
+    assert.equal(submittedPayload.permission_mode, mode);
+    const hint = vm.runInContext(
+      `PERMISSION_MODE_HINTS[${JSON.stringify(mode)}]`,
+      harness.context,
+    );
+    assert.ok(hint.length > 10);
+  }
+});
+
 test("message delivery state is explicit and clears after acceptance", () => {
   const statusNode = { hidden: true, textContent: "" };
   const classes = new Set();

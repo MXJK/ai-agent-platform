@@ -34,6 +34,26 @@ from ai_agent_platform.services import AgentEventEncoder
 
 
 _WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_PERMISSION_MODES = (
+    "default",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+)
+_PERMISSION_MODE_LABELS = {
+    "default": "default · reads run automatically; writes and commands ask",
+    "acceptEdits": "acceptEdits · reads and file edits run automatically; commands ask",
+    "plan": "plan · plan-first read-only discipline; unexpected writes and commands ask",
+    "bypassPermissions": "bypassPermissions · permitted operations skip ordinary confirmation",
+}
+
+
+def _validate_permission_mode(value: str) -> str:
+    if value not in _PERMISSION_MODES:
+        raise ValueError(
+            "permission mode must be one of: " + ", ".join(_PERMISSION_MODES)
+        )
+    return value
 
 
 class CliEnvironmentError(ValueError):
@@ -110,6 +130,7 @@ class CliApplication:
         output_stream: TextIO = sys.stdout,
         error_stream: TextIO = sys.stderr,
         interrupt: CliInterruptController | None = None,
+        permission_mode: str = "default",
     ) -> None:
         self.runtime = runtime
         self.sdk = AgentSDK(runtime)
@@ -122,6 +143,7 @@ class CliApplication:
         self.output_stream = output_stream
         self.error_stream = error_stream
         self.interrupt = interrupt
+        self.permission_mode = _validate_permission_mode(permission_mode)
         self.last_run_id: str | None = None
         self._prepared = False
 
@@ -142,7 +164,9 @@ class CliApplication:
         )
 
     def query(self, text: str, *, mode: str = "tui") -> AsyncIterator[AgentEvent]:
-        return self.sdk.query(self._query_params(text, mode=mode))
+        target = self._permission_command_target(text)
+        events = self.sdk.query(self._query_params(text, mode=mode))
+        return self._commit_permission_mode_after(events, target)
 
     def resume(self, run_id: str, *, approved: bool = True, message: str = ""):
         return self.sdk.resume(
@@ -198,6 +222,46 @@ class CliApplication:
 
     def registry_text(self) -> str:
         return "Model registry is provided by the embedded test runtime."
+
+    @property
+    def permission_mode_summary(self) -> str:
+        return _PERMISSION_MODE_LABELS[self.permission_mode]
+
+    def set_permission_mode(self, value: str) -> str:
+        self.permission_mode = _validate_permission_mode(value)
+        return f"Cogent permission mode: {self.permission_mode_summary}. Hard denies remain active."
+
+    def cycle_permission_mode(self) -> str:
+        index = _PERMISSION_MODES.index(self.permission_mode)
+        return self.set_permission_mode(
+            _PERMISSION_MODES[(index + 1) % len(_PERMISSION_MODES)]
+        )
+
+    def _permission_command_target(self, raw: str) -> str | None:
+        parts = shlex.split(raw)
+        if not parts or parts[0] != "/permissions":
+            return None
+        if len(parts) == 2:
+            return _validate_permission_mode(parts[1])
+        if len(parts) > 2:
+            raise ValueError(
+                "Usage: /permissions [default|acceptEdits|plan|bypassPermissions]"
+            )
+        return None
+
+    async def _commit_permission_mode_after(
+        self,
+        events: AsyncIterator[AgentEvent],
+        target: str | None,
+    ) -> AsyncIterator[AgentEvent]:
+        completed = False
+        async for event in events:
+            completed = completed or (
+                event.type == "command_completed" and event.status == "completed"
+            )
+            yield event
+        if completed and target is not None:
+            self.set_permission_mode(target)
 
     async def run_print(self, message: str) -> int:
         self._prepare_context()
@@ -294,6 +358,7 @@ class CliApplication:
             ),
             skill_name=skill_name,
             skill_arguments=tuple(skill_arguments),
+            permission_mode=self.permission_mode,
             entrypoint="cli",
             entrypoint_metadata={"adapter": mode, "transport": "stdio"},
         )
@@ -584,6 +649,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", help="Reuse an existing conversation.")
     parser.add_argument("--user", default="cli-user", help="Session owner ID.")
     parser.add_argument(
+        "--permission-mode",
+        choices=_PERMISSION_MODES,
+        default="default",
+        help="Initial permission mode; change it interactively with /permissions or Shift+Tab.",
+    )
+    parser.add_argument(
         "--startup-timing",
         action="store_true",
         help="Write process and runtime startup checkpoints to stderr.",
@@ -620,6 +691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id=args.session_id,
             user_id=args.user,
             cwd=Path.cwd(),
+            permission_mode=args.permission_mode,
         )
         timeline.checkpoint("client_ready")
         if args.startup_timing:
@@ -656,6 +728,7 @@ class RemoteCliApplication:
         input_stream: TextIO = sys.stdin,
         output_stream: TextIO = sys.stdout,
         error_stream: TextIO = sys.stderr,
+        permission_mode: str = "default",
     ) -> None:
         from ai_agent_platform.cogent.http_client import CogentHTTPClient
 
@@ -673,6 +746,7 @@ class RemoteCliApplication:
         self.interrupt: CliInterruptController | None = None
         self._prepared = False
         self._event_encoder = AgentEventEncoder()
+        self.permission_mode = _validate_permission_mode(permission_mode)
 
     async def prepare_context(self) -> None:
         if self._prepared:
@@ -700,12 +774,15 @@ class RemoteCliApplication:
             workspace_id=self.workspace_id,
             cwd=self.workspace_root,
             actor_user_id=self.user_id,
+            permission_mode=self.permission_mode,
             entrypoint="cli",
             entrypoint_metadata={"adapter": mode, "transport": "http+sse"},
         )
 
     def query(self, text: str, *, mode: str = "tui") -> AsyncIterator[AgentEvent]:
-        return self.client.query(self._query_params(text, mode=mode))
+        target = self._permission_command_target(text)
+        events = self.client.query(self._query_params(text, mode=mode))
+        return self._commit_permission_mode_after(events, target)
 
     def resume(self, run_id: str, *, approved: bool = True, message: str = ""):
         return self.client.resume(run_id, approved=approved, message=message)
@@ -740,6 +817,46 @@ class RemoteCliApplication:
 
     def registry_text(self) -> str:
         return self.client.registry_text()
+
+    @property
+    def permission_mode_summary(self) -> str:
+        return _PERMISSION_MODE_LABELS[self.permission_mode]
+
+    def set_permission_mode(self, value: str) -> str:
+        self.permission_mode = _validate_permission_mode(value)
+        return f"Cogent permission mode: {self.permission_mode_summary}. Hard denies remain active."
+
+    def cycle_permission_mode(self) -> str:
+        index = _PERMISSION_MODES.index(self.permission_mode)
+        return self.set_permission_mode(
+            _PERMISSION_MODES[(index + 1) % len(_PERMISSION_MODES)]
+        )
+
+    def _permission_command_target(self, raw: str) -> str | None:
+        parts = shlex.split(raw)
+        if not parts or parts[0] != "/permissions":
+            return None
+        if len(parts) == 2:
+            return _validate_permission_mode(parts[1])
+        if len(parts) > 2:
+            raise ValueError(
+                "Usage: /permissions [default|acceptEdits|plan|bypassPermissions]"
+            )
+        return None
+
+    async def _commit_permission_mode_after(
+        self,
+        events: AsyncIterator[AgentEvent],
+        target: str | None,
+    ) -> AsyncIterator[AgentEvent]:
+        completed = False
+        async for event in events:
+            completed = completed or (
+                event.type == "command_completed" and event.status == "completed"
+            )
+            yield event
+        if completed and target is not None:
+            self.set_permission_mode(target)
 
     async def execute_management_command(self, raw: str) -> str | None:
         parts = shlex.split(raw)
@@ -954,6 +1071,7 @@ async def _run_mode(
         output_stream=output_stream,
         error_stream=error_stream,
         interrupt=interrupt,
+        permission_mode=getattr(args, "permission_mode", "default"),
     )
     signal_context = (
         _sigint_handler(interrupt)

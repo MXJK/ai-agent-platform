@@ -155,7 +155,10 @@ def test_mcp_search_result_loaded_set_survives_restart(tmp_path):
                       input_schema={'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']})
     runtime = runtime_for(tmp_path, ScriptedClient(response('', ToolCall('ToolSearch', {'query': 'notes'}, 'search-1')),
         response('', ToolCall('mcp__notes__lookup', {'query': 'hello'}, 'mcp-1')), response('Done.')), registry=registry)
-    record = start(runtime, tmp_path)
+    # This acceptance is about the persisted lazy-load set, not HITL. MCP
+    # invocation is a command and therefore needs bypass (or an approval) to
+    # run uninterrupted.
+    record = start(runtime, tmp_path, permission_mode="bypassPermissions")
     result = execute(runtime, tmp_path, record)
     assert result.status == 'completed'
     state = CogentState.from_mapping(runtime.get_run(record.run_id).runtime_state)

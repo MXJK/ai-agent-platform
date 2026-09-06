@@ -14,6 +14,9 @@ def test_cli_defaults_to_tui_and_supports_print():
     parser = build_parser()
     assert parser.parse_args([]).mode == 'tui'
     assert parser.parse_args(['--print', 'hello', 'world']).print_message == ['hello', 'world']
+    assert parser.parse_args([
+        '--permission-mode', 'bypassPermissions'
+    ]).permission_mode == 'bypassPermissions'
 
 
 def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_path):
@@ -31,6 +34,16 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                     app.query_one("#model-label", Static).content
                 )
                 assert any(item['name'] == 'help' for item in app.capabilities['commands'])
+                assert 'mode: default' in str(app.query_one('#mode-label', Static).content)
+                await app.submit('/permissions acceptEdits')
+                await app.workers.wait_for_complete()
+                assert application.permission_mode == 'acceptEdits'
+                assert 'mode: acceptEdits' in str(app.query_one('#mode-label', Static).content)
+                await pilot.press('shift+tab')
+                assert application.permission_mode == 'plan'
+                await app.submit('/permissions bypassPermissions')
+                await app.workers.wait_for_complete()
+                assert application.permission_mode == 'bypassPermissions'
                 await app.submit('/models')
                 assert any(
                     "embedded test runtime" in str(item.content)
@@ -43,6 +56,9 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                 await app.submit('Hello Cogent')
                 await app.workers.wait_for_complete()
                 run = app.active_run_id
+                assert api.state.runtime.coding_agent_runtime.get_run(
+                    run
+                ).runtime_state['permission_mode'] == 'bypassPermissions'
                 assert 'fake model reply' in app.answer_text[run]
                 assert isinstance(app.answers[run], Markdown)
                 await app.render_event(AgentEvent(999, run, 'running', 'thinking_delta', '', {'text': 'Visible summary'}))

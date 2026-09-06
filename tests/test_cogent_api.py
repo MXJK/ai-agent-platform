@@ -48,6 +48,9 @@ def test_default_api_uses_cogent_and_fast_chat_is_removed(tmp_path):
         body = finish(client, response.json()['run_id'])
         assert body['runtime_engine'] == 'cogent-v1'
         assert body['status'] == 'completed'
+        record = app.state.query_service._runtime.get_run(body['run_id'])
+        assert record.runtime_state['permission_mode'] == 'plan'
+        assert 'Plan mode is active' in record.runtime_state['system_prompt']
         assert body['result']['metrics']['input_tokens'] > 0
         assert not {'context_route', 'selected_knowledge_base_ids', 'context_sources'} & body['result'].keys()
         events = client.get(f"/api/v1/agent/runs/{body['run_id']}/events").json()['events']

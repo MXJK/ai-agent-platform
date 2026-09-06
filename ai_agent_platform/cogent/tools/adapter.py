@@ -76,7 +76,11 @@ class CogentToolAdapter:
             _, server, tool = source.name.split(".", 2)
             return PreparedCall(
                 call, ToolCall(source.name, dict(call.arguments), call.call_id, call.source),
-                Tool("mcp_call", _category(source), source.description), source,
+                # Every MCP invocation is a command: remote read-only
+                # annotations remain advisory and default/plan/acceptEdits
+                # still require confirmation. Only bypass (or an explicit
+                # allow rule) may skip that ordinary confirmation.
+                Tool("mcp_call", "command", source.description), source,
                 permission_arguments={"server": server, "tool": tool, "arguments": call.arguments},
             )
         if call.name == "ToolSearch":
@@ -114,7 +118,7 @@ class CogentToolAdapter:
             return PreparedCall(
                 call,
                 execution,
-                Tool(call.name, _category(source), source.description),
+                Tool(call.name, "command", source.description),
                 source,
             )
         actual_name = _ALIASES.get(call.name)

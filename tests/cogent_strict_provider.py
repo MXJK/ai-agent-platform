@@ -36,7 +36,10 @@ class StrictDeepSeekTransport:
             return httpx.Response(400, json={'error': {'type': 'invalid_request_error', 'message': str(error)}})
         results = [m for m in body['messages'] if m['role'] == 'tool']
         if not results:
-            calls = [('inspect-command', 'Bash', {'command': 'python3 --version'}),
+            # Keep this as a non-whitelisted command so the fixture continues
+            # to exercise the default-mode approval/resume lifecycle.  Safe
+            # read-only commands are intentionally auto-approved.
+            calls = [('inspect-command', 'Bash', {'command': "python3 -c 'print(123)'"}),
                      ('inspect-glob', 'Glob', {'pattern': '**/*.md'})]
             delta = {'reasoning_content': 'Inspect the available project files.', 'tool_calls': [
                 {'index': i, 'id': id, 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}
