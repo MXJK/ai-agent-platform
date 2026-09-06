@@ -471,6 +471,11 @@ const AGENT_ACTIVITY_EVENT_TYPES = new Set([
   "answer_completed",
 ]);
 
+const AGENT_PERSISTED_PRESENTATION_EVENT_TYPES = new Set([
+  ...AGENT_ACTIVITY_EVENT_TYPES,
+  "thinking_completed",
+]);
+
 const AGENT_CONTEXT_ACTIVITY_NODES = new Set([
   "load_project_instructions",
   "classify_request",
@@ -851,6 +856,22 @@ function executionActivityEvents(events) {
       return true;
     })
     .slice(-24);
+}
+
+function agentTracePresentationEvents(trace = []) {
+  return trace.flatMap((step, index) => {
+    const type = step.type
+      || (AGENT_PERSISTED_PRESENTATION_EVENT_TYPES.has(step.node) ? step.node : "");
+    if (!type) return [];
+    return [{
+      sequence: Number(step.sequence || step.step) || index + 1,
+      type,
+      status: step.status || "completed",
+      node: step.event_node || step.node || null,
+      summary: step.summary || "",
+      output: step.output || {},
+    }];
+  });
 }
 
 function executionActiveActivitySequence(events, status = "running") {
@@ -4372,6 +4393,34 @@ function runAnswerAlreadyPersisted(body, messages) {
   );
 }
 
+async function restoreHistoricalAgentRuns(conversationId, messages, latestRunId) {
+  const historicalRunIds = [...new Set(
+    messages
+      .filter((message) => message.role === "assistant" && message.source_run_id)
+      .map((message) => message.source_run_id)
+      .filter((sourceRunId) => sourceRunId !== latestRunId),
+  )];
+  const historicalRuns = await Promise.allSettled(
+    historicalRunIds.map((sourceRunId) => (
+      fetchJson(`/agent/runs/${encodeURIComponent(sourceRunId)}`)
+    )),
+  );
+  if (conversationId !== state.conversationId) return;
+  historicalRuns.forEach((entry, index) => {
+    const sourceRunId = historicalRunIds[index];
+    if (entry.status !== "fulfilled") {
+      console.warn(`Unable to restore historical Agent Run ${sourceRunId}`, entry.reason);
+      return;
+    }
+    if (agentRunConversationId(entry.value) !== conversationId) return;
+    const historicalContent = chatContentForRun(sourceRunId);
+    if (!historicalContent) return;
+    const historicalStartedAt = performance.now()
+      - (entry.value?.result?.metrics?.elapsed_ms || 0);
+    renderAgentChatResponse(historicalContent, entry.value, historicalStartedAt);
+  });
+}
+
 async function restoreLatestAgentRun(conversationId, messages = []) {
   let body;
   try {
@@ -4402,9 +4451,14 @@ async function restoreLatestAgentRun(conversationId, messages = []) {
     const timestamp = contentNode.closest(".chat-bubble")?.querySelector(".message-label span");
     if (timestamp) timestamp.textContent = "已恢复运行";
   }
+
+  const historicalRestore = restoreHistoricalAgentRuns(conversationId, messages, runId);
   const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
   renderAgentChatResponse(contentNode, body, startedAt);
-  if (!["queued", "running"].includes(status)) return body;
+  if (!["queued", "running"].includes(status)) {
+    await historicalRestore;
+    return body;
+  }
 
   const presenter = createAgentProgressPresenter(contentNode, startedAt, {
     initialTrace: agentRunTrace(body),
@@ -4425,6 +4479,7 @@ async function restoreLatestAgentRun(conversationId, messages = []) {
     stopResponseTimer(contentNode);
     showToast(`Agent 运行恢复失败：${humanizeError(error)}`, "error");
   });
+  await historicalRestore;
   return body;
 }
 
@@ -4766,6 +4821,11 @@ async function refreshMessages(showRaw = true, renderChat = true) {
   renderMessages(body.messages || []);
   if (renderChat) {
     renderChatHistory(body.messages || []);
+    try {
+      await restoreLatestAgentRun(conversationId, body.messages || []);
+    } catch (error) {
+      showToast(`Agent 状态恢复失败：${humanizeError(error)}`, "warning");
+    }
   }
   if (showRaw) {
     setRaw(body);
@@ -4908,7 +4968,9 @@ function renderChatHistory(messages) {
   setChatWorkbenchActive(true);
   output.innerHTML = "";
   for (const message of chatMessages) {
-    appendChatMessage(message.role, message.content, message.created_at);
+    appendChatMessage(message.role, message.content, message.created_at, {
+      runId: message.role === "assistant" ? message.source_run_id || "" : "",
+    });
   }
   scrollConversationToLatest({ behavior: "auto" });
 }
@@ -5908,8 +5970,11 @@ function renderAgentChatResponse(
   const status = holdAnswer ? "running" : actualStatus;
   const trace = visibleTrace || (body?.trace?.length ? body.trace : result.trace) || [];
   const streamEvents = body?.stream_events || [];
+  const presentationEvents = streamEvents.length
+    ? streamEvents
+    : agentTracePresentationEvents(trace);
   const streamedAnswer = String(body?.streamed_answer || "");
-  renderCogentThinking(contentNode, streamEvents, result.metrics);
+  renderCogentThinking(contentNode, presentationEvents, result.metrics);
   const elapsedMs = result.metrics?.elapsed_ms ?? Math.round(performance.now() - startedAt);
   renderExecutionProcess(contentNode, {
     trace,
@@ -5919,7 +5984,7 @@ function renderAgentChatResponse(
     fallbackSummary: actualStatus === "queued"
       ? "Agent 任务已进入执行队列。"
       : "Cogent 正在执行当前任务。",
-    events: streamEvents,
+    events: presentationEvents,
     activityOnly: true,
   });
 
@@ -5986,10 +6051,16 @@ function renderAgentChatResponse(
 }
 
 function cogentThinkingPresentation(events, metrics = {}) {
-  const text = (events || [])
+  const deltaText = (events || [])
     .filter((event) => event.type === "thinking_delta")
     .map((event) => String(event.output?.text || ""))
     .join("");
+  const completedText = (events || [])
+    .filter((event) => event.type === "thinking_completed")
+    .map((event) => String(event.output?.text || "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const text = deltaText || completedText;
   const usage = (events || []).filter((event) => event.type === "usage");
   const tokens = metrics?.thoughts_tokens || usage.reduce(
     (total, event) => total + Number(event.output?.thoughts_tokens || 0), 0,

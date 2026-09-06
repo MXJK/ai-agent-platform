@@ -908,7 +908,7 @@ class ApiTests(unittest.TestCase):
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260905-output-r1',
+            '/static/app.js?v=20260906-run-history-r1',
             response.text,
         )
         self.assertNotIn('id="composer-mode-input"', response.text)
@@ -1462,6 +1462,10 @@ Inspect the requested code before reporting findings.
                 self.assertIn(f'event: {event}', response.text)
             messages = client.get(f'/api/v1/sessions/{session}/messages').json()['messages']
             self.assertEqual([item['role'] for item in messages], ['user', 'assistant'])
+            self.assertEqual(
+                [item['source_run_id'] for item in messages],
+                [body['run_id'], body['run_id']],
+            )
             usage = client.get(f'/api/v1/sessions/{session}/token-usage').json()
             self.assertGreater(usage['input_tokens'], 0)
             self.assertGreater(usage['output_tokens'], 0)

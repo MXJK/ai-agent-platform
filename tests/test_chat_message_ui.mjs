@@ -326,6 +326,86 @@ test("direct session loading still opens the conversation workbench", async () =
   assert.ok(events.includes("navigate:chat"));
 });
 
+test("session history binds every assistant message to its persisted Run", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  vm.runInContext(`
+    const output = { innerHTML: "" };
+    const appended = [];
+    document.getElementById = (id) => id === "chat-output" ? output : null;
+    setChatWorkbenchActive = () => {};
+    scrollConversationToLatest = () => {};
+    appendChatMessage = (role, content, createdAt, options) => {
+      appended.push({ role, content, createdAt, runId: options?.runId || "" });
+    };
+    renderChatHistory([
+      { role: "user", content: "第一问", created_at: "t1", source_run_id: "run_1" },
+      { role: "assistant", content: "第一答", created_at: "t2", source_run_id: "run_1" },
+      { role: "user", content: "第二问", created_at: "t3", source_run_id: "run_2" },
+      { role: "assistant", content: "第二答", created_at: "t4", source_run_id: "run_2" },
+    ]);
+    testEvents.push(...appended.map((item) => item.role + ":" + item.runId));
+  `, context);
+
+  assert.deepEqual(context.testEvents, [
+    "user:",
+    "assistant:run_1",
+    "user:",
+    "assistant:run_2",
+  ]);
+});
+
+test("session restore hydrates historical Runs and tolerates a missing Run", async () => {
+  const { context, events } = loadAgentSubmissionHarness(async (calls, path) => {
+    calls.push(`request:${path}`);
+    if (path.endsWith("/agent/runs/latest")) {
+      return {
+        run_id: "run_latest",
+        conversation_id: "sess_1",
+        status: "completed",
+        result: { answer: "最新回答", metrics: { elapsed_ms: 20 }, trace: [] },
+      };
+    }
+    if (path === "/agent/runs/run_old") {
+      return {
+        run_id: "run_old",
+        conversation_id: "sess_1",
+        status: "completed",
+        result: { answer: "历史回答", metrics: { elapsed_ms: 10 }, trace: [] },
+      };
+    }
+    if (path === "/agent/runs/run_missing") throw new Error("not found");
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  vm.runInContext(`
+    state.conversationId = "sess_1";
+    const contentByRun = new Map([
+      ["run_old", { id: "old" }],
+      ["run_missing", { id: "missing" }],
+      ["run_latest", { id: "latest" }],
+    ]);
+    chatContentForRun = (runId) => contentByRun.get(runId) || null;
+    renderAgentRun = () => {};
+    setChatStatusFromRun = () => {};
+    renderAgentChatResponse = (content, body) => {
+      testEvents.push("hydrate:" + content.id + ":" + body.run_id);
+    };
+    performance = { now: () => 100 };
+  `, context);
+
+  const result = await vm.runInContext(`restoreLatestAgentRun("sess_1", [
+    { role: "assistant", content: "历史回答", source_run_id: "run_old" },
+    { role: "assistant", content: "已删除回答", source_run_id: "run_missing" },
+    { role: "assistant", content: "最新回答", source_run_id: "run_latest" },
+  ])`, context);
+
+  assert.equal(result.run_id, "run_latest");
+  assert.ok(events.includes("request:/agent/runs/run_old"));
+  assert.ok(events.includes("request:/agent/runs/run_missing"));
+  assert.ok(events.includes("hydrate:old:run_old"));
+  assert.ok(events.includes("hydrate:latest:run_latest"));
+  assert.equal(events.some((event) => event.startsWith("hydrate:missing:")), false);
+});
+
 test("Agent answer deltas render while running and resets remove tool preambles", () => {
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   vm.runInContext(`
@@ -406,6 +486,52 @@ test("only unfinished Agent activities are marked active", () => {
   assert.equal(
     vm.runInContext('executionActiveActivitySequence(testActivityEvents, "running")', context),
     null,
+  );
+});
+
+test("persisted Cogent traces restore completed thinking and tool activity", () => {
+  const { context } = loadAgentSubmissionHarness(async () => ({}));
+  context.testPersistedTrace = [
+    {
+      step: 11,
+      node: "thinking_completed",
+      summary: "Provider reasoning summary completed.",
+      output: { text: "先读取项目结构，再验证实现。" },
+    },
+    {
+      step: 12,
+      node: "tool_selected",
+      summary: "Tool selected: ReadFile.",
+      output: { call_id: "call_1", name: "ReadFile", arguments: { path: "README.md" } },
+    },
+    {
+      step: 13,
+      node: "tool_result",
+      summary: "Tool completed: ReadFile.",
+      output: { call_id: "call_1", name: "ReadFile", ok: true },
+    },
+  ];
+
+  const events = vm.runInContext(
+    "agentTracePresentationEvents(testPersistedTrace)",
+    context,
+  );
+  context.testPersistedEvents = events;
+  const thinking = vm.runInContext(
+    "cogentThinkingPresentation(testPersistedEvents, { thoughts_tokens: 42 })",
+    context,
+  );
+  const activities = vm.runInContext(
+    "executionActivityEvents(testPersistedEvents)",
+    context,
+  );
+
+  assert.equal(thinking.text, "先读取项目结构，再验证实现。");
+  assert.equal(thinking.tokens, 42);
+  assert.equal(thinking.visible, true);
+  assert.deepEqual(
+    Array.from(activities, (event) => event.type),
+    ["tool_selected", "tool_result"],
   );
 });
 

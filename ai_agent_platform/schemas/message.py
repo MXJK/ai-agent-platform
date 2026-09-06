@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ class MessageResponse(BaseModel):
     role: MessageRole
     content: str
     created_at: datetime
+    source_run_id: Optional[str] = None
 
     @classmethod
     def from_domain(cls, message: Message) -> "MessageResponse":
@@ -32,6 +33,7 @@ class MessageResponse(BaseModel):
             role=message.role,  # type: ignore[arg-type]
             content=message.content,
             created_at=message.created_at,
+            source_run_id=message.source_run_id,
         )
 
 

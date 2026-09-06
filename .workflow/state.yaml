@@ -1,8 +1,10 @@
 project_id: "ai-agent-platform"
-status: "active"
-active_task: "COGENT-FILE-MEMORY-REFACTOR"
-next_action: "Implement layered instructions, file memory, database session recovery, and replacement Web/API/CLI flows."
-blockers: []
+status: "blocked"
+active_task: "COGENT-RUN-HISTORY-PRESENTATION"
+next_action: "After browser quota resets, reload sess_61b2645282ec in Chromium and verify both assistant replies; then rerun the full suite after the file-memory symlink exception contract is resolved."
+blockers:
+  - "Real Chromium reload acceptance is unavailable until the Codex browser quota resets after 16:16 on 2026-09-06."
+  - "Repository-wide pytest still has the pre-existing file-memory OSError-versus-ValueError symlink assertion failure."
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-06T12:02:14+08:00"
+updated_at: "2026-09-06T12:41:38+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"
