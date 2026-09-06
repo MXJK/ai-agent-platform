@@ -206,6 +206,30 @@ slash commands are supported. Only inline execution is supported; fork requests
 are explicitly rejected. .agents/skills is not read, keeping Codex Skills separate
 from runtime Skills. Skill content never grants tools or overrides authorization.
 
+The bundled `/skill-creator` turns repeatable workflows into project-local
+`.cogent/skills/<name>/SKILL.md` packages and guides updates, behavior checks,
+and packaging. Its deterministic helper creates only inside the current Workspace
+and never replaces an existing Skill. Validation rejects name mismatches,
+unfinished placeholders, symlinks, and unsafe package entries. `metadata`,
+`compatibility`, and `license` are accepted as inert descriptive fields and do
+not change authorization.
+
+```bash
+.venv/bin/python -m ai_agent_platform.skills.creator init release-notes \
+  --workspace . \
+  --description 'Write evidence-based release notes from repository changes.' \
+  --instructions 'Inspect the relevant diff and write concise, verifiable release notes.'
+.venv/bin/python -m ai_agent_platform.skills.creator validate \
+  .cogent/skills/release-notes
+.venv/bin/python -m ai_agent_platform.skills.creator package \
+  .cogent/skills/release-notes --output-directory dist
+```
+
+The deterministic `.skill` ZIP is validated before packaging, excludes root
+`evals/` and common build debris, and must be written outside the source Skill.
+Files under `scripts/`, `references/`, and `assets/` remain resources; discovery
+does not execute them automatically.
+
 ## Gemini protocol support
 
 To use Gemini, save the Google API key, discover models, and register the target

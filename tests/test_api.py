@@ -1312,6 +1312,14 @@ Inspect the requested code before reporting findings.
                         "skill_name": "review",
                         "skill_qualified_name": "user:review",
                         "source": "user",
+                    }, {
+                        "name": "skill-creator",
+                        "description": "Create or improve a Cogent Skill.",
+                        "usage": "/skill-creator <goal or existing Skill path>",
+                        "aliases": [],
+                        "skill_name": "skill-creator",
+                        "skill_qualified_name": "bundled:skill-creator",
+                        "source": "bundled",
                     }],
                 )
                 self.assertEqual(capabilities.json()["mcp_tools"], [])

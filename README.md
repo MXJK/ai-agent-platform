@@ -213,6 +213,26 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 Codex 自身 Skill 和项目运行时 Skill 保持隔离。
 Skill 内容是声明式上下文，不能授予工具、提升权限或越过 Workspace 边界。
 
+内置 `/skill-creator` 可将重复工作流整理为项目级
+`.cogent/skills/<name>/SKILL.md`，并指导更新、行为测试和打包。确定性辅助命令仅在当前
+Workspace 创建 Skill，不覆盖已有目录；校验会拒绝名称不一致、未完成占位符、符号链接和
+不安全包内容。`metadata`、`compatibility`、`license` 作为惰性描述字段接受，不会改变权限。
+
+```bash
+.venv/bin/python -m ai_agent_platform.skills.creator init release-notes \
+  --workspace . \
+  --description '根据仓库变更生成有证据的发布说明。' \
+  --instructions '读取相关 diff，生成简洁且可核验的发布说明。'
+.venv/bin/python -m ai_agent_platform.skills.creator validate \
+  .cogent/skills/release-notes
+.venv/bin/python -m ai_agent_platform.skills.creator package \
+  .cogent/skills/release-notes --output-directory dist
+```
+
+`.skill` 是确定性 ZIP 包；打包前强制校验，排除根目录 `evals/` 和常见构建垃圾，且输出目录
+必须位于 Skill 源目录之外。Skill 中的 `scripts/`、`references/`、`assets/` 只作为资源，
+发现阶段不会自动执行。
+
 ## 主要能力
 
 普通对话、代码任务、Skill、MCP 和 slash command 共用 Cogent Run，不再提供快速对话模式。

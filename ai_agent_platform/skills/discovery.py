@@ -37,6 +37,9 @@ _SKILL_FIELDS = frozenset(
         "mode",
         "context",
         "model",
+        "metadata",
+        "compatibility",
+        "license",
     }
 )
 _COMMAND_FIELDS = frozenset({"name", "description", "usage", "aliases"})
@@ -499,6 +502,9 @@ def parse_skill_document(
             "unknown_metadata",
             "unsupported Skill metadata fields: " + ", ".join(unknown_fields),
         )
+    _optional_metadata(metadata.get("metadata"))
+    _optional_text(metadata.get("compatibility"), label="compatibility", max_chars=500)
+    _optional_text(metadata.get("license"), label="license", max_chars=200)
     name = _name(metadata.get("name"), label="Skill name")
     description = _description(metadata.get("description"), label="Skill description")
     agents = _string_list(
@@ -673,6 +679,34 @@ def _description(value: Any, *, label: str) -> str:
             f"{label} exceeds {_MAX_DESCRIPTION_CHARS} characters",
         )
     return normalized
+
+
+def _optional_metadata(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise SkillDocumentError(
+            "invalid_metadata", "metadata must be an object with text keys"
+        )
+    if len(value) > 32:
+        raise SkillDocumentError("invalid_metadata", "metadata contains too many fields")
+    try:
+        serialized = yaml.safe_dump(dict(value), allow_unicode=True)
+    except yaml.YAMLError as exc:
+        raise SkillDocumentError("invalid_metadata", "metadata cannot be serialized") from exc
+    if len(serialized) > 4_000:
+        raise SkillDocumentError("invalid_metadata", "metadata exceeds 4000 characters")
+
+
+def _optional_text(value: Any, *, label: str, max_chars: int) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise SkillDocumentError("invalid_metadata", f"{label} must be text")
+    if len(value.strip()) > max_chars:
+        raise SkillDocumentError(
+            "invalid_metadata", f"{label} exceeds {max_chars} characters"
+        )
 
 
 def _string_list(

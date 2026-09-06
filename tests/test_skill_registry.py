@@ -51,8 +51,11 @@ class SkillRegistryTests(unittest.TestCase):
                 self.assertEqual(registry["root"], str(root / "skills"))
                 self.assertEqual(
                     [item["qualified_name"] for item in registry["skills"]],
-                    ["user:global-review"],
+                    ["user:global-review", "bundled:skill-creator"],
                 )
+                creator = registry["skills"][1]
+                self.assertFalse(creator["editable"])
+                self.assertEqual(creator["content"], None)
 
                 disabled = client.patch(
                     "/api/v1/skills/global-review/enabled",
@@ -66,7 +69,13 @@ class SkillRegistryTests(unittest.TestCase):
 
                 deleted = client.delete("/api/v1/skills/global-review")
                 self.assertEqual(deleted.status_code, 204)
-                self.assertEqual(client.get("/api/v1/skills").json()["skills"], [])
+                self.assertEqual(
+                    [
+                        item["qualified_name"]
+                        for item in client.get("/api/v1/skills").json()["skills"]
+                    ],
+                    ["bundled:skill-creator"],
+                )
 
     def test_skill_service_uses_one_catalog_for_every_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
