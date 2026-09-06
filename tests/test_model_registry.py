@@ -621,6 +621,8 @@ class ModelRegistryApiTests(unittest.TestCase):
 
         self.assertEqual(usage.status_code, 200)
         self.assertEqual(usage.json()["context"]["budget_tokens"], 98_000)
+        self.assertEqual(usage.json()["context"]["budget_provider"], "anthropic")
+        self.assertEqual(usage.json()["context"]["budget_model"], "test-model")
 
     @patch(
         "ai_agent_platform.model_registry.discovery.ProviderModelDiscovery.discover",

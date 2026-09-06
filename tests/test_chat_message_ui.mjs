@@ -159,11 +159,25 @@ test("message delivery state is explicit and clears after acceptance", () => {
   assert.equal(statusNode.textContent, "");
 });
 
-test("composer context meter separates cumulative usage from current history pressure", () => {
+test("composer context meter uses the latest foreground Prompt input", () => {
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   context.testUsage = {
     total_tokens: 180_000,
-    context: { estimated_tokens: 18_000, budget_tokens: 72_704 },
+    context: {
+      estimated_tokens: 18_000,
+      budget_tokens: 72_704,
+      budget_provider: "openai",
+      budget_model: "gpt-test",
+    },
+    records: [
+      {
+        operation: "agent",
+        provider: "openai",
+        model: "gpt-test",
+        input_tokens: 30_000,
+        input_count_method: "openai_responses_input_tokens",
+      },
+    ],
   };
 
   const presentation = vm.runInContext(
@@ -172,28 +186,47 @@ test("composer context meter separates cumulative usage from current history pre
   );
 
   assert.equal(presentation.kicker, "累计 180,000 tokens");
-  assert.equal(presentation.label, "上下文 ≈ 18,000 / 72,704 · 24.76%");
-  assert.equal(presentation.compactLabel, "上下文 24.76% · ≈ 1.8万");
-  assert.ok(presentation.meterPercent > 24.75 && presentation.meterPercent < 24.77);
+  assert.equal(presentation.label, "上次模型输入 30,000 / 72,704 · 41.26%");
+  assert.equal(presentation.compactLabel, "上次输入 41.26% · 3万");
+  assert.ok(presentation.meterPercent > 41.25 && presentation.meterPercent < 41.27);
   assert.equal(presentation.tone, null);
-  assert.equal(presentation.ringLabel, "25%");
-  assert.equal(presentation.hasBreakdown, false);
-  assert.equal(presentation.breakdown.length, 3);
-  assert.ok(presentation.breakdown.every((item) => item.tokens === 0));
-  assert.match(presentation.description, /累计实际消耗 180,000 tokens/);
-  assert.match(presentation.description, /会话历史上下文估算 18,000 \/ 72,704 tokens/);
+  assert.equal(presentation.ringLabel, "41%");
+  assert.equal(presentation.promptInput, 30_000);
+  assert.equal(presentation.estimatedHistory, 18_000);
+  assert.equal(presentation.hasMeasuredPrompt, true);
+  assert.equal(presentation.comparableBudget, true);
+  assert.match(presentation.description, /本会话累计消耗 180,000 tokens/);
+  assert.match(presentation.description, /记录输入 30,000 tokens/);
+  assert.match(presentation.description, /历史\/摘要另估算为 18,000 tokens/);
   assert.doesNotMatch(presentation.label, /247\.58%/);
 });
 
-test("composer context meter handles unknown budgets and high estimated usage", () => {
+test("composer context meter handles unknown budgets and high actual Prompt usage", () => {
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   context.unknownUsage = {
     total_tokens: 9_000,
-    context: { estimated_tokens: 420, budget_tokens: 0 },
+    context: { estimated_tokens: 120, budget_tokens: 0 },
+    records: [{
+      operation: "chat",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      input_tokens: 420,
+    }],
   };
   context.highUsage = {
     total_tokens: 240_000,
-    context: { estimated_tokens: 66_000, budget_tokens: 72_704 },
+    context: {
+      estimated_tokens: 5_000,
+      budget_tokens: 72_704,
+      budget_provider: "deepseek",
+      budget_model: "deepseek-chat",
+    },
+    records: [{
+      operation: "agent",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      input_tokens: 66_000,
+    }],
   };
 
   const unknown = vm.runInContext(
@@ -205,32 +238,42 @@ test("composer context meter handles unknown budgets and high estimated usage", 
     context,
   );
 
-  assert.equal(unknown.label, "上下文 ≈ 420 · 上限未知");
-  assert.equal(unknown.compactLabel, "上下文 ≈ 420 · 上限未知");
+  assert.equal(unknown.label, "上次模型输入 420 tokens");
+  assert.equal(unknown.compactLabel, "上次输入 420");
   assert.equal(unknown.meterPercent, 0);
   assert.equal(unknown.tone, null);
   assert.doesNotMatch(unknown.label, /%/);
-  assert.equal(high.label, "上下文 ≈ 66,000 / 72,704 · 90.78%");
-  assert.equal(high.compactLabel, "上下文 90.78% · ≈ 6.6万");
+  assert.equal(high.label, "上次模型输入 66,000 / 72,704 · 90.78%");
+  assert.equal(high.compactLabel, "上次输入 90.78% · 6.6万");
   assert.ok(high.meterPercent > 90.77 && high.meterPercent < 90.79);
   assert.equal(high.tone, "error");
 });
 
-test("composer context ring breaks context_shares into system, tools, and messages", () => {
+test("composer context meter ignores later background usage and mismatched budgets", () => {
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   context.shareUsage = {
-    total_tokens: 50_000,
+    total_tokens: 2_565,
     context: {
-      estimated_tokens: 30_000,
-      budget_tokens: 72_704,
-      shares: {
-        system_tokens: 405,
-        tool_schema_tokens: 1736,
-        evidence_tokens: 17_640,
-        history_tokens: 10_584,
-        transcript_tokens: 42_339,
-      },
+      estimated_tokens: 70,
+      budget_tokens: 68_608,
+      budget_provider: "fake",
+      budget_model: "another-model",
     },
+    records: [
+      {
+        operation: "agent",
+        provider: "fake",
+        model: "demo-stream-model",
+        input_tokens: 2_145,
+        input_count_method: "fake_lexical_tokenizer",
+      },
+      {
+        operation: "cogent_memory_extract",
+        provider: "fake",
+        model: "demo-stream-model",
+        input_tokens: 262,
+      },
+    ],
   };
 
   const presentation = vm.runInContext(
@@ -238,13 +281,19 @@ test("composer context ring breaks context_shares into system, tools, and messag
     context,
   );
 
-  assert.equal(presentation.hasBreakdown, true);
-  assert.equal(presentation.breakdown[0].key, "system");
-  assert.equal(presentation.breakdown[0].tokens, 405 + 1736);
-  assert.equal(presentation.breakdown[1].key, "tools");
-  assert.equal(presentation.breakdown[1].tokens, 42_339);
-  assert.equal(presentation.breakdown[2].key, "messages");
-  assert.equal(presentation.breakdown[2].tokens, 17_640 + 10_584);
+  assert.equal(presentation.promptInput, 2_145);
+  assert.equal(presentation.label, "上次模型输入 2,145 tokens");
+  assert.equal(presentation.comparableBudget, false);
+  assert.equal(presentation.percentage, null);
+  assert.equal(presentation.ringLabel, "–");
+  const tooltip = vm.runInContext(
+    "contextRingTooltipHtml(composerContextUsagePresentation(shareUsage))",
+    context,
+  );
+  assert.match(tooltip, /上次模型输入 2\.1k/);
+  assert.match(tooltip, /历史消息\/摘要估算/);
+  assert.match(tooltip, /模型已变化，占比不可直接比较/);
+  assert.doesNotMatch(tooltip, /cogent_memory_extract/);
   assert.equal(
     vm.runInContext("formatTokenK(2141)", context),
     "2.1k",

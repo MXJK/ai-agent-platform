@@ -330,17 +330,32 @@ function formatTokenK(value) {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function contextRingBreakdown(shares) {
-  const system = Number(shares?.system_tokens || 0)
-    + Number(shares?.tool_schema_tokens || 0);
-  const tools = Number(shares?.transcript_tokens || 0);
-  const messages = Number(shares?.history_tokens || 0)
-    + Number(shares?.evidence_tokens || 0);
-  return [
-    { key: "system", label: "系统上下文", tokens: system },
-    { key: "tools", label: "工具调用", tokens: tools },
-    { key: "messages", label: "对话消息", tokens: messages },
-  ];
+const USER_PROMPT_OPERATIONS = new Set(["agent", "chat", "rag_ask"]);
+
+function latestUserPromptRecord(records) {
+  return [...(records || [])]
+    .reverse()
+    .find((record) => (
+      USER_PROMPT_OPERATIONS.has(String(record?.operation || ""))
+      && Number.isFinite(Number(record?.input_tokens))
+      && Number(record.input_tokens) >= 0
+    )) || null;
+}
+
+function promptMatchesContextBudget(record, context) {
+  if (!record || Number(context?.budget_tokens || 0) <= 0) return false;
+  const provider = String(record.provider || "").trim().toLowerCase();
+  const model = String(record.model || "").trim();
+  const budgetProvider = String(context?.budget_provider || "").trim().toLowerCase();
+  const budgetModel = String(context?.budget_model || "").trim();
+  return Boolean(
+    provider
+    && model
+    && budgetProvider
+    && budgetModel
+    && provider === budgetProvider
+    && model === budgetModel
+  );
 }
 
 function contextRingCenterLabel(ratio, hasBudget) {
@@ -360,45 +375,69 @@ function composerContextUsagePresentation(usage) {
       compactLabel: "等待首轮请求",
       meterPercent: 0,
       tone: null,
-      description: "发起请求后分别显示累计实际消耗和当前会话历史上下文估算",
+      description: "发起模型请求后显示最近一次实际 Prompt 输入和会话累计消耗",
       ringPercent: 0,
       ringLabel: "–",
       percentage: null,
-      estimated: 0,
+      promptInput: 0,
+      estimatedHistory: 0,
       budget: 0,
-      breakdown: contextRingBreakdown({}),
-      hasBreakdown: false,
+      provider: "",
+      model: "",
+      inputCountMethod: "",
+      hasMeasuredPrompt: false,
+      comparableBudget: false,
     };
   }
 
   const total = Math.max(0, Number(usage.total_tokens || 0));
-  const estimated = Math.max(0, Number(usage.context?.estimated_tokens || 0));
+  const estimatedHistory = Math.max(0, Number(usage.context?.estimated_tokens || 0));
   const budget = Math.max(0, Number(usage.context?.budget_tokens || 0));
-  const ratio = budget > 0 ? estimated / budget : 0;
-  const percentage = budget > 0 ? formatTokenPercentage(ratio) : null;
-  const breakdown = contextRingBreakdown(usage.context?.shares);
-  const hasBreakdown = breakdown.some((item) => item.tokens > 0);
-  const estimateDescription = budget > 0
-    ? `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} tokens（${percentage}）`
-    : `当前保留的会话历史上下文估算 ${formatTokenCount(estimated)} tokens；当前模型未提供输入预算`;
+  const latestPrompt = latestUserPromptRecord(usage.records);
+  const promptInput = Math.max(0, Number(latestPrompt?.input_tokens || 0));
+  const comparableBudget = promptMatchesContextBudget(latestPrompt, usage.context);
+  const ratio = comparableBudget ? promptInput / budget : 0;
+  const percentage = comparableBudget ? formatTokenPercentage(ratio) : null;
+  const promptIdentity = latestPrompt
+    ? [latestPrompt.provider, latestPrompt.model].filter(Boolean).join(" / ")
+    : "";
+  const countMethod = latestPrompt?.input_count_method || "";
+  const promptDescription = latestPrompt
+    ? `最近一次前台模型请求${promptIdentity ? `（${promptIdentity}）` : ""}记录输入 ${formatTokenCount(promptInput)} tokens${countMethod ? `，计数方式：${formatInputCountMethod(countMethod)}` : ""}`
+    : "尚无 Agent、Chat 或 RAG Ask 的模型请求记录";
+  const budgetDescription = comparableBudget
+    ? `该请求对应的当前输入预算为 ${formatTokenCount(budget)} tokens（${percentage}）`
+    : budget > 0
+      ? "最近请求与当前预算的 Provider/Model 不一致，因此不显示不可比的占用百分比"
+      : "当前未解析到可比较的模型输入预算";
   return {
     kicker: `累计 ${formatTokenCount(total)} tokens`,
-    label: budget > 0
-      ? `上下文 ≈ ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} · ${percentage}`
-      : `上下文 ≈ ${formatTokenCount(estimated)} · 上限未知`,
-    compactLabel: budget > 0
-      ? `上下文 ${percentage} · ≈ ${formatCompactTokenCount(estimated)}`
-      : `上下文 ≈ ${formatCompactTokenCount(estimated)} · 上限未知`,
+    label: latestPrompt
+      ? comparableBudget
+        ? `上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(budget)} · ${percentage}`
+        : `上次模型输入 ${formatTokenCount(promptInput)} tokens`
+      : "尚无前台模型请求",
+    compactLabel: latestPrompt
+      ? comparableBudget
+        ? `上次输入 ${percentage} · ${formatCompactTokenCount(promptInput)}`
+        : `上次输入 ${formatCompactTokenCount(promptInput)}`
+      : "尚无模型请求",
     meterPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
-    tone: ratio >= 0.9 ? "error" : ratio >= 0.72 ? "warning" : null,
-    description: `累计实际消耗 ${formatTokenCount(total)} tokens。${estimateDescription}；估算不含下一条用户输入、系统提示、工具 Schema 和工作区检索内容。`,
+    tone: comparableBudget
+      ? ratio >= 0.9 ? "error" : ratio >= 0.72 ? "warning" : null
+      : null,
+    description: `本会话累计消耗 ${formatTokenCount(total)} tokens。${promptDescription}。${budgetDescription}。会话历史/摘要另估算为 ${formatTokenCount(estimatedHistory)} tokens，不代表完整 Prompt。`,
     ringPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
-    ringLabel: contextRingCenterLabel(ratio, budget > 0),
+    ringLabel: contextRingCenterLabel(ratio, comparableBudget),
     percentage,
-    estimated,
+    promptInput,
+    estimatedHistory,
     budget,
-    breakdown,
-    hasBreakdown,
+    provider: latestPrompt?.provider || "",
+    model: latestPrompt?.model || "",
+    inputCountMethod: countMethod,
+    hasMeasuredPrompt: Boolean(latestPrompt),
+    comparableBudget,
   };
 }
 
@@ -2060,33 +2099,39 @@ function ensureContextRingTooltip() {
   node.setAttribute("role", "tooltip");
   node.hidden = true;
   document.body.appendChild(node);
+  const anchor = $("composer-context-budget");
+  if (anchor) anchor.setAttribute("aria-describedby", node.id);
   contextRingTooltipNode = node;
   return node;
 }
 
 function contextRingTooltipHtml(contextUsage) {
-  const total = contextUsage.budget > 0
-    ? `上下文 ≈ ${formatTokenK(contextUsage.estimated)} / ${formatTokenK(contextUsage.budget)}`
-    : `上下文 ≈ ${formatTokenK(contextUsage.estimated)}`;
-  const rows = contextUsage.hasBreakdown
-    ? contextUsage.breakdown
-        .map((item) => `
-          <li>
-            <span class="ring-legend-dot ring-legend-${item.key}"></span>
-            <span>${escapeHtml(item.label)}</span>
-            <strong>${formatTokenK(item.tokens)}</strong>
-          </li>`)
-        .join("")
-    : "";
-  const note = contextUsage.hasBreakdown
-    ? "三段为最近一次 Agent 运行的输入预算拆解（本地估算）"
-    : "当前仅对话历史估算，无系统/工具拆解";
+  const headline = contextUsage.hasMeasuredPrompt
+    ? `上次模型输入 ${formatTokenK(contextUsage.promptInput)}`
+    : "尚无前台模型请求";
+  const identity = [contextUsage.provider, contextUsage.model].filter(Boolean).join(" / ");
+  const rows = [
+    contextUsage.comparableBudget
+      ? ["对应输入预算", formatTokenK(contextUsage.budget)]
+      : null,
+    ["历史消息/摘要估算", `≈ ${formatTokenK(contextUsage.estimatedHistory)}`],
+    identity ? ["Provider / Model", identity] : null,
+  ].filter(Boolean).map(([label, value]) => `
+    <li>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </li>`).join("");
+  const note = contextUsage.hasMeasuredPrompt
+    ? contextUsage.comparableBudget
+      ? "主数字来自最近一次前台模型请求；历史估算仅用于预览保留消息。"
+      : "主数字来自最近一次前台模型请求；模型已变化，占比不可直接比较。"
+    : "完成一次 Agent、Chat 或 RAG Ask 请求后显示实际输入。";
   return `
     <div class="context-ring-tooltip-head">
-      <strong>${escapeHtml(total)}</strong>
+      <strong>${escapeHtml(headline)}</strong>
       <em>${contextUsage.percentage ?? "–"}</em>
     </div>
-    ${rows ? `<ul class="context-ring-tooltip-list">${rows}</ul>` : ""}
+    <ul class="context-ring-tooltip-list">${rows}</ul>
     <div class="context-ring-tooltip-note">${escapeHtml(note)}</div>`;
 }
 
@@ -2128,22 +2173,41 @@ function renderContextRing(contextUsage) {
 }
 
 function wireContextRingTooltip() {
-  const ring = $("composer-context-ring");
-  if (!ring || ring.__contextRingTooltipWired) return;
-  ring.__contextRingTooltipWired = true;
+  const anchor = $("composer-context-budget");
+  if (!anchor || anchor.__contextRingTooltipWired) return;
+  anchor.__contextRingTooltipWired = true;
+  let clickPinned = false;
   const show = () => {
     const node = ensureContextRingTooltip();
     if (!node) return;
     node.hidden = false;
-    positionContextRingTooltip(ring);
+    anchor.setAttribute("aria-expanded", "true");
+    positionContextRingTooltip(anchor);
   };
   const hide = () => {
     if (contextRingTooltipNode) contextRingTooltipNode.hidden = true;
+    anchor.setAttribute("aria-expanded", "false");
   };
-  ring.addEventListener("mouseenter", show);
-  ring.addEventListener("mouseleave", hide);
-  ring.addEventListener("focus", show);
-  ring.addEventListener("blur", hide);
+  anchor.addEventListener("mouseenter", show);
+  anchor.addEventListener("mouseleave", () => {
+    if (!clickPinned) hide();
+  });
+  anchor.addEventListener("focus", show);
+  anchor.addEventListener("blur", () => {
+    clickPinned = false;
+    hide();
+  });
+  anchor.addEventListener("click", () => {
+    clickPinned = !clickPinned;
+    if (clickPinned) show();
+    else hide();
+  });
+  anchor.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    clickPinned = false;
+    hide();
+    anchor.focus();
+  });
 }
 
 function updateContextSummary() {
@@ -4840,9 +4904,7 @@ function renderSessionSummary(
   const workspaces = usage?.workspaces || [];
   const operations = usage?.operations || [];
   const sessionBudget = usage?.budget?.session;
-  const latestPromptRecord = [...(usage?.records || [])]
-    .reverse()
-    .find((record) => record.operation !== "embedding");
+  const latestPromptRecord = latestUserPromptRecord(usage?.records);
   $("session-summary").innerHTML = `
     <div class="summary-strip">
       <strong>${escapeHtml(summary.session_id)}</strong>
@@ -4876,8 +4938,8 @@ function renderSessionSummary(
             }</small>
             <small>${
               latestPromptRecord
-                ? `最近最终 Prompt <strong>${escapeHtml(formatTokenCount(latestPromptRecord.input_tokens))}</strong> tokens · ${escapeHtml(formatInputCountMethod(latestPromptRecord.input_count_method))}`
-                : "尚无已发送的最终 Prompt"
+                ? `最近前台 Prompt 输入 <strong>${escapeHtml(formatTokenCount(latestPromptRecord.input_tokens))}</strong> tokens · ${escapeHtml(formatInputCountMethod(latestPromptRecord.input_count_method))}`
+                : "尚无 Agent、Chat 或 RAG Ask Prompt 记录"
             }</small>
           </div>
           <div class="token-budget-card ${sessionBudget?.exceeded ? "is-exceeded" : ""}">

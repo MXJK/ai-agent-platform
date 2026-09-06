@@ -44,16 +44,16 @@ from ai_agent_platform.services import (
 )
 
 
-def _context_budget_tokens(
+def _context_budget(
     llm_client: LLMClient | None,
     model_selection: ModelSelection | None = None,
-) -> int:
-    """Resolve the model-derived input budget, or 0 when unavailable."""
+):
+    """Resolve the model-derived input budget and its provenance."""
     resolve = getattr(llm_client, "resolve_context_budget", None)
     if not callable(resolve):
-        return 0
+        return None
     with model_selection_scope(model_selection):
-        return int(resolve().input_tokens)
+        return resolve()
 
 
 def create_sessions_router(
@@ -297,22 +297,27 @@ def create_sessions_router(
             if model_registry is not None
             else None
         )
+        context_budget = _context_budget(llm_client, model_selection)
         context = session_service.get_context_token_usage(
             session_id=session_id,
             max_context_messages=settings.llm_max_context_messages,
-            max_context_tokens=_context_budget_tokens(
-                llm_client,
-                model_selection,
+            max_context_tokens=(
+                int(context_budget.input_tokens)
+                if context_budget is not None
+                else 0
             ),
             max_context_messages_ceiling=(
                 settings.llm_max_context_messages_ceiling
             ),
         )
-        if query_service is not None:
-            context = replace(
-                context,
-                shares=query_service.latest_context_shares(session_id),
-            )
+        context = replace(
+            context,
+            shares=(
+                query_service.latest_context_shares(session_id)
+                if query_service is not None
+                else {}
+            ),
+        )
         return TokenUsagesResponse(
             session_id=session_id,
             input_tokens=totals.input_tokens,
@@ -320,7 +325,15 @@ def create_sessions_router(
             thoughts_tokens=totals.thoughts_tokens,
             total_tokens=totals.total_tokens,
             record_count=totals.record_count,
-            context=ContextTokenUsageResponse.from_domain(context),
+            context=ContextTokenUsageResponse.from_domain(
+                context,
+                budget_provider=(
+                    context_budget.provider if context_budget is not None else None
+                ),
+                budget_model=(
+                    context_budget.model if context_budget is not None else None
+                ),
+            ),
             workspaces=[
                 WorkspaceTokenBreakdownResponse(
                     workspace_id=workspace_id,

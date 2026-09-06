@@ -363,6 +363,15 @@ plan/mutation/final phase budgets no longer drive the Cogent loop.
 Session and workspace budgets count every ledger record attributed to that
 scope:
 
+The composer context headline uses `input_tokens` from the latest `agent`, `chat`,
+or `rag_ask` ledger record, so it represents a Prompt that was actually sent.
+Later memory extraction, compression, and embedding work cannot replace it. A
+percentage is shown only when that record's provider/model matches the current
+input-budget provenance returned by the API; otherwise the UI keeps only the
+unambiguous absolute count. The next-turn message/summary estimate remains a
+separately labelled detail and is never presented as a complete Prompt before
+the next request is assembled and sent.
+
 ```dotenv
 SESSION_TOKEN_BUDGET=100000
 WORKSPACE_TOKEN_BUDGET=1000000

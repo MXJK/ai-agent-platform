@@ -212,12 +212,22 @@ class ContextTokenUsageResponse(BaseModel):
     synchronous_compactions: int = 0
     summary_realigned: bool = False
     shares: dict[str, int] = Field(default_factory=dict)
+    budget_provider: str | None = None
+    budget_model: str | None = None
 
     @classmethod
     def from_domain(
-        cls, usage: ConversationContextUsage
+        cls,
+        usage: ConversationContextUsage,
+        *,
+        budget_provider: str | None = None,
+        budget_model: str | None = None,
     ) -> "ContextTokenUsageResponse":
-        return cls(**usage.__dict__)
+        return cls(
+            **usage.__dict__,
+            budget_provider=budget_provider,
+            budget_model=budget_model,
+        )
 
 
 class WorkspaceTokenBreakdownResponse(TokenUsageTotalsResponse):

@@ -904,11 +904,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260905-output-r1',
+            '/static/styles.css?v=20260906-actual-context-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260906-run-history-r1',
+            '/static/app.js?v=20260906-actual-context-r1',
             response.text,
         )
         self.assertNotIn('id="composer-mode-input"', response.text)
@@ -949,6 +949,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="composer-scope-strip"', response.text)
         self.assertIn('id="composer-workspace-btn"', response.text)
         self.assertIn('id="composer-context-budget"', response.text)
+        self.assertIn('aria-expanded="false"', response.text)
+        self.assertIn('aria-controls="composer-context-ring-tooltip"', response.text)
         self.assertIn('id="composer-context-kicker"', response.text)
         self.assertIn('id="composer-context-label-full"', response.text)
         self.assertIn('id="composer-context-label-compact"', response.text)
@@ -961,12 +963,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn('return "<0.01%"', script_response.text)
         self.assertIn("maximumFractionDigits: 2", script_response.text)
         self.assertIn(
-            "上下文 ≈ ${formatTokenCount(estimated)} / ${formatTokenCount(budget)} · ${percentage}",
+            "上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(budget)} · ${percentage}",
             script_response.text,
         )
+        self.assertIn("function latestUserPromptRecord(records)", script_response.text)
+        self.assertIn("function promptMatchesContextBudget(record, context)", script_response.text)
         self.assertIn("Math.min(1, ratio)", script_response.text)
         self.assertIn("function formatCompactTokenCount(value)", script_response.text)
-        self.assertIn("上限未知", script_response.text)
+        self.assertIn("模型已变化，占比不可直接比较", script_response.text)
         self.assertNotIn("历史尚未形成", script_response.text)
         self.assertNotIn('id="composer-workspace-select"', response.text)
         self.assertNotIn('id="workspace-catalog-list"', response.text)
@@ -1194,15 +1198,15 @@ class ApiTests(unittest.TestCase):
         self.assertIn("repeat(5, minmax(0, 1fr))", stylesheet_response.text)
         self.assertIn("loadSessionTokenUsage", script_response.text)
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
-        self.assertIn("累计实际消耗", script_response.text)
+        self.assertIn("本会话累计消耗", script_response.text)
         self.assertIn(
-            "const ratio = budget > 0 ? estimated / budget : 0;",
+            "const ratio = comparableBudget ? promptInput / budget : 0;",
             script_response.text,
         )
         self.assertNotIn("const ratio = budget > 0 ? total / budget : 0;", script_response.text)
         self.assertIn('contextNode.classList.toggle("warning"', script_response.text)
         self.assertIn('contextNode.classList.toggle("error"', script_response.text)
-        self.assertIn("估算不含下一条用户输入、系统提示、工具 Schema 和工作区检索内容", script_response.text)
+        self.assertIn("历史/摘要另估算为", script_response.text)
         self.assertIn("await loadSessionTokenUsage([conversationId]);", script_response.text)
         self.assertIn("createAgentProgressPresenter", script_response.text)
         self.assertIn("await onProgress", script_response.text)

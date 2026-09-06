@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>Cogent</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260905-output-r1" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260906-actual-context-r1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -254,7 +254,14 @@
                 <span class="scope-chip-copy"><small>Model</small><strong id="composer-model-label">默认配置</strong></span>
                 <em>配置</em>
               </button>
-              <div id="composer-context-budget" class="scope-chip context-scope" role="status" aria-live="polite">
+              <button
+                id="composer-context-budget"
+                class="scope-chip context-scope"
+                type="button"
+                aria-live="polite"
+                aria-expanded="false"
+                aria-controls="composer-context-ring-tooltip"
+              >
                 <svg class="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
                 <span class="scope-chip-copy">
                   <small id="composer-context-kicker">累计 Token</small>
@@ -270,7 +277,7 @@
                   </svg>
                   <strong id="composer-context-ring-label">–</strong>
                 </span>
-              </div>
+              </button>
             </div>
             <div class="composer">
               <div
@@ -1338,6 +1345,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260906-run-history-r1" defer></script>
+    <script src="/static/app.js?v=20260906-actual-context-r1" defer></script>
   </body>
 </html>

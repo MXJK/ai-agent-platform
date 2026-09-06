@@ -409,29 +409,10 @@ button.scope-chip:focus-visible {
   white-space: nowrap;
 }
 
-.context-ring-tooltip-list .ring-legend-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-}
-
 .context-ring-tooltip-list strong {
   margin-left: auto;
   color: var(--ink-soft);
   font-family: var(--font-mono);
-}
-
-.ring-legend-system {
-  background: var(--muted);
-}
-
-.ring-legend-tools {
-  background: var(--signal);
-}
-
-.ring-legend-messages {
-  background: var(--blue);
 }
 
 .context-ring-tooltip-note {

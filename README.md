@@ -404,6 +404,12 @@ PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
 
 会话和工作区预算会统计归属于对应范围的所有账本记录：
 
+对话输入区的上下文主指标使用最近一次 `agent`、`chat` 或 `rag_ask` 模型请求账本中的
+`input_tokens`，表示已经实际发送的 Prompt 输入；更晚完成的记忆提取、压缩和 Embedding
+不会覆盖它。只有该记录的 Provider/Model 与 API 返回的当前输入预算来源一致时才显示
+占比，否则只显示不可争议的绝对 Token。会话消息/摘要的下一轮预估仍在详情中单独标为
+估算；在下一次请求真正装配和发送前，系统不会把它宣称为完整 Prompt。
+
 ```dotenv
 SESSION_TOKEN_BUDGET=100000
 WORKSPACE_TOKEN_BUDGET=1000000
