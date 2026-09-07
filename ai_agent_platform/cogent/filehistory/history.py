@@ -52,7 +52,7 @@ class FileHistory:
         for path, data in files.items():
             self._validate_path(path)
             digest = hashlib.sha256(data).hexdigest()
-            if self.files.read('blobs/' + digest) is None:
+            if not self.files.exists('blobs/' + digest):
                 self.files.write('blobs/' + digest, data)
             result[path] = digest
         return result
@@ -104,7 +104,7 @@ class FileHistory:
             return None
         if len(digest) != 64 or any(char not in '0123456789abcdef' for char in digest):
             raise ValueError('Invalid history hash')
-        data = self.files.read('blobs/' + digest)
+        data = self.files.read('blobs/' + digest, limit=None)
         if data is None or hashlib.sha256(data).hexdigest() != digest:
             raise HistoryConflict('File history data is missing or has changed')
         return data

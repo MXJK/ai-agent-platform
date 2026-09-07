@@ -60,6 +60,21 @@ def test_latest_hundred_snapshots_and_original_target_across_edits(tmp_path):
     assert preview['target_hashes']['a'] == hashlib.sha256(b'2').hexdigest()
 
 
+def test_file_history_blobs_are_not_limited_to_eight_megabytes(tmp_path):
+    large = b'x' * 8_000_001
+    digest = hashlib.sha256(large).hexdigest()
+    history = FileHistory(str(tmp_path), 'large-blob')
+
+    history.begin('run:large', run_id='run', message_index=1, before={'large.bin': large})
+    assert history.files.exists('blobs/' + digest)
+    with pytest.raises(ValueError, match='exceeds its size limit'):
+        history.files.read('blobs/' + digest)
+    assert history._blob(digest) == large
+
+    history.finish('run:large', after={'large.bin': large})
+    assert history.get_snapshots()[0].backups == {}
+
+
 def test_managed_files_refuse_symlinked_parent_and_traversal(tmp_path):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()

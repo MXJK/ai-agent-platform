@@ -342,8 +342,8 @@ function latestUserPromptRecord(records) {
     )) || null;
 }
 
-function promptMatchesContextBudget(record, context) {
-  if (!record || Number(context?.budget_tokens || 0) <= 0) return false;
+function promptMatchesContextWindow(record, context) {
+  if (!record || Number(context?.context_window_tokens || 0) <= 0) return false;
   const provider = String(record.provider || "").trim().toLowerCase();
   const model = String(record.model || "").trim();
   const budgetProvider = String(context?.budget_provider || "").trim().toLowerCase();
@@ -370,9 +370,10 @@ function contextRingCenterLabel(ratio, hasBudget) {
 function composerContextUsagePresentation(usage) {
   if (!usage) {
     return {
-      kicker: "累计 Token",
+      kicker: "本会话累计 Token",
       label: "等待首轮请求",
       compactLabel: "等待首轮请求",
+      percentageLabel: "–",
       meterPercent: 0,
       tone: null,
       description: "发起模型请求后显示最近一次实际 Prompt 输入和会话累计消耗",
@@ -381,23 +382,31 @@ function composerContextUsagePresentation(usage) {
       percentage: null,
       promptInput: 0,
       estimatedHistory: 0,
-      budget: 0,
+      contextWindow: 0,
+      inputBudget: 0,
+      reservedOutput: 0,
+      inputBudgetExceeded: false,
       provider: "",
       model: "",
       inputCountMethod: "",
       hasMeasuredPrompt: false,
-      comparableBudget: false,
+      comparableWindow: false,
     };
   }
 
   const total = Math.max(0, Number(usage.total_tokens || 0));
   const estimatedHistory = Math.max(0, Number(usage.context?.estimated_tokens || 0));
-  const budget = Math.max(0, Number(usage.context?.budget_tokens || 0));
+  const contextWindow = Math.max(0, Number(usage.context?.context_window_tokens || 0));
+  const inputBudget = Math.max(0, Number(usage.context?.budget_tokens || 0));
+  const reservedOutput = Math.max(0, Number(usage.context?.reserved_output_tokens || 0));
   const latestPrompt = latestUserPromptRecord(usage.records);
   const promptInput = Math.max(0, Number(latestPrompt?.input_tokens || 0));
-  const comparableBudget = promptMatchesContextBudget(latestPrompt, usage.context);
-  const ratio = comparableBudget ? promptInput / budget : 0;
-  const percentage = comparableBudget ? formatTokenPercentage(ratio) : null;
+  const comparableWindow = promptMatchesContextWindow(latestPrompt, usage.context);
+  const ratio = comparableWindow ? promptInput / contextWindow : 0;
+  const percentage = comparableWindow ? formatTokenPercentage(ratio) : null;
+  const inputBudgetExceeded = comparableWindow
+    && inputBudget > 0
+    && promptInput > inputBudget;
   const promptIdentity = latestPrompt
     ? [latestPrompt.provider, latestPrompt.model].filter(Boolean).join(" / ")
     : "";
@@ -405,39 +414,52 @@ function composerContextUsagePresentation(usage) {
   const promptDescription = latestPrompt
     ? `最近一次前台模型请求${promptIdentity ? `（${promptIdentity}）` : ""}记录输入 ${formatTokenCount(promptInput)} tokens${countMethod ? `，计数方式：${formatInputCountMethod(countMethod)}` : ""}`
     : "尚无 Agent、Chat 或 RAG Ask 的模型请求记录";
-  const budgetDescription = comparableBudget
-    ? `该请求对应的当前输入预算为 ${formatTokenCount(budget)} tokens（${percentage}）`
-    : budget > 0
-      ? "最近请求与当前预算的 Provider/Model 不一致，因此不显示不可比的占用百分比"
-      : "当前未解析到可比较的模型输入预算";
+  const windowDescription = comparableWindow
+    ? `该请求模型的完整上下文窗口为 ${formatTokenCount(contextWindow)} tokens（占用 ${percentage}）`
+    : contextWindow > 0
+      ? "最近请求与上下文窗口的 Provider/Model 不一致，因此不显示不可比的占用百分比"
+      : "当前未解析到可比较的模型上下文窗口";
+  const inputBudgetDescription = inputBudget > 0
+    ? inputBudgetExceeded
+      ? `平台输入预算为 ${formatTokenCount(inputBudget)} tokens，本次超出 ${formatTokenCount(promptInput - inputBudget)} tokens`
+      : `平台输入预算为 ${formatTokenCount(inputBudget)} tokens`
+    : "当前未解析到平台输入预算";
   return {
-    kicker: `累计 ${formatTokenCount(total)} tokens`,
+    kicker: `本会话累计 ${formatTokenCount(total)} tokens`,
     label: latestPrompt
-      ? comparableBudget
-        ? `上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(budget)} · ${percentage}`
+      ? comparableWindow
+        ? `上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(contextWindow)} · ${percentage}`
         : `上次模型输入 ${formatTokenCount(promptInput)} tokens`
       : "尚无前台模型请求",
     compactLabel: latestPrompt
-      ? comparableBudget
-        ? `上次输入 ${percentage} · ${formatCompactTokenCount(promptInput)}`
-        : `上次输入 ${formatCompactTokenCount(promptInput)}`
-      : "尚无模型请求",
+      ? comparableWindow
+        ? `最近 Prompt ${formatCompactTokenCount(promptInput)} / ${formatCompactTokenCount(contextWindow)}`
+        : `最近 Prompt ${formatCompactTokenCount(promptInput)} tokens`
+      : "等待首轮请求",
+    percentageLabel: latestPrompt
+      ? comparableWindow
+        ? percentage
+        : contextWindow > 0 ? "不可比" : "无窗口"
+      : "–",
     meterPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
-    tone: comparableBudget
-      ? ratio >= 0.9 ? "error" : ratio >= 0.72 ? "warning" : null
+    tone: comparableWindow
+      ? ratio >= 0.9 ? "error" : ratio >= 0.72 || inputBudgetExceeded ? "warning" : null
       : null,
-    description: `本会话累计消耗 ${formatTokenCount(total)} tokens。${promptDescription}。${budgetDescription}。会话历史/摘要另估算为 ${formatTokenCount(estimatedHistory)} tokens，不代表完整 Prompt。`,
+    description: `本会话累计消耗 ${formatTokenCount(total)} tokens。${promptDescription}。${windowDescription}。${inputBudgetDescription}。会话历史/摘要另估算为 ${formatTokenCount(estimatedHistory)} tokens，不代表完整 Prompt。`,
     ringPercent: Number((Math.min(1, ratio) * 100).toFixed(4)),
-    ringLabel: contextRingCenterLabel(ratio, comparableBudget),
+    ringLabel: contextRingCenterLabel(ratio, comparableWindow),
     percentage,
     promptInput,
     estimatedHistory,
-    budget,
+    contextWindow,
+    inputBudget,
+    reservedOutput,
+    inputBudgetExceeded,
     provider: latestPrompt?.provider || "",
     model: latestPrompt?.model || "",
     inputCountMethod: countMethod,
     hasMeasuredPrompt: Boolean(latestPrompt),
-    comparableBudget,
+    comparableWindow,
   };
 }
 
@@ -2084,6 +2106,7 @@ function updateComposerScopeSummary() {
   $("composer-context-kicker").textContent = contextUsage.kicker;
   $("composer-context-label-full").textContent = contextUsage.label;
   $("composer-context-label-compact").textContent = contextUsage.compactLabel;
+  $("composer-context-percentage").textContent = contextUsage.percentageLabel;
   renderContextRing(contextUsage);
   contextNode.title = contextUsage.description;
   contextNode.setAttribute("aria-label", contextUsage.description);
@@ -2111,8 +2134,17 @@ function contextRingTooltipHtml(contextUsage) {
     : "尚无前台模型请求";
   const identity = [contextUsage.provider, contextUsage.model].filter(Boolean).join(" / ");
   const rows = [
-    contextUsage.comparableBudget
-      ? ["对应输入预算", formatTokenK(contextUsage.budget)]
+    contextUsage.comparableWindow
+      ? ["模型上下文窗口", formatTokenK(contextUsage.contextWindow)]
+      : null,
+    contextUsage.inputBudget > 0
+      ? ["平台输入预算", formatTokenK(contextUsage.inputBudget)]
+      : null,
+    contextUsage.inputBudgetExceeded
+      ? ["超出输入预算", `+${formatTokenK(contextUsage.promptInput - contextUsage.inputBudget)}`]
+      : null,
+    contextUsage.reservedOutput > 0
+      ? ["预留输出", formatTokenK(contextUsage.reservedOutput)]
       : null,
     ["历史消息/摘要估算", `≈ ${formatTokenK(contextUsage.estimatedHistory)}`],
     identity ? ["Provider / Model", identity] : null,
@@ -2122,8 +2154,8 @@ function contextRingTooltipHtml(contextUsage) {
       <strong>${escapeHtml(value)}</strong>
     </li>`).join("");
   const note = contextUsage.hasMeasuredPrompt
-    ? contextUsage.comparableBudget
-      ? "主数字来自最近一次前台模型请求；历史估算仅用于预览保留消息。"
+    ? contextUsage.comparableWindow
+      ? "主百分比按完整模型窗口计算；平台输入预算是独立的装配安全线。"
       : "主数字来自最近一次前台模型请求；模型已变化，占比不可直接比较。"
     : "完成一次 Agent、Chat 或 RAG Ask 请求后显示实际输入。";
   return `

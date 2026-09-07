@@ -1,0 +1,3 @@
+[console_scripts]
+cogent = ai_agent_platform.cli:main
+cogent-api = ai_agent_platform.api.entrypoint:main

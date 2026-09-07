@@ -214,6 +214,8 @@ class ContextTokenUsageResponse(BaseModel):
     shares: dict[str, int] = Field(default_factory=dict)
     budget_provider: str | None = None
     budget_model: str | None = None
+    context_window_tokens: int = 0
+    reserved_output_tokens: int = 0
 
     @classmethod
     def from_domain(
@@ -222,11 +224,15 @@ class ContextTokenUsageResponse(BaseModel):
         *,
         budget_provider: str | None = None,
         budget_model: str | None = None,
+        context_window_tokens: int = 0,
+        reserved_output_tokens: int = 0,
     ) -> "ContextTokenUsageResponse":
         return cls(
             **usage.__dict__,
             budget_provider=budget_provider,
             budget_model=budget_model,
+            context_window_tokens=context_window_tokens,
+            reserved_output_tokens=reserved_output_tokens,
         )
 
 

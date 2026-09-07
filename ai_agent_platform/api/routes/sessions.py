@@ -4,7 +4,7 @@ from dataclasses import replace
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ai_agent_platform.core import Settings, request_user_id
-from ai_agent_platform.domain import QueryLifecycle
+from ai_agent_platform.domain import QueryLifecycle, TokenUsageRecord
 from ai_agent_platform.agents.coding.models import AgentRunNotFoundError
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.model_registry import (
@@ -47,13 +47,32 @@ from ai_agent_platform.services import (
 def _context_budget(
     llm_client: LLMClient | None,
     model_selection: ModelSelection | None = None,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
 ):
     """Resolve the model-derived input budget and its provenance."""
     resolve = getattr(llm_client, "resolve_context_budget", None)
     if not callable(resolve):
         return None
     with model_selection_scope(model_selection):
-        return resolve()
+        return resolve(provider=provider, model=model)
+
+
+_FOREGROUND_TOKEN_OPERATIONS = frozenset({"agent", "chat", "rag_ask"})
+
+
+def _latest_foreground_token_record(
+    records: list[TokenUsageRecord],
+) -> TokenUsageRecord | None:
+    return next(
+        (
+            record
+            for record in reversed(records)
+            if record.operation in _FOREGROUND_TOKEN_OPERATIONS
+        ),
+        None,
+    )
 
 
 def create_sessions_router(
@@ -296,7 +315,13 @@ def create_sessions_router(
             if model_registry is not None
             else None
         )
-        context_budget = _context_budget(llm_client, model_selection)
+        latest_prompt = _latest_foreground_token_record(records)
+        context_budget = _context_budget(
+            llm_client,
+            model_selection,
+            provider=(latest_prompt.provider if latest_prompt is not None else None),
+            model=(latest_prompt.model if latest_prompt is not None else None),
+        )
         context = session_service.get_context_token_usage(
             session_id=session_id,
             max_context_messages=settings.llm_max_context_messages,
@@ -331,6 +356,16 @@ def create_sessions_router(
                 ),
                 budget_model=(
                     context_budget.model if context_budget is not None else None
+                ),
+                context_window_tokens=(
+                    int(context_budget.window_tokens)
+                    if context_budget is not None
+                    else 0
+                ),
+                reserved_output_tokens=(
+                    int(context_budget.reserved_output_tokens)
+                    if context_budget is not None
+                    else 0
                 ),
             ),
             workspaces=[

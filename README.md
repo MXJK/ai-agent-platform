@@ -63,6 +63,9 @@ uv run cogent --workspace-id project --print "解释这个项目的入口结构"
 另保留可选的单进程 SQLite 本地 profile。旧 Go gateway、Celery/Redis 多 Worker、
 数据库记忆、Chroma 与操作系统 keyring 兼容实现已经移除。
 
+执行工作区复制、基线和文件历史快照会跳过 `.venv-*` 虚拟环境目录。FileHistory
+以 SHA-256 校验内容寻址 blob，读取这些回滚数据时不受普通受管文件的 8 MB 默认上限限制。
+
 ## 文档
 
 - [完整技术参考](docs/reference.zh-CN.md)：配置、协议、权限、存储、迁移和评测说明。

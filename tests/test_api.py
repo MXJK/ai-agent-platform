@@ -844,11 +844,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260906-actual-context-r1',
+            '/static/styles.css?v=20260907-context-window-r3',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260906-actual-context-r1',
+            '/static/app.js?v=20260907-context-window-r3',
             response.text,
         )
         self.assertNotIn('id="composer-mode-input"', response.text)
@@ -903,11 +903,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn('return "<0.01%"', script_response.text)
         self.assertIn("maximumFractionDigits: 2", script_response.text)
         self.assertIn(
-            "上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(budget)} · ${percentage}",
+            "上次模型输入 ${formatTokenCount(promptInput)} / ${formatTokenCount(contextWindow)} · ${percentage}",
             script_response.text,
         )
         self.assertIn("function latestUserPromptRecord(records)", script_response.text)
-        self.assertIn("function promptMatchesContextBudget(record, context)", script_response.text)
+        self.assertIn("function promptMatchesContextWindow(record, context)", script_response.text)
         self.assertIn("Math.min(1, ratio)", script_response.text)
         self.assertIn("function formatCompactTokenCount(value)", script_response.text)
         self.assertIn("模型已变化，占比不可直接比较", script_response.text)
@@ -1128,9 +1128,11 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".chat-workbench.has-conversation", stylesheet_response.text)
         self.assertIn(".composer-scope-strip", stylesheet_response.text)
         self.assertIn(
-            "minmax(0, 0.82fr) minmax(0, 0.88fr) minmax(0, 1.4fr)",
+            "grid-template-columns: repeat(2, minmax(0, 1fr))",
             stylesheet_response.text,
         )
+        self.assertIn('id="composer-context-percentage"', response.text)
+        self.assertIn("grid-column: 1 / -1", stylesheet_response.text)
         self.assertIn(".response-error-card", stylesheet_response.text)
         self.assertIn(".inspector-backdrop:not([hidden])", stylesheet_response.text)
         self.assertIn("body.mobile-more-open", stylesheet_response.text)
@@ -1140,7 +1142,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("loadWorkspaceTokenUsage", script_response.text)
         self.assertIn("本会话累计消耗", script_response.text)
         self.assertIn(
-            "const ratio = comparableBudget ? promptInput / budget : 0;",
+            "const ratio = comparableWindow ? promptInput / contextWindow : 0;",
             script_response.text,
         )
         self.assertNotIn("const ratio = budget > 0 ? total / budget : 0;", script_response.text)

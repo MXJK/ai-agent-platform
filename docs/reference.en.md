@@ -363,10 +363,11 @@ scope:
 
 The composer context headline uses `input_tokens` from the latest `agent`, `chat`,
 or `rag_ask` ledger record, so it represents a Prompt that was actually sent.
-Later memory extraction, compression, and embedding work cannot replace it. A
-percentage is shown only when that record's provider/model matches the current
-input-budget provenance returned by the API; otherwise the UI keeps only the
-unambiguous absolute count. The next-turn message/summary estimate remains a
+Later memory extraction, compression, and embedding work cannot replace it. The
+primary percentage is `input_tokens / context_window_tokens`, representing
+the Prompt's share of that model's complete context window. The platform input
+budget and any overage remain separate supporting information instead of serving
+as the primary denominator. The next-turn message/summary estimate remains a
 separately labelled detail and is never presented as a complete Prompt before
 the next request is assembled and sent.
 
@@ -450,6 +451,8 @@ overwriting manual edits. Maintenance receives no Bash, MCP, or ordinary Workspa
 /plan restricts writes to the plan file; /review is read-only. /rewind previews and requires approval,
 rejects hash conflicts, and appends a logical conversation branch. Use a file snapshot ID for files/all,
 or `/rewind <completed-run-id> conversation` for a pure conversation branch. History is not deleted.
+FileHistory verifies content-addressed blobs with SHA-256 and reads them without the default 8 MB
+limit used for ordinary managed files.
 
 Agent-only and independent RAG evaluations are separated; existing retrieval data and gates remain.
 SQLite and isolated PostgreSQL crash/resume/compaction/lease tests cover the persisted boundaries.
@@ -635,7 +638,9 @@ retained audit modes are:
   branch worktree from the frozen HEAD, and leave the current checkout unchanged.
 
 Real `.env` files, credentials, private keys, symbolic links, unreadable paths,
-sockets, FIFOs, and other special files are rejected or skipped and recorded.
+sockets, FIFOs, and other special files are rejected or skipped and recorded. Versioned
+virtual-environment directories matching `.venv-*` are excluded from temporary copies,
+execution baselines, and file-history snapshots.
 Writes accept an optional `expected_sha256` and validate both the Run baseline
 and current bytes; patches additionally validate paths, context, and pre-write
 hashes. Same-directory temporary files, `fsync`, atomic replacement, and a

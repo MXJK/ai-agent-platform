@@ -80,6 +80,10 @@ class ExecutionWorkspaceConflictError(ExecutionWorkspaceError):
     code = "workspace_conflict"
 
 
+def _is_ignored_name(name: str) -> bool:
+    return name in _IGNORED_NAMES or name.startswith(".venv-")
+
+
 @dataclass
 class ExecutionWorkspaceRecord:
     run_id: str
@@ -890,7 +894,7 @@ def _snapshot_files(root: Path) -> dict[str, bytes]:
             relative = path.relative_to(root).as_posix()
         except ValueError:
             continue
-        if any(part in _IGNORED_NAMES for part in PurePosixPath(relative).parts):
+        if any(_is_ignored_name(part) for part in PurePosixPath(relative).parts):
             continue
         if relative.startswith((".cogent/sessions/", ".cogent/memory/", ".cogent/file-history/")):
             continue
@@ -923,7 +927,7 @@ def _copy_source_item(
         if source.is_symlink():
             _append_warning(warnings, f"skipped symbolic link: {relative.as_posix()}")
             return
-        if source.name in _IGNORED_NAMES:
+        if _is_ignored_name(source.name):
             return
         if relative.as_posix() in {".cogent/sessions", ".cogent/memory", ".cogent/file-history"}:
             return

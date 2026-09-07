@@ -166,6 +166,8 @@ test("composer context meter uses the latest foreground Prompt input", () => {
     context: {
       estimated_tokens: 18_000,
       budget_tokens: 72_704,
+      context_window_tokens: 128_000,
+      reserved_output_tokens: 8_192,
       budget_provider: "openai",
       budget_model: "gpt-test",
     },
@@ -185,16 +187,17 @@ test("composer context meter uses the latest foreground Prompt input", () => {
     context,
   );
 
-  assert.equal(presentation.kicker, "累计 180,000 tokens");
-  assert.equal(presentation.label, "上次模型输入 30,000 / 72,704 · 41.26%");
-  assert.equal(presentation.compactLabel, "上次输入 41.26% · 3万");
-  assert.ok(presentation.meterPercent > 41.25 && presentation.meterPercent < 41.27);
+  assert.equal(presentation.kicker, "本会话累计 180,000 tokens");
+  assert.equal(presentation.label, "上次模型输入 30,000 / 128,000 · 23.44%");
+  assert.equal(presentation.compactLabel, "最近 Prompt 3万 / 12.8万");
+  assert.equal(presentation.percentageLabel, "23.44%");
+  assert.ok(presentation.meterPercent > 23.43 && presentation.meterPercent < 23.45);
   assert.equal(presentation.tone, null);
-  assert.equal(presentation.ringLabel, "41%");
+  assert.equal(presentation.ringLabel, "23%");
   assert.equal(presentation.promptInput, 30_000);
   assert.equal(presentation.estimatedHistory, 18_000);
   assert.equal(presentation.hasMeasuredPrompt, true);
-  assert.equal(presentation.comparableBudget, true);
+  assert.equal(presentation.comparableWindow, true);
   assert.match(presentation.description, /本会话累计消耗 180,000 tokens/);
   assert.match(presentation.description, /记录输入 30,000 tokens/);
   assert.match(presentation.description, /历史\/摘要另估算为 18,000 tokens/);
@@ -205,7 +208,7 @@ test("composer context meter handles unknown budgets and high actual Prompt usag
   const { context } = loadAgentSubmissionHarness(async () => ({}));
   context.unknownUsage = {
     total_tokens: 9_000,
-    context: { estimated_tokens: 120, budget_tokens: 0 },
+    context: { estimated_tokens: 120, budget_tokens: 0, context_window_tokens: 0 },
     records: [{
       operation: "chat",
       provider: "deepseek",
@@ -217,7 +220,9 @@ test("composer context meter handles unknown budgets and high actual Prompt usag
     total_tokens: 240_000,
     context: {
       estimated_tokens: 5_000,
-      budget_tokens: 72_704,
+      budget_tokens: 68_608,
+      context_window_tokens: 128_000,
+      reserved_output_tokens: 8_192,
       budget_provider: "deepseek",
       budget_model: "deepseek-chat",
     },
@@ -225,7 +230,7 @@ test("composer context meter handles unknown budgets and high actual Prompt usag
       operation: "agent",
       provider: "deepseek",
       model: "deepseek-chat",
-      input_tokens: 66_000,
+      input_tokens: 94_305,
     }],
   };
 
@@ -239,14 +244,19 @@ test("composer context meter handles unknown budgets and high actual Prompt usag
   );
 
   assert.equal(unknown.label, "上次模型输入 420 tokens");
-  assert.equal(unknown.compactLabel, "上次输入 420");
+  assert.equal(unknown.compactLabel, "最近 Prompt 420 tokens");
+  assert.equal(unknown.percentageLabel, "无窗口");
   assert.equal(unknown.meterPercent, 0);
   assert.equal(unknown.tone, null);
   assert.doesNotMatch(unknown.label, /%/);
-  assert.equal(high.label, "上次模型输入 66,000 / 72,704 · 90.78%");
-  assert.equal(high.compactLabel, "上次输入 90.78% · 6.6万");
-  assert.ok(high.meterPercent > 90.77 && high.meterPercent < 90.79);
-  assert.equal(high.tone, "error");
+  assert.equal(high.label, "上次模型输入 94,305 / 128,000 · 73.68%");
+  assert.equal(high.compactLabel, "最近 Prompt 9.4万 / 12.8万");
+  assert.equal(high.percentageLabel, "73.68%");
+  assert.ok(high.meterPercent > 73.67 && high.meterPercent < 73.69);
+  assert.equal(high.ringLabel, "74%");
+  assert.equal(high.tone, "warning");
+  assert.equal(high.inputBudgetExceeded, true);
+  assert.match(high.description, /本次超出 25,697 tokens/);
 });
 
 test("composer context meter ignores later background usage and mismatched budgets", () => {
@@ -256,6 +266,7 @@ test("composer context meter ignores later background usage and mismatched budge
     context: {
       estimated_tokens: 70,
       budget_tokens: 68_608,
+      context_window_tokens: 128_000,
       budget_provider: "fake",
       budget_model: "another-model",
     },
@@ -283,8 +294,9 @@ test("composer context meter ignores later background usage and mismatched budge
 
   assert.equal(presentation.promptInput, 2_145);
   assert.equal(presentation.label, "上次模型输入 2,145 tokens");
-  assert.equal(presentation.comparableBudget, false);
+  assert.equal(presentation.comparableWindow, false);
   assert.equal(presentation.percentage, null);
+  assert.equal(presentation.percentageLabel, "不可比");
   assert.equal(presentation.ringLabel, "–");
   const tooltip = vm.runInContext(
     "contextRingTooltipHtml(composerContextUsagePresentation(shareUsage))",

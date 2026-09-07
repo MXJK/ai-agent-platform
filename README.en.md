@@ -74,6 +74,10 @@ An optional single-process SQLite profile remains available. The old Go gateway,
 Celery/Redis multi-Worker, database-memory, Chroma, and OS-keyring compatibility
 implementations have been removed.
 
+Execution-workspace copies, baselines, and file-history snapshots skip `.venv-*`
+virtual-environment directories. FileHistory verifies content-addressed blobs with SHA-256
+and reads this rewind data without the default 8 MB limit used for ordinary managed files.
+
 ## Documentation
 
 - [Full technical reference](docs/reference.en.md) for configuration, protocols,

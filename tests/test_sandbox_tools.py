@@ -531,6 +531,46 @@ class SandboxToolTests(unittest.TestCase):
             self.assertEqual(registry.cleanup_context(context), [])
             self.assertFalse(workspace.exists())
 
+    def test_copy_and_history_skip_versioned_virtualenv_directories(self) -> None:
+        with TemporaryDirectory() as source_dir, TemporaryDirectory() as runtime_dir:
+            root = Path(source_dir)
+            (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+            ignored = root / ".venv-py39-backup-20260723" / "lib"
+            ignored.mkdir(parents=True)
+            (ignored / "large.so").write_bytes(b"binary")
+            execution = ExecutionWorkspaceRuntime(runtime_parent=runtime_dir)
+
+            copied = execution.prepare(
+                run_id="run_copy_virtualenv",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="patch_only",
+            )
+            direct = execution.prepare(
+                run_id="run_history_virtualenv",
+                workspace_id="workspace_main",
+                source_root=str(root),
+                mode="direct",
+            )
+            history_files = execution.history_files(
+                _context(root, run_id="run_history_virtualenv", mode="direct")
+            )
+
+            self.assertFalse(
+                (copied.execution_root / ".venv-py39-backup-20260723").exists()
+            )
+            self.assertEqual(copied.baseline, {"app.py": b"value = 1\n"})
+            self.assertEqual(direct.baseline, {"app.py": b"value = 1\n"})
+            self.assertEqual(history_files, {"app.py": b"value = 1\n"})
+            execution.cleanup(
+                _context(
+                    root,
+                    run_id="run_copy_virtualenv",
+                    mode="patch_only",
+                    execution_root=copied.execution_root,
+                )
+            )
+
     def test_local_command_rejects_shell_wrapper_and_strips_secret_environment(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

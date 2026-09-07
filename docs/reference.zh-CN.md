@@ -406,8 +406,9 @@ PostgreSQL 产品运行时不会读取 `LLM_PROVIDER`、`LLM_MODEL` 或
 
 对话输入区的上下文主指标使用最近一次 `agent`、`chat` 或 `rag_ask` 模型请求账本中的
 `input_tokens`，表示已经实际发送的 Prompt 输入；更晚完成的记忆提取、压缩和 Embedding
-不会覆盖它。只有该记录的 Provider/Model 与 API 返回的当前输入预算来源一致时才显示
-占比，否则只显示不可争议的绝对 Token。会话消息/摘要的下一轮预估仍在详情中单独标为
+不会覆盖它。主百分比使用该记录的 `input_tokens / context_window_tokens`，表示 Prompt 对
+模型完整上下文窗口的占用；平台输入预算及其超限状态作为独立辅助信息展示，不再充当主
+百分比的分母。会话消息/摘要的下一轮预估仍在详情中单独标为
 估算；在下一次请求真正装配和发送前，系统不会把它宣称为完整 Prompt。
 
 ```dotenv
@@ -479,7 +480,8 @@ Workspace、Bash 或 MCP 权限。验证后的模型响应和写入计划均持�
 /plan 仅允许读取与写当前计划；ExitPlanMode 要审批。/review 只读审查 Git diff。
 /rewind 先列出文件快照和已完成 Run：`/rewind <run-id> conversation` 可纯对话回退，
 文件回退使用 snapshot ID 与 all/files 模式。预览后审批，冲突拒绝，追加逻辑分支而不删除历史。
-FileHistory 最多保存 100 个快照及前后像。
+FileHistory 最多保存 100 个快照及前后像；内容寻址 blob 使用 SHA-256 校验，读取时不受普通
+受管文件的 8 MB 默认上限限制。
 
 Run、事件和版本快照在同一数据库事务保存；SQLite 使用进程文件锁，PostgreSQL 使用 advisory lock。
 启动恢复重新投递未完成 Run，审批/追问保持等待，已确认但未完成的 resume 从落库边界继续。
@@ -620,7 +622,8 @@ ChangeSet 是模型工具审批之后的独立审计与恢复边界。读取/拒
   当前源码检出保持不变。
 
 真实 `.env`、凭据、私钥、符号链接、不可读路径、Socket、FIFO 和其他特殊文件都会被
-拒绝或跳过并记录。Cogent 的副作用先经过批次权限与精确审批。
+拒绝或跳过并记录；`.venv-*` 虚拟环境目录不会进入临时副本、执行基线或文件历史快照。
+Cogent 的副作用先经过批次权限与精确审批。
 写文件接受可选 `expected_sha256`，所有已存在目标继续校验
 Run 基线和当前哈希；补丁还校验路径、上下文和写前哈希。写入使用同目录临时文件、`fsync`
 和原子替换，原内容先持久化到服务端 mutation journal。`direct` 对同一 Workspace 实施

@@ -35,7 +35,7 @@ class ManagedFiles:
             for fd in reversed(descriptors):
                 os.close(fd)
 
-    def read(self, relative: str, *, limit=8_000_000) -> bytes | None:
+    def read(self, relative: str, *, limit: int | None = 8_000_000) -> bytes | None:
         try:
             with self.parent(relative) as (parent, name):
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -43,12 +43,30 @@ class ManagedFiles:
                     import stat
                     if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                         raise ValueError('Managed file must be a regular file')
-                    data = stream.read(limit + 1)
-                    if len(data) > limit:
+                    data = stream.read() if limit is None else stream.read(limit + 1)
+                    if limit is not None and len(data) > limit:
                         raise ValueError('Managed file exceeds its size limit')
                     return data
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ValueError('Managed file path contains a symbolic link') from exc
+            raise
+
+    def exists(self, relative: str) -> bool:
+        try:
+            with self.parent(relative) as (parent, name):
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                try:
+                    import stat
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise ValueError('Managed file must be a regular file')
+                finally:
+                    os.close(fd)
+                return True
+        except FileNotFoundError:
+            return False
         except OSError as exc:
             if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
                 raise ValueError('Managed file path contains a symbolic link') from exc

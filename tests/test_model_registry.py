@@ -621,8 +621,85 @@ class ModelRegistryApiTests(unittest.TestCase):
 
         self.assertEqual(usage.status_code, 200)
         self.assertEqual(usage.json()["context"]["budget_tokens"], 98_000)
+        self.assertEqual(usage.json()["context"]["context_window_tokens"], 200_000)
+        self.assertEqual(usage.json()["context"]["reserved_output_tokens"], 2_000)
         self.assertEqual(usage.json()["context"]["budget_provider"], "anthropic")
         self.assertEqual(usage.json()["context"]["budget_model"], "test-model")
+
+    def test_session_token_usage_budget_uses_latest_prompt_model(self) -> None:
+        settings = Settings(
+            llm_provider="fake",
+            llm_model="demo-stream-model",
+            llm_context_input_token_ratio=0.5,
+            llm_max_output_tokens=2_000,
+            embedding_provider="local",
+            model_secret_backend="memory",
+        )
+        with TestClient(
+            create_app(settings=settings),
+            client=("127.0.0.1", 50000),
+        ) as client:
+            session_id = client.post(
+                "/api/v1/sessions",
+                json={"user_id": "local"},
+            ).json()["id"]
+            for provider in ("anthropic", "openai"):
+                client.put(
+                    f"/api/v1/model-registry/connections/{provider}",
+                    json={
+                        "display_name": provider.title(),
+                        "api_key": "sk-never-return-this",
+                        "enabled": True,
+                    },
+                ).raise_for_status()
+            selected_model = client.post(
+                "/api/v1/model-registry/models",
+                json={**_registered_payload("anthropic"), "model": "selected-model"},
+            ).json()
+            client.post(
+                "/api/v1/model-registry/models",
+                json={
+                    **_registered_payload("openai"),
+                    "model": "prompt-model",
+                    "context_window_tokens": 64_000,
+                },
+            ).raise_for_status()
+            client.put(
+                f"/api/v1/sessions/{session_id}/model-preference",
+                json={
+                    "mode": "manual",
+                    "routing_policy": "smart",
+                    "preferred_model_id": selected_model["id"],
+                    "fallback_enabled": False,
+                },
+            ).raise_for_status()
+            client.app.state.session_service.record_token_usage(
+                session_id,
+                "openai",
+                "prompt-model",
+                12_000,
+                500,
+                operation="agent",
+            )
+            client.app.state.session_service.record_token_usage(
+                session_id,
+                "anthropic",
+                "selected-model",
+                100,
+                10,
+                operation="cogent_memory_extract",
+            )
+
+            usage = client.get(
+                f"/api/v1/sessions/{session_id}/token-usage"
+            )
+
+        self.assertEqual(usage.status_code, 200)
+        self.assertEqual(usage.json()["context"]["budget_tokens"], 62_000)
+        self.assertEqual(usage.json()["context"]["context_window_tokens"], 128_000)
+        self.assertEqual(usage.json()["context"]["reserved_output_tokens"], 2_000)
+        self.assertEqual(usage.json()["context"]["budget_provider"], "openai")
+        self.assertEqual(usage.json()["context"]["budget_model"], "prompt-model")
 
     @patch(
         "ai_agent_platform.model_registry.discovery.ProviderModelDiscovery.discover",
