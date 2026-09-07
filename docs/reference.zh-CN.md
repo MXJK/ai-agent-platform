@@ -95,7 +95,7 @@ uv sync
 ```
 
 入口为 `cogent` 和 `cogent-api`。公开 CLI 是网页后端的 HTTP/SSE 客户端，不在终端进程
-中装配第二套 Runtime；模型注册、Provider 密钥状态、Workspace、Session、Run、MCP、Skill、
+中装配第二套 Runtime；模型注册与选择、Provider 密钥状态、Workspace、Session、Run、MCP、Skill、
 权限和记忆均来自网页使用的同一个服务端。密钥明文始终留在服务端 Secret Store，终端只显示
 是否已经配置及健康状态。
 
@@ -109,7 +109,10 @@ uv run cogent --workspace-id project --print "解释入口结构"
 默认连接 `http://127.0.0.1:8000/api/v1` 并启动 Textual TUI；端口变化时设置
 `COGENT_API_URL` 或传 `--api-url`。若网页端只有一个 Workspace、已有默认 Workspace，或当前
 目录名能唯一匹配服务端 Workspace，CLI 会自动选择；否则使用 `--workspace-id` 明确选择。
-`/models` 查看服务端模型与凭据配置状态。非交互输出与兼容 REPL 也走同一 HTTP/SSE 边界；
+`/models` 查看服务端模型与凭据配置状态；`/models register <provider> <model>` 在已有
+Provider 连接下注册启用模型，`/models use <model-id|provider/model>` 把当前会话锁定到指定模型
+并关闭 fallback，`/models auto [smart|quality|cost|latency]` 恢复自动路由。CLI 不接收
+Provider API Key，缺少连接时仍需在本地模型管理页录入。非交互输出与兼容 REPL 也走同一 HTTP/SSE 边界；
 嵌入式 `AgentSDK.query()` 仍供 Python 调用。Web 与 CLI 都通过 POST /api/v1/agent/runs 和
 Run SSE 使用同一 QueryService，`/api/v1/chat/stream` 返回 404。
 审批、追问、取消、暂停和压缩共享运行时能力，不维护另一套 CLI Agent 循环。
@@ -117,8 +120,10 @@ Run SSE 使用同一 QueryService，`/api/v1/chat/stream` 返回 404。
 共享命令为 /help、/status、/clear、/compact、/mcp、/memory、/session、
 /skill（兼容 /skills）、/tools、/permissions、/resume、/plan、/review、
 /rewind、/sandbox；/exit 仅用于 CLI 本地退出。CLI 可用 `--permission-mode` 设置启动模式、
-`/permissions [default|acceptEdits|plan|bypassPermissions]` 查看或切换，并在 TUI 中用
-Shift+Tab 按相同顺序循环；状态栏显示将用于下一次 Run 的模式。
+`/permissions [default|acceptEdits|plan|bypassPermissions]` 查看或即时切换，不创建管理 Run；
+TUI 中也可用 Shift+Tab 按相同顺序循环。状态栏沿用 mewcode 的显示名和颜色，显示为
+`default`、`accept-edits`、`plan` 或 `YOLO`，代表将用于下一次 Run 的模式；后端仍在创建
+Run 时冻结并执行同一权限硬边界。
 
 ## 分层运行时配置
 

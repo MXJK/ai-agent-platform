@@ -34,13 +34,22 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                     app.query_one("#model-label", Static).content
                 )
                 assert any(item['name'] == 'help' for item in app.capabilities['commands'])
-                assert 'mode: default' in str(app.query_one('#mode-label', Static).content)
+                mode_label = app.query_one('#mode-label', Static)
+                assert mode_label.render().plain == 'default'
+                assert mode_label.region.bottom <= app.size.height
                 await app.submit('/permissions acceptEdits')
                 await app.workers.wait_for_complete()
                 assert application.permission_mode == 'acceptEdits'
-                assert 'mode: acceptEdits' in str(app.query_one('#mode-label', Static).content)
+                assert mode_label.render().plain == 'accept-edits  (shift+tab to cycle)'
                 await pilot.press('shift+tab')
                 assert application.permission_mode == 'plan'
+                assert mode_label.render().plain == 'plan  (shift+tab to cycle)'
+                await pilot.press('shift+tab')
+                assert application.permission_mode == 'bypassPermissions'
+                assert mode_label.render().plain == 'YOLO  (shift+tab to cycle)'
+                await pilot.press('shift+tab')
+                assert application.permission_mode == 'default'
+                assert mode_label.render().plain == 'default'
                 await app.submit('/permissions bypassPermissions')
                 await app.workers.wait_for_complete()
                 assert application.permission_mode == 'bypassPermissions'
@@ -49,6 +58,9 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                     "embedded test runtime" in str(item.content)
                     for item in app.query(".system-message")
                 )
+                app.complete("models u")
+                popup = app.query_one("CompletionPopup")
+                assert popup.get_selected() == "/models use"
                 await app.submit('/help')
                 await app.workers.wait_for_complete()
                 assert app.run_status == 'completed'

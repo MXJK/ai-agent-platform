@@ -14,10 +14,26 @@ from textual.widgets import Button, Collapsible, Markdown, Static
 
 from ai_agent_platform.domain import AgentEvent, QueryCommand, QueryLifecycle
 from .commands.completion import CompletionPopup
+from .permissions import PermissionMode
 from .widgets import ChatInput, ToolCallBlock
 
 if TYPE_CHECKING:
     from ai_agent_platform.cli import CliApplication
+
+
+_MODE_CYCLE = [
+    PermissionMode.DEFAULT,
+    PermissionMode.ACCEPT_EDITS,
+    PermissionMode.PLAN,
+    PermissionMode.BYPASS,
+]
+
+_MODE_COLORS = {
+    PermissionMode.DEFAULT: "dim",
+    PermissionMode.ACCEPT_EDITS: "green",
+    PermissionMode.PLAN: "yellow",
+    PermissionMode.BYPASS: "red",
+}
 
 
 class CogentApp(App):
@@ -27,7 +43,7 @@ class CogentApp(App):
         Binding("ctrl+c", "cancel_run", "Cancel Run", priority=True),
         Binding("ctrl+p", "pause_run", "Pause", priority=True),
         Binding("ctrl+o", "toggle_tool_blocks", "Toggle tools", priority=True),
-        Binding("shift+tab", "cycle_permission_mode", "Cycle permission mode", priority=True),
+        Binding("shift+tab", "cycle_mode", "Cycle mode", priority=True),
         Binding("ctrl+q", "close", "Exit", priority=True),
     ]
     CSS = """
@@ -45,7 +61,7 @@ class CogentApp(App):
     #pending { height: auto; max-height: 10; overflow-y: auto; }
     #input-area { dock: bottom; height: auto; max-height: 22; padding: 0 1; border-top: solid #303030; }
     #chat-input { height: auto; min-height: 3; max-height: 10; border: none; }
-    #status-bar { height: 1; width: 100%; padding: 0 1; border-top: solid #303030; }
+    #status-bar { height: auto; min-height: 1; width: 100%; padding: 0 1; border-top: solid #303030; }
     #activity { width: 1fr; height: 1; color: $text-muted; }
     #credential-label { width: auto; height: 1; color: $text-muted; padding: 0 1; }
     #mode-label { width: auto; height: 1; color: $text-muted; padding: 0 1; }
@@ -81,7 +97,7 @@ class CogentApp(App):
             yield ChatInput(id="chat-input")
             with Horizontal(id="status-bar"):
                 yield Static("Connecting…", id="activity", markup=False)
-                yield Static("", id="mode-label", markup=False)
+                yield Static("default", id="mode-label")
                 yield Static("", id="credential-label", markup=False)
                 yield Static("", id="model-label", markup=False)
             yield CompletionPopup()
@@ -126,10 +142,7 @@ class CogentApp(App):
             self.query_one("#credential-label", Static).update(
                 self.application.credential_summary
             )
-            self.query_one("#model-label", Static).update(
-                self.application.model_summary
-            )
-            self._update_permission_mode_label()
+            self._update_runtime_labels()
             composer.load_history(str(self.application.local_cwd))
             composer.focus()
             self.show_activity("Ready · /help · /models")
@@ -154,16 +167,7 @@ class CogentApp(App):
         if text.strip() == "/exit":
             await self.action_close()
             return
-        if text.strip() == "/models":
-            await self.query_one("#chat-area", VerticalScroll).mount(
-                Static(
-                    self.application.registry_text(),
-                    classes="system-message",
-                    markup=False,
-                )
-            )
-            return
-        if text.startswith(("/memory", "/session")):
+        if text.startswith(("/memory", "/models", "/permissions", "/session")):
             try:
                 output = await self.application.execute_management_command(text)
                 if output is not None:
@@ -171,6 +175,7 @@ class CogentApp(App):
                         Static(output, classes="system-message", markup=False)
                     )
                     self.show_activity("Ready")
+                    self._update_runtime_labels()
                     await self.refresh_capabilities()
                     return
             except (ValueError, RuntimeError, PermissionError) as exc:
@@ -199,15 +204,51 @@ class CogentApp(App):
         self.busy = True
         self.consume(events)
 
-    def action_cycle_permission_mode(self) -> None:
-        message = self.application.cycle_permission_mode()
-        self._update_permission_mode_label()
+    def action_cycle_mode(self) -> None:
+        current = PermissionMode(self.application.permission_mode)
+        try:
+            idx = _MODE_CYCLE.index(current)
+        except ValueError:
+            idx = 0
+        next_mode = _MODE_CYCLE[(idx + 1) % len(_MODE_CYCLE)]
+        message = self.application.set_permission_mode(next_mode.value)
+        self._update_mode_label()
         self.show_activity(message)
 
+    _MODE_DISPLAY = {
+        PermissionMode.DEFAULT: "default",
+        PermissionMode.ACCEPT_EDITS: "accept-edits",
+        PermissionMode.PLAN: "plan",
+        PermissionMode.BYPASS: "YOLO",
+    }
+
+    def _update_mode_label(self) -> None:
+        perm = PermissionMode(self.application.permission_mode)
+        display = self._MODE_DISPLAY.get(perm, perm.value)
+        color = _MODE_COLORS.get(perm, "dim")
+        label = self.query_one("#mode-label", Static)
+        if perm == PermissionMode.DEFAULT:
+            label.update(f"[{color}]{display}[/{color}]")
+        else:
+            label.update(f"[{color}]{display}[/{color}]  (shift+tab to cycle)")
+
     def _update_permission_mode_label(self) -> None:
-        self.query_one("#mode-label", Static).update(
-            f"mode: {self.application.permission_mode} · Shift+Tab"
+        self._update_mode_label()
+
+    def _update_runtime_labels(self) -> None:
+        self.query_one("#model-label", Static).update(
+            self.application.model_summary
         )
+        self.query_one("#credential-label", Static).update(
+            self.application.credential_summary
+        )
+        self.query_one("#title-bar", Static).update(
+            self._make_banner(
+                self.application.model_summary,
+                f"{self.application.workspace_id} · {self.application.api_url}",
+            )
+        )
+        self._update_permission_mode_label()
 
     @work(group="query-stream", exclusive=True)
     async def consume(self, events: AsyncIterator[AgentEvent]):
@@ -346,12 +387,27 @@ class CogentApp(App):
         if prefix is None:
             popup.hide()
             return
+        local_commands = [
+            ("/models list  Show server models", "/models list"),
+            ("/models register <provider> <model>", "/models register"),
+            ("/models use <model-id|provider/model>", "/models use"),
+            ("/models auto [smart|quality|cost|latency]", "/models auto"),
+            ("/permissions default", "/permissions default"),
+            ("/permissions acceptEdits", "/permissions acceptEdits"),
+            ("/permissions plan", "/permissions plan"),
+            ("/permissions bypassPermissions", "/permissions bypassPermissions"),
+        ]
+        if " " in prefix:
+            normalized = f"/{prefix}"
+            pairs = [item for item in local_commands if item[1].startswith(normalized)]
+            popup.show_pairs(pairs[:8]) if pairs else popup.hide()
+            return
         items = [*self.capabilities.get("commands", []), *self.capabilities.get("skill_commands", []), *self.capabilities.get("mcp_tools", [])]
         pairs = [(f"/{item['name']}  {item.get('description', '')}", f"/{item['name']}") for item in items if item['name'].startswith(prefix)]
         if "exit".startswith(prefix):
             pairs.append(("/exit  Exit Cogent CLI", "/exit"))
         if "models".startswith(prefix):
-            pairs.append(("/models  Show server models and credential status", "/models"))
+            pairs.append(("/models  List, register, or select server models", "/models"))
         popup.show_pairs(pairs[:8]) if pairs else popup.hide()
 
     def on_chat_input_slash_menu_update(self, event: ChatInput.SlashMenuUpdate):

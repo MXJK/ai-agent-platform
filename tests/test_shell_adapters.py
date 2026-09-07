@@ -17,6 +17,7 @@ from ai_agent_platform.api import entrypoint as api_entrypoint
 from ai_agent_platform.cli import (
     CliApplication,
     CliInterruptController,
+    RemoteCliApplication,
     _run_mode,
     build_parser,
     main as cli_main,
@@ -41,6 +42,61 @@ _EVENT_SCHEMA = {
 
 
 class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_cli_management_commands_are_local_and_http_backed(self) -> None:
+        application = RemoteCliApplication(
+            api_url="http://cogent.test",
+            workspace_id="project",
+            session_id="session-1",
+            user_id="user",
+            cwd=Path.cwd(),
+        )
+        await application.client.close()
+        client = SimpleNamespace(
+            context=SimpleNamespace(
+                model_summary="auto/smart · 1 models",
+                credential_summary="1/1 credentials",
+            ),
+            register_model=AsyncMock(
+                return_value={
+                    "id": "model-pro",
+                    "provider": "deepseek",
+                    "model": "deepseek-pro",
+                }
+            ),
+            select_model=AsyncMock(
+                return_value={"provider": "deepseek", "model": "deepseek-pro"}
+            ),
+            select_auto_model=AsyncMock(return_value={"mode": "auto"}),
+            registry_text=Mock(return_value="Current model: auto/smart"),
+        )
+        application.client = client
+        application._prepared = True
+
+        permission = await application.execute_management_command(
+            "/permissions acceptEdits"
+        )
+        registered = await application.execute_management_command(
+            "/models register deepseek deepseek-pro"
+        )
+        selected = await application.execute_management_command(
+            "/models use deepseek/deepseek-pro"
+        )
+        automatic = await application.execute_management_command(
+            "/models auto latency"
+        )
+
+        self.assertIn("acceptEdits", permission)
+        self.assertEqual(application.permission_mode, "acceptEdits")
+        self.assertIn("model-pro", registered)
+        self.assertIn("fallback disabled", selected)
+        self.assertIn("latency", automatic)
+        client.register_model.assert_awaited_once_with(
+            provider="deepseek",
+            model="deepseek-pro",
+        )
+        client.select_model.assert_awaited_once_with("deepseek/deepseek-pro")
+        client.select_auto_model.assert_awaited_once_with("latency")
+
     async def test_sdk_query_resume_and_control_keep_domain_contracts(self) -> None:
         query_events = _events("run_query", "completed")
         resumed_events = _events("run_resume", "completed")
@@ -185,8 +241,9 @@ class ShellAdapterContractTests(unittest.IsolatedAsyncioTestCase):
                 runtime.close()
         events = _json_objects(output.getvalue())
         commands = [item['output']['command'] for item in events if item.get('type') == 'command_completed']
-        self.assertEqual(commands, ['skill', 'tools', 'mcp', 'permissions'])
-        self.assertEqual(len(records), 4)
+        self.assertEqual(commands, ['skill', 'tools', 'mcp'])
+        self.assertEqual(len(records), 3)
+        self.assertIn("Cogent permission mode: default", output.getvalue())
         self.assertFalse(any(item.get('kind') == 'error' for item in events))
 
     async def test_global_skill_command_submits_query_and_freezes_invocation(self) -> None:

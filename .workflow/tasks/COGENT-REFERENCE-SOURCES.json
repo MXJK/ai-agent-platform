@@ -10,7 +10,7 @@
     },
     {
       "module": "app.py",
-      "symbols": ["ChatInput", "ToolCallBlock", "_tool_title", "_format_detail"],
+      "symbols": ["ChatInput", "ToolCallBlock", "_tool_title", "_format_detail", "_MODE_CYCLE", "_MODE_COLORS", "MewCodeApp.action_cycle_mode", "MewCodeApp._MODE_DISPLAY", "MewCodeApp._update_mode_label"],
       "sha256": "9c4bdbb25d00adbfbd498f6c091f074e8b6cf0d46aee2a99e2d77d2f9428eeda"
     },
     {

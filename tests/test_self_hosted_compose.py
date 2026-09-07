@@ -62,10 +62,25 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["MCP_ENABLED"] == "true"
     assert environment["MCP_CONFIG_PATH"] == "/home/app/.ai-agent-platform/mcp.json"
     assert environment["SKILLS_ENABLED"] == "true"
-    assert environment["SKILLS_DIRECTORY_PATH"] == "/home/app/.ai-agent-platform/skills"
+    assert environment["SKILLS_DIRECTORY_PATH"] == "/home/app/.cogent/skills"
     assert "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces" in app["volumes"]
     assert "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform" in app["volumes"]
+    assert "cogent_user_state:/home/app/.cogent" in app["volumes"]
     assert all("docker.sock" not in volume for volume in app["volumes"])
+
+
+def test_user_skill_path_is_consistent_across_config_and_web_fallbacks() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    app_js = (ROOT / "ai_agent_platform/static/app.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "ai_agent_platform/static/index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SKILLS_DIRECTORY_PATH=~/.cogent/skills" in example
+    assert "SKILLS_DIRECTORY_PATH=~/.ai-agent-platform/skills" not in example
+    assert "~/.cogent/skills" in app_js
+    assert "~/.ai-agent-platform/skills" not in app_js
+    assert "~/.cogent/skills" in index_html
 
 
 def test_application_image_runs_as_a_non_root_user() -> None:

@@ -46,7 +46,7 @@ x-app-environment: &app-environment
   MCP_ENABLED: "true"
   MCP_CONFIG_PATH: "/home/app/.ai-agent-platform/mcp.json"
   SKILLS_ENABLED: "true"
-  SKILLS_DIRECTORY_PATH: "/home/app/.ai-agent-platform/skills"
+  SKILLS_DIRECTORY_PATH: "/home/app/.cogent/skills"
 
 services:
   postgres:

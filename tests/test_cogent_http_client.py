@@ -79,6 +79,18 @@ def test_http_client_uses_server_registry_session_workspace_and_sse():
                     "model": None,
                 },
             )
+        if path == "/api/v1/sessions/session-1/model-preference":
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "session-1",
+                    "mode": "auto",
+                    "routing_policy": "smart",
+                    "preferred_model_id": None,
+                    "fallback_enabled": True,
+                    "updated_at": None,
+                },
+            )
         if path == "/api/v1/agent/composer-capabilities":
             return httpx.Response(
                 200,
@@ -127,7 +139,7 @@ def test_http_client_uses_server_registry_session_workspace_and_sse():
             context = await client.prepare(cwd=Path("/tmp/project"))
             assert context.workspace_id == "project"
             assert context.workspace_root == "/workspaces/project"
-            assert context.model_summary == "auto · 1 models"
+            assert context.model_summary == "auto/smart · 1 models"
             assert context.credential_summary == "1/1 credentials"
             assert "credential configured" in client.registry_text()
             capabilities = await client.composer_capabilities()
@@ -156,6 +168,126 @@ def test_http_client_uses_server_registry_session_workspace_and_sse():
     assert run_request[2]["workspace_id"] == "project"
     assert run_request[2]["permission_mode"] == "acceptEdits"
     assert "api_key" not in json.dumps(requests)
+
+
+def test_http_client_registers_and_switches_models_for_active_session():
+    requests: list[tuple[str, str, dict]] = []
+    preference = {
+        "session_id": "session-1",
+        "mode": "auto",
+        "routing_policy": "smart",
+        "preferred_model_id": None,
+        "fallback_enabled": True,
+        "updated_at": None,
+    }
+    registry = {
+        "connections": [
+            {
+                "provider": "deepseek",
+                "display_name": "DeepSeek",
+                "credential_configured": True,
+                "status": "available",
+            }
+        ],
+        "models": [
+            {
+                "id": "model-flash",
+                "provider": "deepseek",
+                "model": "deepseek-flash",
+                "enabled": True,
+                "status": "available",
+            }
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content or b"{}")
+        requests.append((request.method, request.url.path, body))
+        path = request.url.path
+        if path == "/api/v1/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if path == "/api/v1/model-registry":
+            return httpx.Response(200, json=registry)
+        if path == "/api/v1/users/me/preferences":
+            return httpx.Response(200, json={"default_workspace_id": "project"})
+        if path == "/api/v1/workspaces":
+            return httpx.Response(
+                200,
+                json={"workspaces": [{
+                    "id": "project",
+                    "root_path": "/workspaces/project",
+                    "available": True,
+                }]},
+            )
+        if path == "/api/v1/sessions" and request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "id": "session-1",
+                    "workspace_id": "project",
+                    "composer_mode": "agent",
+                    "provider": None,
+                    "model": None,
+                },
+            )
+        if path == "/api/v1/sessions/session-1/model-preference":
+            if request.method == "PUT":
+                preference.update(body)
+            return httpx.Response(200, json=preference)
+        if path == "/api/v1/model-registry/models" and request.method == "POST":
+            created = {
+                "id": "model-pro",
+                "provider": body["provider"],
+                "model": body["model"],
+                "enabled": body["enabled"],
+                "status": "unknown",
+            }
+            registry["models"].append(created)
+            return httpx.Response(201, json=created)
+        raise AssertionError(f"unexpected request: {request.method} {path}")
+
+    async def scenario():
+        client = CogentHTTPClient(
+            "http://cogent.test",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            await client.prepare(cwd=Path("/tmp/project"))
+            created = await client.register_model(
+                provider="deepseek",
+                model="deepseek-pro",
+            )
+            assert created["id"] == "model-pro"
+            selected = await client.select_model("deepseek/deepseek-pro")
+            assert selected["id"] == "model-pro"
+            assert client.context is not None
+            assert client.context.model_summary == "deepseek/deepseek-pro"
+            assert "* model-pro" in client.registry_text()
+            await client.select_auto_model("latency")
+            assert client.context.model_summary == "auto/latency · 2 models"
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+    assert (
+        "POST",
+        "/api/v1/model-registry/models",
+        {
+            "provider": "deepseek",
+            "model": "deepseek-pro",
+            "enabled": True,
+            "auto_eligible": True,
+        },
+    ) in requests
+    manual = next(
+        body
+        for method, path, body in requests
+        if method == "PUT"
+        and path == "/api/v1/sessions/session-1/model-preference"
+        and body["mode"] == "manual"
+    )
+    assert manual["preferred_model_id"] == "model-pro"
+    assert manual["fallback_enabled"] is False
 
 
 def test_http_client_does_not_fall_back_when_server_has_no_workspace():

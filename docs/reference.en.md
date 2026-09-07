@@ -98,14 +98,23 @@ uv run cogent --workspace-id project --print "Explain the entrypoints"
 The default endpoint is `http://127.0.0.1:8000/api/v1`; set `COGENT_API_URL` or
 pass `--api-url` when it differs. The CLI automatically selects a sole/default
 Workspace or a unique Workspace matching the current directory; otherwise pass
-`--workspace-id`. `/models` shows the server model and credential status.
+`--workspace-id`. `/models` shows the server model and credential status;
+`/models register <provider> <model>` registers an enabled model under an existing
+Provider connection, `/models use <model-id|provider/model>` locks the active session
+to that model with fallback disabled, and `/models auto [smart|quality|cost|latency]`
+restores automatic routing. The CLI never accepts Provider API keys; configure a
+missing connection in the local model settings page.
 Textual, noninteractive output, and the compatibility REPL use the same HTTP/SSE
 QueryService boundary as the web UI. The embedded `AgentSDK.query()` remains
 available for Python callers. `/api/v1/chat/stream` returns 404.
 
 Shared commands: /help, /status, /clear, /compact, /mcp, /memory, /session,
 /skill (also /skills), /tools, /permissions, /resume, /plan, /review, /rewind,
-/sandbox. /exit is local to the CLI.
+/sandbox. `/permissions [default|acceptEdits|plan|bypassPermissions]` changes the
+next-Run mode immediately without creating a management Run; Shift+Tab cycles the
+same modes in the TUI. The mewcode-style status label renders them as `default`,
+`accept-edits`, `plan`, and `YOLO`. Server-side hard boundaries are still frozen and
+enforced when the Run starts. /exit is local to the CLI.
 
 ## Layered runtime configuration
 

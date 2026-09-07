@@ -30,6 +30,7 @@ class RemoteCliContext:
     model_summary: str
     credential_summary: str
     registry: dict[str, Any]
+    model_preference: dict[str, Any]
 
 
 class CogentHTTPClient:
@@ -126,23 +127,17 @@ class CogentHTTPClient:
                 },
             )
 
-        connections = list(registry.get("connections") or [])
-        models = [item for item in registry.get("models") or [] if item.get("enabled")]
-        configured = [item for item in connections if item.get("credential_configured")]
-        provider = session.get("provider")
-        model = session.get("model")
-        model_summary = (
-            f"{provider}/{model}" if provider and model else f"auto · {len(models)} models"
+        preference = await self._json(
+            "GET",
+            f"/sessions/{session['id']}/model-preference",
         )
-        credential_summary = f"{len(configured)}/{len(connections)} credentials"
-        self.context = RemoteCliContext(
+        self.context = _remote_context(
             api_url=self.api_url,
             session_id=str(session["id"]),
             workspace_id=str(selected["id"]),
             workspace_root=str(selected["root_path"]),
-            model_summary=model_summary,
-            credential_summary=credential_summary,
             registry=registry,
+            preference=preference,
         )
         return self.context
 
@@ -183,16 +178,100 @@ class CogentHTTPClient:
                     "composer_mode": "agent",
                 }},
             )
-        self.context = RemoteCliContext(
+        preference = await self._json(
+            "GET",
+            f"/sessions/{session['id']}/model-preference",
+        )
+        registry = await self._json("GET", "/model-registry")
+        self.context = _remote_context(
             api_url=context.api_url,
             session_id=str(session["id"]),
             workspace_id=context.workspace_id,
             workspace_root=context.workspace_root,
-            model_summary=context.model_summary,
-            credential_summary=context.credential_summary,
-            registry=context.registry,
+            registry=registry,
+            preference=preference,
         )
         return session
+
+    async def register_model(self, *, provider: str, model: str) -> dict[str, Any]:
+        """Register an enabled model through the server-owned model registry."""
+
+        registered = await self._json(
+            "POST",
+            "/model-registry/models",
+            json={
+                "provider": provider,
+                "model": model,
+                "enabled": True,
+                "auto_eligible": True,
+            },
+            expected={201},
+        )
+        await self.refresh_model_context()
+        return registered
+
+    async def select_model(self, selector: str) -> dict[str, Any]:
+        """Persist an exact manual model selection for the active session."""
+
+        context = self._require_context()
+        model = _resolve_model(context.registry, selector)
+        if not model.get("enabled"):
+            raise CogentAPIError(
+                f"Model {model.get('provider')}/{model.get('model')} is disabled."
+            )
+        preference = await self._json(
+            "PUT",
+            f"/sessions/{context.session_id}/model-preference",
+            json={
+                "mode": "manual",
+                "routing_policy": "smart",
+                "preferred_model_id": model["id"],
+                "fallback_enabled": False,
+            },
+        )
+        await self.refresh_model_context(preference=preference)
+        return model
+
+    async def select_auto_model(self, routing_policy: str = "smart") -> dict[str, Any]:
+        """Restore server-side automatic routing for the active session."""
+
+        if routing_policy not in {"smart", "quality", "cost", "latency"}:
+            raise ValueError("routing policy must be smart, quality, cost, or latency")
+        context = self._require_context()
+        preference = await self._json(
+            "PUT",
+            f"/sessions/{context.session_id}/model-preference",
+            json={
+                "mode": "auto",
+                "routing_policy": routing_policy,
+                "preferred_model_id": None,
+                "fallback_enabled": True,
+            },
+        )
+        await self.refresh_model_context(preference=preference)
+        return preference
+
+    async def refresh_model_context(
+        self,
+        *,
+        preference: dict[str, Any] | None = None,
+    ) -> RemoteCliContext:
+        context = self._require_context()
+        registry = await self._json("GET", "/model-registry")
+        if preference is None:
+            preference = await self._json(
+                "GET",
+                f"/sessions/{context.session_id}/model-preference",
+            )
+        self.context = _remote_context(
+            api_url=context.api_url,
+            session_id=context.session_id,
+            workspace_id=context.workspace_id,
+            workspace_root=context.workspace_root,
+            registry=registry,
+            preference=preference,
+        )
+        return self.context
 
     async def delete_session(self, session_id: str) -> None:
         await self._request("DELETE", f"/sessions/{session_id}", expected={204})
@@ -381,7 +460,8 @@ class CogentHTTPClient:
         context = self._require_context()
         connections = context.registry.get("connections") or []
         models = context.registry.get("models") or []
-        lines = ["Server model registry:"]
+        selected_id = context.model_preference.get("preferred_model_id")
+        lines = [f"Current model: {context.model_summary}", "Server model registry:"]
         for connection in connections:
             credential = (
                 "configured" if connection.get("credential_configured") else "missing"
@@ -394,9 +474,21 @@ class CogentHTTPClient:
             for model in models:
                 if model.get("provider") == provider:
                     state = "enabled" if model.get("enabled") else "disabled"
-                    lines.append(f"    {model.get('model')} · {state}")
+                    marker = "*" if model.get("id") == selected_id else " "
+                    lines.append(
+                        f"  {marker} {model.get('id')} · {provider}/{model.get('model')} · "
+                        f"{state} · {model.get('status', 'unknown')}"
+                    )
         if not connections:
             lines.append("  No Provider is configured. Add one in the web model settings.")
+        lines.extend(
+            [
+                "Commands:",
+                "  /models register <provider> <model>",
+                "  /models use <model-id|provider/model>",
+                "  /models auto [smart|quality|cost|latency]",
+            ]
+        )
         return "\n".join(lines)
 
     def _require_context(self) -> RemoteCliContext:
@@ -513,6 +605,77 @@ def _select_workspace(
     raise CogentAPIError(
         "The Cogent server has multiple Workspaces and none matches this directory. "
         f"Run `uv run cogent --workspace-id <id>`; available IDs: {choices}."
+    )
+
+
+def _remote_context(
+    *,
+    api_url: str,
+    session_id: str,
+    workspace_id: str,
+    workspace_root: str,
+    registry: dict[str, Any],
+    preference: dict[str, Any],
+) -> RemoteCliContext:
+    connections = list(registry.get("connections") or [])
+    models = list(registry.get("models") or [])
+    enabled_models = [item for item in models if item.get("enabled")]
+    configured = [item for item in connections if item.get("credential_configured")]
+    selected = next(
+        (
+            item
+            for item in models
+            if item.get("id") == preference.get("preferred_model_id")
+        ),
+        None,
+    )
+    if preference.get("mode") == "manual" and selected is not None:
+        model_summary = f"{selected.get('provider')}/{selected.get('model')}"
+    else:
+        policy = str(preference.get("routing_policy") or "smart")
+        model_summary = f"auto/{policy} · {len(enabled_models)} models"
+    return RemoteCliContext(
+        api_url=api_url,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        workspace_root=workspace_root,
+        model_summary=model_summary,
+        credential_summary=f"{len(configured)}/{len(connections)} credentials",
+        registry=registry,
+        model_preference=preference,
+    )
+
+
+def _resolve_model(registry: dict[str, Any], selector: str) -> dict[str, Any]:
+    selector = selector.strip()
+    if not selector:
+        raise ValueError("model selector must not be blank")
+    models = list(registry.get("models") or [])
+    exact = [
+        item
+        for item in models
+        if selector
+        in {
+            str(item.get("id") or ""),
+            f"{item.get('provider')}/{item.get('model')}",
+            f"{item.get('provider')}:{item.get('model')}",
+        }
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    by_name = [item for item in models if item.get("model") == selector]
+    if len(by_name) == 1:
+        return by_name[0]
+    if len(by_name) > 1:
+        choices = ", ".join(
+            sorted(f"{item.get('provider')}/{item.get('model')}" for item in by_name)
+        )
+        raise CogentAPIError(
+            f"Model name {selector!r} is ambiguous; use one of: {choices}."
+        )
+    raise CogentAPIError(
+        f"Model {selector!r} is not registered. Run `/models` to list models or "
+        "`/models register <provider> <model>` first."
     )
 
 

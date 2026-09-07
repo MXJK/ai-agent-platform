@@ -62,6 +62,22 @@ uv run cogent --workspace-id project --print "Explain this project's entrypoints
 The default API URL is `http://127.0.0.1:8000/api/v1`. Override it with
 `COGENT_API_URL` or `--api-url`.
 
+Inside the TUI or `uv run cogent repl`, manage the next Run directly:
+
+```text
+/permissions [default|acceptEdits|plan|bypassPermissions]
+/models
+/models register <provider> <model>
+/models use <model-id|provider/model>
+/models auto [smart|quality|cost|latency]
+```
+
+Permission changes take effect immediately. The TUI status bar shows the active mode
+as `default`, `accept-edits`, `plan`, or `YOLO`; Shift+Tab cycles through them in that
+order. Model registration and selection update the same server registry and active-session preference used by the web UI. The CLI
+does not accept Provider API keys; configure a missing connection in the local model
+settings page.
+
 ## Deployment boundary
 
 The supported Compose stack runs the FastAPI/Web UI App, PostgreSQL, Qdrant, and a

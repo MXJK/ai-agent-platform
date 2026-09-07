@@ -424,7 +424,14 @@ class CliApplication:
     async def _handle_slash_command(self, raw: str) -> bool:
         if raw.strip().casefold() == "/exit":
             return True
-        managed = await self.execute_management_command(raw)
+        try:
+            managed = await self.execute_management_command(raw)
+        except (ValueError, RuntimeError, PermissionError) as exc:
+            self._write_diagnostic(
+                "error",
+                {"message": str(exc), "code": getattr(exc, "code", "invalid_command")},
+            )
+            return False
         if managed is not None:
             self.output_stream.write(managed + "\n")
             self.output_stream.flush()
@@ -437,8 +444,30 @@ class CliApplication:
 
     async def execute_management_command(self, raw: str) -> str | None:
         parts = shlex.split(raw)
-        if not parts or parts[0] not in {"/memory", "/session"}:
+        if not parts or parts[0] not in {
+            "/memory",
+            "/models",
+            "/permissions",
+            "/session",
+        }:
             return None
+        if parts[0] == "/permissions":
+            if len(parts) == 1:
+                return (
+                    f"Cogent permission mode: {self.permission_mode_summary}. "
+                    "Hard denies remain active."
+                )
+            if len(parts) == 2:
+                return self.set_permission_mode(parts[1])
+            raise ValueError(
+                "Usage: /permissions [default|acceptEdits|plan|bypassPermissions]"
+            )
+        if parts[0] == "/models":
+            if len(parts) == 1:
+                return self.registry_text()
+            raise ValueError(
+                "Model registration and selection require the public HTTP CLI."
+            )
         self._prepare_context()
         if parts[0] == "/session":
             return self._manage_session(parts[1:])
@@ -860,9 +889,60 @@ class RemoteCliApplication:
 
     async def execute_management_command(self, raw: str) -> str | None:
         parts = shlex.split(raw)
-        if not parts or parts[0] not in {"/memory", "/session"}:
+        if not parts or parts[0] not in {
+            "/memory",
+            "/models",
+            "/permissions",
+            "/session",
+        }:
             return None
+        if parts[0] == "/permissions":
+            if len(parts) == 1:
+                return (
+                    f"Cogent permission mode: {self.permission_mode_summary}. "
+                    "Hard denies remain active."
+                )
+            if len(parts) == 2:
+                return self.set_permission_mode(parts[1])
+            raise ValueError(
+                "Usage: /permissions [default|acceptEdits|plan|bypassPermissions]"
+            )
         await self.prepare_context()
+        if parts[0] == "/models":
+            action = parts[1] if len(parts) > 1 else "list"
+            if (action == "list" and len(parts) == 2) or len(parts) == 1:
+                return self.registry_text()
+            if action == "register":
+                if len(parts) == 4:
+                    provider, model = parts[2], parts[3]
+                elif len(parts) == 3 and "/" in parts[2]:
+                    provider, model = parts[2].split("/", 1)
+                else:
+                    raise ValueError("Usage: /models register <provider> <model>")
+                registered = await self.client.register_model(
+                    provider=provider,
+                    model=model,
+                )
+                return (
+                    f"Registered {registered['provider']}/{registered['model']} "
+                    f"as {registered['id']}. Use `/models use {registered['id']}` "
+                    "to select it."
+                )
+            if action == "use" and len(parts) == 3:
+                selected = await self.client.select_model(parts[2])
+                return (
+                    f"Current session now uses {selected['provider']}/{selected['model']} "
+                    "with fallback disabled."
+                )
+            if action == "auto" and len(parts) in {2, 3}:
+                policy = parts[2] if len(parts) == 3 else "smart"
+                await self.client.select_auto_model(policy)
+                return f"Current session now uses automatic {policy} routing."
+            raise ValueError(
+                "Usage: /models [list] | /models register <provider> <model> | "
+                "/models use <model-id|provider/model> | "
+                "/models auto [smart|quality|cost|latency]"
+            )
         action = parts[1] if len(parts) > 1 else "list"
         if parts[0] == "/session":
             if action == "list":
@@ -957,7 +1037,12 @@ class RemoteCliApplication:
                 continue
             if message.casefold() == "/exit":
                 return 0
-            managed = await self.execute_management_command(message)
+            try:
+                managed = await self.execute_management_command(message)
+            except (ValueError, RuntimeError, PermissionError) as exc:
+                self.error_stream.write(f"error: {exc}\n")
+                self.error_stream.flush()
+                continue
             if managed is not None:
                 self.output_stream.write(managed + "\n")
                 self.output_stream.flush()

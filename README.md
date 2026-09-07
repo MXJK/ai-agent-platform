@@ -54,6 +54,20 @@ uv run cogent --workspace-id project --print "解释这个项目的入口结构"
 默认 API 地址是 `http://127.0.0.1:8000/api/v1`；可通过 `COGENT_API_URL`
 或 `--api-url` 修改。
 
+进入 TUI 或 `uv run cogent repl` 后可直接管理下一次 Run：
+
+```text
+/permissions [default|acceptEdits|plan|bypassPermissions]
+/models
+/models register <provider> <model>
+/models use <model-id|provider/model>
+/models auto [smart|quality|cost|latency]
+```
+
+权限模式在终端即时切换；TUI 状态栏按 mewcode 的显示方式标记当前模式为
+`default`、`accept-edits`、`plan` 或 `YOLO`，Shift+Tab 按此顺序循环。模型注册和当前会话选模写入网页共用的服务端注册中心。
+CLI 不接收 Provider API Key，尚未配置的连接仍需通过本地模型管理页安全录入。
+
 ## 当前部署边界
 
 官方 Compose 运行 FastAPI/Web UI、PostgreSQL、Qdrant 和一次性迁移服务。

@@ -111,7 +111,7 @@ const state = {
     servers: [],
   },
   skillRegistry: {
-    root: "~/.ai-agent-platform/skills",
+    root: "~/.cogent/skills",
     writable: false,
     skills: [],
     diagnostics: [],
@@ -2906,7 +2906,7 @@ function skillByName(name) {
 function renderSkillRegistry() {
   const registry = state.skillRegistry;
   const skills = registry.skills || [];
-  $("skill-registry-root").textContent = registry.root || "~/.ai-agent-platform/skills";
+  $("skill-registry-root").textContent = registry.root || "~/.cogent/skills";
   $("skill-list-count").textContent = String(skills.length);
   const note = $("skill-runtime-note");
   const errors = (registry.diagnostics || []).filter((item) => item.severity === "error");

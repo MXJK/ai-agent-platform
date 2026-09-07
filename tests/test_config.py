@@ -49,6 +49,10 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.agent_workspace_allowed_modes, ("patch_only",))
         self.assertEqual(settings.native_directory_picker_mode, "loopback")
         self.assertEqual(settings.model_probe_interval_seconds, 0)
+        self.assertEqual(
+            settings.skills_directory_path,
+            str(Path.home() / ".cogent" / "skills"),
+        )
 
     def test_model_probe_interval_is_opt_in_and_bounded(self) -> None:
         with patch.dict(
