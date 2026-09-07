@@ -3,6 +3,7 @@ from .models import (
     ChangeSetRecord,
     ContextAssembly,
     ConversationContextUsage,
+    ConversationMemoryHit,
     ConversationSummary,
     KnowledgeBaseRecord,
     Message,
@@ -11,6 +12,8 @@ from .models import (
     TokenUsageRecord,
     TokenUsageTotals,
     UserPreferences,
+    WORKSPACE_ROLE_RANK,
+    WorkspaceMember,
     WorkspaceRecord,
 )
 from .run_context import (
@@ -53,6 +56,7 @@ __all__ = [
     "ConversationMessageSnapshot",
     "ConversationSummarySnapshot",
     "ConversationContextUsage",
+    "ConversationMemoryHit",
     "ConversationSummary",
     "KnowledgeBaseRecord",
     "GitContext",
@@ -73,6 +77,8 @@ __all__ = [
     "TokenUsageRecord",
     "TokenUsageTotals",
     "UserPreferences",
+    "WORKSPACE_ROLE_RANK",
+    "WorkspaceMember",
     "WorkspaceRecord",
     "canonical_project_config",
     "AgentEvent",

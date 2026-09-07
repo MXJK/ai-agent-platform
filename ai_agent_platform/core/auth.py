@@ -1,9 +1,4 @@
-"""Identity boundary shared by HTTP routers.
-
-In production the Go gateway validates OIDC tokens and signs the trusted
-identity headers with a shared secret. Direct client identity headers are not
-accepted in that mode.
-"""
+"""Identity boundary shared by HTTP routers."""
 
 from __future__ import annotations
 
@@ -13,10 +8,6 @@ import ipaddress
 from fastapi import HTTPException, Request
 
 from ai_agent_platform.core.config import Settings
-
-
-LOCAL_GATEWAY_MODE_HEADER = "X-Gateway-Mode"
-LOCAL_GATEWAY_MODE = "local"
 
 
 def request_user_id(
@@ -69,9 +60,7 @@ def require_local_capability(
 
     Single-user self-hosting has one fixed owner and is published to host loopback by
     the Compose contract. Unauthenticated development must arrive directly from
-    loopback. Trusted-header deployments must first pass the shared-secret identity
-    boundary and then carry the local-mode assertion that the Go gateway strips and
-    reissues itself.
+    loopback. Trusted-header identity does not grant host administration.
     """
     if settings.auth_mode == "single_user":
         return request_user_id(request, settings)
@@ -80,9 +69,7 @@ def require_local_capability(
             return request_user_id(request, settings)
         raise HTTPException(status_code=403, detail=detail)
 
-    user_id = request_user_id(request, settings)
-    if request.headers.get(LOCAL_GATEWAY_MODE_HEADER) == LOCAL_GATEWAY_MODE:
-        return user_id
+    request_user_id(request, settings)
     raise HTTPException(status_code=403, detail=detail)
 
 
@@ -110,8 +97,6 @@ def validate_bind_host(*, host: str, auth_mode: str) -> None:
 
 
 __all__ = [
-    "LOCAL_GATEWAY_MODE",
-    "LOCAL_GATEWAY_MODE_HEADER",
     "is_loopback_request",
     "request_user_id",
     "require_local_capability",

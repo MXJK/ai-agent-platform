@@ -16,7 +16,7 @@ Cogent 是一个本地优先、自托管的 Coding Agent 平台。Web、终端�
 - **统一模型管理**：集中管理 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、
   MiniMax 与豆包连接和模型。
 - **MCP 与 Skill**：共享工具目录、中央权限裁决、项目/用户级 Skill 发现和 slash command。
-- **分层上下文**：项目指令、用户记忆、项目记忆、会话与附件统一装配，并控制 Token 预算。
+- **分层上下文**：项目指令、Markdown 用户/项目记忆、会话与附件统一装配，并控制 Token 预算。
 - **独立知识库**：文档摄取、混合检索、引用与评测独立于 Coding Agent 运行时。
 
 ## 快速开始
@@ -60,8 +60,8 @@ uv run cogent --workspace-id project --print "解释这个项目的入口结构"
 应用只发布到宿主机 loopback；`single_user` 模式不具备公网认证能力，请勿直接暴露到
 局域网或公网。代码工具默认面向用户自己信任的仓库，执行写入前请审阅审批内容。
 
-SQLite、Celery/Redis、Go gateway、OIDC 和多 Worker 代码是保留的兼容/演进实现，
-不属于当前支持的产品部署面。
+另保留可选的单进程 SQLite 本地 profile。旧 Go gateway、Celery/Redis 多 Worker、
+数据库记忆、Chroma 与操作系统 keyring 兼容实现已经移除。
 
 ## 文档
 

@@ -20,6 +20,7 @@ from ai_agent_platform.agents.coding.models import (
 from ai_agent_platform.agents.coding.store import events_for_record
 from ai_agent_platform.domain import (
     ConversationSummary,
+    ConversationMemoryHit,
     KnowledgeBaseRecord,
     Message,
     Session,
@@ -35,7 +36,6 @@ from ai_agent_platform.integrations.rag import (
     RetrievedDocument,
 )
 from ai_agent_platform.integrations.tools import ToolCall
-from ai_agent_platform.memory import ConversationMemoryHit
 from ai_agent_platform.repositories.memory import (
     SessionArchivedError,
     SessionNotFoundError,

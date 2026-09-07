@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import unittest
 
-from ai_agent_platform.agents import GameAgentRuntime
 from ai_agent_platform.repositories import InMemorySessionRepository
 from ai_agent_platform.services import (
     RuleBasedConversationCompressor,
@@ -23,7 +22,6 @@ GOLDEN = json.loads(
 def _service(*, summary_enabled: bool = False) -> SessionService:
     return SessionService(
         repository=InMemorySessionRepository(),
-        agent_runtime=GameAgentRuntime(),
         compressor=RuleBasedConversationCompressor(),
         summary_enabled=summary_enabled,
         summary_trigger_messages=6,

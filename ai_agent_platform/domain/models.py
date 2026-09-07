@@ -69,6 +69,29 @@ class ConversationSummary:
 
 
 @dataclass(frozen=True)
+class ConversationMemoryHit:
+    message_id: str
+    session_id: str
+    workspace_id: Optional[str]
+    role: str
+    excerpt: str
+    created_at: datetime
+    score: float
+
+
+WORKSPACE_ROLE_RANK = {"viewer": 1, "editor": 2, "admin": 3}
+
+
+@dataclass(frozen=True)
+class WorkspaceMember:
+    workspace_id: str
+    user_id: str
+    role: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class TokenUsageRecord:
     id: str
     session_id: Optional[str]

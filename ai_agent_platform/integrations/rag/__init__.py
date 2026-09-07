@@ -37,7 +37,6 @@ from ai_agent_platform.integrations.rag.models import (
 )
 from ai_agent_platform.integrations.rag.factory import create_rag_service
 from ai_agent_platform.integrations.rag.service import (
-    ChromaVectorStore,
     GeminiEmbeddingProvider,
     HashingEmbeddingProvider,
     InMemoryVectorStore,
@@ -55,7 +54,6 @@ from ai_agent_platform.integrations.rag.service import (
 )
 
 __all__ = [
-    "ChromaVectorStore",
     "DocumentChunk",
     "DocumentVectorSnapshot",
     "DocumentStore",

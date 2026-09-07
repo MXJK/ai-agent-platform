@@ -209,29 +209,10 @@ PROCESS_SECURITY_FIELDS = frozenset(
         "workspace_allowed_roots",
         "model_registry_store",
         "model_secret_backend",
-        "chroma_persist_directory",
-        "chroma_collection_name",
         "rag_vector_store",
         "qdrant_url",
         "qdrant_api_key",
         "qdrant_collection_name",
-        "project_memory_qdrant_collection",
-        "project_memory_store",
-        "project_memory_vector_store",
-        "user_memory_enabled",
-        "user_memory_mode",
-        "user_profile_max_context_chars",
-        "task_queue_backend",
-        "redis_url",
-        "celery_result_backend_url",
-        "celery_visibility_timeout_seconds",
-        "celery_task_max_retries",
-        "celery_task_retry_backoff_seconds",
-        "celery_task_retry_backoff_max_seconds",
-        "celery_task_soft_time_limit_seconds",
-        "celery_task_time_limit_seconds",
-        "celery_result_expires_seconds",
-        "celery_worker_max_tasks_per_child",
         "background_task_workers",
         "background_task_queue_capacity",
         "mcp_allowed",
@@ -302,9 +283,7 @@ _SECRET_FIELDS = frozenset(
         "gateway_trust_secret",
     }
 )
-_CONNECTION_FIELDS = frozenset(
-    {"database_url", "qdrant_url", "redis_url", "celery_result_backend_url"}
-)
+_CONNECTION_FIELDS = frozenset({"database_url", "qdrant_url"})
 
 _CONFIG_PATH_ENV_NAMES = frozenset(
     {

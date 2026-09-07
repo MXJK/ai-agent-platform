@@ -10,7 +10,6 @@ from unittest.mock import Mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ai_agent_platform.agents import GameAgentRuntime
 from test_cogent_runtime import runtime_for, ScriptedClient, response
 from ai_agent_platform.agents.coding import (
     AgentChangeSummary,
@@ -36,7 +35,6 @@ from ai_agent_platform.repositories import (
 )
 from ai_agent_platform.schemas import AgentRunStatusResponse
 from ai_agent_platform.services import (
-    AgentRunService,
     ExecutionContextFactory,
     QueryService,
     SessionService,
@@ -501,32 +499,9 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_eval_flag_skips_user_and_project_memory_side_effects(self) -> None:
-        class UserMemorySpy:
-            enabled = True
-
-            def __init__(self) -> None:
-                self.context_calls = []
-                self.capture_calls = []
-
-            def context_for_user(self, *, user_id):
-                self.context_calls.append(user_id)
-                return "REAL PROFILE"
-
-            def capture_user_message(self, **kwargs):
-                self.capture_calls.append(kwargs)
-
-        class ProjectMemorySpy:
-            def __init__(self) -> None:
-                self.extract_calls = []
-
-            def extract_and_store(self, **kwargs):
-                self.extract_calls.append(kwargs)
-
+    async def test_eval_flag_isolates_history_and_assistant_side_effects(self) -> None:
         with TemporaryDirectory() as temp_dir:
             kernel = _kernel(Path(temp_dir))
-            user_memory = UserMemorySpy()
-            project_memory = ProjectMemorySpy()
             queue = _CaptureQueue()
             context_factory = ExecutionContextFactory(
                 session_service=kernel["session_service"],
@@ -542,7 +517,6 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
                 task_queue=queue,
                 execution_context_factory=context_factory,
                 query_uow=kernel["uow"],
-                workspace_authorizer=project_memory,
             )
             record = service.start(
                 QueryParams(
@@ -561,9 +535,6 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             service._record_assistant_message(result)
 
             self.assertEqual(queue.names, ["agent_run"])
-            self.assertEqual(user_memory.context_calls, [])
-            self.assertEqual(user_memory.capture_calls, [])
-            self.assertEqual(project_memory.extract_calls, [])
             self.assertEqual(record.context_snapshot.session.controlled_history, ())
             self.assertEqual(
                 record.context_snapshot.metadata.entrypoint_metadata[
@@ -573,20 +544,6 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             messages = kernel["session_service"].list_messages(kernel["session_id"])
             self.assertEqual([item.role for item in messages], ["user"])
-
-            ordinary = service.start(
-                QueryParams(
-                    conversation_id=kernel["session_id"],
-                    message="ordinary run",
-                    workspace_id="workspace_main",
-                )
-            )
-
-            self.assertNotIn("user_memory_extraction", queue.names)
-            self.assertNotIn("REAL PROFILE", [
-                item.content
-                for item in ordinary.context_snapshot.session.controlled_history
-            ])
 
     async def test_atomic_start_rolls_back_message_and_run_together(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -786,9 +743,6 @@ class QueryServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(assistants), 1)
             self.assertEqual(assistants[0].source_run_id, record.run_id)
 
-    async def test_agent_run_service_is_a_compatible_query_service_facade(self) -> None:
-        self.assertTrue(issubclass(AgentRunService, QueryService))
-
     async def test_worker_restores_frozen_pool_after_unrelated_tool_is_registered(self) -> None:
         with TemporaryDirectory() as temp_dir:
             kernel = _kernel(Path(temp_dir))
@@ -858,7 +812,6 @@ def _kernel(root: Path, on_submit=None) -> dict[str, object]:
     session_repository = InMemorySessionRepository()
     session_service = SessionService(
         repository=session_repository,
-        agent_runtime=GameAgentRuntime(),
     )
     session = session_service.create_session("alice")
     workspace_service = WorkspaceService(

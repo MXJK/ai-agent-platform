@@ -23,16 +23,16 @@ from .postgres import (
     PostgresSessionRepository,
     PostgresWorkspaceRepository,
 )
-from .project_memory import (
-    InMemoryProjectMemoryRepository,
-    PostgresProjectMemoryRepository,
-)
 from .sqlite import (
     SQLiteAgentRunRepository,
     SQLiteSessionRepository,
     SQLiteWorkspaceRepository,
 )
-from .sqlite_project_memory import SQLiteProjectMemoryRepository
+from .workspace_access import (
+    InMemoryWorkspaceAccessRepository,
+    PostgresWorkspaceAccessRepository,
+    SQLiteWorkspaceAccessRepository,
+)
 from .query import (
     InMemoryQueryUnitOfWork,
     PostgresQueryUnitOfWork,
@@ -49,7 +49,7 @@ __all__ = [
     "InMemoryEvalRepository",
     "InMemoryKnowledgeBaseRepository",
     "InMemoryWorkspaceRepository",
-    "InMemoryProjectMemoryRepository",
+    "InMemoryWorkspaceAccessRepository",
     "PostgresAgentRunRepository",
     "PostgresChangeSetRepository",
     "PostgresEvalRepository",
@@ -58,9 +58,9 @@ __all__ = [
     "PostgresKnowledgeBaseRepository",
     "PostgresSessionRepository",
     "PostgresWorkspaceRepository",
-    "PostgresProjectMemoryRepository",
+    "PostgresWorkspaceAccessRepository",
     "SQLiteAgentRunRepository",
-    "SQLiteProjectMemoryRepository",
+    "SQLiteWorkspaceAccessRepository",
     "SQLiteSessionRepository",
     "SQLiteWorkspaceRepository",
     "SessionArchivedError",

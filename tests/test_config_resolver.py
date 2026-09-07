@@ -34,44 +34,9 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.model_registry_store, "postgres")
         self.assertEqual(settings.rag_vector_store, "qdrant")
         self.assertEqual(settings.workspace_access_store, "postgres")
-        self.assertEqual(settings.task_queue_backend, "in_process")
-        self.assertFalse(settings.project_memory_enabled)
-        self.assertFalse(settings.user_memory_enabled)
         self.assertEqual(settings.auth_mode, "single_user")
         self.assertEqual(settings.single_user_id, "owner")
         self.assertEqual(settings.native_directory_picker_mode, "disabled")
-
-    def test_production_env_template_selects_shared_backends(self) -> None:
-        profile = Path(__file__).resolve().parents[1] / ".env.production.example"
-
-        settings = ConfigResolver.from_default_locations(
-            env={"AI_AGENT_PLATFORM_USER_CONFIG": "/tmp/missing-user-config.json"},
-            dotenv_path=profile,
-        ).resolve_process().settings
-
-        self.assertEqual(settings.runtime_profile, "production")
-        self.assertEqual(settings.session_repository, "postgres")
-        self.assertEqual(settings.rag_vector_store, "qdrant")
-        self.assertEqual(settings.task_queue_backend, "celery")
-        self.assertEqual(settings.native_directory_picker_mode, "disabled")
-
-    def test_trusted_local_picker_mode_is_resolved_as_process_security(self) -> None:
-        resolved = ConfigResolver(
-            env={
-                "AUTH_MODE": "trusted_header",
-                "GATEWAY_TRUST_SECRET": "test-secret",
-                "NATIVE_DIRECTORY_PICKER_MODE": "trusted_local_gateway",
-            }
-        ).resolve_process()
-
-        self.assertEqual(
-            resolved.settings.native_directory_picker_mode,
-            "trusted_local_gateway",
-        )
-        self.assertEqual(
-            resolved.process_security.native_directory_picker_mode,
-            "trusted_local_gateway",
-        )
 
     def test_local_profile_uses_sqlite_for_access_and_session_state(self) -> None:
         profile = Path(__file__).resolve().parents[1] / ".env.local-memory.example"
@@ -87,9 +52,6 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.agent_run_store, "sqlite")
         self.assertEqual(settings.workspace_store, "sqlite")
         self.assertEqual(settings.workspace_access_store, "sqlite")
-        self.assertFalse(settings.project_memory_enabled)
-        self.assertFalse(settings.user_memory_enabled)
-        self.assertEqual(settings.task_queue_backend, "in_process")
         self.assertEqual(settings.model_registry_store, "memory")
         self.assertEqual(settings.change_set_store, "memory")
 
@@ -108,31 +70,10 @@ class ConfigResolverTests(unittest.TestCase):
         self.assertEqual(settings.document_store, "memory")
         self.assertEqual(settings.model_registry_store, "memory")
         self.assertEqual(settings.rag_vector_store, "memory")
-        self.assertEqual(settings.task_queue_backend, "in_process")
-        self.assertFalse(settings.project_memory_enabled)
-        self.assertFalse(settings.user_memory_enabled)
         self.assertEqual(
             resolved.provenance_for("session_repository").detail,
             "environment:RUNTIME_PROFILE -> runtime_profile=local",
         )
-
-    def test_production_profile_expands_shared_worker_defaults(self) -> None:
-        settings = ConfigResolver(
-            env={"RUNTIME_PROFILE": "production"},
-        ).resolve_process().settings
-
-        self.assertEqual(settings.runtime_profile, "production")
-        self.assertEqual(settings.session_repository, "postgres")
-        self.assertEqual(settings.agent_run_store, "postgres")
-        self.assertEqual(settings.change_set_store, "postgres")
-        self.assertEqual(settings.document_store, "postgres")
-        self.assertEqual(settings.workspace_store, "postgres")
-        self.assertEqual(settings.model_registry_store, "postgres")
-        self.assertEqual(settings.rag_vector_store, "qdrant")
-        self.assertEqual(settings.workspace_access_store, "postgres")
-        self.assertEqual(settings.task_queue_backend, "celery")
-        self.assertFalse(settings.project_memory_enabled)
-        self.assertFalse(settings.user_memory_enabled)
 
     def test_named_profile_rejects_manual_backend_mixing(self) -> None:
         with self.assertRaisesRegex(
@@ -540,7 +481,6 @@ class ConfigResolverTests(unittest.TestCase):
     def test_safe_snapshot_and_reprs_do_not_expose_secrets(self) -> None:
         secrets = {
             "database_url": "postgresql://alice:db-password@db.local/app",
-            "redis_url": "redis://:redis-password@cache.local/0",
             "qdrant_url": "https://qdrant.local/collections?token=query-secret",
             "qdrant_api_key": "qdrant-secret-value",
             "gateway_trust_secret": "gateway-secret-value",
@@ -559,7 +499,6 @@ class ConfigResolverTests(unittest.TestCase):
         combined_repr = repr(resolved) + repr(resolved.settings)
         for secret in (
             "db-password",
-            "redis-password",
             "query-secret",
             "qdrant-secret-value",
             "gateway-secret-value",
@@ -607,6 +546,9 @@ class ConfigResolverTests(unittest.TestCase):
                 "GEMINI_API_KEY": "legacy-key",
             },
             clear=True,
+        ), patch(
+            "ai_agent_platform.core.config_resolver._read_dotenv",
+            return_value={},
         ):
             settings = Settings.from_env()
         self.assertFalse(hasattr(settings, "google_api_key"))

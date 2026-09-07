@@ -17,9 +17,9 @@ self-hosting. The persistent services are the FastAPI/Web UI App, PostgreSQL, an
 Qdrant; a one-shot `migrate` service applies the existing Alembic chain. Agent work
 uses the in-process bounded queue, so no Go gateway, Redis, Celery Worker, or
 Adminer is started.
-The App image installs `requirements.self-hosted.txt`, excluding Celery/Redis,
-Chroma and OS keyring. It includes SentenceTransformer/Torch for the default BGE-M3
-document embeddings. Optional adapters remain in the full development set.
+The App image installs `requirements.self-hosted.txt`. The legacy Celery/Redis,
+Chroma, and OS-keyring dependencies have been removed. SentenceTransformer/Torch
+remain for the default BGE-M3 document embeddings.
 
 ```bash
 cp -n .env.example .env
@@ -53,10 +53,10 @@ for every existing Workspace, including soft-removed records, without deleting
 legacy members or project data. A legacy host-absolute root must still be relinked
 through the UI to its container-visible `/workspaces/...` path.
 
-SQLite, Celery, Go gateway, OIDC, and multi-worker implementations remain as
-compatibility and test code, not supported deployment paths. `start-local.sh` now
-forwards to the same Compose entrypoint; `./scripts/start.sh --check` performs a
-static Compose check.
+The optional single-process SQLite profile remains for local development and tests.
+The legacy Celery/Redis multi-worker path, Go gateway/OIDC, database memory,
+Chroma, OS keyring, and `start-local.sh` have been removed. Use
+`./scripts/start.sh --check` for a static Compose check.
 
 For an existing installation, back up PostgreSQL, then run:
 
@@ -121,10 +121,9 @@ single-node product contract in service-owned environment values:
 | Workspace | `/workspaces` bind mount and direct source edits |
 | Sandbox | Local execution inside the App container for trusted repositories |
 
-The named `local` and `production` profiles remain compatibility implementations,
-not public startup paths. Existing Celery validation still requires fully shared
-PostgreSQL/Qdrant state; this Compose stack does not select Celery and therefore
-does not require Redis or a separate Worker.
+The named `local` profile remains as an optional single-process SQLite setup. The
+`production` profile and Celery adapter have been removed. Tasks always use the
+bounded queue in the API process, so Redis and a separate Worker are unnecessary.
 
 `ConfigResolver` resolves configuration in one fixed order: `Settings` defaults,
 user JSON, project JSON, environment/`.env`, then explicit entry-point overrides.
@@ -185,7 +184,7 @@ Store. Session and Run Stores must also select the same backend; configuration f
 before runtime resource construction when an atomic Query start would be impossible.
 The new `AI_AGENT_PLATFORM_<FIELD>` namespace rejects unknown names. The immutable
 `ResolvedConfig` exposes a compatible `settings` view, three frozen sections, and
-per-field provenance. `Settings.from_env()` still returns `Settings`. API/Worker
+per-field provenance. `Settings.from_env()` still returns `Settings`. API
 containers retain `ResolvedConfig.safe_snapshot()` as `config_snapshot`, the
 supported serialization view for logs, Run snapshots, and configuration
 diagnostics. Structured logging also recursively redacts nested keys, secrets,
@@ -235,9 +234,8 @@ does not execute them automatically.
 To use Gemini, save the Google API key, discover models, and register the target
 model in Model Management. `.env` neither selects nor imports Google/Gemini models,
 and Provider API keys are not read from `.env` or process environment variables.
-`LLM_MAX_OUTPUT_TOKENS`, `LLM_THINKING_LEVEL`, `LLM_TIMEOUT_SECONDS`, and
-`SSE_HEARTBEAT_SECONDS` configure shared runtime policy rather than Provider/model
-registration.
+`LLM_MAX_OUTPUT_TOKENS`, `LLM_THINKING_LEVEL`, and `LLM_TIMEOUT_SECONDS` configure
+shared runtime policy rather than Provider/model registration.
 
 Gemini 3 requests accept `minimal`, `low`, `medium`, or `high` as
 `thinking_level`. API requests and existing session configuration can still
@@ -337,8 +335,8 @@ catalog state and `MODEL_SECRET_BACKEND=encrypted_file` for Provider API keys en
 through the UI. Ciphertext and its random owner-only host key live in the private
 `app_state` volume; PostgreSQL, API responses, logs, and browser storage never contain
 plaintext. The fixed `single_user` owner may save/test/discover connections and mutate
-models, and caller identity headers cannot replace that owner. `memory` is test-only,
-native runs may use the OS keyring, and multi-node deployments require an external
+models, and caller identity headers cannot replace that owner. `memory` is test-only;
+the OS-keyring backend has been removed. Multi-node deployments require an external
 KMS/Vault instead of this single-node file backend.
 
 ## Dynamic model admission and Token budgets
@@ -470,8 +468,8 @@ the browser hides dot-directories and out-of-bound symbolic links.
 Containers cannot open the host Finder on behalf of a browser user, so the
 official Compose stack fixes `NATIVE_DIRECTORY_PICKER_MODE=disabled`. The frontend
 uses the existing constrained web directory browser under `/workspaces`, and each
-selected path still passes `WORKSPACE_ALLOWED_ROOTS`. The loopback and trusted
-local-gateway native picker implementations remain compatibility code only.
+selected path still passes `WORKSPACE_ALLOWED_ROOTS`. The loopback native picker
+remains for trusted local development; trusted-local-gateway mode has been removed.
 
 A Workspace root belongs to the filesystem that actually executes the Agent. If
 a future control plane runs in the cloud while code remains on a user's computer,
@@ -948,10 +946,9 @@ Historical migrations remain in the revision chain. The PostgreSQL result
 loader alone adapts historical JSON containing `repository_id`/`rag_context`;
 new APIs and runs expose only the workspace contract.
 
-The current single-node product does not start Celery. Its official combination is:
+The current single-node product uses only its in-process queue. Its official combination is:
 
 ```dotenv
-TASK_QUEUE_BACKEND=in_process
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
@@ -970,11 +967,9 @@ The persistent runtime assigns one responsibility to each database:
 | PostgreSQL | Sessions/messages, user defaults, summaries, Agent Runs/Events/tool ledger/ChangeSets, model and Run-context snapshots, Workspace access, document metadata, lexical search, and Cogent/maintenance Run state |
 | Qdrant | Rebuildable vectors for the independent document knowledge base; Cogent file memory does not use a vector store |
 | SQLite | Local-profile Sessions, Runs, Workspace access, and maintenance state; file-memory content remains Markdown |
-| Redis/Celery | Retained multi-Worker extension; not started by current Compose |
-| Chroma | Retained embedded vector alternative; not selected by current Compose |
 
-`RAG_VECTOR_STORE` still supports Qdrant, Chroma, or memory, but official Compose
-locks Qdrant and does not dual-write another vector backend.
+`RAG_VECTOR_STORE` supports Qdrant or the test-only memory backend. Official Compose
+locks Qdrant and does not dual-write another vector backend; the Chroma adapter is gone.
 
 At product startup, the one-shot `migrate` service reuses the existing Alembic
 chain; the App starts only after migration succeeds:
@@ -990,17 +985,15 @@ are injected only into the private Compose network. Adminer, Gateway, Redis, and
 Celery are absent from the current service set.
 
 The in-process queue registers Agent run/resume, conversation compression, incremental memory
-extraction, and file-memory consolidation tasks with the same task semantics as
-the retained Celery adapter. Workspace, configuration, and tool context are still
+extraction, and file-memory consolidation tasks. Workspace, configuration, and tool context are still
 frozen before execution. Restarting the App interrupts work that is running or
 queued at that moment; persisted Runs, events, and maintenance write plans remain, but
 this MVP does not promise automatic recovery of every interrupted Run.
 
 ### Runtime assembly and lifecycle
 
-FastAPI `create_app()`, the retained process-local Celery Worker adapter, and
-the embedded SDK enter the same `ApplicationFactory` through
-`build_runtime(settings, role=api|worker|cli)`. Repositories, the LLM, model
+FastAPI `create_app()` and the embedded SDK enter the same `ApplicationFactory`
+through `build_runtime(settings, role=api|cli)`. Repositories, the LLM, model
 registry, Workspace, RAG, MCP, Tool Registry, Cogent Agent runtime, and business
 services therefore share one dependency graph. The public Textual/print/REPL CLI
 instead uses HTTP/SSE to reach the one Runtime already owned by FastAPI, sharing
@@ -1012,32 +1005,22 @@ The returned `RuntimeContainer` explicitly owns its immutable resolved config,
 redacted snapshot, shared `SecretStore`, `MCPConnectionManager`,
 `ExecutionContextFactory`, services, and resources and records `config_loaded`,
 `stores_ready`, `mcp_ready`, `tools_ready`, and
-`agent_ready` startup checkpoints in order. FastAPI lifespan shutdown, Worker
-shutdown, and partial-startup rollback use the same idempotent `close()`;
+`agent_ready` startup checkpoints in order. FastAPI lifespan shutdown and
+partial-startup rollback use the same idempotent `close()`;
 cleanup callbacks run strictly in reverse registration order and each resource
 is closed at most once. Tests can still inject the LLM, RAG service, Agent
 runtime, and directory picker into `create_app()`, or override component
 builders on `ApplicationFactory`.
 
-## Retained extension implementations
+## Removed compatibility implementations
 
-The `gateway/`, Celery/Redis, and local SQLite profile code and tests remain to
-demonstrate later multi-user, multi-Worker, or alternate-storage evolution. They
-are not services in the current Docker MVP. The Go gateway can still be tested
-independently:
-
-```bash
-go run ./gateway/cmd/gateway
-go test ./gateway/...
-go vet ./gateway/...
-```
-
-`AUTH_MODE=trusted_header`, OIDC/JWKS, local-gateway assertions, and multi-Worker
-reliability tests remain valid implemented extension evidence, but they are not
-the default deployment and do not demonstrate production-scale operation. A
-future public or multi-user deployment must revisit authentication, tenant
-authorization, secrets, backups, observability, and untrusted execution instead
-of exposing the `single_user` stack.
+This cleanup removes the Go gateway/OIDC path, Celery/Redis multi-worker support,
+the database-backed ProjectMemory/UserMemory implementation, Chroma, OS keyring,
+the rule-based GameAgent, the legacy `AgentRunService` alias, and `start-local.sh`.
+Historical database migrations remain in the Alembic revision chain so existing
+installations can still upgrade, and the single-process SQLite profile remains.
+A future public, multi-user, or multi-worker design should start from the current
+security and persistence contracts rather than revive these unverified adapters.
 
 ## Verification
 
@@ -1045,32 +1028,27 @@ of exposing the `single_user` stack.
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
 docker compose --env-file .env.example config --quiet
-bash -n scripts/start.sh scripts/start-local.sh
+bash -n scripts/start.sh
 node --check ai_agent_platform/static/app.js
 git diff --check
 ```
-
-After changing the retained Go gateway compatibility implementation, also run
-`go test ./gateway/...`.
 
 Run offline Agent evaluations with:
 
 ```bash
 .venv/bin/python evals/run_evals.py
 .venv/bin/python evals/run_trajectory_evals.py
-.venv/bin/python evals/run_memory_evals.py
 ```
 
-The three suites answer different questions. `run_evals.py` is the L0 pipeline
+The two suites answer different questions. `run_evals.py` is the L0 pipeline
 regression and RAG retrieval gate. `run_trajectory_evals.py` is the L1
 trajectory layer: it grades the process against declared constraints (required
 and forbidden tools, ordering, step ceilings) rather than a golden answer, and
 separates proposed, accepted, executed, succeeded, failed, suppressed, denied,
 and pending-approval calls. Only calls joined to a real `ToolResult` are
 executed. It also builds a successful-read ledger and reports citation content
-accuracy, answer-path grounding, and fully grounded cases separately.
-`run_memory_evals.py` gates project-memory quality. All three run on the fake
-provider, so a passing run is not evidence of answer quality.
+accuracy, answer-path grounding, and fully grounded cases separately. Both run
+on the fake provider, so a passing run is not evidence of answer quality.
 
 The same L1 suite also runs **inside the app against a registered model**, from
 the 评测 page: pick a registered provider/model pair, run it, and the page shows

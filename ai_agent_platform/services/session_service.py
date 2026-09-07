@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
 
-from ai_agent_platform.agents.game_agent import GameAgentRuntime
 from ai_agent_platform.core import MetricsRegistry, TaskQueue, TaskQueueError
 from ai_agent_platform.domain import (
     ContextAssembly,
@@ -102,7 +101,6 @@ class SessionService:
     def __init__(
         self,
         repository,
-        agent_runtime: GameAgentRuntime,
         compressor: ConversationCompressor | None = None,
         summary_enabled: bool = False,
         summary_trigger_messages: int = 12,
@@ -119,7 +117,6 @@ class SessionService:
         default_composer_mode: str = "chat",
     ) -> None:
         self._repository = repository
-        self._agent_runtime = agent_runtime
         self._compressor = compressor
         self._summary_enabled = summary_enabled
         self._summary_trigger_messages = summary_trigger_messages
@@ -376,7 +373,6 @@ class SessionService:
         session_id: str,
         role: str,
         content: str,
-        run_agent: bool = False,
         *,
         message_id: str | None = None,
         source_run_id: str | None = None,
@@ -402,20 +398,6 @@ class SessionService:
                         updated_at=datetime.now(timezone.utc),
                     )
                 )
-
-        if run_agent and role == "user":
-            decision = self._agent_runtime.decide(content)
-            messages.append(
-                self._repository.add_message(
-                    session_id=session_id,
-                    role="assistant",
-                    content=(
-                        f"agent_action={decision.kind}; "
-                        f"confidence={decision.confidence:.2f}; "
-                        f"reason={decision.reason}"
-                    ),
-                )
-            )
 
         return messages
 

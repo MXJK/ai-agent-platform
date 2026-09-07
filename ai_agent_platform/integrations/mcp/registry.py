@@ -376,11 +376,11 @@ def _provider_name(server_name: str) -> str:
 
 
 def _secret_ref(server_name: str, kind: str, name: str) -> str:
-    return f"keyring:mcp-server:{server_name}:{kind}:{name.lower()}"
+    return f"secret-store:mcp-server:{server_name}:{kind}:{name.lower()}"
 
 
 def _is_managed_secret_ref(ref: str) -> bool:
-    return ref.startswith("keyring:mcp-server:")
+    return ref.startswith(("secret-store:mcp-server:", "keyring:mcp-server:"))
 
 
 def _restore_secrets(

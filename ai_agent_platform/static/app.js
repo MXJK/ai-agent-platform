@@ -5050,7 +5050,6 @@ async function addMessage() {
       body: JSON.stringify({
         role: $("message-role-input").value,
         content,
-        run_agent: $("message-run-agent-input").checked,
       }),
     });
     renderMessages(body.messages || []);

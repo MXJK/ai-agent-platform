@@ -24,9 +24,9 @@ from ai_agent_platform.repositories import (
 )
 from ai_agent_platform.schemas import AgentRunRequest
 from ai_agent_platform.services import (
-    AgentRunService,
     ExecutionContextFactory,
     ExecutionWorkspaceRuntime,
+    QueryService,
     WorkspaceNotFoundError,
     WorkspaceService,
 )
@@ -89,15 +89,7 @@ class _Authorizer:
 
 
 class ExecutionContextFactoryTests(unittest.TestCase):
-    def test_isolated_eval_snapshot_has_no_history_summary_or_user_profile(self) -> None:
-        class UserMemorySpy:
-            def __init__(self) -> None:
-                self.calls = []
-
-            def context_for_user(self, *, user_id: str):
-                self.calls.append(user_id)
-                return "REAL OWNER PROFILE"
-
+    def test_isolated_eval_snapshot_has_no_history_or_summary(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             sessions = _SessionService()
@@ -106,7 +98,6 @@ class ExecutionContextFactoryTests(unittest.TestCase):
                 through_message_id="m1", version=1, source_chars=12,
                 updated_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
             )
-            memory = UserMemorySpy()
             factory = ExecutionContextFactory(
                 session_service=sessions,
                 workspace_service=_workspace_service(root, ("main", root)),
@@ -127,7 +118,6 @@ class ExecutionContextFactoryTests(unittest.TestCase):
 
         self.assertEqual(snapshot.session.controlled_history, ())
         self.assertIsNone(snapshot.session.summary)
-        self.assertEqual(memory.calls, [])
         self.assertEqual(
             snapshot.session.model_selection.preferred_model,
             "registered-fake-v2",
@@ -964,7 +954,7 @@ class WorkerContextRecoveryTests(unittest.TestCase):
             store = InMemoryAgentRunStore()
             queued_runtime = _QueuedRuntime(store)
             queue = _CaptureQueue()
-            submitter = AgentRunService(
+            submitter = QueryService(
                 runtime=queued_runtime,
                 session_service=sessions,
                 workspace_service=workspaces,
@@ -992,7 +982,7 @@ class WorkerContextRecoveryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             worker_runtime = _WorkerRuntime(store)
-            worker = AgentRunService(
+            worker = QueryService(
                 runtime=worker_runtime,
                 session_service=sessions,
                 workspace_service=workspaces,

@@ -27,7 +27,7 @@ from ai_agent_platform.domain import (
     WorkspaceRecord,
 )
 from ai_agent_platform.local_state import LocalStateDatabase
-from ai_agent_platform.memory import ConversationMemoryHit
+from ai_agent_platform.domain import ConversationMemoryHit
 from ai_agent_platform.repositories.memory import (
     SessionArchivedError,
     SessionNotFoundError,

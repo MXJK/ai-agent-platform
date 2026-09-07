@@ -245,26 +245,6 @@ class TestStreamUsageCacheFields:
         end = StreamEnd(stop_reason='end_turn', input_tokens=1, output_tokens=2, cache_read=3, cache_creation=4)
         assert end.cache_read == 3 and end.cache_creation == 4
 
-    def test_collector_propagates_cache_fields_into_response(self) -> None:
-        import asyncio
-        from ai_agent_platform.cogent.streaming import StreamCollector
-        from ai_agent_platform.cogent.tools.base import StreamEnd
-
-        async def _stream():
-            yield StreamEnd(stop_reason='end_turn', input_tokens=1000, output_tokens=200, cache_read=5000, cache_creation=300)
-
-        async def _run():
-            collector = StreamCollector()
-            async for _ in collector.consume(_stream()):
-                pass
-            return collector.response
-        resp = asyncio.run(_run())
-        assert resp.cache_read == 5000
-        assert resp.cache_creation == 300
-        conv = ConversationManager()
-        conv.record_usage_anchor(resp.input_tokens, resp.output_tokens, resp.cache_read, resp.cache_creation, provider='anthropic')
-        assert conv.baseline_tokens == 1000 + 5000 + 300 + 200
-
 def _user(text_tokens: int) -> Message:
     return Message(role='user', content='u' * int(text_tokens * _CHARS_PER_TOKEN))
 

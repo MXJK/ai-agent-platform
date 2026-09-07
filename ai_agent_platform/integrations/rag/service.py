@@ -1196,150 +1196,6 @@ class InMemoryVectorStore:
         return scored[:limit]
 
 
-class ChromaVectorStore:
-    def __init__(self, *, persist_directory: str, collection_name: str) -> None:
-        try:
-            import chromadb
-        except ImportError as exc:
-            raise RAGConfigurationError(
-                "chromadb is not installed; run pip install -r requirements.txt"
-            ) from exc
-
-        client = chromadb.PersistentClient(path=persist_directory)
-        self._collection = client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-
-    def delete_document(self, *, document_id: str) -> None:
-        self._collection.delete(where={"document_id": document_id})
-
-    def delete_knowledge_base(self, *, knowledge_base_id: str) -> None:
-        self._collection.delete(where={"knowledge_base_id": knowledge_base_id})
-
-    def snapshot_document(
-        self,
-        *,
-        document_id: str,
-    ) -> DocumentVectorSnapshot:
-        result = self._collection.get(
-            where={"document_id": document_id},
-            include=["documents", "metadatas", "embeddings"],
-        )
-        ids = list(result.get("ids") or [])
-        documents = list(result.get("documents") or [])
-        metadatas = list(result.get("metadatas") or [])
-        raw_embeddings = result.get("embeddings")
-        embeddings = list(raw_embeddings) if raw_embeddings is not None else []
-        chunks = [
-            DocumentChunk(
-                id=str(chunk_id),
-                knowledge_base_id=str(metadata["knowledge_base_id"]),
-                document_id=str(metadata["document_id"]),
-                filename=str(metadata["filename"]),
-                chunk_index=int(metadata["chunk_index"]),
-                text=str(documents[index]),
-                start_line=_optional_int(metadata.get("start_line")),
-                end_line=_optional_int(metadata.get("end_line")),
-                symbols=_metadata_symbols(metadata.get("symbols")),
-            )
-            for index, (chunk_id, metadata) in enumerate(zip(ids, metadatas))
-        ]
-        return DocumentVectorSnapshot(
-            chunks=chunks,
-            embeddings=[[float(value) for value in row] for row in embeddings],
-        )
-
-    def restore_document(
-        self,
-        *,
-        document_id: str,
-        snapshot: DocumentVectorSnapshot,
-    ) -> None:
-        self.replace_document(
-            document_id=document_id,
-            chunks=snapshot.chunks,
-            embeddings=snapshot.embeddings,
-        )
-
-    def upsert_chunks(
-        self,
-        chunks: list[DocumentChunk],
-        embeddings: list[list[float]],
-    ) -> None:
-        if not chunks:
-            return
-        _validate_embeddings(chunks, embeddings)
-
-        self._collection.upsert(
-            ids=[chunk.id for chunk in chunks],
-            embeddings=embeddings,
-            documents=[chunk.text for chunk in chunks],
-            metadatas=[_chroma_chunk_metadata(chunk) for chunk in chunks],
-        )
-
-    def replace_document(
-        self,
-        *,
-        document_id: str,
-        chunks: list[DocumentChunk],
-        embeddings: list[list[float]],
-    ) -> None:
-        _validate_embeddings(chunks, embeddings)
-        existing = self._collection.get(
-            where={"document_id": document_id},
-            include=[],
-        )
-        existing_ids = {
-            str(item) for item in (existing.get("ids") or [])
-        }
-        self.upsert_chunks(chunks, embeddings)
-        stale_ids = existing_ids - {chunk.id for chunk in chunks}
-        if stale_ids:
-            self._collection.delete(ids=sorted(stale_ids))
-
-    def search(
-        self,
-        *,
-        knowledge_base_id: str,
-        query_embedding: list[float],
-        limit: int,
-    ) -> list[RetrievedDocument]:
-        result = self._collection.query(
-            query_embeddings=[query_embedding],
-            n_results=limit,
-            where={"knowledge_base_id": knowledge_base_id},
-            include=["documents", "metadatas", "distances"],
-        )
-
-        ids = _first_result_list(result.get("ids"))
-        documents = _first_result_list(result.get("documents"))
-        metadatas = _first_result_list(result.get("metadatas"))
-        distances = _first_result_list(result.get("distances"))
-
-        retrieved: list[RetrievedDocument] = []
-        for index, chunk_id in enumerate(ids):
-            metadata = metadatas[index]
-            distance = distances[index]
-            score = 1.0 - float(distance)
-            retrieved.append(
-                RetrievedDocument(
-                    id=str(chunk_id),
-                    knowledge_base_id=str(metadata["knowledge_base_id"]),
-                    document_id=str(metadata["document_id"]),
-                    filename=str(metadata["filename"]),
-                    chunk_index=int(metadata["chunk_index"]),
-                    text=str(documents[index]),
-                    score=score,
-                    start_line=_optional_int(metadata.get("start_line")),
-                    end_line=_optional_int(metadata.get("end_line")),
-                    symbols=_metadata_symbols(metadata.get("symbols")),
-                    recall_score=score,
-                )
-            )
-        return retrieved
-
-
 class QdrantVectorStore:
     def __init__(
         self,
@@ -2441,22 +2297,6 @@ def _line_overlap(lines: list[str], max_chars: int) -> list[str]:
     return overlap
 
 
-def _chroma_chunk_metadata(chunk: DocumentChunk) -> dict[str, str | int]:
-    metadata: dict[str, str | int] = {
-        "knowledge_base_id": chunk.knowledge_base_id,
-        "document_id": chunk.document_id,
-        "filename": chunk.filename,
-        "chunk_index": chunk.chunk_index,
-    }
-    if chunk.start_line is not None:
-        metadata["start_line"] = chunk.start_line
-    if chunk.end_line is not None:
-        metadata["end_line"] = chunk.end_line
-    if chunk.symbols:
-        metadata["symbols"] = ",".join(chunk.symbols)
-    return metadata
-
-
 def _optional_int(value: object) -> int | None:
     if value is None:
         return None
@@ -2750,14 +2590,6 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right:
         return 0.0
     return sum(a * b for a, b in zip(left, right))
-
-
-def _first_result_list(value: object) -> list:
-    if isinstance(value, list) and value:
-        first = value[0]
-        if isinstance(first, list):
-            return first
-    return []
 
 
 def _qdrant_model(name: str):

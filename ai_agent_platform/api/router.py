@@ -12,7 +12,6 @@ from ai_agent_platform.api.routes import (
     create_mcp_registry_router,
     create_skill_registry_router,
     create_memory_router,
-    create_retired_memory_router,
     create_sessions_router,
     create_workspaces_router,
 )
@@ -94,7 +93,6 @@ def create_api_router(
         create_memory_router(session_service, file_memory_service,
             workspace_service, workspace_access_service, query_service, settings)
     )
-    router.include_router(create_retired_memory_router())
     router.include_router(
         create_knowledge_bases_router(
             knowledge_base_service,

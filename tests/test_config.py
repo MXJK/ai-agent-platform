@@ -198,17 +198,6 @@ class SettingsTests(unittest.TestCase):
                 "RAG_RERANK_DEFAULT_ENABLED": "true",
                 "BACKGROUND_TASK_WORKERS": "6",
                 "BACKGROUND_TASK_QUEUE_CAPACITY": "25",
-                "TASK_QUEUE_BACKEND": "celery",
-                "REDIS_URL": "redis://127.0.0.1:6379/2",
-                "CELERY_RESULT_BACKEND_URL": "redis://127.0.0.1:6379/3",
-                "CELERY_VISIBILITY_TIMEOUT_SECONDS": "7200",
-                "CELERY_TASK_MAX_RETRIES": "4",
-                "CELERY_TASK_RETRY_BACKOFF_SECONDS": "3",
-                "CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS": "90",
-                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS": "1200",
-                "CELERY_TASK_TIME_LIMIT_SECONDS": "1260",
-                "CELERY_RESULT_EXPIRES_SECONDS": "43200",
-                "CELERY_WORKER_MAX_TASKS_PER_CHILD": "50",
                 "QDRANT_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "qdrant-secret",
                 "QDRANT_COLLECTION_NAME": "test_repo_chunks",
@@ -250,7 +239,6 @@ class SettingsTests(unittest.TestCase):
                 "TOKEN_BUDGET_ACTION": "downgrade",
                 "TOKEN_BUDGET_FALLBACK_PROVIDER": "fake",
                 "TOKEN_BUDGET_FALLBACK_MODEL": "fake-cheap",
-                "SSE_HEARTBEAT_SECONDS": "4.5",
                 "CONVERSATION_SUMMARY_ENABLED": "true",
                 "CONVERSATION_SUMMARY_TRIGGER_MESSAGES": "16",
                 "CONVERSATION_SUMMARY_KEEP_RECENT_MESSAGES": "8",
@@ -266,18 +254,6 @@ class SettingsTests(unittest.TestCase):
                 "SANDBOX_WORKSPACE_PARENT": "/tmp/agent-workspaces",
                 "SANDBOX_WORKSPACE_TTL_SECONDS": "600",
                 "SANDBOX_ALLOWED_COMMANDS": "python,pytest,node",
-                "PROJECT_MEMORY_ENABLED": "true",
-                "PROJECT_MEMORY_MODE": "review",
-                "PROJECT_MEMORY_CANDIDATE_THRESHOLD": "0.65",
-                "PROJECT_MEMORY_AUTO_THRESHOLD": "0.9",
-                "PROJECT_MEMORY_RECALL_LIMIT": "24",
-                "PROJECT_MEMORY_RESULT_LIMIT": "5",
-                "PROJECT_MEMORY_MAX_CONTEXT_CHARS": "2500",
-                "PROJECT_MEMORY_QDRANT_COLLECTION": "test_project_memories",
-                "PROJECT_MEMORY_RELEVANCE_WEIGHT": "0.55",
-                "PROJECT_MEMORY_RECENCY_WEIGHT": "0.30",
-                "PROJECT_MEMORY_IMPORTANCE_WEIGHT": "0.15",
-                "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS": "90",
                 "AUTH_MODE": "trusted_header",
                 "LIVE_WORKSPACE_WRITES_ENABLED": "true",
                 "CHANGE_SET_APPLY_MODE": "direct",
@@ -317,20 +293,6 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.rag_rerank_default_enabled)
         self.assertEqual(settings.background_task_workers, 6)
         self.assertEqual(settings.background_task_queue_capacity, 25)
-        self.assertEqual(settings.task_queue_backend, "celery")
-        self.assertEqual(settings.redis_url, "redis://127.0.0.1:6379/2")
-        self.assertEqual(
-            settings.celery_result_backend_url,
-            "redis://127.0.0.1:6379/3",
-        )
-        self.assertEqual(settings.celery_visibility_timeout_seconds, 7200)
-        self.assertEqual(settings.celery_task_max_retries, 4)
-        self.assertEqual(settings.celery_task_retry_backoff_seconds, 3)
-        self.assertEqual(settings.celery_task_retry_backoff_max_seconds, 90)
-        self.assertEqual(settings.celery_task_soft_time_limit_seconds, 1200)
-        self.assertEqual(settings.celery_task_time_limit_seconds, 1260)
-        self.assertEqual(settings.celery_result_expires_seconds, 43200)
-        self.assertEqual(settings.celery_worker_max_tasks_per_child, 50)
         self.assertEqual(settings.qdrant_url, "http://localhost:6333")
         self.assertEqual(settings.qdrant_api_key, "qdrant-secret")
         self.assertEqual(settings.qdrant_collection_name, "test_repo_chunks")
@@ -366,7 +328,6 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.token_budget_action, "downgrade")
         self.assertEqual(settings.token_budget_fallback_provider, "fake")
         self.assertEqual(settings.token_budget_fallback_model, "fake-cheap")
-        self.assertEqual(settings.sse_heartbeat_seconds, 4.5)
         self.assertTrue(settings.conversation_summary_enabled)
         self.assertEqual(settings.conversation_summary_trigger_messages, 16)
         self.assertEqual(settings.conversation_summary_keep_recent_messages, 8)
@@ -385,21 +346,6 @@ class SettingsTests(unittest.TestCase):
             settings.sandbox_allowed_commands,
             ("python", "pytest", "node"),
         )
-        self.assertTrue(settings.project_memory_enabled)
-        self.assertEqual(settings.project_memory_mode, "review")
-        self.assertEqual(settings.project_memory_candidate_threshold, 0.65)
-        self.assertEqual(settings.project_memory_auto_threshold, 0.9)
-        self.assertEqual(settings.project_memory_recall_limit, 24)
-        self.assertEqual(settings.project_memory_result_limit, 5)
-        self.assertEqual(settings.project_memory_max_context_chars, 2500)
-        self.assertEqual(
-            settings.project_memory_qdrant_collection,
-            "test_project_memories",
-        )
-        self.assertEqual(settings.project_memory_relevance_weight, 0.55)
-        self.assertEqual(settings.project_memory_recency_weight, 0.30)
-        self.assertEqual(settings.project_memory_importance_weight, 0.15)
-        self.assertEqual(settings.project_memory_recency_half_life_days, 90)
         self.assertEqual(settings.auth_mode, "trusted_header")
         self.assertTrue(settings.live_workspace_writes_enabled)
         self.assertEqual(settings.change_set_apply_mode, "direct")
@@ -483,10 +429,6 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "background_task_queue_capacity"):
             Settings(background_task_queue_capacity=-1)
 
-    def test_celery_requires_shared_worker_storage(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires shared storage"):
-            Settings(task_queue_backend="celery")
-
     def test_rejects_unknown_runtime_profile(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime_profile"):
             Settings(runtime_profile="staging")
@@ -494,34 +436,6 @@ class SettingsTests(unittest.TestCase):
     def test_named_runtime_profile_rejects_incompatible_backends(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime_profile=local"):
             Settings(runtime_profile="local")
-
-    def test_celery_accepts_postgres_and_qdrant_shared_storage(self) -> None:
-        settings = Settings(
-            task_queue_backend="celery",
-            session_repository="postgres",
-            agent_run_store="postgres",
-            change_set_store="postgres",
-            document_store="postgres",
-            workspace_store="postgres",
-            rag_vector_store="qdrant",
-        )
-
-        self.assertEqual(settings.task_queue_backend, "celery")
-
-    def test_rejects_celery_hard_limit_not_above_soft_limit(self) -> None:
-        with self.assertRaisesRegex(ValueError, "time_limit_seconds"):
-            Settings(
-                celery_task_soft_time_limit_seconds=60,
-                celery_task_time_limit_seconds=60,
-            )
-
-    def test_rejects_visibility_timeout_below_task_time_limit(self) -> None:
-        with self.assertRaisesRegex(ValueError, "visibility_timeout_seconds"):
-            Settings(
-                celery_task_soft_time_limit_seconds=50,
-                celery_task_time_limit_seconds=60,
-                celery_visibility_timeout_seconds=60,
-            )
 
     def test_requires_mcp_config_when_mcp_is_enabled(self) -> None:
         with self.assertRaisesRegex(ValueError, "mcp_config_path"):
@@ -617,17 +531,12 @@ class SettingsTests(unittest.TestCase):
                 token_budget_action="downgrade",
             )
 
-    def test_rejects_invalid_memory_thresholds_and_missing_gateway_secret(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must not exceed"):
-            Settings(
-                project_memory_candidate_threshold=0.9,
-                project_memory_auto_threshold=0.8,
-            )
+    def test_rejects_invalid_auth_and_directory_picker_settings(self) -> None:
         with self.assertRaisesRegex(ValueError, "gateway_trust_secret"):
             Settings(auth_mode="trusted_header")
         with self.assertRaisesRegex(ValueError, "native_directory_picker_mode"):
             Settings(native_directory_picker_mode="remote")
-        with self.assertRaisesRegex(ValueError, "auth_mode=trusted_header"):
+        with self.assertRaisesRegex(ValueError, "native_directory_picker_mode"):
             Settings(native_directory_picker_mode="trusted_local_gateway")
         settings = Settings(auth_mode="single_user", single_user_id="owner")
         self.assertEqual(settings.single_user_id, "owner")
@@ -635,12 +544,6 @@ class SettingsTests(unittest.TestCase):
             Settings(auth_mode="single_user", single_user_id="   ")
         with self.assertRaisesRegex(ValueError, "single_user_id"):
             Settings(auth_mode="single_user", single_user_id="x" * 257)
-        with self.assertRaisesRegex(ValueError, "weights must sum to 1"):
-            Settings(
-                project_memory_relevance_weight=0.5,
-                project_memory_recency_weight=0.5,
-                project_memory_importance_weight=0.5,
-            )
 
     def test_disabled_auth_requires_loopback_bind_host(self) -> None:
         for host in ("localhost", "127.0.0.1", "127.12.0.4", "::1", "[::1]"):

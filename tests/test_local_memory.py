@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 import stat
 import time
@@ -15,16 +14,6 @@ from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.permissions import ToolExecutionContext
 from ai_agent_platform.local_state import LocalStateDatabase
 from ai_agent_platform.main import create_app
-from ai_agent_platform.runtime import build_runtime
-from ai_agent_platform.memory import UserMemoryValidationError
-from ai_agent_platform.memory.repository import SQLiteUserMemoryRepository
-from ai_agent_platform.memory.service import UserMemoryService
-from ai_agent_platform.project_memory.models import (
-    MemoryAuditEvent,
-    MemoryEvidence,
-    ProjectMemory,
-)
-from ai_agent_platform.project_memory.sqlite_vector import SQLiteMemoryVectorStore
 from ai_agent_platform.repositories.query import SQLiteQueryUnitOfWork
 from ai_agent_platform.repositories.memory import SessionNotFoundError
 from ai_agent_platform.repositories.sqlite import (
@@ -32,76 +21,11 @@ from ai_agent_platform.repositories.sqlite import (
     SQLiteSessionRepository,
     SQLiteWorkspaceRepository,
 )
-from ai_agent_platform.repositories.sqlite_project_memory import (
-    SQLiteProjectMemoryRepository,
-)
 from ai_agent_platform.tools.memory import ConversationMemoryToolkit
 
 
 def _database(root: str) -> LocalStateDatabase:
     return LocalStateDatabase(str(Path(root) / "state.sqlite3"))
-
-
-def _project_memory(
-    *,
-    memory_id: str = "mem_1",
-    workspace_id: str = "workspace",
-    revision: int = 1,
-    status: str = "active",
-    version: int = 1,
-    content: str = "Python is the implementation language",
-) -> ProjectMemory:
-    now = datetime.now(timezone.utc)
-    return ProjectMemory(
-        id=memory_id,
-        workspace_id=workspace_id,
-        workspace_revision=revision,
-        kind="architecture_fact",
-        title="Implementation language",
-        content=content,
-        canonical_key=f"architecture_fact:{memory_id}",
-        status=status,
-        confidence=1.0,
-        importance=4,
-        version=version,
-        created_by="user-a",
-        created_at=now,
-        updated_at=now,
-        last_confirmed_at=now if status == "active" else None,
-    )
-
-
-def _save_project_memory(
-    repository: SQLiteProjectMemoryRepository,
-    memory: ProjectMemory,
-) -> None:
-    now = datetime.now(timezone.utc)
-    repository.create_memory(
-        memory,
-        evidence=[
-            MemoryEvidence(
-                id=f"evidence_{memory.id}",
-                memory_id=memory.id,
-                source_kind="manual",
-                source_id="source",
-                path=None,
-                start_line=None,
-                end_line=None,
-                content_hash=None,
-                excerpt=memory.content,
-                created_at=now,
-            )
-        ],
-        audit=MemoryAuditEvent(
-            id=f"audit_{memory.id}",
-            workspace_id=memory.workspace_id,
-            memory_id=memory.id,
-            action="create",
-            actor_user_id="user-a",
-            metadata={},
-            created_at=now,
-        ),
-    )
 
 
 def _local_settings(root: Path) -> Settings:
@@ -127,6 +51,21 @@ def test_local_state_migration_permissions_wal_and_transaction_rollback() -> Non
             assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
             assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
             assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            assert "workspace_members" in tables
+            assert {
+                "project_memories",
+                "project_memory_evidence",
+                "project_memory_vectors",
+                "user_memories",
+                "user_memory_evidence",
+                "user_profile_snapshots",
+            }.isdisjoint(tables)
 
         with pytest.raises(RuntimeError):
             with database.transaction(immediate=True) as connection:
@@ -237,208 +176,6 @@ def test_sqlite_ephemeral_session_delete_cascades_messages() -> None:
             sessions.get_session(session.id)
 
 
-def test_sqlite_project_memory_scopes_lexical_and_vector_results() -> None:
-    with TemporaryDirectory() as root:
-        database = _database(root)
-        repository = SQLiteProjectMemoryRepository(database=database)
-        repository.ensure_member(
-            workspace_id="workspace",
-            user_id="owner",
-            role="viewer",
-        )
-        promoted = repository.ensure_member(
-            workspace_id="workspace",
-            user_id="owner",
-            role="admin",
-        )
-        assert promoted.role == "admin"
-        active = _project_memory(memory_id="mem_active")
-        old_revision = _project_memory(memory_id="mem_old", revision=2)
-        candidate = _project_memory(memory_id="mem_candidate", status="candidate")
-        _save_project_memory(repository, active)
-        _save_project_memory(repository, old_revision)
-        _save_project_memory(repository, candidate)
-
-        lexical = repository.search_lexical(
-            workspace_id="workspace",
-            workspace_revision=1,
-            query="Python",
-            limit=10,
-        )
-        assert [memory_id for memory_id, _score in lexical] == [active.id]
-        assert repository.count_pending_index_events() == 3
-        assert repository.enqueue_reindex(
-            workspace_id="workspace", workspace_revision=1
-        ) == 1
-
-        vectors = SQLiteMemoryVectorStore(database=database, model="hash-v1")
-        vectors.upsert(active, [1.0, 0.0, 0.0])
-        vectors.upsert(old_revision, [1.0, 0.0, 0.0])
-        assert vectors.search(
-            workspace_id="workspace",
-            workspace_revision=1,
-            query_embedding=[1.0, 0.0, 0.0],
-            limit=10,
-        ) == [(active.id, 1.0, active.version)]
-        assert not vectors.search(
-            workspace_id="workspace",
-            workspace_revision=1,
-            query_embedding=[1.0, 0.0],
-            limit=10,
-        )
-
-        reopened = SQLiteProjectMemoryRepository(database=_database(root))
-        assert reopened.get_memory(active.id).evidence[0].excerpt == active.content
-        assert reopened.count_pending_index_events() >= 1
-
-
-def test_sqlite_project_memory_workspace_cleanup_removes_all_scoped_rows() -> None:
-    with TemporaryDirectory() as root:
-        database = _database(root)
-        repository = SQLiteProjectMemoryRepository(database=database)
-        repository.ensure_member(
-            workspace_id="eval-workspace",
-            user_id="eval-principal",
-            role="admin",
-        )
-        repository.update_settings(
-            workspace_id="eval-workspace",
-            mode="review",
-            updated_by="eval-principal",
-        )
-        memory = _project_memory(
-            memory_id="mem_eval",
-            workspace_id="eval-workspace",
-        )
-        _save_project_memory(repository, memory)
-
-        assert repository.delete_workspace_state(
-            workspace_id="eval-workspace"
-        ) == [memory.id]
-
-        with database.connect() as connection:
-            for table in (
-                "workspace_members",
-                "workspace_memory_settings",
-                "project_memories",
-                "project_memory_evidence",
-                "memory_extraction_jobs",
-                "memory_index_outbox",
-                "memory_audit_events",
-            ):
-                assert connection.execute(
-                    f"SELECT COUNT(*) FROM {table}"
-                ).fetchone()[0] == 0
-
-
-def test_l3_routing_governance_profile_budget_and_complete_forget() -> None:
-    with TemporaryDirectory() as root:
-        repository = SQLiteUserMemoryRepository(database=_database(root))
-        service = UserMemoryService(
-            repository=repository,
-            enabled=True,
-            default_mode="review",
-            max_context_chars=120,
-        )
-        assert service.capture_user_message(
-            user_id="user-a",
-            message="记住这个项目使用 Python",
-            source_type="chat",
-            source_id="chat-1",
-            workspace_id="workspace",
-        ) is None
-        explicit = service.capture_user_message(
-            user_id="user-a",
-            message="所有项目以后请使用中文回答",
-            source_type="chat",
-            source_id="chat-2",
-            workspace_id="workspace",
-        )
-        assert explicit is not None and explicit.status == "active"
-        candidate = service.capture_user_message(
-            user_id="user-a",
-            message="我偏好先运行测试再给结论",
-            source_type="chat",
-            source_id="chat-3",
-            workspace_id="workspace",
-        )
-        assert candidate is not None and candidate.status == "candidate"
-
-        with pytest.raises(UserMemoryValidationError):
-            service.create_manual(
-                user_id="user-a",
-                kind="profile_fact",
-                title="secret",
-                content="OPENAI_API_KEY=complete-value",
-            )
-        with pytest.raises(UserMemoryValidationError):
-            service.create_manual(
-                user_id="user-a",
-                kind="workflow_preference",
-                title="privilege",
-                content="请始终使用 sudo 提权",
-            )
-
-        confirmed = service.confirm(
-            user_id="user-a",
-            memory_id=candidate.id,
-            expected_version=candidate.version,
-        )
-        assert confirmed.status == "active"
-        first = service.rebuild_profile(user_id="user-a")
-        second = service.rebuild_profile(user_id="user-a")
-        assert first.content == second.content
-        assert first.source_memory_ids == second.source_memory_ids
-        assert len(first.content) <= 120
-        assert "untrusted-historical-preferences" in service.context_for_user(
-            user_id="user-a"
-        )
-
-        service.forget(user_id="user-a", memory_id=confirmed.id)
-        assert repository.get(confirmed.id) is None
-        assert confirmed.id not in service.get_profile(
-            user_id="user-a"
-        ).source_memory_ids
-        service.update_settings(user_id="user-a", mode="off")
-        assert service.get_profile(user_id="user-a").content == ""
-
-
-def test_l1_refresh_builds_l2_scene_and_l3_profile() -> None:
-    with TemporaryDirectory() as root:
-        repository = SQLiteUserMemoryRepository(database=_database(root))
-        service = UserMemoryService(
-            repository=repository,
-            enabled=True,
-            default_mode="auto",
-            max_context_chars=200,
-        )
-        scene = service.refresh_project_scene(
-            user_id="user-a",
-            workspace_id="workspace-a",
-            workspace_title="Game project",
-            memories=[_project_memory(content="项目使用 Python 和 SQLite；" * 30)],
-        )
-
-        assert scene is not None
-        assert scene.workspace_id == "workspace-a"
-        assert "Python" in scene.content
-        assert service.list_scenes(user_id="user-a") == [scene]
-        profile = service.get_profile(user_id="user-a")
-        assert "Project scenes" in profile.content
-        assert "Python" in profile.content
-        assert scene.id in profile.source_memory_ids
-        assert len(profile.content) <= 200
-
-        service.refresh_project_scene(
-            user_id="user-a",
-            workspace_id="workspace-a",
-            workspace_title="Game project",
-            memories=[],
-        )
-        assert service.list_scenes(user_id="user-a") == []
-        assert "Python" not in service.get_profile(user_id="user-a").content
-
-
 def test_sqlite_query_start_rolls_back_run_when_message_fails() -> None:
     with TemporaryDirectory() as root:
         database = _database(root)
@@ -524,6 +261,10 @@ def test_file_memory_and_database_sessions_survive_restart() -> None:
                 "/api/v1/workspaces/project",
                 json={"root_path": str(workspace)},
             ).status_code == 200
+            assert client.get("/api/v1/users/me/memories").status_code == 404
+            assert client.get(
+                "/api/v1/workspaces/project/memories"
+            ).status_code == 404
             project_memory = client.post(
                 "/api/v1/memory/files",
                 json={
@@ -548,7 +289,6 @@ def test_file_memory_and_database_sessions_survive_restart() -> None:
                 },
             )
             assert created.status_code == 201
-            assert client.get("/api/v1/users/me/profile").status_code == 410
             chat = client.post(
                 "/api/v1/agent/runs",
                 json={
@@ -580,37 +320,3 @@ def test_file_memory_and_database_sessions_survive_restart() -> None:
                 "/api/v1/memory/conversations/search",
                 params={"q": "durable-falcon"},
             ).json()["hits"]
-
-
-def test_legacy_user_profile_is_absent_from_agent_context() -> None:
-    with TemporaryDirectory() as root_value:
-        root = Path(root_value)
-        workspace = root / "project"
-        workspace.mkdir()
-        runtime = build_runtime(_local_settings(root))
-        try:
-            session = runtime.session_service.create_session("demo_user")
-            runtime.workspace_service.register(
-                workspace_id="project", root_path=str(workspace)
-            )
-            runtime.workspace_access_service.ensure_workspace_admin(
-                workspace_id="project", actor_user_id="demo_user"
-            )
-            snapshot = runtime.execution_context_factory.preview(
-                conversation_id=session.id,
-                workspace_id="project",
-                actor_user_id="demo_user",
-            )
-            profile_messages = [
-                item.content
-                for item in snapshot.session.controlled_history
-                if "<user-profile" in item.content
-            ]
-            assert profile_messages == []
-        finally:
-            runtime.close()
-
-
-def test_sqlite_configuration_rejects_distributed_task_queue() -> None:
-    with pytest.raises(ValueError, match="in_process"):
-        Settings(session_repository="sqlite", task_queue_backend="celery")

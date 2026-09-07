@@ -17,7 +17,6 @@ x-app-environment: &app-environment
   MODEL_PROBE_INTERVAL_SECONDS: "${MODEL_PROBE_INTERVAL_SECONDS:-0}"
   RAG_VECTOR_STORE: "qdrant"
   WORKSPACE_ACCESS_STORE: "postgres"
-  TASK_QUEUE_BACKEND: "in_process"
   AUTH_MODE: "single_user"
   SINGLE_USER_ID: "${SINGLE_USER_ID:-owner}"
   NATIVE_DIRECTORY_PICKER_MODE: "disabled"

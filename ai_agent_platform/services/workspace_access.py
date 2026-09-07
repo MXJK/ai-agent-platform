@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_agent_platform.project_memory.models import ROLE_RANK
+from ai_agent_platform.domain import WORKSPACE_ROLE_RANK
 
 
 class WorkspaceAccessDeniedError(PermissionError):
@@ -36,7 +36,7 @@ class WorkspaceAccessService:
         actor_user_id: str,
         required_role: str = "viewer",
     ) -> None:
-        if required_role not in ROLE_RANK:
+        if required_role not in WORKSPACE_ROLE_RANK:
             raise WorkspaceAccessValidationError(
                 f"unsupported workspace role: {required_role}"
             )
@@ -44,7 +44,11 @@ class WorkspaceAccessService:
             workspace_id=workspace_id,
             user_id=actor_user_id,
         )
-        if member is None or ROLE_RANK.get(member.role, 0) < ROLE_RANK[required_role]:
+        if (
+            member is None
+            or WORKSPACE_ROLE_RANK.get(member.role, 0)
+            < WORKSPACE_ROLE_RANK[required_role]
+        ):
             raise WorkspaceAccessDeniedError(
                 f"workspace role {required_role} is required"
             )

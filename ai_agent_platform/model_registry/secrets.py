@@ -24,44 +24,8 @@ class SecretStore(Protocol):
     def delete(self, secret_ref: str) -> None: ...
 
 
-class KeyringSecretStore:
-    """Uses macOS Keychain or the host keyring selected by ``keyring``."""
-
-    def __init__(self, *, service_name: str = "ai-agent-platform") -> None:
-        self._service_name = service_name
-
-    def get(self, secret_ref: str) -> str | None:
-        if secret_ref.startswith("env:"):
-            return os.getenv(secret_ref.removeprefix("env:")) or None
-        keyring = _keyring()
-        try:
-            return keyring.get_password(self._service_name, secret_ref)
-        except Exception as exc:
-            raise SecretStoreError("failed to read the operating-system keyring") from exc
-
-    def set(self, secret_ref: str, value: str) -> None:
-        if not value.strip():
-            raise ValueError("API key must not be blank")
-        keyring = _keyring()
-        try:
-            keyring.set_password(self._service_name, secret_ref, value)
-        except Exception as exc:
-            raise SecretStoreError("failed to write the operating-system keyring") from exc
-
-    def delete(self, secret_ref: str) -> None:
-        if secret_ref.startswith("env:"):
-            return
-        keyring = _keyring()
-        try:
-            keyring.delete_password(self._service_name, secret_ref)
-        except keyring.errors.PasswordDeleteError:
-            return
-        except Exception as exc:
-            raise SecretStoreError("failed to delete the operating-system keyring entry") from exc
-
-
 class InMemorySecretStore:
-    """Deterministic test/local fallback selected explicitly through settings."""
+    """Deterministic test fallback selected explicitly through settings."""
 
     def __init__(self) -> None:
         self._values: dict[str, str] = {}
@@ -100,7 +64,7 @@ class EncryptedFileSecretStore:
         self._path = Path(path)
         self._key_path = self._path.with_name(f"{self._path.name}.key")
         self._lock = Lock()
-        self._fernet = Fernet(self._load_or_create_key())
+        self._fernet: Fernet | None = None
 
     def get(self, secret_ref: str) -> str | None:
         if secret_ref.startswith("env:"):
@@ -110,7 +74,7 @@ class EncryptedFileSecretStore:
             if encrypted is None:
                 return None
             try:
-                return self._fernet.decrypt(encrypted.encode("ascii")).decode(
+                return self._cipher().decrypt(encrypted.encode("ascii")).decode(
                     "utf-8"
                 )
             except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
@@ -121,7 +85,7 @@ class EncryptedFileSecretStore:
             raise ValueError("API key must not be blank")
         with self._lock:
             values = self._read_values()
-            values[secret_ref] = self._fernet.encrypt(
+            values[secret_ref] = self._cipher().encrypt(
                 value.encode("utf-8")
             ).decode("ascii")
             self._write_values(values)
@@ -171,6 +135,11 @@ class EncryptedFileSecretStore:
             ) from exc
         return key
 
+    def _cipher(self) -> Fernet:
+        if self._fernet is None:
+            self._fernet = Fernet(self._load_or_create_key())
+        return self._fernet
+
     def _read_values(self) -> dict[str, str]:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -214,13 +183,3 @@ class EncryptedFileSecretStore:
             self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError as exc:
             raise SecretStoreError("failed to create the secret store directory") from exc
-
-
-def _keyring():
-    try:
-        import keyring
-    except ImportError as exc:
-        raise SecretStoreError(
-            "keyring is required for frontend API-key storage; install project dependencies"
-        ) from exc
-    return keyring

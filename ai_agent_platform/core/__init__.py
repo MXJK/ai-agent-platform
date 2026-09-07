@@ -18,8 +18,6 @@ from .config_resolver import (
 )
 from .metrics import MetricsRegistry
 from .auth import (
-    LOCAL_GATEWAY_MODE,
-    LOCAL_GATEWAY_MODE_HEADER,
     is_loopback_request,
     request_user_id,
     require_local_capability,
@@ -27,7 +25,6 @@ from .auth import (
 )
 from .observability import RequestObservabilityMiddleware, configure_logging, log_context
 from .task_queue import (
-    CeleryTaskQueue,
     InProcessTaskQueue,
     TaskQueue,
     TaskQueueClosedError,
@@ -36,15 +33,12 @@ from .task_queue import (
 )
 
 __all__ = [
-    "CeleryTaskQueue",
     "ConfigError",
     "ConfigFieldSource",
     "ConfigResolver",
     "ConfigSchemaError",
     "ConfigSecurityError",
     "ConfigSource",
-    "LOCAL_GATEWAY_MODE",
-    "LOCAL_GATEWAY_MODE_HEADER",
     "MetricsRegistry",
     "is_loopback_request",
     "request_user_id",

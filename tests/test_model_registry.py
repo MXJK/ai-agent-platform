@@ -131,7 +131,7 @@ class ProviderSecretStoreTests(unittest.TestCase):
                 RuntimeError,
                 "encryption key is missing",
             ):
-                EncryptedFileSecretStore(path)
+                EncryptedFileSecretStore(path).get("model-provider:deepseek")
 
     def test_registry_credential_survives_secret_store_recreation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -904,7 +904,7 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(body['status'], 'completed')
 
-    def test_registry_writes_accept_only_direct_or_trusted_gateway_local_mode(
+    def test_registry_writes_reject_trusted_header_and_remote_direct_callers(
         self,
     ) -> None:
         settings = Settings(
@@ -944,12 +944,11 @@ class ModelRegistryApiTests(unittest.TestCase):
                     "enabled": True,
                 },
             )
-            local_gateway = client.put(
+            trusted_user = client.put(
                 "/api/v1/model-registry/connections/openai",
                 headers={
                     "X-Authenticated-User": "local-user",
                     "X-Gateway-Auth": "test-gateway-secret",
-                    "X-Gateway-Mode": "local",
                 },
                 json={
                     "display_name": "OpenAI",
@@ -1001,8 +1000,7 @@ class ModelRegistryApiTests(unittest.TestCase):
 
         self.assertEqual(oidc_gateway.status_code, 403)
         self.assertEqual(forged_local.status_code, 401)
-        self.assertEqual(local_gateway.status_code, 200)
-        self.assertNotIn("local-test-key", local_gateway.text)
+        self.assertEqual(trusted_user.status_code, 403)
         self.assertEqual(remote_direct.status_code, 403)
         self.assertEqual(single_user.status_code, 200)
         self.assertNotIn("single-user-test-key", single_user.text)

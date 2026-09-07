@@ -26,7 +26,6 @@ _SENSITIVE_FIELD_PARTS = {
     "database_url",
     "dsn",
     "password",
-    "redis_url",
     "secret",
     "token",
 }

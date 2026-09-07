@@ -1,6 +1,5 @@
 import unittest
 
-from ai_agent_platform.agents import GameAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.repositories import (
@@ -20,13 +19,11 @@ class SessionServiceTests(unittest.TestCase):
         self.repository = InMemorySessionRepository()
         self.service = SessionService(
             repository=self.repository,
-            agent_runtime=GameAgentRuntime(),
         )
 
     def test_copies_defaults_and_can_save_session_configuration_as_default(self) -> None:
         service = SessionService(
             repository=InMemorySessionRepository(),
-            agent_runtime=GameAgentRuntime(),
             default_provider="fake",
             default_model="server-default",
             default_thinking_level="low",
@@ -188,19 +185,6 @@ class SessionServiceTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0].role, "user")
 
-    def test_can_run_agent_after_user_message(self) -> None:
-        session = self.service.create_session(user_id="user_1")
-        messages = self.service.add_message(
-            session_id=session.id,
-            role="user",
-            content="攻击附近的敌人",
-            run_agent=True,
-        )
-
-        self.assertEqual(len(messages), 2)
-        self.assertEqual(messages[1].role, "assistant")
-        self.assertIn("combat.attack", messages[1].content)
-
     def test_gets_session_summary(self) -> None:
         session = self.service.create_session(user_id="user_1")
         self.service.add_message(
@@ -281,7 +265,6 @@ class SessionServiceTests(unittest.TestCase):
     def test_rolls_old_messages_into_persistent_bounded_summary(self) -> None:
         service = SessionService(
             repository=InMemorySessionRepository(),
-            agent_runtime=GameAgentRuntime(),
             compressor=RuleBasedConversationCompressor(),
             summary_enabled=True,
             summary_trigger_messages=6,
@@ -354,7 +337,6 @@ class SessionServiceTests(unittest.TestCase):
         ledger = UsageLedgerService(repository, settings)
         service = SessionService(
             repository=repository,
-            agent_runtime=GameAgentRuntime(),
             compressor=LLMConversationCompressor(
                 LLMClient(settings, usage_ledger=ledger)
             ),

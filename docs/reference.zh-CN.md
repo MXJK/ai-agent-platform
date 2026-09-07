@@ -25,7 +25,7 @@ MCP 管理和独立 RAG 保留。内部 Python 包仍是 `ai_agent_platform`。
 - [记忆与分层指令](#记忆与分层指令)
 - [独立知识库](#独立知识库)
 - [存储与数据库迁移](#存储与数据库迁移)
-- [保留的扩展实现](#保留的扩展实现)
+- [已移除的兼容实现](#已移除的兼容实现)
 - [验证](#验证)
 
 ## Docker 单实例启动
@@ -33,8 +33,8 @@ MCP 管理和独立 RAG 保留。内部 Python 包仍是 `ai_agent_platform`。
 当前唯一公开支持的产品运行路径是单用户、单实例 Docker Compose 自托管。常驻服务只有
 FastAPI/Web UI、PostgreSQL 和 Qdrant；Alembic 迁移由一次性 `migrate` 服务执行。后台
 Agent 任务复用进程内有界队列，不启动 Go 网关、Redis、Celery Worker 或 Adminer。
-App 镜像使用 `requirements.self-hosted.txt`，不安装当前拓扑不会加载的 Celery/Redis、
-Chroma 和 OS keyring；会安装 Sentence Transformers/Torch，因为官方 Compose 的默认
+App 镜像使用 `requirements.self-hosted.txt`；旧 Celery/Redis、Chroma 和 OS keyring
+依赖已从项目移除。镜像仍安装 Sentence Transformers/Torch，因为官方 Compose 的默认
 文档 embedding 是 `BAAI/bge-m3`。
 
 ```bash
@@ -63,9 +63,9 @@ App 端口改为 `0.0.0.0`、局域网或公网地址。Sandbox 命令在 App �
 所有既有工作区（包括软移除记录）的管理员关系，同时保留旧成员和项目数据。旧记录若
 保存的是宿主机绝对路径，仍需在页面中重新关联到容器可见的 `/workspaces/...` 路径。
 
-兼容的 SQLite、Celery、Go gateway、OIDC 和多 Worker 实现仍保留在代码中，供测试与后续
-演进使用，但不属于当前 MVP 的支持部署面。旧 `start-local.sh` 仅转发到同一个 Compose
-入口；可用 `./scripts/start.sh --check` 做静态配置检查。
+可选的单进程 SQLite profile 仍保留，供本地开发和测试使用。旧 Celery/Redis 多 Worker、
+Go gateway/OIDC、数据库记忆、Chroma、OS keyring 与 `start-local.sh` 兼容实现已经删除；
+可用 `./scripts/start.sh --check` 做静态配置检查。
 
 已有安装升级时，先备份 PostgreSQL，再执行：
 
@@ -134,9 +134,9 @@ Shift+Tab 按相同顺序循环；状态栏显示将用于下一次 Run 的模�
 | Workspace | `/workspaces` bind mount + `direct` 源码修改 |
 | Sandbox | App 容器内本地执行，仅限可信仓库 |
 
-`local` 与 `production` 命名 profile 及其 Adapter 暂时保留为兼容实现，不再是公开启动
-路径。Celery 的既有 fail-fast 校验仍要求全部事实使用共享 PostgreSQL/Qdrant；当前
-Compose 不选择 Celery，因此不需要 Redis 或独立 Worker。
+`local` 命名 profile 仍作为可选的单进程 SQLite 本地配置；`production` profile 和
+Celery Adapter 已删除。任务始终由当前 API 进程内的有界队列执行，不需要 Redis 或独立
+Worker。
 
 `ConfigResolver.resolve_process()` 只解析 `Settings` 默认值 → 用户 JSON → 环境变量/
 `.env` → 显式入口覆盖，不从服务进程 cwd 自动发现项目文件。默认用户路径是
@@ -146,7 +146,7 @@ Workspace 自动发现。
 
 创建 Run 时，`ExecutionContextFactory` 先从 Workspace catalog 取得并鉴权主 Workspace
 root，再由 `ConfigResolver.resolve_workspace()` 读取该 root 下的
-`.ai-agent-platform/config.json`。因此项目配置不会随 API/Worker/CLI 的 cwd 改变，也不会
+`.ai-agent-platform/config.json`。因此项目配置不会随 API/CLI 的 cwd 改变，也不会
 泄漏到另一个 Workspace。配置文件只使用 Python 标准库 JSON，根对象分为
 `process_security`、`runtime`、`project_session`；未知分区、未知字段和错误类型会在对应
 进程解析或 Run 创建边界 fail closed：
@@ -199,7 +199,7 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 带 schema version、逐字段 source/detail 的序列化视图；新 Run 写 schema v3，并保存配置
 内容哈希、catalog/pool contract version、脱敏规范化摘要、hash、选择 provenance 与安全
 排除诊断。摘要只含工具定义和 Schema 的 hash，不保存 Secret、Header、连接凭据或完整
-敏感参数。API/Worker 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
+敏感参数。API 的 `RuntimeContainer` 只保存进程基线快照；结构化日志也会
 递归遮蔽嵌套 API Key、Secret、Token 和带凭据连接串。
 
 ## Skill 发现与 slash command
@@ -296,8 +296,8 @@ MODEL_PROBE_INTERVAL_SECONDS=0
 
 如需使用 Gemini，必须在“模型管理”中保存 Google API Key、发现并注册目标模型；
 `.env` 不选择或导入 Google/Gemini 模型。Provider API Key 不会从 `.env` 或进程环境
-读取。`LLM_MAX_OUTPUT_TOKENS`、`LLM_THINKING_LEVEL`、`LLM_TIMEOUT_SECONDS` 和
-`SSE_HEARTBEAT_SECONDS` 只控制通用运行策略，不承担 Provider/Model 注册。
+读取。`LLM_MAX_OUTPUT_TOKENS`、`LLM_THINKING_LEVEL` 和 `LLM_TIMEOUT_SECONDS` 只控制
+通用运行策略，不承担 Provider/Model 注册。
 
 Gemini 3 请求的 `thinking_level` 支持 `minimal`、`low`、`medium` 或 `high`；API 请求
 和既有会话配置仍可覆盖服务端默认值，但个人工作区管理界面不提供这个选项。当
@@ -381,8 +381,8 @@ Route Trace 的 `retries` 数组记录候选模型、错误代码、重试序号
 `MODEL_SECRET_BACKEND=encrypted_file` 将页面录入的 Provider API Key 加密写入私有
 `app_state` 持久卷。密文文件和随机本机密钥均为 owner-only；数据库、API、日志和浏览器
 存储都不持有明文。固定的 `single_user` owner 可以执行模型连接保存、测试/发现和模型
-增删改，调用方提交的身份 Header 不会改变 owner。`memory` 仅用于测试，原生运行仍可用
-OS keyring；多节点部署需要外部 KMS/Vault，而不是共享该单机文件后端。
+增删改，调用方提交的身份 Header 不会改变 owner。`memory` 仅用于测试；OS keyring 后端
+已经删除。多节点部署需要外部 KMS/Vault，而不是共享该单机文件后端。
 
 ## 动态模型准入与 Token 预算
 
@@ -497,7 +497,7 @@ Run、事件和版本快照在同一数据库事务保存；SQLite 使用进程�
 容器无法代表浏览器用户打开宿主机 Finder，因此官方 Compose 固定
 `NATIVE_DIRECTORY_PICKER_MODE=disabled`。前端直接使用受控网页目录浏览器浏览
 `/workspaces`；任何选中路径仍必须通过 `WORKSPACE_ALLOWED_ROOTS` 校验。旧的 loopback
-与 trusted-local-gateway 原生选择器实现仍留在代码中，但不属于当前产品入口。
+原生选择器仍供可信本机调试；trusted-local-gateway 模式已经删除。
 
 Workspace 根路径属于实际执行 Agent 的文件系统。若未来控制面部署在云端而代码仍在
 用户电脑上，需要本地 Agent/桌面 companion 负责目录授权和执行；云端服务自身的 Finder
@@ -822,7 +822,7 @@ curl -X POST http://localhost:8000/api/v1/knowledge-bases/product_docs/documents
 官方 Compose 默认使用真正的中英多语言语义 embedding `BAAI/bge-m3`。模型由
 Sentence Transformers 在第一次文档摄取时延迟下载，并保存在 `model_cache` volume；
 重建 App 镜像不会重复下载，删除该 volume 才会移除缓存。设备默认使用 CPU。切换
-embedding Provider、模型或向量维度后，已有 Qdrant/Chroma 向量不会自动兼容，必须
+embedding Provider、模型或向量维度后，已有 Qdrant 向量不会自动兼容，必须
 重新索引对应知识库；`local/local-hashing` 只保留给确定性测试和轻量开发：
 
 ```dotenv
@@ -906,10 +906,9 @@ RAG_RERANK_DEFAULT_ENABLED=false
 历史迁移会继续保留在 revision 链中。只有 PostgreSQL 结果加载器会兼容含有
 `repository_id`/`rag_context` 的历史 JSON；新 API 和新运行只暴露 workspace 契约。
 
-当前单实例产品不启动 Celery。官方组合是：
+当前单实例产品只使用进程内队列。官方组合是：
 
 ```dotenv
-TASK_QUEUE_BACKEND=in_process
 SESSION_REPOSITORY=postgres
 AGENT_RUN_STORE=postgres
 CHANGE_SET_STORE=postgres
@@ -928,11 +927,9 @@ WORKSPACE_ALLOWED_ROOTS=/workspaces
 | PostgreSQL | 会话/消息、用户默认值、会话配置和滚动摘要、Agent Run/Event/工具账本/ChangeSet、模型与 Run 上下文快照、工作区授权、文档元数据、词法搜索和 Cogent/维护 Run 状态 |
 | Qdrant | 独立知识库的可重建文档向量；Cogent 文件记忆不使用向量库 |
 | SQLite | 本地 profile 的会话、Run、工作区授权与维护状态；文件记忆正文仍是 Markdown |
-| Redis/Celery | 保留的多 Worker 扩展实现；当前 Compose 不启动 |
-| Chroma | 保留的可选嵌入式向量实现；当前 Compose 不选择 |
 
-`RAG_VECTOR_STORE` 实现仍支持 Qdrant、Chroma 或 memory，但官方 Compose 锁定 Qdrant，
-不会双写另一套向量存储。
+`RAG_VECTOR_STORE` 支持 Qdrant 或仅供测试的 memory；官方 Compose 锁定 Qdrant，
+不会双写另一套向量存储。旧 Chroma Adapter 已删除。
 
 产品启动时，一次性 `migrate` 服务复用现有 Alembic revision，成功后 App 才会启动：
 
@@ -945,15 +942,15 @@ docker compose ps
 数据库凭据来自用户本机 `.env`，并只注入私有 Compose 网络。Adminer、Gateway、Redis 和
 Celery 不在当前服务集合中。
 
-进程内队列注册 Agent 启动/恢复、会话压缩、增量记忆提炼和文件记忆治理任务，
-并复用与 Celery Adapter 相同的任务语义。运行开始前仍冻结 Workspace、配置和工具上下文；
+进程内队列注册 Agent 启动/恢复、会话压缩、增量记忆提炼和文件记忆治理任务。运行开始前
+仍冻结 Workspace、配置和工具上下文；
 应用重启会中断当时正在执行或排队的任务，这是当前单实例 MVP 的明确边界。持久化 Run、
 事件和维护写入计划仍保留恢复与幂等证据，但当前版本不承诺自动恢复所有被重启打断的运行。
 
 ### 运行时装配与生命周期
 
-FastAPI `create_app()`、保留的 Celery Worker 进程适配器和嵌入式 SDK 通过
-`build_runtime(settings, role=api|worker|cli)` 进入同一个 `ApplicationFactory`。
+FastAPI `create_app()` 和嵌入式 SDK 通过
+`build_runtime(settings, role=api|cli)` 进入同一个 `ApplicationFactory`。
 Repository、LLM、模型注册中心、Workspace、RAG、MCP、Tool Registry、Cogent runtime 和业务 Service 因此使用同一依赖图。正式 Textual/print/REPL CLI 不再装配容器，而是经 HTTP/SSE
 连接 FastAPI 已持有的唯一 Runtime，因此与网页共享服务端配置、Secret Store 和持久 Run。
 启动配置在进入工厂前只解析进程基线；Workspace
@@ -965,26 +962,17 @@ Agent Loop，但不拥有或关闭 Registry/MCP 资源。
 共享 `SecretStore`、`MCPConnectionManager`、`ExecutionContextFactory`、服务和资源，并按
 顺序记录 `config_loaded`、
 `stores_ready`、`mcp_ready`、`tools_ready`、`agent_ready` 启动检查点。正常的 FastAPI
-lifespan、Worker shutdown 和部分启动失败都走同一个幂等 `close()`；清理回调严格按
+lifespan 和部分启动失败都走同一个幂等 `close()`；清理回调严格按
 创建登记的逆序执行且每个资源最多关闭一次。测试仍可向 `create_app()` 注入 LLM、RAG、
 Agent runtime 和目录选择器，也可覆写 `ApplicationFactory` 的组件构造器。
 
-## 保留的扩展实现
+## 已移除的兼容实现
 
-`gateway/`、Celery/Redis 和 local SQLite profile 的代码及测试仍保留，用于说明后续
-多用户、多 Worker 或不同存储拓扑的演进边界；它们不在当前 Docker MVP 的 Compose
-服务集合中。Go gateway 仍可独立运行和验证：
-
-```bash
-go run ./gateway/cmd/gateway
-go test ./gateway/...
-go vet ./gateway/...
-```
-
-`AUTH_MODE=trusted_header`、OIDC/JWKS、local gateway 证明和多 Worker 可靠性测试仍可以作为
-面试中的已实现扩展能力说明，但不得描述为当前默认部署或真实生产规模经验。若未来恢复
-多用户/公网部署，必须重新设计认证、租户授权、密钥、备份、可观测性和不可信执行隔离，
-不能直接把 `single_user` Compose 暴露出去。
+本次清理删除了 Go gateway/OIDC、Celery/Redis 多 Worker、旧数据库 ProjectMemory/
+UserMemory、Chroma、OS keyring、规则式 GameAgent、旧 `AgentRunService` 别名和
+`start-local.sh`。历史数据库迁移仍留在 Alembic revision 链中，以保证已有安装可升级；
+单进程 SQLite profile 也继续保留。未来若需要公网、多用户或多 Worker，应基于当前安全
+和持久化契约重新设计，而不是恢复这些已经失去验证面的旧实现。
 
 ## 验证
 
@@ -994,12 +982,10 @@ go vet ./gateway/...
 .venv/bin/python INTERVIEW_NOTES/validate.py
 node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs
 docker compose --env-file .env.example config --quiet
-bash -n scripts/start.sh scripts/start-local.sh
+bash -n scripts/start.sh
 node --check ai_agent_platform/static/app.js
 git diff --check
 ```
-
-修改保留的 Go gateway 兼容实现后，再额外运行 `go test ./gateway/...`。
 
 运行离线 Agent 评估：
 
@@ -1010,7 +996,6 @@ git diff --check
 .venv/bin/python evals/run_rag_evals.py --profile bge-m3-rerank --hybrid-only
 .venv/bin/python evals/run_rag_answer_evals.py --replay /path/to/prior-report.json
 .venv/bin/python evals/run_trajectory_evals.py
-.venv/bin/python evals/run_memory_evals.py
 ```
 
 各套件分别回答不同问题：`run_evals.py` 默认跑 Agent 管道回归，
@@ -1039,7 +1024,6 @@ Top-5 违规从 `1.000` 降到 `0.500`、冲突首选从 `0.333` 提到 `0.667`�
 succeeded / failed / suppressed / denied / pending approval 分层；只有能按 `call_id`
 关联到真实 `ToolResult` 的调用才算 executed。无效动作率按“实际执行的精确重复 +
 被抑制调用”除以“实际执行 + 被抑制”计算；没有分母时显示 `n/a`。
-`run_memory_evals.py` 保留为旧数据库记忆实现的历史评测入口，不属于当前 Cogent 文件记忆验收。
 30 条 RAG pilot 是虚构 AuroraDesk 知识库上的用户风格问题，不是真实生产查询或正式
 holdout；其分数只能作为当前检索设置的起始基线。离线 Agent 套件使用 fake provider，
 通过率不能当作最终答案质量证据。

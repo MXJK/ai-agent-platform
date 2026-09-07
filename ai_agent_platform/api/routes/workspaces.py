@@ -345,9 +345,7 @@ def _directory_name(directory: FileSystemPath) -> str:
 
 def _authorize_native_directory_picker(request: Request, settings: Settings) -> None:
     mode = settings.native_directory_picker_mode
-    if mode == "trusted_local_gateway" or (
-        mode == "loopback" and settings.auth_mode == "disabled"
-    ):
+    if mode == "loopback" and settings.auth_mode == "disabled":
         require_local_capability(
             request,
             settings,

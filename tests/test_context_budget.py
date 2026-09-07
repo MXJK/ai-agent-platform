@@ -1,6 +1,5 @@
 import unittest
 
-from ai_agent_platform.agents import GameAgentRuntime
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations import LLMClient
 from ai_agent_platform.repositories import InMemorySessionRepository
@@ -26,7 +25,6 @@ class _CountingCompressor(RuleBasedConversationCompressor):
 def _service(**overrides: object) -> SessionService:
     kwargs: dict[str, object] = {
         "repository": InMemorySessionRepository(),
-        "agent_runtime": GameAgentRuntime(),
         "compressor": RuleBasedConversationCompressor(),
         "summary_enabled": True,
         "summary_trigger_messages": 6,

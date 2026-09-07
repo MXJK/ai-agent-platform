@@ -278,19 +278,9 @@ The original raw run contained 170 proposals, 139 matching ToolResults, 30
 suppressed calls, and one pending approval. Re-running it under v2 would require
 a paid provider call and is intentionally not part of automated verification.
 
-## Project-memory quality gates
-
-```bash
-.venv/bin/python evals/run_memory_evals.py
-```
-
-The checked-in suite fails below 90% candidate precision or 85% Recall@6, and
-requires exactly zero cross-workspace leaks. It covers candidate precision,
-Recall@6, and workspace isolation.
-
 ## What these suites do not prove
 
-All three run on the fake LLM provider. They are deterministic regression tests
+The offline suites run on the fake LLM provider. They are deterministic regression tests
 of **this system's** logic — routing, exploration, suppression, budgets,
 citation bookkeeping — not a benchmark of model or answer quality. A passing
 run says nothing about how good the answers are.

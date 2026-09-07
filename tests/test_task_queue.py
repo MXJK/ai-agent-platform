@@ -2,19 +2,15 @@ from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
-from uuid import UUID
 
 from ai_agent_platform.agents.coding.models import AgentRunRecord
 from ai_agent_platform.core import (
-    CeleryTaskQueue,
     InProcessTaskQueue,
     MetricsRegistry,
     TaskQueueClosedError,
-    TaskQueueError,
     TaskQueueFullError,
 )
-from ai_agent_platform.services import AgentRunService
+from ai_agent_platform.services import QueryService
 
 
 class InProcessTaskQueueTests(unittest.TestCase):
@@ -56,7 +52,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
             def get_run(self, _: str) -> AgentRunRecord:
                 return record
 
-        service = AgentRunService(
+        service = QueryService(
             runtime=RuntimeStub(),
             session_service=SimpleNamespace(
                 get_session=lambda **_: SimpleNamespace(user_id="editor"),
@@ -103,7 +99,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
                 if required_role == "editor":
                     raise PermissionError("editor access is required")
 
-        service = AgentRunService(
+        service = QueryService(
             runtime=RuntimeStub(),
             session_service=SimpleNamespace(
                 get_session=lambda **_: SimpleNamespace(user_id="viewer"),
@@ -156,7 +152,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
             def submit(self, _task_name: str, _task, **payload: object) -> None:
                 queued.append(payload)
 
-        service = AgentRunService(
+        service = QueryService(
             runtime=RuntimeStub(),
             session_service=SimpleNamespace(
                 get_session=lambda **_: SimpleNamespace(user_id="editor"),
@@ -232,7 +228,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
                 return self.record
 
         runtime = RuntimeStub()
-        service = AgentRunService(
+        service = QueryService(
             runtime=runtime,
             session_service=SimpleNamespace(
                 get_session=lambda **_: SimpleNamespace(user_id='owner'),
@@ -255,75 +251,7 @@ class InProcessTaskQueueTests(unittest.TestCase):
         queue.close()
 
 
-class CeleryTaskQueueTests(unittest.TestCase):
-    def test_publishes_agent_and_memory_tasks(self) -> None:
-        with patch("celery.Celery") as celery_factory:
-            celery_app = celery_factory.return_value
-            queue = CeleryTaskQueue(broker_url="redis://localhost:6379/0")
-            queue.submit(
-                "agent_run",
-                lambda: None,
-                run_id="run_1",
-                workspace_id="workspace_main",
-            )
-            queue.submit(
-                "agent_checkpoint_restore",
-                lambda: None,
-                run_id="run_branch",
-            )
-            queue.submit(
-                "cogent_memory_extract",
-                lambda: None,
-                parent_run_id="run_1",
-                user_message="remember this",
-                answer="saved",
-            )
-            queue.submit(
-                "cogent_memory_consolidate",
-                lambda: None,
-                parent_run_id="run_1",
-                force=True,
-            )
-            queue.submit(
-                "conversation_compression",
-                lambda: None,
-                session_id="session_1",
-                trigger_message_id="msg_12",
-            )
-            with self.assertRaises(TaskQueueError):
-                queue.submit("repository_index", lambda: None)
-            queue.close()
-        calls = celery_app.send_task.call_args_list
-        self.assertEqual(calls[0].args, ("ai_agent_platform.agent_run",))
-        self.assertEqual(
-            calls[1].args,
-            ("ai_agent_platform.agent_checkpoint_restore",),
-        )
-        self.assertEqual(
-            calls[2].args,
-            ("ai_agent_platform.cogent_memory_extract",),
-        )
-        self.assertEqual(
-            calls[3].args,
-            ("ai_agent_platform.cogent_memory_consolidate",),
-        )
-        self.assertEqual(
-            calls[4].args,
-            ("ai_agent_platform.conversation_compression",),
-        )
-        UUID(calls[0].kwargs["task_id"])
-
-    def test_duplicate_payloads_use_the_same_task_id(self) -> None:
-        with patch("celery.Celery") as celery_factory:
-            app = celery_factory.return_value
-            queue = CeleryTaskQueue(broker_url="redis://localhost:6379/0")
-            for _ in range(2):
-                queue.submit("agent_run", lambda: None, run_id="run_1")
-        ids = [call.kwargs["task_id"] for call in app.send_task.call_args_list]
-        self.assertEqual(ids[0], ids[1])
-
-
-class AgentWorkerLossTests(unittest.TestCase):
+class PersistedRunRecoveryTests(unittest.TestCase):
     def test_redelivered_running_agent_is_failed_without_replay(self) -> None:
         class RuntimeStub:
             def __init__(self) -> None:
@@ -352,7 +280,7 @@ class AgentWorkerLossTests(unittest.TestCase):
                 self.run_calls += 1
 
         runtime = RuntimeStub()
-        service = AgentRunService(
+        service = QueryService(
             runtime=runtime,
             session_service=SimpleNamespace(),
             workspace_service=SimpleNamespace(),

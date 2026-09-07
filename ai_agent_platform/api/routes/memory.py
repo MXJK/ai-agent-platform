@@ -154,31 +154,6 @@ def create_memory_router(session_service, memory_service: MemoryService,
     return router
 
 
-def create_retired_memory_router() -> APIRouter:
-    router = APIRouter()
-
-    def retired():
-        raise HTTPException(status_code=410,
-            detail='Database memory was retired; use /memory/files and /memory/index')
-
-    router.add_api_route('/users/me/memories', retired, methods=['GET', 'POST', 'PATCH', 'DELETE'])
-    router.add_api_route('/users/me/memories/{rest:path}', retired,
-                         methods=['GET', 'POST', 'PATCH', 'DELETE'])
-    router.add_api_route('/users/me/memory-settings', retired, methods=['GET', 'PATCH'])
-    router.add_api_route('/users/me/memory-scenes', retired, methods=['GET'])
-    router.add_api_route('/users/me/profile', retired, methods=['GET'])
-    router.add_api_route('/users/me/profile/{rest:path}', retired, methods=['GET', 'POST'])
-    router.add_api_route('/workspaces/{workspace_id}/memories', retired,
-                         methods=['GET', 'POST', 'PATCH', 'DELETE'])
-    router.add_api_route('/workspaces/{workspace_id}/memories/{rest:path}', retired,
-                         methods=['GET', 'POST', 'PATCH', 'DELETE'])
-    router.add_api_route('/workspaces/{workspace_id}/memory-settings', retired,
-                         methods=['GET', 'PATCH'])
-    router.add_api_route('/workspaces/{workspace_id}/memory-jobs', retired,
-                         methods=['GET'])
-    return router
-
-
 def _public_file(item):
     raw = item['text'].encode('utf-8')
     return {key: item[key] for key in ('id', 'scope', 'name', 'description', 'type',
@@ -187,4 +162,4 @@ def _public_file(item):
     }
 
 
-__all__ = ['create_memory_router', 'create_retired_memory_router']
+__all__ = ['create_memory_router']

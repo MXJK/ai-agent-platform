@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-import hashlib
-import json
 import logging
 import re
 from threading import BoundedSemaphore, Lock
 from time import perf_counter
 from typing import Any, Callable, Protocol
-from uuid import NAMESPACE_URL, uuid5
 
 from ai_agent_platform.core.metrics import MetricsRegistry
 
@@ -46,8 +43,7 @@ class TaskQueue(Protocol):
 class InProcessTaskQueue:
     """Bounded thread-backed queue behind a replaceable application protocol.
 
-    Business services depend on ``TaskQueue`` rather than directly on threads,
-    allowing a Redis/Celery or cloud queue adapter to be introduced later.
+    Business services depend on ``TaskQueue`` rather than directly on threads.
     """
 
     def __init__(
@@ -155,120 +151,3 @@ class InProcessTaskQueue:
 def _metric_task_name(task_name: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", task_name.lower()).strip("_")
     return normalized or "unknown"
-
-
-class CeleryTaskQueue:
-    """Publishes named JSON tasks to Celery through a Redis broker."""
-
-    TASK_NAMES = {
-        "agent_run": "ai_agent_platform.agent_run",
-        "agent_resume": "ai_agent_platform.agent_resume",
-        "agent_checkpoint_restore": (
-            "ai_agent_platform.agent_checkpoint_restore"
-        ),
-        "cogent_memory_extract": "ai_agent_platform.cogent_memory_extract",
-        "cogent_memory_consolidate": "ai_agent_platform.cogent_memory_consolidate",
-        "conversation_compression": "ai_agent_platform.conversation_compression",
-    }
-
-    def __init__(
-        self,
-        *,
-        broker_url: str,
-        result_backend_url: str | None = None,
-        visibility_timeout_seconds: int = 3600,
-        publish_max_retries: int = 3,
-        publish_retry_backoff_seconds: int = 2,
-        publish_retry_backoff_max_seconds: int = 60,
-        metrics: MetricsRegistry | None = None,
-    ) -> None:
-        try:
-            from celery import Celery
-        except ImportError as exc:
-            raise TaskQueueError(
-                "celery redis dependencies are not installed; "
-                "run pip install -r requirements.txt"
-            ) from exc
-        self._metrics = metrics or MetricsRegistry()
-        self._app = Celery(
-            "ai_agent_platform_publisher",
-            broker=broker_url,
-            backend=result_backend_url,
-        )
-        self._publish_retry_policy = {
-            "max_retries": publish_max_retries,
-            "interval_start": 0,
-            "interval_step": publish_retry_backoff_seconds,
-            "interval_max": publish_retry_backoff_max_seconds,
-        }
-        self._app.conf.update(
-            task_serializer="json",
-            accept_content=["json"],
-            result_serializer="json",
-            broker_connection_retry_on_startup=True,
-            broker_transport_options={
-                "visibility_timeout": visibility_timeout_seconds,
-            },
-        )
-        self._closed = False
-        self._lock = Lock()
-
-    def submit(
-        self,
-        task_name: str,
-        function: Callable[..., None],
-        **kwargs: Any,
-    ) -> Any:
-        del function
-        celery_task_name = self.TASK_NAMES.get(task_name)
-        if celery_task_name is None:
-            raise TaskQueueError(f"unsupported distributed task: {task_name}")
-        with self._lock:
-            if self._closed:
-                raise TaskQueueClosedError("background task queue is closed")
-        started_at = perf_counter()
-        idempotency_key = _task_idempotency_key(task_name, kwargs)
-        task_id = str(uuid5(NAMESPACE_URL, idempotency_key))
-        try:
-            result = self._app.send_task(
-                celery_task_name,
-                kwargs=kwargs,
-                task_id=task_id,
-                headers={"idempotency_key": idempotency_key},
-                retry=True,
-                retry_policy=self._publish_retry_policy,
-            )
-        except Exception as exc:
-            self._metrics.increment("background_tasks_rejected_total")
-            self._metrics.increment(
-                f"background_task_{_metric_task_name(task_name)}_rejected_total"
-            )
-            raise TaskQueueError(f"failed to publish {task_name}: {exc}") from exc
-        publish_duration_ms = int((perf_counter() - started_at) * 1000)
-        self._metrics.increment("background_tasks_submitted_total")
-        self._metrics.increment(
-            f"background_task_{_metric_task_name(task_name)}_submitted_total"
-        )
-        self._metrics.observe_ms(
-            "background_task_publish_duration_ms",
-            publish_duration_ms,
-        )
-        return result
-
-    def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-        self._app.close()
-
-
-def _task_idempotency_key(task_name: str, payload: dict[str, Any]) -> str:
-    canonical_payload = json.dumps(
-        payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
-    return f"ai-agent-platform:{task_name}:{payload_digest}"

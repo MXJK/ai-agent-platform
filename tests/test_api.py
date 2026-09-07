@@ -56,7 +56,7 @@ def upload_document(
 
 
 class ApiTests(unittest.TestCase):
-    def test_file_memory_crud_index_conflict_and_retired_routes(self) -> None:
+    def test_file_memory_crud_index_conflict_and_removed_legacy_routes(self) -> None:
         with TemporaryDirectory() as temp_dir, self._client(Path(temp_dir)) as client:
             client.put(
                 "/api/v1/workspaces/project",
@@ -83,7 +83,7 @@ class ApiTests(unittest.TestCase):
                 "/api/v1/memory/files",
                 json={**payload, "body": "changed", "expected_hash": "0" * 64},
             )
-            retired = client.get("/api/v1/workspaces/project/memories")
+            removed = client.get("/api/v1/workspaces/project/memories")
             deleted = client.request(
                 "DELETE",
                 "/api/v1/memory/files",
@@ -101,7 +101,7 @@ class ApiTests(unittest.TestCase):
                          ["database-decisions"])
         self.assertIn("database-decisions.md", index.json()["content"])
         self.assertEqual(conflict.status_code, 409)
-        self.assertEqual(retired.status_code, 410)
+        self.assertEqual(removed.status_code, 404)
         self.assertEqual(deleted.status_code, 204)
 
     def test_file_memory_rejects_symlink_topics_without_hiding_valid_files(self) -> None:
@@ -650,66 +650,6 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(remote_response.status_code, 403)
             self.assertEqual(trusted_response.status_code, 403)
             self.assertFalse(picker.called)
-
-    def test_native_workspace_directory_picker_accepts_trusted_local_gateway(
-        self,
-    ) -> None:
-        class StubDirectoryPicker:
-            def __init__(self, selection: str):
-                self.selection = selection
-                self.initial_paths = []
-
-            def pick_directory(self, *, initial_path=None):
-                self.initial_paths.append(initial_path)
-                return self.selection
-
-        with TemporaryDirectory() as allowed_dir:
-            allowed = Path(allowed_dir).resolve()
-            project = allowed / "project"
-            project.mkdir()
-            picker = StubDirectoryPicker(str(project))
-            settings = Settings(
-                llm_provider="fake",
-                embedding_provider="local",
-                workspace_allowed_roots=(str(allowed),),
-                background_task_workers=2,
-                auth_mode="trusted_header",
-                gateway_trust_secret="test-secret",
-                native_directory_picker_mode="trusted_local_gateway",
-            )
-            app = create_app(settings=settings, directory_picker=picker)
-            with TestClient(app, client=("192.168.97.1", 50000)) as client:
-                missing_identity = client.post(
-                    "/api/v1/workspace-directory-picker",
-                    json={"initial_path": None},
-                )
-                selected = client.post(
-                    "/api/v1/workspace-directory-picker",
-                    headers={
-                        "X-Authenticated-User": "local-user",
-                        "X-Gateway-Auth": "test-secret",
-                        "X-Gateway-Mode": "local",
-                    },
-                    json={"initial_path": str(allowed)},
-                )
-
-                oidc_gateway = client.post(
-                    "/api/v1/workspace-directory-picker",
-                    headers={
-                        "X-Authenticated-User": "remote-user",
-                        "X-Gateway-Auth": "test-secret",
-                    },
-                    json={"initial_path": str(allowed)},
-                )
-
-            self.assertEqual(missing_identity.status_code, 401)
-            self.assertEqual(selected.status_code, 200)
-            self.assertEqual(oidc_gateway.status_code, 403)
-            self.assertEqual(
-                selected.json(),
-                {"path": str(project), "cancelled": False},
-            )
-            self.assertEqual(picker.initial_paths, [str(allowed)])
 
     def test_agent_uses_workspace_contract_and_live_files(self) -> None:
         with TemporaryDirectory() as temp_dir:

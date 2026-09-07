@@ -270,7 +270,7 @@ class QueryService:
                     else "sdk"
                 ),
                 entrypoint_metadata={
-                    "adapter": "AgentRunService",
+                    "adapter": "QueryService",
                     "evaluation": {
                         "isolated": True,
                     }

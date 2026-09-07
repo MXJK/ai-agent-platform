@@ -57,7 +57,6 @@ _SENSITIVE_FIELD_PARTS = frozenset(
         "database_url",
         "dsn",
         "password",
-        "redis_url",
         "secret",
         "token",
     }

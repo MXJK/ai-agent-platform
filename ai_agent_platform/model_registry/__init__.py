@@ -22,7 +22,6 @@ from .repository import (
 from .secrets import (
     EncryptedFileSecretStore,
     InMemorySecretStore,
-    KeyringSecretStore,
     SecretStoreError,
 )
 from .selection import (
@@ -43,7 +42,6 @@ __all__ = [
     "InMemoryModelRegistryRepository",
     "EncryptedFileSecretStore",
     "InMemorySecretStore",
-    "KeyringSecretStore",
     "ModelConnectionTestError",
     "ModelProbeStats",
     "ModelDiscovery",

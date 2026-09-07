@@ -41,8 +41,8 @@ L0 保持现状，不要改动。增量全部在 L1–L3。
 
 ## L0 管道回归（已有，保留）
 
-- 实现：`evals/run_evals.py`、`evals/run_memory_evals.py`
-- 数据：`evals/agent_cases.json`（9 个 fixture、9 个 case）、`evals/memory_cases.json`
+- 实现：`evals/run_evals.py`
+- 数据：`evals/agent_cases.json`（9 个 fixture、9 个 case）
 - 门禁：`retrieval_thresholds` 中的 Recall@k / Precision@k / MRR / NDCG@k / HitRate@k
 - RAG 试标诊断：`evals/run_rag_evals.py` + `rag_cases.json` 另行提供 30 条 0–3
   分级检索用例、K=1/3/5/10 指标、负例/冲突诊断和 p50/p95；它不是 L2 最终答案
@@ -275,7 +275,7 @@ AgentBench / SWE-bench / τ-bench 本质是**模型 benchmark，不是系统 ben
 | 主题 | 位置 |
 | --- | --- |
 | L0 eval runner | `evals/run_evals.py`（`_run_agent_case`、`_run_search_case`） |
-| L0 case 数据 | `evals/agent_cases.json`、`evals/memory_cases.json` |
+| L0 case 数据 | `evals/agent_cases.json` |
 | RAG 分级试标 | `evals/run_rag_evals.py`、`evals/rag_cases.json`、`integrations/rag/evaluation.py` |
 | L1 轨迹 runner | `evals/run_trajectory_evals.py` |
 | L1 约束与指标 | `ai_agent_platform/evaluation/trajectory.py`、`evaluation/trajectory_cases.json` |

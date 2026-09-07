@@ -19,8 +19,8 @@ trusted code repositories.
   MiniMax, and Doubao connections and models.
 - **MCP and Skills** through a shared tool catalogue, central permission decisions,
   user/project Skill discovery, and slash commands.
-- **Layered context** across project instructions, user and project memory, sessions,
-  attachments, and Token budgets.
+- **Layered context** across project instructions, Markdown user/project memory,
+  sessions, attachments, and Token budgets.
 - **Independent knowledge base** with document ingestion, hybrid retrieval, citations,
   and evaluation outside the Coding Agent runtime.
 
@@ -70,8 +70,9 @@ one-shot migration service. The App is published on host loopback only.
 it directly to a LAN or the Internet. Code tools are intended for repositories you
 trust; review approval requests before allowing writes.
 
-The retained SQLite, Celery/Redis, Go gateway, OIDC, and multi-Worker paths are
-compatibility and evolution code, not part of the supported product deployment.
+An optional single-process SQLite profile remains available. The old Go gateway,
+Celery/Redis multi-Worker, database-memory, Chroma, and OS-keyring compatibility
+implementations have been removed.
 
 ## Documentation
 

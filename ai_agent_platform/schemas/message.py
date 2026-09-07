@@ -14,7 +14,6 @@ MessageRole = Literal["system", "user", "assistant", "tool"]
 class AddMessageRequest(BaseModel):
     role: MessageRole
     content: str = Field(min_length=1, max_length=4000)
-    run_agent: bool = False
 
 
 class MessageResponse(BaseModel):

@@ -21,19 +21,6 @@ RUNTIME_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "rag_vector_store": "memory",
         "workspace_access_store": "sqlite",
         "rag_reranker_provider": "none",
-        "task_queue_backend": "in_process",
-    },
-    "production": {
-        "session_repository": "postgres",
-        "agent_run_store": "postgres",
-        "change_set_store": "postgres",
-        "document_store": "postgres",
-        "eval_store": "postgres",
-        "workspace_store": "postgres",
-        "model_registry_store": "postgres",
-        "rag_vector_store": "qdrant",
-        "workspace_access_store": "postgres",
-        "task_queue_backend": "celery",
     },
 }
 
@@ -82,7 +69,6 @@ _RUNTIME_PROFILE_BACKEND_REQUIREMENTS = {
             "model_registry_store",
             "rag_vector_store",
             "workspace_access_store",
-            "task_queue_backend",
         }
     }
     for profile, defaults in RUNTIME_PROFILE_DEFAULTS.items()
@@ -152,7 +138,7 @@ class Settings:
     llm_circuit_error_rate_min_requests: int = 5
     llm_circuit_error_rate_threshold: float = 0.5
     model_registry_store: str = "memory"
-    model_secret_backend: str = "keyring"
+    model_secret_backend: str = "encrypted_file"
     model_probe_interval_seconds: float = 0.0
     session_token_budget: int = 0
     workspace_token_budget: int = 0
@@ -165,34 +151,12 @@ class Settings:
     conversation_summary_max_chars: int = 4000
     conversation_summary_max_source_chars: int = 12000
     conversation_summary_sync_on_overflow: bool = True
-    sse_heartbeat_seconds: float = 10.0
     rag_vector_store: str = "memory"
-    chroma_persist_directory: str = ".chroma"
-    chroma_collection_name: str = "rag_chunks"
     qdrant_url: str = field(default="http://localhost:6333", repr=False)
     qdrant_api_key: str | None = field(default=None, repr=False)
     qdrant_collection_name: str = "knowledge_chunks"
     workspace_access_store: str = "memory"
     cogent_user_memory_root: str = "~/.cogent/memory"
-    # Deprecated database-memory settings are parsed for configuration-file
-    # compatibility but are no longer read by runtime business logic.
-    project_memory_enabled: bool = False
-    project_memory_mode: str = "off"
-    project_memory_store: str = "memory"
-    project_memory_vector_store: str = "memory"
-    project_memory_candidate_threshold: float = 0.60
-    project_memory_auto_threshold: float = 0.85
-    project_memory_recall_limit: int = 20
-    project_memory_result_limit: int = 6
-    project_memory_max_context_chars: int = 3000
-    project_memory_qdrant_collection: str = "project_memories"
-    project_memory_relevance_weight: float = 0.65
-    project_memory_recency_weight: float = 0.20
-    project_memory_importance_weight: float = 0.15
-    project_memory_recency_half_life_days: float = 180.0
-    user_memory_enabled: bool = False
-    user_memory_mode: str = "off"
-    user_profile_max_context_chars: int = 1500
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
     local_embedding_dimensions: int = 128
@@ -209,20 +173,6 @@ class Settings:
     rag_max_prompt_chars: int = 6000
     background_task_workers: int = 4
     background_task_queue_capacity: int = 100
-    task_queue_backend: str = "in_process"
-    redis_url: str = field(default="redis://localhost:6379/0", repr=False)
-    celery_result_backend_url: str = field(
-        default="redis://localhost:6379/1",
-        repr=False,
-    )
-    celery_visibility_timeout_seconds: int = 3600
-    celery_task_max_retries: int = 3
-    celery_task_retry_backoff_seconds: int = 2
-    celery_task_retry_backoff_max_seconds: int = 60
-    celery_task_soft_time_limit_seconds: int = 900
-    celery_task_time_limit_seconds: int = 960
-    celery_result_expires_seconds: int = 86400
-    celery_worker_max_tasks_per_child: int = 100
     mcp_enabled: bool = False
     mcp_allowed: bool = True
     mcp_config_path: str | None = str(
@@ -428,12 +378,12 @@ class Settings:
         _require_choice(
             "model_secret_backend",
             self.model_secret_backend,
-            {"encrypted_file", "keyring", "memory"},
+            {"encrypted_file", "memory"},
         )
         _require_choice(
             "rag_vector_store",
             self.rag_vector_store,
-            {"memory", "chroma", "qdrant"},
+            {"memory", "qdrant"},
         )
         _require_choice(
             "rag_reranker_provider",
@@ -454,26 +404,6 @@ class Settings:
             {"memory", "postgres", "sqlite"},
         )
         _require_choice(
-            "project_memory_mode",
-            self.project_memory_mode,
-            {"off", "shadow", "review", "auto"},
-        )
-        _require_choice(
-            "project_memory_store",
-            self.project_memory_store,
-            {"memory", "postgres", "sqlite"},
-        )
-        _require_choice(
-            "project_memory_vector_store",
-            self.project_memory_vector_store,
-            {"memory", "qdrant", "sqlite"},
-        )
-        _require_choice(
-            "user_memory_mode",
-            self.user_memory_mode,
-            {"off", "review", "auto"},
-        )
-        _require_choice(
             "auth_mode",
             self.auth_mode,
             {"disabled", "single_user", "trusted_header"},
@@ -485,7 +415,7 @@ class Settings:
         _require_choice(
             "native_directory_picker_mode",
             self.native_directory_picker_mode,
-            {"disabled", "loopback", "trusted_local_gateway"},
+            {"disabled", "loopback"},
         )
         _require_choice(
             "agent_workspace_default_mode",
@@ -526,11 +456,6 @@ class Settings:
             raise ValueError(
                 "sandbox_allowed_commands must contain executable basenames"
             )
-        _require_choice(
-            "task_queue_backend",
-            self.task_queue_backend,
-            {"celery", "in_process"},
-        )
         profile_requirements = _RUNTIME_PROFILE_BACKEND_REQUIREMENTS[
             self.runtime_profile
         ]
@@ -544,19 +469,6 @@ class Settings:
                 f"runtime_profile={self.runtime_profile} has incompatible backends: "
                 + ", ".join(profile_mismatches)
                 + "; use runtime_profile=custom for a manual combination"
-            )
-        sqlite_selected = any(
-            value == "sqlite"
-            for value in (
-                self.session_repository,
-                self.agent_run_store,
-                self.workspace_store,
-                self.workspace_access_store,
-            )
-        )
-        if sqlite_selected and self.task_queue_backend != "in_process":
-            raise ValueError(
-                "SQLite local state requires TASK_QUEUE_BACKEND=in_process"
             )
         if self.session_repository != self.agent_run_store:
             raise ValueError(
@@ -580,7 +492,6 @@ class Settings:
                 "llm_retry_after_max_seconds",
                 self.llm_retry_after_max_seconds,
             ),
-            ("sse_heartbeat_seconds", self.sse_heartbeat_seconds),
             ("llm_max_input_chars", self.llm_max_input_chars),
             ("llm_max_context_messages", self.llm_max_context_messages),
             (
@@ -629,46 +540,7 @@ class Settings:
             ("rag_recall_limit", self.rag_recall_limit),
             ("rag_rrf_k", self.rag_rrf_k),
             ("rag_max_prompt_chars", self.rag_max_prompt_chars),
-            ("project_memory_recall_limit", self.project_memory_recall_limit),
-            ("project_memory_result_limit", self.project_memory_result_limit),
-            (
-                "project_memory_max_context_chars",
-                self.project_memory_max_context_chars,
-            ),
-            (
-                "user_profile_max_context_chars",
-                self.user_profile_max_context_chars,
-            ),
-            (
-                "project_memory_recency_half_life_days",
-                self.project_memory_recency_half_life_days,
-            ),
             ("background_task_workers", self.background_task_workers),
-            (
-                "celery_visibility_timeout_seconds",
-                self.celery_visibility_timeout_seconds,
-            ),
-            (
-                "celery_task_retry_backoff_seconds",
-                self.celery_task_retry_backoff_seconds,
-            ),
-            (
-                "celery_task_retry_backoff_max_seconds",
-                self.celery_task_retry_backoff_max_seconds,
-            ),
-            (
-                "celery_task_soft_time_limit_seconds",
-                self.celery_task_soft_time_limit_seconds,
-            ),
-            (
-                "celery_task_time_limit_seconds",
-                self.celery_task_time_limit_seconds,
-            ),
-            ("celery_result_expires_seconds", self.celery_result_expires_seconds),
-            (
-                "celery_worker_max_tasks_per_child",
-                self.celery_worker_max_tasks_per_child,
-            ),
             ("mcp_request_timeout_seconds", self.mcp_request_timeout_seconds),
             (
                 "sandbox_command_timeout_seconds",
@@ -852,47 +724,9 @@ class Settings:
             )
         if not 0.0 <= self.rag_lexical_weight <= 1.0:
             raise ValueError("rag_lexical_weight must be between 0 and 1")
-        if not 0.0 <= self.project_memory_candidate_threshold <= 1.0:
-            raise ValueError(
-                "project_memory_candidate_threshold must be between 0 and 1"
-            )
-        if not 0.0 <= self.project_memory_auto_threshold <= 1.0:
-            raise ValueError(
-                "project_memory_auto_threshold must be between 0 and 1"
-            )
-        if (
-            self.project_memory_candidate_threshold
-            > self.project_memory_auto_threshold
-        ):
-            raise ValueError(
-                "project_memory_candidate_threshold must not exceed "
-                "project_memory_auto_threshold"
-            )
-        if self.project_memory_result_limit > self.project_memory_recall_limit:
-            raise ValueError(
-                "project_memory_result_limit must not exceed "
-                "project_memory_recall_limit"
-            )
-        memory_weights = (
-            self.project_memory_relevance_weight,
-            self.project_memory_recency_weight,
-            self.project_memory_importance_weight,
-        )
-        if any(weight < 0.0 or weight > 1.0 for weight in memory_weights):
-            raise ValueError("project memory ranking weights must be between 0 and 1")
-        if not math.isclose(sum(memory_weights), 1.0, abs_tol=1e-9):
-            raise ValueError("project memory ranking weights must sum to 1")
         if self.auth_mode == "trusted_header" and not self.gateway_trust_secret:
             raise ValueError(
                 "gateway_trust_secret is required when auth_mode=trusted_header"
-            )
-        if (
-            self.native_directory_picker_mode == "trusted_local_gateway"
-            and self.auth_mode != "trusted_header"
-        ):
-            raise ValueError(
-                "native_directory_picker_mode=trusted_local_gateway requires "
-                "auth_mode=trusted_header"
             )
         if self.live_workspace_writes_enabled and self.auth_mode == "disabled":
             raise ValueError(
@@ -927,46 +761,6 @@ class Settings:
             raise ValueError(
                 "background_task_queue_capacity must be greater than or equal to 0"
             )
-        if self.celery_task_max_retries < 0:
-            raise ValueError(
-                "celery_task_max_retries must be greater than or equal to 0"
-            )
-        if (
-            self.celery_task_retry_backoff_max_seconds
-            < self.celery_task_retry_backoff_seconds
-        ):
-            raise ValueError(
-                "celery_task_retry_backoff_max_seconds must be greater than or "
-                "equal to celery_task_retry_backoff_seconds"
-            )
-        if (
-            self.celery_task_time_limit_seconds
-            <= self.celery_task_soft_time_limit_seconds
-        ):
-            raise ValueError(
-                "celery_task_time_limit_seconds must be greater than "
-                "celery_task_soft_time_limit_seconds"
-            )
-        if (
-            self.celery_visibility_timeout_seconds
-            <= self.celery_task_time_limit_seconds
-        ):
-            raise ValueError(
-                "celery_visibility_timeout_seconds must be greater than "
-                "celery_task_time_limit_seconds"
-            )
-        if self.task_queue_backend == "celery":
-            if not self.redis_url.startswith(("redis://", "rediss://")):
-                raise ValueError(
-                    "redis_url must start with redis:// or rediss:// for Celery"
-                )
-            if not self.celery_result_backend_url.startswith(
-                ("redis://", "rediss://")
-            ):
-                raise ValueError(
-                    "celery_result_backend_url must start with redis:// or rediss://"
-                )
-            self._validate_distributed_task_storage()
         if self.mcp_enabled and not self.mcp_config_path:
             raise ValueError("mcp_config_path is required when mcp_enabled is true")
         if self.mcp_enabled and not self.mcp_allowed:
@@ -1197,16 +991,7 @@ class Settings:
                 cls.conversation_summary_sync_on_overflow,
                 dotenv,
             ),
-            sse_heartbeat_seconds=_float_env(
-                "SSE_HEARTBEAT_SECONDS", cls.sse_heartbeat_seconds, dotenv
-            ),
             rag_vector_store=_env("RAG_VECTOR_STORE", cls.rag_vector_store, dotenv),
-            chroma_persist_directory=_env(
-                "CHROMA_PERSIST_DIRECTORY", cls.chroma_persist_directory, dotenv
-            ),
-            chroma_collection_name=_env(
-                "CHROMA_COLLECTION_NAME", cls.chroma_collection_name, dotenv
-            ),
             qdrant_url=_env("QDRANT_URL", cls.qdrant_url, dotenv),
             qdrant_api_key=_env("QDRANT_API_KEY", None, dotenv),
             qdrant_collection_name=_env(
@@ -1217,91 +1002,6 @@ class Settings:
             ),
             cogent_user_memory_root=_env(
                 "COGENT_USER_MEMORY_ROOT", cls.cogent_user_memory_root, dotenv
-            ),
-            project_memory_enabled=_bool_env(
-                "PROJECT_MEMORY_ENABLED",
-                cls.project_memory_enabled,
-                dotenv,
-            ),
-            project_memory_mode=_env(
-                "PROJECT_MEMORY_MODE",
-                cls.project_memory_mode,
-                dotenv,
-            ),
-            project_memory_store=_env(
-                "PROJECT_MEMORY_STORE",
-                cls.project_memory_store,
-                dotenv,
-            ),
-            project_memory_vector_store=_env(
-                "PROJECT_MEMORY_VECTOR_STORE",
-                cls.project_memory_vector_store,
-                dotenv,
-            ),
-            project_memory_candidate_threshold=_float_env(
-                "PROJECT_MEMORY_CANDIDATE_THRESHOLD",
-                cls.project_memory_candidate_threshold,
-                dotenv,
-            ),
-            project_memory_auto_threshold=_float_env(
-                "PROJECT_MEMORY_AUTO_THRESHOLD",
-                cls.project_memory_auto_threshold,
-                dotenv,
-            ),
-            project_memory_recall_limit=_int_env(
-                "PROJECT_MEMORY_RECALL_LIMIT",
-                cls.project_memory_recall_limit,
-                dotenv,
-            ),
-            project_memory_result_limit=_int_env(
-                "PROJECT_MEMORY_RESULT_LIMIT",
-                cls.project_memory_result_limit,
-                dotenv,
-            ),
-            project_memory_max_context_chars=_int_env(
-                "PROJECT_MEMORY_MAX_CONTEXT_CHARS",
-                cls.project_memory_max_context_chars,
-                dotenv,
-            ),
-            project_memory_qdrant_collection=_env(
-                "PROJECT_MEMORY_QDRANT_COLLECTION",
-                cls.project_memory_qdrant_collection,
-                dotenv,
-            ),
-            project_memory_relevance_weight=_float_env(
-                "PROJECT_MEMORY_RELEVANCE_WEIGHT",
-                cls.project_memory_relevance_weight,
-                dotenv,
-            ),
-            project_memory_recency_weight=_float_env(
-                "PROJECT_MEMORY_RECENCY_WEIGHT",
-                cls.project_memory_recency_weight,
-                dotenv,
-            ),
-            project_memory_importance_weight=_float_env(
-                "PROJECT_MEMORY_IMPORTANCE_WEIGHT",
-                cls.project_memory_importance_weight,
-                dotenv,
-            ),
-            project_memory_recency_half_life_days=_float_env(
-                "PROJECT_MEMORY_RECENCY_HALF_LIFE_DAYS",
-                cls.project_memory_recency_half_life_days,
-                dotenv,
-            ),
-            user_memory_enabled=_bool_env(
-                "USER_MEMORY_ENABLED",
-                cls.user_memory_enabled,
-                dotenv,
-            ),
-            user_memory_mode=_env(
-                "USER_MEMORY_MODE",
-                cls.user_memory_mode,
-                dotenv,
-            ),
-            user_profile_max_context_chars=_int_env(
-                "USER_PROFILE_MAX_CONTEXT_CHARS",
-                cls.user_profile_max_context_chars,
-                dotenv,
             ),
             embedding_provider=_env(
                 "EMBEDDING_PROVIDER", cls.embedding_provider, dotenv
@@ -1351,55 +1051,6 @@ class Settings:
             background_task_queue_capacity=_int_env(
                 "BACKGROUND_TASK_QUEUE_CAPACITY",
                 cls.background_task_queue_capacity,
-                dotenv,
-            ),
-            task_queue_backend=_env(
-                "TASK_QUEUE_BACKEND", cls.task_queue_backend, dotenv
-            ),
-            redis_url=_env("REDIS_URL", cls.redis_url, dotenv),
-            celery_result_backend_url=_env(
-                "CELERY_RESULT_BACKEND_URL",
-                cls.celery_result_backend_url,
-                dotenv,
-            ),
-            celery_visibility_timeout_seconds=_int_env(
-                "CELERY_VISIBILITY_TIMEOUT_SECONDS",
-                cls.celery_visibility_timeout_seconds,
-                dotenv,
-            ),
-            celery_task_max_retries=_int_env(
-                "CELERY_TASK_MAX_RETRIES",
-                cls.celery_task_max_retries,
-                dotenv,
-            ),
-            celery_task_retry_backoff_seconds=_int_env(
-                "CELERY_TASK_RETRY_BACKOFF_SECONDS",
-                cls.celery_task_retry_backoff_seconds,
-                dotenv,
-            ),
-            celery_task_retry_backoff_max_seconds=_int_env(
-                "CELERY_TASK_RETRY_BACKOFF_MAX_SECONDS",
-                cls.celery_task_retry_backoff_max_seconds,
-                dotenv,
-            ),
-            celery_task_soft_time_limit_seconds=_int_env(
-                "CELERY_TASK_SOFT_TIME_LIMIT_SECONDS",
-                cls.celery_task_soft_time_limit_seconds,
-                dotenv,
-            ),
-            celery_task_time_limit_seconds=_int_env(
-                "CELERY_TASK_TIME_LIMIT_SECONDS",
-                cls.celery_task_time_limit_seconds,
-                dotenv,
-            ),
-            celery_result_expires_seconds=_int_env(
-                "CELERY_RESULT_EXPIRES_SECONDS",
-                cls.celery_result_expires_seconds,
-                dotenv,
-            ),
-            celery_worker_max_tasks_per_child=_int_env(
-                "CELERY_WORKER_MAX_TASKS_PER_CHILD",
-                cls.celery_worker_max_tasks_per_child,
                 dotenv,
             ),
             mcp_enabled=_bool_env("MCP_ENABLED", cls.mcp_enabled, dotenv),
@@ -1629,29 +1280,6 @@ class Settings:
             ),
             gateway_trust_secret=_env("GATEWAY_TRUST_SECRET", None, dotenv),
         )
-
-    def _validate_distributed_task_storage(self) -> None:
-        required_values = {
-            "session_repository": (self.session_repository, "postgres"),
-            "agent_run_store": (self.agent_run_store, "postgres"),
-            "change_set_store": (self.change_set_store, "postgres"),
-            "document_store": (self.document_store, "postgres"),
-            "workspace_store": (
-                self.workspace_store,
-                "postgres",
-            ),
-            "rag_vector_store": (self.rag_vector_store, "qdrant"),
-        }
-        invalid = [
-            f"{name}={actual} (expected {expected})"
-            for name, (actual, expected) in required_values.items()
-            if actual != expected
-        ]
-        if invalid:
-            raise ValueError(
-                "celery task queue requires shared storage: " + ", ".join(invalid)
-            )
-
 
 def _validate_permission_selection(
     name: str,

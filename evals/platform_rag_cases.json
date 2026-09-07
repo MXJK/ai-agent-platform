@@ -21,7 +21,7 @@
     },
     {
       "filename": "ai_agent_platform/api/routes/agent_runs.py",
-      "content": "def run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:\n    \"\"\"Create an asynchronous agent run and return a run id.\"\"\"\n    return agent_run_service.submit_run(request)\n"
+      "content": "def run_agent(request: AgentRunRequest) -> AgentRunStatusResponse:\n    \"\"\"Create an asynchronous agent run and return a run id.\"\"\"\n    return query_service.submit_run(request)\n"
     },
     {
       "filename": "ai_agent_platform/agents/coding_agent.py",

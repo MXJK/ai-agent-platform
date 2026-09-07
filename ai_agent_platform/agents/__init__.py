@@ -1,3 +1,1 @@
-from .game_agent import GameAgentRuntime
-
-__all__ = ["GameAgentRuntime"]
+"""Shared Agent persistence and tool contracts."""

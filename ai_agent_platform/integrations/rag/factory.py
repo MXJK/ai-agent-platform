@@ -13,7 +13,6 @@ from ai_agent_platform.integrations.rag.models import (
     VectorStore,
 )
 from ai_agent_platform.integrations.rag.service import (
-    ChromaVectorStore,
     GeminiEmbeddingProvider,
     HashingEmbeddingProvider,
     InMemoryVectorStore,
@@ -64,13 +63,8 @@ def create_rag_service(
             f"unsupported embedding provider: {settings.embedding_provider}"
         )
 
-    if settings.rag_vector_store == "chroma":
-        vector_store: VectorStore = ChromaVectorStore(
-            persist_directory=settings.chroma_persist_directory,
-            collection_name=settings.chroma_collection_name,
-        )
-    elif settings.rag_vector_store == "qdrant":
-        vector_store = QdrantVectorStore(
+    if settings.rag_vector_store == "qdrant":
+        vector_store: VectorStore = QdrantVectorStore(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
             collection_name=settings.qdrant_collection_name,

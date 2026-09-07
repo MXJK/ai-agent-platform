@@ -490,7 +490,7 @@ class MCPLifecycleTests(unittest.TestCase):
                 persisted_before_delete = config_path.read_text(encoding="utf-8")
                 self.assertNotIn(secret_value, persisted_before_delete)
                 self.assertIn(
-                    "keyring:mcp-server:frontend_demo:env:mcp_server_token",
+                    "secret-store:mcp-server:frontend_demo:env:mcp_server_token",
                     persisted_before_delete,
                 )
 
@@ -514,7 +514,7 @@ class MCPLifecycleTests(unittest.TestCase):
             self.assertIn("/mcp/servers/${encodeURIComponent(name)}", frontend_js)
             self.assertIn("remove_env_secrets", frontend_js)
 
-    def test_frontend_registry_writes_accept_only_trusted_gateway_local_mode(
+    def test_frontend_registry_writes_reject_trusted_header_callers(
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -555,12 +555,11 @@ class MCPLifecycleTests(unittest.TestCase):
                         "enabled": False,
                     },
                 )
-                local_gateway = client.put(
+                trusted_user = client.put(
                     "/api/v1/mcp/servers/local_allowed",
                     headers={
                         "X-Authenticated-User": "local-user",
                         "X-Gateway-Auth": "test-gateway-secret",
-                        "X-Gateway-Mode": "local",
                     },
                     json={
                         "transport": "stdio",
@@ -572,12 +571,8 @@ class MCPLifecycleTests(unittest.TestCase):
 
             self.assertEqual(oidc_gateway.status_code, 403)
             self.assertEqual(forged_local.status_code, 401)
-            self.assertEqual(local_gateway.status_code, 200)
-            self.assertTrue(persisted.is_file())
-            saved = persisted.read_text(encoding="utf-8")
-            self.assertNotIn("remote_forbidden", saved)
-            self.assertNotIn("forged_local", saved)
-            self.assertIn("local_allowed", saved)
+            self.assertEqual(trusted_user.status_code, 403)
+            self.assertFalse(persisted.exists())
 
     def test_frontend_registry_registers_streamable_http_with_secret_header(self) -> None:
         server = _FakeHTTPMCPServer()
@@ -629,7 +624,7 @@ class MCPLifecycleTests(unittest.TestCase):
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn("frontend-http-secret", persisted)
             self.assertIn(
-                "keyring:mcp-server:frontend_http:header:authorization",
+                "secret-store:mcp-server:frontend_http:header:authorization",
                 persisted,
             )
 

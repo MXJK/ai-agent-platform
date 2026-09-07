@@ -113,21 +113,6 @@ class LocalStateDatabase:
                 for row in conn.execute("SELECT id, session_id, content FROM messages")
             ],
         )
-        conn.execute("DELETE FROM project_memories_fts")
-        conn.executemany(
-            "INSERT INTO project_memories_fts(memory_id, title, kind, content) VALUES (?, ?, ?, ?)",
-            [
-                (
-                    row[0],
-                    fts_index_text(str(row[1])),
-                    fts_index_text(str(row[2])),
-                    fts_index_text(str(row[3])),
-                )
-                for row in conn.execute(
-                    "SELECT id, title, kind, content FROM project_memories"
-                )
-            ],
-        )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -340,154 +325,6 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(workspace_id, user_id)
 );
-
-CREATE TABLE IF NOT EXISTS workspace_memory_settings (
-    workspace_id TEXT PRIMARY KEY,
-    mode TEXT NOT NULL,
-    updated_by TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS project_memories (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    workspace_revision INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    canonical_key TEXT NOT NULL,
-    status TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    importance INTEGER NOT NULL,
-    version INTEGER NOT NULL,
-    created_by TEXT NOT NULL,
-    supersedes_id TEXT,
-    expires_at TEXT,
-    last_confirmed_at TEXT,
-    last_accessed_at TEXT,
-    access_count INTEGER NOT NULL DEFAULT 0,
-    conflict INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_local_project_memories_scope
-    ON project_memories(workspace_id, workspace_revision, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_local_project_memories_key
-    ON project_memories(workspace_id, workspace_revision, canonical_key);
-
-CREATE TABLE IF NOT EXISTS project_memory_evidence (
-    id TEXT PRIMARY KEY,
-    memory_id TEXT NOT NULL REFERENCES project_memories(id) ON DELETE CASCADE,
-    source_kind TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    path TEXT,
-    start_line INTEGER,
-    end_line INTEGER,
-    content_hash TEXT,
-    excerpt TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    workspace_revision INTEGER NOT NULL,
-    source_type TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempts INTEGER NOT NULL,
-    candidate_count INTEGER NOT NULL,
-    active_count INTEGER NOT NULL,
-    error TEXT,
-    input_tokens INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    completed_at TEXT,
-    UNIQUE(workspace_id, source_type, source_id)
-);
-
-CREATE TABLE IF NOT EXISTS memory_index_outbox (
-    id TEXT PRIMARY KEY,
-    memory_id TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    memory_version INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    attempts INTEGER NOT NULL,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_local_memory_outbox_status
-    ON memory_index_outbox(status, created_at);
-
-CREATE TABLE IF NOT EXISTS memory_audit_events (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    actor_user_id TEXT NOT NULL,
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS project_memory_vectors (
-    memory_id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    workspace_revision INTEGER NOT NULL,
-    memory_version INTEGER NOT NULL,
-    dimensions INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_local_memory_vectors_scope
-    ON project_memory_vectors(workspace_id, workspace_revision);
-
-CREATE TABLE IF NOT EXISTS user_memory_settings (
-    user_id TEXT PRIMARY KEY,
-    mode TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_memories (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    canonical_key TEXT NOT NULL,
-    status TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    importance INTEGER NOT NULL,
-    version INTEGER NOT NULL,
-    created_by TEXT NOT NULL,
-    supersedes_id TEXT,
-    last_confirmed_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_local_user_memories_scope
-    ON user_memories(user_id, status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_local_user_memories_key
-    ON user_memories(user_id, canonical_key);
-
-CREATE TABLE IF NOT EXISTS user_memory_evidence (
-    id TEXT PRIMARY KEY,
-    memory_id TEXT NOT NULL REFERENCES user_memories(id) ON DELETE CASCADE,
-    source_kind TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    excerpt TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_profile_snapshots (
-    user_id TEXT PRIMARY KEY,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    source_memory_ids_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
 """
 
 
@@ -498,32 +335,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
     tokenize='unicode61'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS project_memories_fts USING fts5(
-    memory_id UNINDEXED,
-    title,
-    kind,
-    content,
-    tokenize='unicode61'
-);
 """
 
 
-_SCHEMA_V2 = r"""
-CREATE TABLE IF NOT EXISTS user_memory_scenes (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    source_memory_ids_json TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(user_id, workspace_id)
-);
-CREATE INDEX IF NOT EXISTS idx_local_user_memory_scenes_scope
-    ON user_memory_scenes(user_id, updated_at DESC, id DESC);
-"""
+_SCHEMA_V2 = "-- Retired database-memory schema version."
 
 
 _SCHEMA_V4 = r"""

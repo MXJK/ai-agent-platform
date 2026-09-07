@@ -246,7 +246,6 @@ def create_sessions_router(
                 session_id=session_id,
                 role=request.role,
                 content=request.content,
-                run_agent=request.run_agent,
             )
         except SessionNotFoundError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc

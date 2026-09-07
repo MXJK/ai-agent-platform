@@ -42,7 +42,7 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["WORKSPACE_ACCESS_STORE"] == "postgres"
     assert "PROJECT_MEMORY_STORE" not in environment
     assert "PROJECT_MEMORY_VECTOR_STORE" not in environment
-    assert environment["TASK_QUEUE_BACKEND"] == "in_process"
+    assert "TASK_QUEUE_BACKEND" not in environment
     assert environment["AUTH_MODE"] == "single_user"
     assert environment["NATIVE_DIRECTORY_PICKER_MODE"] == "disabled"
     assert environment["WORKSPACE_ALLOWED_ROOTS"] == "/workspaces"

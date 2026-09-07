@@ -1,4 +1,3 @@
-from .agent_run_service import AgentRunService
 from .query_service import AgentRunExecutionError, QueryService
 from .query_events import AgentEventEncoder, EventStore, RuntimeEventStore
 from .execution_context import ExecutionContextFactory
@@ -55,7 +54,6 @@ from .conversation_compression import (
 )
 
 __all__ = [
-    "AgentRunService",
     "AgentRunExecutionError",
     "AgentEventEncoder",
     "EventStore",

@@ -1126,12 +1126,6 @@ def _warn_for_sensitive_cli_modes(config: ResolvedConfig) -> None:
             RuntimeWarning,
             stacklevel=2,
         )
-    if config.settings.task_queue_backend == "celery":
-        warnings.warn(
-            "CLI is using Celery; a worker with the same persistent stores must be running",
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
 
 def _write_warnings(items: list[warnings.WarningMessage], stream: TextIO) -> None:

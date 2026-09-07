@@ -10,13 +10,11 @@ from threading import Lock
 from time import perf_counter
 from typing import Any, Callable, Literal
 
-from ai_agent_platform.agents.game_agent import GameAgentRuntime
 from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.agents.coding import InMemoryAgentRunStore
 from ai_agent_platform.cogent import AgentRuntime
 from ai_agent_platform.cogent.runtime import CogentRuntime
 from ai_agent_platform.core import (
-    CeleryTaskQueue,
     InProcessTaskQueue,
     MetricsRegistry,
     ResolvedConfig,
@@ -47,7 +45,6 @@ from ai_agent_platform.model_registry import (
     EncryptedFileSecretStore,
     InMemoryModelRegistryRepository,
     InMemorySecretStore,
-    KeyringSecretStore,
     ModelRegistryService,
     PostgresModelRegistryRepository,
 )
@@ -56,7 +53,7 @@ from ai_agent_platform.repositories import (
     InMemoryEvalRepository,
     InMemoryKnowledgeBaseRepository,
     InMemorySessionRepository,
-    InMemoryProjectMemoryRepository,
+    InMemoryWorkspaceAccessRepository,
     InMemoryWorkspaceRepository,
     PostgresAgentRunRepository,
     PostgresChangeSetRepository,
@@ -64,16 +61,15 @@ from ai_agent_platform.repositories import (
     PostgresDocumentRepository,
     PostgresKnowledgeBaseRepository,
     PostgresSessionRepository,
-    PostgresProjectMemoryRepository,
+    PostgresWorkspaceAccessRepository,
     PostgresWorkspaceRepository,
     SQLiteAgentRunRepository,
     SQLiteSessionRepository,
-    SQLiteProjectMemoryRepository,
+    SQLiteWorkspaceAccessRepository,
     SQLiteWorkspaceRepository,
     create_query_unit_of_work,
 )
 from ai_agent_platform.services import (
-    AgentRunService,
     ChangeSetService,
     KnowledgeBaseService,
     QueryService,
@@ -96,8 +92,8 @@ from ai_agent_platform.skills import (
 
 logger = logging.getLogger(__name__)
 
-RuntimeRole = Literal["api", "worker", "cli"]
-_RUNTIME_ROLES = {"api", "worker", "cli"}
+RuntimeRole = Literal["api", "cli"]
+_RUNTIME_ROLES = {"api", "cli"}
 
 
 @dataclass(frozen=True)
@@ -140,7 +136,6 @@ class RuntimeContainer:
     llm_client: LLMClient | None = None
     model_registry: ModelRegistryService | None = None
     secret_store: Any = field(default=None, repr=False)
-    game_agent_runtime: GameAgentRuntime | None = None
     workspace_service: WorkspaceService | None = None
     workspace_access_service: WorkspaceAccessService | None = None
     file_memory_service: Any = None
@@ -164,7 +159,6 @@ class RuntimeContainer:
     execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None
     query_uow: Any = None
     query_service: QueryService | None = None
-    agent_run_service: AgentRunService | None = None
     eval_service: Any = None
     startup_timeline: list[StartupCheckpoint] = field(default_factory=list)
     close_errors: list[RuntimeCloseError] = field(default_factory=list)
@@ -240,11 +234,6 @@ class ApplicationFactory:
         container.checkpoint("config_loaded")
         try:
             configure_logging(level=settings.log_level, log_format=settings.log_format)
-            if role == "worker" and settings.task_queue_backend != "celery":
-                raise RuntimeError(
-                    "Celery worker requires TASK_QUEUE_BACKEND=celery"
-                )
-
             container.metrics = self.create_metrics_registry()
             container.directory_picker = (
                 directory_picker or self.create_directory_picker()
@@ -323,7 +312,6 @@ class ApplicationFactory:
                     "model_registry_probes",
                     container.model_registry.close,
                 )
-            container.game_agent_runtime = self.create_game_agent_runtime()
             container.workspace_service = WorkspaceService(
                 store=container.workspace_store,
                 allowed_roots=(
@@ -512,7 +500,6 @@ class ApplicationFactory:
                 )
             container.session_service = SessionService(
                 repository=container.session_repository,
-                agent_runtime=container.game_agent_runtime,
                 compressor=create_conversation_compressor(
                     llm_provider=settings.llm_provider,
                     llm_client=container.llm_client,
@@ -584,7 +571,7 @@ class ApplicationFactory:
                     "QueryService requires session and Run stores on the same "
                     "supported backend for atomic start"
                 )
-            container.agent_run_service = AgentRunService(
+            container.query_service = QueryService(
                 runtime=container.coding_agent_runtime,
                 session_service=container.session_service,
                 workspace_service=container.workspace_service,
@@ -601,10 +588,9 @@ class ApplicationFactory:
                 tool_registry=container.tool_registry,
                 tool_pool_builder=container.tool_pool_builder,
             )
-            container.query_service = container.agent_run_service
             container.register_cleanup(
-                "agent_run_service",
-                container.agent_run_service.close,
+                "query_service",
+                container.query_service.close,
             )
             container.eval_service = self.create_eval_service(
                 settings,
@@ -637,22 +623,6 @@ class ApplicationFactory:
         role: RuntimeRole,
         metrics: MetricsRegistry,
     ) -> Any:
-        if settings.task_queue_backend == "celery":
-            return CeleryTaskQueue(
-                broker_url=settings.redis_url,
-                result_backend_url=settings.celery_result_backend_url,
-                visibility_timeout_seconds=(
-                    settings.celery_visibility_timeout_seconds
-                ),
-                publish_max_retries=settings.celery_task_max_retries,
-                publish_retry_backoff_seconds=(
-                    settings.celery_task_retry_backoff_seconds
-                ),
-                publish_retry_backoff_max_seconds=(
-                    settings.celery_task_retry_backoff_max_seconds
-                ),
-                metrics=metrics,
-            )
         return InProcessTaskQueue(
             max_workers=settings.background_task_workers,
             max_queue_size=settings.background_task_queue_capacity,
@@ -838,10 +808,9 @@ class ApplicationFactory:
             return EncryptedFileSecretStore(
                 state_path.with_name("provider-secrets.enc")
             )
-        return KeyringSecretStore(service_name=settings.app_name)
-
-    def create_game_agent_runtime(self) -> GameAgentRuntime:
-        return GameAgentRuntime()
+        raise ValueError(
+            f"unsupported model secret backend: {settings.model_secret_backend}"
+        )
 
     def create_workspace_access_service(
         self,
@@ -851,14 +820,14 @@ class ApplicationFactory:
         local_state_database: LocalStateDatabase | None = None,
     ) -> WorkspaceAccessService:
         if settings.workspace_access_store == 'postgres':
-            repository = PostgresProjectMemoryRepository(
+            repository = PostgresWorkspaceAccessRepository(
                 database_url=settings.database_url)
         elif settings.workspace_access_store == 'sqlite':
             if local_state_database is None:
                 raise ValueError('SQLite workspace access requires local state')
-            repository = SQLiteProjectMemoryRepository(database=local_state_database)
+            repository = SQLiteWorkspaceAccessRepository(database=local_state_database)
         else:
-            repository = InMemoryProjectMemoryRepository()
+            repository = InMemoryWorkspaceAccessRepository()
         return WorkspaceAccessService(repository=repository,
                                       workspace_service=workspace_service)
 

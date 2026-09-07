@@ -1,8 +1,10 @@
 project_id: "ai-agent-platform"
-status: "active"
-active_task: "ACTUAL-CONTEXT-TOKEN-USAGE"
-next_action: "Reproduce and fix the compact mobile context-token layout and percentage presentation, then rerun browser and repository verification."
-blockers: []
+status: "blocked"
+active_task: "REMOVE-OBSOLETE-COMPATIBILITY-CODE"
+next_action: "Decide whether to expand scope to align the unchanged ManagedFiles symlink exception test, then rerun the full suite."
+blockers:
+  - "Required staged-snapshot pytest has one unchanged baseline failure: test_result_storage_never_follows_symlinked_parent expects OSError while ManagedFiles.read deliberately raises ValueError for ELOOP/ENOTDIR."
+  - "Eight unreferenced legacy database-memory PNG exports remain because the exact deletion command was rejected when the approval reviewer hit its usage limit."
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-06T23:11:10+08:00"
+updated_at: "2026-09-07T10:43:37+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

@@ -5,14 +5,12 @@ import ssl
 import sys
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
-from threading import Event
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import httpx
 
-from ai_agent_platform.api.sse import sse_heartbeat, stream_with_heartbeat
 from ai_agent_platform.core import Settings
 from ai_agent_platform.integrations.llm import (
     LLMClient,
@@ -806,24 +804,6 @@ class RetryAfterTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "rate_limit")
         self.assertEqual(raised.exception.retry_after_seconds, 3.0)
-
-
-class HeartbeatTests(unittest.TestCase):
-    def test_idle_stream_emits_sse_comment_heartbeat(self) -> None:
-        release = Event()
-
-        def delayed_events():
-            release.wait(timeout=0.2)
-            yield LLMStreamEvent(type="done")
-
-        iterator = stream_with_heartbeat(
-            delayed_events(),
-            heartbeat_seconds=0.01,
-        )
-        self.assertIsNone(next(iterator))
-        self.assertEqual(sse_heartbeat(), ": heartbeat\n\n")
-        release.set()
-        self.assertEqual(next(iterator).type, "done")
 
 
 if __name__ == "__main__":
