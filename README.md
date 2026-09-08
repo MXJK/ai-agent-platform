@@ -12,6 +12,7 @@ Cogent 是一个本地优先、自托管的 Coding Agent 平台。Web、终端�
 
 - **持久化 Agent Run**：支持流式事件、审批、追问、暂停/恢复、取消、压缩与重启恢复；
   带工具调用的中间文本会在展示层重置，只有最终模型轮次保留为回答正文。
+- **Trace 审计**：时间线每页 100 条，展开时才生成完整事件数据；同一 Run 使用 `after` 游标增量刷新，保留当前页和已展开内容。首次打开仍获取完整事件历史，分页限制的是 DOM 渲染量。
 - **受控代码执行**：工作区限定的读写、搜索、补丁和命令工具，提供
   `default`、`acceptEdits`、`plan`、`bypassPermissions` 权限模式。
 - **统一模型管理**：集中管理 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、

@@ -1,9 +1,9 @@
 project_id: "ai-agent-platform"
 status: "blocked"
-active_task: "MODEL-DISCOVERY-SELECTION"
-next_action: "Align the task-external ManagedFiles symlink exception contract, rerun the full pytest suite, then close MODEL-DISCOVERY-SELECTION."
+active_task: "TRACE-AUDIT-PERFORMANCE"
+next_action: "Align the existing ManagedFiles symlink exception contract and rerun full pytest to close TRACE-AUDIT-PERFORMANCE."
 blockers:
-  - "Required full pytest has one unchanged task-external failure: test_result_storage_never_follows_symlinked_parent expects OSError while ManagedFiles.read deliberately raises ValueError for ELOOP/ENOTDIR."
+  - "Required full pytest: test_result_storage_never_follows_symlinked_parent expects OSError but ManagedFiles raises ValueError; 829 passed, 12 skipped, 108 subtests passed."
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-07T22:25:36+08:00"
+updated_at: "2026-09-08T21:34:09+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

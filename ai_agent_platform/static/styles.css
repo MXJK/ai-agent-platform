@@ -9746,3 +9746,15 @@ body.inspector-hidden .inspector {
     animation: none;
   }
 }
+
+.trace-audit-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.trace-audit-pagination .button {
+  min-height: 44px;
+}

@@ -844,11 +844,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(
-            '/static/styles.css?v=20260907-context-window-r3',
+            '/static/styles.css?v=20260908-trace-pagination-r1',
             response.text,
         )
         self.assertIn(
-            '/static/app.js?v=20260907-model-selection-r1',
+            '/static/app.js?v=20260908-trace-pagination-r1',
             response.text,
         )
         self.assertNotIn('id="composer-mode-input"', response.text)

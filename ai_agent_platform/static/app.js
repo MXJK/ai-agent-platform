@@ -27,6 +27,9 @@ const state = {
   auditRunId: "",
   auditRunBody: null,
   auditEvents: [],
+  auditStoredEvents: [],
+  auditCursor: 0,
+  auditPage: 0,
   auditCategory: "all",
   auditPollTimer: null,
   auditRequestGeneration: 0,
@@ -2568,7 +2571,7 @@ function auditEventCategoryLabel(event) {
 }
 
 function buildAuditEvents(run, storedEvents) {
-  const events = (storedEvents || []).map((event) => ({ ...event, output: event.output || {} }));
+  const events = [...(storedEvents || [])];
   let sequence = events.reduce((maximum, event) => Math.max(maximum, Number(event.sequence || 0)), 0);
   const toolCalls = new Set(events.filter((event) => event.type === "tool_selected").map((event) => event.output?.call_id));
   const toolResults = new Set(events.filter((event) => ["tool_result", "tool_error"].includes(event.type)).map((event) => event.output?.call_id));
@@ -2638,19 +2641,36 @@ function auditEventSummary(event) {
   return event.summary || humanizeAgentNode(event.node);
 }
 
+const AUDIT_PAGE_SIZE = 100;
+
 function renderAuditTimeline() {
   const list = $("trace-audit-timeline");
   const visible = state.auditEvents.filter((event) => auditEventMatches(event, state.auditCategory));
+  const pages = Math.max(1, Math.ceil(visible.length / AUDIT_PAGE_SIZE));
+  state.auditPage = Math.min(state.auditPage, pages - 1);
+  const start = state.auditPage * AUDIT_PAGE_SIZE;
   $("trace-audit-visible-count").textContent = `${visible.length} 条`;
-  list.innerHTML = "";
+  $("trace-audit-page-label").textContent = `${state.auditPage + 1} / ${pages} 页`;
+  $("trace-audit-prev").disabled = state.auditPage === 0;
+  $("trace-audit-next").disabled = state.auditPage >= pages - 1;
+  const existing = new Map([...list.children].map((item) => [item.auditKey, item]));
+  const items = [];
   if (!visible.length) {
     list.innerHTML = '<li class="trace-audit-placeholder">当前筛选下没有审计事件。</li>';
     return;
   }
-  for (const event of visible) {
+  for (const event of visible.slice(start, start + AUDIT_PAGE_SIZE)) {
+    const key = `${state.auditRunId}:${event.reconstructed ? "reconstructed" : "stored"}:${event.sequence}`;
+    const previous = existing.get(key);
+    if (previous && (previous.auditEvent === event || (event.reconstructed && jsonPretty(previous.auditEvent) === jsonPretty(event)))) {
+      items.push(previous);
+      continue;
+    }
     const category = auditEventCategory(event);
     const item = document.createElement("li");
     item.className = `trace-audit-event category-${category}${event.type === "tool_error" ? " event-failed" : ""}`;
+    item.auditKey = key;
+    item.auditEvent = event;
     const payload = event.output || {};
     const hasPayload = Object.keys(payload).length > 0;
     item.innerHTML = `
@@ -2672,13 +2692,28 @@ function renderAuditTimeline() {
         ${hasPayload ? `
           <details class="trace-audit-payload">
             <summary>${event.type === "tool_selected" ? "查看精确参数" : "查看完整事件数据"}</summary>
-            <pre><code>${escapeHtml(jsonPretty(payload))}</code></pre>
+            <pre><code></code></pre>
           </details>
         ` : ""}
       </article>
     `;
-    list.appendChild(item);
+    const details = item.querySelector("details");
+    if (details) {
+      details.addEventListener("toggle", () => {
+        if (!details.open || details.dataset.loaded) return;
+        details.querySelector("code").textContent = jsonPretty(payload);
+        details.dataset.loaded = "true";
+      });
+    }
+    items.push(item);
   }
+  // Keep unchanged rows attached so polling preserves focus and expanded payloads.
+  for (const child of [...list.children]) {
+    if (!items.includes(child)) child.remove();
+  }
+  items.forEach((item, index) => {
+    if (list.children[index] !== item) list.insertBefore(item, list.children[index] || null);
+  });
 }
 
 function renderAuditDetail() {
@@ -2703,7 +2738,7 @@ function renderAuditDetail() {
   $("trace-audit-workspace").textContent = run.workspace_id;
   $("trace-audit-checkpoint").textContent = run.checkpoint_id || "尚无";
   $("trace-audit-cursor").textContent = state.auditEvents.length
-    ? `#${state.auditEvents.at(-1).sequence}`
+    ? `#${state.auditCursor}`
     : "—";
   const toolEvents = state.auditEvents.filter((event) => event.type === "tool_selected");
   const approvals = state.auditEvents.filter((event) => event.type.startsWith("approval_"));
@@ -2732,10 +2767,19 @@ function scheduleAuditPoll() {
 
 async function loadAuditRun(runId, options = {}) {
   if (!runId) return;
+  clearAuditPoll();
   const generation = ++state.auditRequestGeneration;
+  const sameRun = state.auditRunBody?.run_id === runId;
+  if (!sameRun) {
+    state.auditStoredEvents = [];
+    state.auditCursor = 0;
+    state.auditPage = 0;
+    state.auditRunBody = null;
+    state.auditEvents = [];
+  }
   state.auditRunId = runId;
   renderAuditRuns();
-  if (!options.silent) {
+  if (!sameRun) {
     $("trace-audit-empty").hidden = true;
     $("trace-audit-content").hidden = false;
     $("trace-audit-timeline").innerHTML = '<li class="trace-audit-placeholder">正在装载审计事实…</li>';
@@ -2743,11 +2787,19 @@ async function loadAuditRun(runId, options = {}) {
   try {
     const [run, eventBody] = await Promise.all([
       fetchJson(`/agent/runs/${encodeURIComponent(runId)}`),
-      fetchJson(`/agent/runs/${encodeURIComponent(runId)}/events`),
+      fetchJson(`/agent/runs/${encodeURIComponent(runId)}/events?after=${state.auditCursor}`),
     ]);
     if (generation !== state.auditRequestGeneration) return;
     state.auditRunBody = run;
-    state.auditEvents = buildAuditEvents(run, eventBody.events || []);
+    const known = new Set(state.auditStoredEvents.map((event) => event.sequence));
+    for (const event of eventBody.events || []) {
+      if (!known.has(event.sequence)) {
+        state.auditStoredEvents.push(event);
+        known.add(event.sequence);
+      }
+      state.auditCursor = Math.max(state.auditCursor, Number(event.sequence || 0));
+    }
+    state.auditEvents = buildAuditEvents(run, state.auditStoredEvents);
     state.auditRuns = state.auditRuns.map((item) => item.run_id === run.run_id
       ? {
           ...item,
@@ -8901,6 +8953,14 @@ function bindEvents() {
       .then(() => showToast("Trace 已刷新"))
       .catch((error) => showToast(humanizeError(error), "error"));
   });
+  $("trace-audit-prev").addEventListener("click", () => {
+    state.auditPage = Math.max(0, state.auditPage - 1);
+    renderAuditTimeline();
+  });
+  $("trace-audit-next").addEventListener("click", () => {
+    state.auditPage += 1;
+    renderAuditTimeline();
+  });
   $("trace-run-search").addEventListener("input", renderAuditRuns);
   $("trace-run-status-filter").addEventListener("change", renderAuditRuns);
   $("trace-run-list").addEventListener("click", (event) => {
@@ -8913,6 +8973,7 @@ function bindEvents() {
     const filter = event.target.closest("[data-audit-filter]");
     if (!filter) return;
     state.auditCategory = filter.dataset.auditFilter;
+    state.auditPage = 0;
     document.querySelectorAll("[data-audit-filter]").forEach((button) => {
       const active = button === filter;
       button.classList.toggle("active", active);

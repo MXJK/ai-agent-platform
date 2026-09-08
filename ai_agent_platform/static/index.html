@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#08131f" />
     <title>Cogent</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260907-context-window-r3" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260908-trace-pagination-r1" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -1106,6 +1106,11 @@
                   <span id="trace-audit-visible-count">0 条</span>
                 </div>
 
+                <nav class="trace-audit-pagination" aria-label="审计事件分页">
+                  <button id="trace-audit-prev" class="button secondary" type="button" disabled>上一页</button>
+                  <span id="trace-audit-page-label" aria-live="polite">1 / 1 页</span>
+                  <button id="trace-audit-next" class="button secondary" type="button" disabled>下一页</button>
+                </nav>
                 <ol id="trace-audit-timeline" class="trace-audit-timeline" aria-live="polite" aria-atomic="false">
                   <li class="trace-audit-placeholder">正在装载审计事实…</li>
                 </ol>
@@ -1343,6 +1348,6 @@
 
     <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    <script src="/static/app.js?v=20260907-model-selection-r1" defer></script>
+    <script src="/static/app.js?v=20260908-trace-pagination-r1" defer></script>
   </body>
 </html>
