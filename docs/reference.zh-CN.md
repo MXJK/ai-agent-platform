@@ -83,7 +83,48 @@ docker compose -f docker-compose.yml logs --tail=80 app
 第一次使用：打开页面 → 模型管理中添加连接和模型 → 工作区登记 `/workspaces/项目目录` →
 新建会话并选择该工作区 → 输入任务。默认逐次确认，写入/命令出现审批后再选择是否执行。
 可先发送 `/help`、`/status` 或让 Agent 阅读 README；`/plan` 用于先做只读计划。
-容器中的用户 Cogent 配置与文件记忆保存在 `cogent_user_state` 卷，重建 App 会保留。
+容器中的用户 Cogent 配置、Skills 与文件记忆通过 bind mount 保存在宿主机 `~/.cogent`，
+重建 App 会保留，也可与宿主机 CLI 共用。
+
+### 可选推荐 MCP profile
+
+项目提供 opt-in `mcp` profile，不改变默认 Compose 资源占用：
+
+```bash
+docker compose --profile mcp up -d --build --wait \
+  mcp-playwright mcp-postgres mcp-qdrant
+python3 scripts/install_recommended_mcp.py \
+  --api-url http://127.0.0.1:8000/api/v1
+```
+
+安装器通过本地 MCP Registry API 幂等注册五项配置，且不接收、读取或写入凭据：
+
+- GitHub 使用官方远程端点、`repos,pull_requests,issues,actions` toolsets、read-only 与
+  lockdown Header。默认禁用；在“能力管理 → MCP 连接”编辑 `github`，把
+  `Authorization=Bearer ...` 填入 Secret Header 后再启用。不要复用宽权限 token。
+- Context7 使用官方 Streamable HTTP 端点，可无 Key 运行；需要更高限额时同样把
+  `Authorization=Bearer ...` 作为 Secret Header 保存。
+- Playwright 固定 `v0.0.80`，使用 headless Chromium、内存隔离 profile 和项目 App
+  origin allowlist；其 `/mcp` 端点仅在 Compose 网络可达。浏览产品时使用
+  `http://host.docker.internal:${SELF_HOSTED_PORT}`，避免 Chromium 把容器短主机名升级为 HTTPS。
+- PostgreSQL MCP Pro 固定 `v0.3.0`，强制 `restricted` 只读事务模式，使用旧版 SSE
+  `/sse`；它复用 Compose 数据库凭据但不向宿主机发布端口。
+- Qdrant MCP 固定 `v0.8.1` 与兼容的 `qdrant-client 1.17.0`、
+  `QDRANT_READ_ONLY=true`，使用规范 `/mcp/` Streamable HTTP 端点。其
+  FastEmbed 不支持平台默认 `BAAI/bge-m3`，所以默认指向独立 `mcp_context` collection
+  并保持禁用。只有该 collection 已由同一 `MCP_QDRANT_EMBEDDING_MODEL` 构建后才应启用；
+  它不能替代平台 RAG 的检索、融合与引用链路。
+
+三个 sidecar 均未设置 `ports`，外部 HTTP 目标还需 Registry 的精确 `allowed_hosts`、
+private-network 与 insecure-HTTP 显式许可。MCP 的远端只读声明不会自动授予权限；每次调用
+仍进入平台工具池、PermissionResolver 和必要审批。停止可选服务可运行
+`docker compose --profile mcp stop mcp-playwright mcp-postgres mcp-qdrant`，注册信息保留在
+`~/.ai-agent-platform/mcp.json`。
+
+OrbStack 等容器运行时可能把公网域名映射到合成的 `198.18.0.0/15` DNS 地址，平台会按
+非公网地址拒绝。确认解析结果属于本机容器 DNS 代理而非目标变更后，可用
+`scripts/install_recommended_mcp.py --allow-container-dns-proxy` 重新注册；该开关只对
+GitHub 和 Context7 两个精确 allowlist 域名开放 private-network 解析，不改变其他 Server。
 
 ## CLI、REPL、SDK 与进程入口
 
@@ -209,9 +250,9 @@ Secret 后端、允许根目录、真实写入开关或 MCP 配置路径。沙�
 
 ## Skill 发现与 slash command
 
-发现优先级为项目 `.cogent/skills` > 用户 `~/.cogent/skills` >
-兼容读取 `~/.ai-agent-platform/skills` > 内置。旧 Skill 不自动移动，
-现有 CRUD API/UI 保留，但新写入目标为 ~/.cogent/skills。
+发现优先级为项目 `.cogent/skills` > 用户 `~/.cogent/skills` > 内置。
+运行时不再读取旧 `~/.ai-agent-platform/skills`，现有 CRUD API/UI 的用户级读写目标
+统一为 `~/.cogent/skills`；因此从新目录删除的 Skill 不会被旧副本重新加载。
 
 支持 .md、SKILL.md、skill.yaml + prompt.md、参数替换、热加载及 slash command。
 只支持 inline，mode/context=fork 返回不支持；不会降级执行，也不会读取 .agents/skills。
@@ -221,7 +262,9 @@ Skill 内容是声明式上下文，不能授予工具、提升权限或越过 W
 内置 `/skill-creator` 可将重复工作流整理为项目级
 `.cogent/skills/<name>/SKILL.md`，并指导更新、行为测试和打包。确定性辅助命令仅在当前
 Workspace 创建 Skill，不覆盖已有目录；校验会拒绝名称不一致、未完成占位符、符号链接和
-不安全包内容。`metadata`、`compatibility`、`license` 作为惰性描述字段接受，不会改变权限。
+不安全包内容。`description` 只要求为非空文本，不设单独的 500 字符上限；仍受 64 KiB
+单文件、128 KiB 总发现内容和上下文预算约束。`metadata`、`compatibility`、`license`
+作为惰性描述字段接受，不会改变权限。
 
 ```bash
 .venv/bin/python -m ai_agent_platform.skills.creator init release-notes \

@@ -73,13 +73,19 @@ def test_tui_shared_commands_streaming_and_collapsed_displayable_thinking(tmp_pa
                 ).runtime_state['permission_mode'] == 'bypassPermissions'
                 assert 'fake model reply' in app.answer_text[run]
                 assert isinstance(app.answers[run], Markdown)
-                await app.render_event(AgentEvent(999, run, 'running', 'thinking_delta', '', {'text': 'Visible summary'}))
-                await app.render_event(AgentEvent(1000, run, 'running', 'thinking_completed', '', {'text': 'Visible summary', 'signature': 'never show'}))
+                await app.render_event(AgentEvent(997, run, 'running', 'answer_delta', '', {'text': 'temporary tool preamble'}))
+                assert app.answer_text[run].endswith('temporary tool preamble')
+                await app.render_event(AgentEvent(998, run, 'running', 'answer_reset', '', {'reason': 'tool_calls'}))
+                assert app.answer_text[run] == ''
+                await app.render_event(AgentEvent(999, run, 'running', 'answer_delta', '', {'text': 'final reply'}))
+                assert app.answer_text[run] == 'final reply'
+                await app.render_event(AgentEvent(1000, run, 'running', 'thinking_delta', '', {'text': 'Visible summary'}))
+                await app.render_event(AgentEvent(1001, run, 'running', 'thinking_completed', '', {'text': 'Visible summary', 'signature': 'never show'}))
                 panel = app.thinking[run]
                 assert isinstance(panel, Collapsible) and panel.collapsed
                 assert app.thinking_text[run] == 'Visible summary'
                 assert 'never show' not in str(panel.query_one('.thinking-content', Static).content)
-                await app.render_event(AgentEvent(1001, run, 'running', 'tool_result', '', {'call_id':'rejected', 'name':'[red]tool', 'ok':False, 'error':'[bold]not markup'}))
+                await app.render_event(AgentEvent(1002, run, 'running', 'tool_result', '', {'call_id':'rejected', 'name':'[red]tool', 'ok':False, 'error':'[bold]not markup'}))
                 block = app.tools[(run, 'rejected')]
                 block.on_click()
                 assert '[bold]not markup' in block._full_output

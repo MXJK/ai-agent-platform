@@ -107,6 +107,43 @@ class SkillDiscoveryTests(unittest.TestCase):
                 {item.code for item in catalog.diagnostics},
             )
 
+    def test_description_is_bounded_by_document_limits_not_an_arbitrary_field_cap(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            user = Path(temp_dir) / "user"
+            description = "Detailed applicability guidance. " * 40
+            _write_raw(
+                user / "detailed" / "SKILL.md",
+                "---\n"
+                "name: detailed\n"
+                f"description: {description}\n"
+                "---\n"
+                "Follow the detailed workflow.\n",
+            )
+
+            catalog = SkillDiscovery(user_root=user).discover()
+
+            skill = catalog.get_skill("detailed")
+            self.assertIsNotNone(skill)
+            self.assertGreater(len(skill.description), 500)
+            self.assertNotIn(
+                "invalid_description",
+                {item.code for item in catalog.diagnostics},
+            )
+
+    def test_root_readme_is_not_misclassified_as_a_single_file_skill(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            user = Path(temp_dir) / "user"
+            _write_raw(user / "README.md", "# User Skills\n\nDirectory documentation.\n")
+            _write_raw(
+                user / "focused-review.md",
+                _skill_text(name="focused-review", body="Review the requested change."),
+            )
+
+            catalog = SkillDiscovery(user_root=user).discover()
+
+            self.assertEqual([skill.name for skill in catalog.skills], ["focused-review"])
+            self.assertEqual(catalog.diagnostics, ())
+
     def test_command_alias_conflicts_follow_source_priority(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

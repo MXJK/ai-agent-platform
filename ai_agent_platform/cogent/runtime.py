@@ -460,6 +460,12 @@ class CogentRuntime:
             context = self._base_tool_context(
                 record, record.context_snapshot, actor_user_id=self._actor(record)
             )
+            if state.retry_on_resume:
+                self._reset_answer_stream(
+                    run_id,
+                    reason="incomplete_model_response",
+                    request_index=state.request_count + 1,
+                )
             self._emit(
                 run_id, "retry", "running", "Cogent recovered a durable Run boundary.",
                 {"discard_partial_answer": state.retry_on_resume},
@@ -689,6 +695,11 @@ class CogentRuntime:
                             self._record_failed_usage(state, exc.usage)
                         if state.recovery_count < MAX_MODEL_OUTPUT_RETRIES:
                             state.recovery_count += 1
+                            self._reset_answer_stream(
+                                record.run_id,
+                                reason="incomplete_model_response",
+                                request_index=state.request_count,
+                            )
                             state.messages.append(
                                 {
                                     "role": "user",
@@ -732,6 +743,11 @@ class CogentRuntime:
                     if exc.code not in {'context_overflow', 'context_length_exceeded', 'context_window_exceeded'}:
                         raise
                     state.context_recovery_count += 1
+                    self._reset_answer_stream(
+                        record.run_id,
+                        reason="incomplete_model_response",
+                        request_index=state.request_count + 1,
+                    )
                     self._compact(record, state, {'automatic': True, 'instruction': 'Reduce context after provider overflow.'})
                     if not state.compact_boundaries[-1]['changed'] or state.context_recovery_count > 3:
                         state.retry_on_resume = False
@@ -770,6 +786,13 @@ class CogentRuntime:
                 state.retry_on_resume = False
                 state.response_ready = True
                 state.last_stop_reason = str(decision.stop_reason or "")
+                if state.pending_calls:
+                    self._reset_answer_stream(
+                        record.run_id,
+                        reason="tool_calls",
+                        request_index=state.request_count,
+                        tool_call_count=len(state.pending_calls),
+                    )
                 record = self._persist(record, state, boundary="model_response")
                 self._emit_usage(record.run_id, record.status, decision)
                 if decision.route_trace:
@@ -1784,6 +1807,33 @@ class CogentRuntime:
                 status=status,
                 node="agent_loop",
                 summary=summary,
+                output=output,
+            ),
+        )
+
+    def _reset_answer_stream(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        request_index: int,
+        tool_call_count: int | None = None,
+    ) -> None:
+        output: dict[str, Any] = {
+            "reason": reason,
+            "request_index": request_index,
+        }
+        if tool_call_count is not None:
+            output["tool_call_count"] = tool_call_count
+        self._run_store.append_event_once(
+            run_id,
+            f"answer-reset:{reason}:{request_index}",
+            AgentRunEvent(
+                sequence=0,
+                type="answer_reset",
+                status="running",
+                node="agent_loop",
+                summary="Temporary answer cleared before Cogent continues.",
                 output=output,
             ),
         )

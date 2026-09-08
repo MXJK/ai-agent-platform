@@ -289,6 +289,10 @@ class CogentApp(App):
                 await feed.mount(node)
             self.answer_text[event.run_id] = self.answer_text.get(event.run_id, "") + text
             self.answers[event.run_id].update(self.answer_text[event.run_id])
+        elif event.type == "answer_reset":
+            self.answer_text[event.run_id] = ""
+            if event.run_id in self.answers:
+                self.answers[event.run_id].update("")
         elif event.type in {"thinking_delta", "thinking_completed", "usage"}:
             text = str(output.get("text") or "") if event.type == "thinking_delta" else ""
             count = int(output.get("thoughts_tokens") or 0) if event.type == "usage" else 0
@@ -315,7 +319,7 @@ class CogentApp(App):
                 self.tools[call_key] = block
                 await feed.mount(block)
             block.set_result(json.dumps(output.get("result") if output.get("ok") else output.get("error"), ensure_ascii=False, indent=2), not bool(output.get("ok")), 0.0)
-        if event.type not in {"answer_delta", "thinking_delta"}:
+        if event.type not in {"answer_delta", "answer_reset", "thinking_delta"}:
             self.show_activity(event.summary)
         feed.scroll_end(animate=False)
 

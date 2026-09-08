@@ -12,7 +12,8 @@ trusted code repositories.
 ## Highlights
 
 - **Durable Agent Runs** with streamed events, approvals, questions, pause/resume,
-  cancellation, compaction, and restart recovery.
+  cancellation, compaction, and restart recovery. Intermediate text from a tool-calling
+  model turn is reset in the presentation layer; only the final model turn remains as the answer.
 - **Controlled code execution** with workspace-scoped read, write, search, patch,
   and command tools plus `default`, `acceptEdits`, `plan`, and `bypassPermissions` modes.
 - **Central model management** for OpenAI, DeepSeek, Anthropic, Google, Zhipu GLM,
@@ -35,6 +36,9 @@ mkdir -p workspaces
 docker compose -f docker-compose.yml up -d --build
 docker compose -f docker-compose.yml ps
 ```
+
+Compose bind-mounts host `~/.cogent` at `/home/app/.cogent`; user memory, Skills,
+and Cogent settings remain available to host-side CLI processes and survive App recreation.
 
 Open <http://127.0.0.1:8000>, then:
 
@@ -85,6 +89,23 @@ one-shot migration service. The App is published on host loopback only.
 `single_user` mode does not provide public-network authentication, so do not expose
 it directly to a LAN or the Internet. Code tools are intended for repositories you
 trust; review approval requests before allowing writes.
+
+Install the bounded MCP profile when the project needs its recommended debugging
+integrations:
+
+```bash
+docker compose --profile mcp up -d --build --wait \
+  mcp-playwright mcp-postgres mcp-qdrant
+python3 scripts/install_recommended_mcp.py
+```
+
+This registers GitHub, Context7, Playwright, PostgreSQL MCP Pro, and Qdrant MCP.
+Context7, isolated Playwright, and restricted PostgreSQL start enabled. Add a
+fine-grained PAT as GitHub's secret `Authorization` header under Capability
+Management → MCP Connections before enabling it. Qdrant MCP uses FastEmbed, which
+is incompatible with the product RAG's BGE-M3 collection, so it is installed
+read-only but disabled by default. The three sidecars remain on the private Compose
+network, and every MCP call still passes through platform permission and approval.
 
 An optional single-process SQLite profile remains available. The old Go gateway,
 Celery/Redis multi-Worker, database-memory, Chroma, and OS-keyring compatibility

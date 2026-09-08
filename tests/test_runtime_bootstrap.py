@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -100,6 +102,25 @@ class RuntimeBootstrapTests(unittest.TestCase):
             [(item["provider"], item["model"]) for item in registry.list_models()],
             [("fake", "ephemeral-test-model")],
         )
+
+    def test_skill_service_does_not_resurrect_deleted_legacy_user_skills(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            current_root = home / ".cogent" / "skills"
+            legacy_root = home / ".ai-agent-platform" / "skills"
+            _write_skill(current_root, "current")
+            _write_skill(legacy_root, "deleted")
+            settings = self.settings(skills_directory_path=str(current_root))
+
+            with patch("ai_agent_platform.runtime.Path.home", return_value=home):
+                service = ApplicationFactory().create_skill_service(
+                    settings,
+                    tool_registry=SimpleNamespace(list_specs=lambda: ()),
+                )
+
+            catalog = service.discover(enabled=True)
+            self.assertIsNotNone(catalog.get_skill("current"))
+            self.assertIsNone(catalog.get_skill("deleted"))
 
     def test_periodic_model_probes_start_only_for_api_role(self) -> None:
         factory = ApplicationFactory()
@@ -234,6 +255,19 @@ class RuntimeBootstrapTests(unittest.TestCase):
             self.assertIs(runtime.directory_picker, directory_picker)
         finally:
             app.state.runtime.close()
+
+def _write_skill(root: Path, name: str) -> None:
+    document = root / name / "SKILL.md"
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {name} description\n"
+        "---\n"
+        "Follow these declarative instructions.\n",
+        encoding="utf-8",
+    )
+
 
 if __name__ == "__main__":
     unittest.main()

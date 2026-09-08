@@ -69,6 +69,51 @@ function loadDismissalHarness() {
   };
 }
 
+function loadDiscoveryHarness() {
+  const select = { disabled: true, innerHTML: "", value: "" };
+  const summary = { innerHTML: "", textContent: "" };
+  const manualInput = { placeholder: "" };
+  const elements = new Map([
+    ["discovered-model-select", select],
+    ["discovered-model-summary", summary],
+    ["manual-model-id-input", manualInput],
+  ]);
+  const document = {
+    getElementById: (id) => elements.get(id),
+  };
+  const context = vm.createContext({
+    AbortController,
+    Blob,
+    DOMException,
+    EventSource: class {},
+    FormData,
+    Headers,
+    Intl,
+    Map,
+    Request,
+    Response,
+    Set,
+    TextDecoder,
+    TextEncoder,
+    URL,
+    URLSearchParams,
+    WeakMap,
+    document,
+    location: { hash: "" },
+    navigator: {},
+    window: {},
+  });
+  const source = readFileSync(APP_PATH, "utf8").replace(/\ninit\(\);\s*$/, "\n");
+  vm.runInContext(source, context, { filename: APP_PATH.pathname });
+
+  return {
+    manualInput,
+    run: (expression) => vm.runInContext(expression, context),
+    select,
+    summary,
+  };
+}
+
 function keyEvent(key) {
   return {
     defaultPrevented: false,
@@ -121,4 +166,87 @@ test("Escape leaves the outer configuration open while the nested picker is open
   harness.run('closeModelPicker({ restoreFocus: true })');
   assert.equal(harness.pickerMenu.hidden, true);
   assert.equal(harness.pickerTriggerFocused(), true);
+});
+
+test("available-model rerender preserves a selectable user choice", () => {
+  const harness = loadDiscoveryHarness();
+  harness.run(`
+    state.modelDiscovery = {
+      provider: "glm",
+      loading: false,
+      models: [
+        {
+          model: "glm-4.5",
+          display_name: "GLM 4.5",
+          context_window_tokens: 200000,
+          max_output_tokens: 64000,
+          capabilities: { tool_calling: true, structured_output: true },
+          quality_tier: "balanced",
+          cost_tier: "standard",
+          already_registered: false,
+        },
+        {
+          model: "glm-4.5-air",
+          display_name: "GLM 4.5 Air",
+          context_window_tokens: 200000,
+          max_output_tokens: 64000,
+          capabilities: { tool_calling: true, structured_output: true },
+          quality_tier: "efficient",
+          cost_tier: "low",
+          already_registered: false,
+        },
+      ],
+    };
+    renderDiscoveredModels();
+  `);
+  assert.equal(harness.select.value, "glm-4.5");
+
+  harness.select.value = "glm-4.5-air";
+  harness.run("renderDiscoveredModels()");
+
+  assert.equal(harness.select.value, "glm-4.5-air");
+  assert.match(harness.summary.innerHTML, /GLM 4\.5 Air/);
+});
+
+test("available-model rerender falls back when the previous choice is unavailable", () => {
+  const harness = loadDiscoveryHarness();
+  harness.select.value = "model-no-longer-available";
+  harness.run(`
+    state.modelDiscovery = {
+      provider: "minimax",
+      loading: false,
+      models: [
+        {
+          model: "MiniMax-M2",
+          display_name: "MiniMax M2",
+          context_window_tokens: 200000,
+          max_output_tokens: 64000,
+          capabilities: { tool_calling: true, structured_output: true },
+          quality_tier: "balanced",
+          cost_tier: "low",
+          already_registered: false,
+        },
+        {
+          model: "MiniMax-M2.1",
+          display_name: "MiniMax M2.1",
+          context_window_tokens: 200000,
+          max_output_tokens: 64000,
+          capabilities: { tool_calling: true, structured_output: true },
+          quality_tier: "balanced",
+          cost_tier: "low",
+          already_registered: true,
+        },
+      ],
+    };
+    renderDiscoveredModels();
+  `);
+
+  assert.equal(harness.select.value, "MiniMax-M2");
+  assert.equal(harness.select.disabled, false);
+
+  harness.run(`
+    state.modelDiscovery.models[0].already_registered = true;
+    renderDiscoveredModels();
+  `);
+  assert.equal(harness.select.disabled, true);
 });

@@ -10,7 +10,8 @@ Cogent 是一个本地优先、自托管的 Coding Agent 平台。Web、终端�
 
 ## 核心能力
 
-- **持久化 Agent Run**：支持流式事件、审批、追问、暂停/恢复、取消、压缩与重启恢复。
+- **持久化 Agent Run**：支持流式事件、审批、追问、暂停/恢复、取消、压缩与重启恢复；
+  带工具调用的中间文本会在展示层重置，只有最终模型轮次保留为回答正文。
 - **受控代码执行**：工作区限定的读写、搜索、补丁和命令工具，提供
   `default`、`acceptEdits`、`plan`、`bypassPermissions` 权限模式。
 - **统一模型管理**：集中管理 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、
@@ -29,6 +30,9 @@ mkdir -p workspaces
 docker compose -f docker-compose.yml up -d --build
 docker compose -f docker-compose.yml ps
 ```
+
+Compose 将宿主机 `~/.cogent` 绑定到容器 `/home/app/.cogent`；用户级记忆、Skills 与
+Cogent 配置可被宿主机 CLI 共用，并在 App 重建后保留。
 
 打开 <http://127.0.0.1:8000>，然后依次完成：
 
@@ -73,6 +77,20 @@ CLI 不接收 Provider API Key，尚未配置的连接仍需通过本地模型�
 官方 Compose 运行 FastAPI/Web UI、PostgreSQL、Qdrant 和一次性迁移服务。
 应用只发布到宿主机 loopback；`single_user` 模式不具备公网认证能力，请勿直接暴露到
 局域网或公网。代码工具默认面向用户自己信任的仓库，执行写入前请审阅审批内容。
+
+需要项目调试能力时，可安装经过收紧的推荐 MCP profile：
+
+```bash
+docker compose --profile mcp up -d --build --wait \
+  mcp-playwright mcp-postgres mcp-qdrant
+python3 scripts/install_recommended_mcp.py
+```
+
+该命令注册 GitHub、Context7、Playwright、PostgreSQL MCP Pro 和 Qdrant MCP。
+Context7、隔离的 Playwright 与 restricted PostgreSQL 默认启用；GitHub 在“能力管理 →
+MCP 连接”中通过 Secret Header 录入细粒度 PAT 后再启用。Qdrant MCP 使用 FastEmbed，
+与平台 RAG 的 BGE-M3 collection 不兼容，因此只读安装但默认禁用。三个 sidecar 只在
+Compose 私有网络监听，不发布宿主机端口；MCP 调用仍经过平台权限和审批。
 
 另保留可选的单进程 SQLite 本地 profile。旧 Go gateway、Celery/Redis 多 Worker、
 数据库记忆、Chroma 与操作系统 keyring 兼容实现已经移除。

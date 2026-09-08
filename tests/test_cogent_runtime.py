@@ -119,6 +119,53 @@ def test_multi_round_pairing_raw_usage_and_immutable_snapshots(tmp_path):
     assert len(snapshots[-1].state["messages"]) == 5
 
 
+def test_tool_round_resets_provisional_answer_without_removing_transcript(tmp_path):
+    calls = []
+    registry = ToolRegistry(PermissionResolver())
+    register_read(registry, calls)
+    client = ScriptedClient(
+        response(
+            "I found the file; I will inspect it next.",
+            ToolCall("ReadFile", {"file_path": "a.py"}, "read-1"),
+        ),
+        response("Final answer."),
+    )
+    runtime = runtime_for(tmp_path, client, registry=registry)
+    record = start(runtime, tmp_path)
+
+    result = execute(runtime, tmp_path, record)
+
+    assert result.status == "completed"
+    assert result.answer == "Final answer."
+    assert calls == ["read"]
+    events = runtime.list_events(record.run_id)
+    event_types = [event.type for event in events]
+    provisional_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "answer_delta"
+        and event.output.get("text") == "I found the file; I will inspect it next."
+    )
+    reset_index = event_types.index("answer_reset")
+    tool_index = event_types.index("tool_started")
+    assert provisional_index < reset_index < tool_index
+    reset = events[reset_index]
+    assert reset.output == {
+        "reason": "tool_calls",
+        "request_index": 1,
+        "tool_call_count": 1,
+    }
+    visible_answer = ""
+    for event in events:
+        if event.type == "answer_reset":
+            visible_answer = ""
+        elif event.type == "answer_delta":
+            visible_answer += str(event.output.get("text") or "")
+    assert visible_answer == "Final answer."
+    assert client.requests[1][-2]["content"] == "I found the file; I will inspect it next."
+    assert client.requests[1][-2]["tool_calls"][0]["call_id"] == "read-1"
+
+
 def test_new_run_in_same_conversation_keeps_canonical_tool_pairs(tmp_path):
     effects = []
     registry = ToolRegistry(PermissionResolver())
@@ -242,6 +289,22 @@ def test_interrupted_stream_restarts_from_complete_messages_only(tmp_path):
     assert client.requests[0] == client.requests[1]
     assert "unfinished fragment" not in str(runtime.get_run(record.run_id).runtime_state)
     assert any(event.type == "retry" and event.output["discard_partial_answer"] for event in runtime.list_events(record.run_id))
+    resets = [event for event in runtime.list_events(record.run_id) if event.type == "answer_reset"]
+    assert len(resets) == 1
+    assert resets[0].output == {
+        "reason": "incomplete_model_response",
+        "request_index": 1,
+    }
+    runtime._reset_answer_stream(
+        record.run_id,
+        reason="incomplete_model_response",
+        request_index=1,
+    )
+    assert len([
+        event
+        for event in runtime.list_events(record.run_id)
+        if event.type == "answer_reset"
+    ]) == 1
 
 
 def test_completed_model_response_survives_crash_without_new_request(tmp_path):

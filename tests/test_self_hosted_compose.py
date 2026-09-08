@@ -10,7 +10,15 @@ def test_compose_exposes_only_the_single_node_product_topology() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     services = compose["services"]
 
-    assert set(services) == {"app", "migrate", "postgres", "qdrant"}
+    assert set(services) == {
+        "app",
+        "migrate",
+        "postgres",
+        "qdrant",
+        "mcp-playwright",
+        "mcp-postgres",
+        "mcp-qdrant",
+    }
     assert "ports" not in services["postgres"]
     assert "ports" not in services["qdrant"]
     assert services["app"]["ports"] == [
@@ -19,6 +27,46 @@ def test_compose_exposes_only_the_single_node_product_topology() -> None:
     assert services["app"]["depends_on"]["migrate"]["condition"] == (
         "service_completed_successfully"
     )
+
+
+def test_recommended_mcp_sidecars_are_opt_in_private_and_pinned() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    playwright = services["mcp-playwright"]
+    postgres = services["mcp-postgres"]
+    qdrant = services["mcp-qdrant"]
+
+    for service in (playwright, postgres, qdrant):
+        assert service["profiles"] == ["mcp"]
+        assert "ports" not in service
+
+    assert playwright["image"] == "mcr.microsoft.com/playwright/mcp:v0.0.80"
+    assert "--headless" in playwright["command"]
+    assert "--isolated" in playwright["command"]
+    assert "--allowed-origins" in playwright["command"]
+    allowed_hosts_index = playwright["command"].index("--allowed-hosts")
+    assert playwright["command"][allowed_hosts_index + 1] == "mcp-playwright:8931"
+    allowed_origins_index = playwright["command"].index("--allowed-origins")
+    assert playwright["command"][allowed_origins_index + 1] == (
+        "http://host.docker.internal:${SELF_HOSTED_PORT:-8000}"
+    )
+
+    assert postgres["image"] == "crystaldba/postgres-mcp:0.3.0"
+    assert postgres["command"] == ["--access-mode=restricted", "--transport=sse"]
+    assert "DATABASE_URI" in postgres["environment"]
+
+    assert qdrant["build"]["dockerfile"] == "docker/mcp-qdrant/Dockerfile"
+    assert qdrant["build"]["args"]["MCP_SERVER_QDRANT_VERSION"] == "0.8.1"
+    assert qdrant["build"]["args"]["QDRANT_CLIENT_VERSION"] == "1.17.0"
+    assert qdrant["environment"]["QDRANT_READ_ONLY"] == "true"
+    assert qdrant["command"] == ["--transport", "streamable-http"]
+
+    dockerfile = (ROOT / "docker/mcp-qdrant/Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert 'mcp-server-qdrant==${MCP_SERVER_QDRANT_VERSION}' in dockerfile
+    assert 'qdrant-client==${QDRANT_CLIENT_VERSION}' in dockerfile
+    assert "USER mcp" in dockerfile
 
 
 def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -> None:
@@ -65,7 +113,8 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
     assert environment["SKILLS_DIRECTORY_PATH"] == "/home/app/.cogent/skills"
     assert "${WORKSPACE_HOST_PATH:-./workspaces}:/workspaces" in app["volumes"]
     assert "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform" in app["volumes"]
-    assert "cogent_user_state:/home/app/.cogent" in app["volumes"]
+    assert "${HOME}/.cogent:/home/app/.cogent" in app["volumes"]
+    assert "cogent_user_state" not in compose.get("volumes", {})
     assert all("docker.sock" not in volume for volume in app["volumes"])
 
 

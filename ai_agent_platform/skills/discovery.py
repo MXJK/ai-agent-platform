@@ -46,7 +46,6 @@ _COMMAND_FIELDS = frozenset({"name", "description", "usage", "aliases"})
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _TOOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _DEFAULT_CONTEXT_BUDGET = 4_000
-_MAX_DESCRIPTION_CHARS = 500
 _MAX_APPLICABILITY_ITEMS = 16
 _MAX_TOOL_ITEMS = 32
 _MAX_ALIASES = 8
@@ -105,7 +104,6 @@ class SkillDiscovery:
         *,
         bundled_root: str | Path | None = None,
         user_root: str | Path | None = None,
-        legacy_user_root: str | Path | None = None,
         project_skills_directory: str = ".cogent/skills",
         limits: SkillDiscoveryLimits | None = None,
     ) -> None:
@@ -114,7 +112,6 @@ class SkillDiscovery:
             raise ValueError("project_skills_directory must stay relative to workspace")
         self._bundled_root = Path(bundled_root) if bundled_root is not None else None
         self._user_root = Path(user_root) if user_root is not None else None
-        self._legacy_user_root = Path(legacy_user_root) if legacy_user_root is not None else None
         self._project_skills_directory = project_path
         self._limits = limits or SkillDiscoveryLimits()
 
@@ -335,7 +332,6 @@ class SkillDiscovery:
                             )
         for source, configured in (
             (SkillSource.USER, self._user_root),
-            (SkillSource.LEGACY_USER, self._legacy_user_root),
             (SkillSource.BUNDLED, self._bundled_root),
         ):
             if configured is None or not (
@@ -414,7 +410,11 @@ def _skill_candidates(
                 if (
                     name == "skill.yaml"
                     or (name == "SKILL.md" and not selected_yaml)
-                    or (current_path == root and name.endswith(".md") and name not in {"SKILL.md", "prompt.md"})
+                    or (
+                        current_path == root
+                        and name.endswith(".md")
+                        and name not in {"SKILL.md", "prompt.md", "README.md"}
+                    )
                 ):
                     candidates.append(current_path / name)
                     if len(candidates) >= max_candidates:
@@ -673,11 +673,6 @@ def _description(value: Any, *, label: str) -> str:
             f"{label} must be non-empty text",
         )
     normalized = " ".join(value.split())
-    if len(normalized) > _MAX_DESCRIPTION_CHARS:
-        raise SkillDocumentError(
-            "invalid_description",
-            f"{label} exceeds {_MAX_DESCRIPTION_CHARS} characters",
-        )
     return normalized
 
 

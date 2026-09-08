@@ -485,13 +485,17 @@ test("Agent answer deltas render while running and resets remove tool preambles"
     events.push({ type: "answer_reset", sequence: 3, status: "running", output: {} });
     renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
     testEvents.push(contentNode.innerHTML);
-    events.push({ type: "answer_delta", sequence: 4, status: "running", output: { text: "第一段" } });
+    events.push({ type: "input_required", sequence: 4, status: "waiting_input", output: {} });
     renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
     testEvents.push(contentNode.innerHTML);
-    events.push({ type: "answer_delta", sequence: 5, status: "running", output: { text: "，第二段" } });
+    events.push({ type: "run_resume_requested", sequence: 5, status: "running", output: {} });
+    events.push({ type: "answer_delta", sequence: 6, status: "running", output: { text: "第一段" } });
     renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
     testEvents.push(contentNode.innerHTML);
-    events.push({ type: "run_completed", sequence: 6, status: "completed", output: {} });
+    events.push({ type: "answer_delta", sequence: 7, status: "running", output: { text: "，第二段" } });
+    renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
+    testEvents.push(contentNode.innerHTML);
+    events.push({ type: "run_completed", sequence: 8, status: "completed", output: {} });
     renderAgentChatResponse(contentNode, agentProgressBodyFromEvents(events), 0);
     testEvents.push(contentNode.innerHTML);
     renderAgentChatResponse(contentNode, {
@@ -506,6 +510,7 @@ test("Agent answer deltas render while running and resets remove tool preambles"
   assert.deepEqual(context.testEvents, [
     "temporary tool preamble",
     "",
+    "<p>Agent 正在等待你的补充，请在下方回复后继续。</p>",
     "第一段",
     "第一段，第二段",
     "第一段，第二段",

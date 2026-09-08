@@ -74,6 +74,95 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
+  mcp-playwright:
+    profiles: ["mcp"]
+    image: mcr.microsoft.com/playwright/mcp:v0.0.80
+    init: true
+    entrypoint: ["node", "/app/cli.js"]
+    command:
+      - "--headless"
+      - "--browser"
+      - "chromium"
+      - "--no-sandbox"
+      - "--isolated"
+      - "--port"
+      - "8931"
+      - "--host"
+      - "0.0.0.0"
+      - "--allowed-hosts"
+      - "mcp-playwright:8931"
+      - "--allowed-origins"
+      - "http://host.docker.internal:${SELF_HOSTED_PORT:-8000}"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const s=require('net').connect(8931,'127.0.0.1',()=>s.end());s.on('error',()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mcp-postgres:
+    profiles: ["mcp"]
+    image: crystaldba/postgres-mcp:0.3.0
+    environment:
+      DATABASE_URI: "postgresql://${POSTGRES_USER:-ai_agent}:${POSTGRES_PASSWORD:-local-only-change-me}@postgres:5432/${POSTGRES_DB:-ai_agent_platform}"
+    command: ["--access-mode=restricted", "--transport=sse"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mcp-qdrant:
+    profiles: ["mcp"]
+    build:
+      context: .
+      dockerfile: docker/mcp-qdrant/Dockerfile
+      args:
+        MCP_SERVER_QDRANT_VERSION: "0.8.1"
+        QDRANT_CLIENT_VERSION: "1.17.0"
+    environment:
+      QDRANT_URL: "http://qdrant:6333"
+      COLLECTION_NAME: "${MCP_QDRANT_COLLECTION_NAME:-mcp_context}"
+      EMBEDDING_MODEL: "${MCP_QDRANT_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}"
+      QDRANT_READ_ONLY: "true"
+      FASTMCP_SERVER_HOST: "0.0.0.0"
+      FASTMCP_SERVER_PORT: "8000"
+      FASTEMBED_CACHE_PATH: "/var/cache/fastembed"
+    command: ["--transport", "streamable-http"]
+    volumes:
+      - mcp_qdrant_cache:/var/cache/fastembed
+    depends_on:
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
   migrate:
     build:
       context: .
@@ -103,7 +192,7 @@ services:
       - "${HOME}/.ai-agent-platform:/home/app/.ai-agent-platform"
       - app_state:/var/lib/ai-agent-platform
       - model_cache:/home/app/.cache/huggingface
-      - cogent_user_state:/home/app/.cogent
+      - "${HOME}/.cogent:/home/app/.cogent"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -125,8 +214,8 @@ services:
     restart: unless-stopped
 
 volumes:
-  cogent_user_state:
   app_state:
   model_cache:
+  mcp_qdrant_cache:
   postgres_data:
   qdrant_data:

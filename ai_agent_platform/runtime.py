@@ -920,10 +920,6 @@ class ApplicationFactory:
         discovery = SkillDiscovery(
             bundled_root=package_root / "bundled_skills",
             user_root=user_root,
-            legacy_user_root=(
-                Path.home() / ".ai-agent-platform" / "skills"
-                if user_root == Path.home() / ".cogent" / "skills" else None
-            ),
         )
         effective_selection = (
             settings.enabled_skills

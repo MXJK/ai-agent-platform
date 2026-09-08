@@ -4239,6 +4239,7 @@ function renderDiscoveredModels() {
   const summary = $("discovered-model-summary");
   const manualInput = $("manual-model-id-input");
   const models = state.modelDiscovery.models || [];
+  const previousSelection = select.value;
   const doubaoRestricted = state.modelDiscovery.provider === "doubao";
   manualInput.placeholder = doubaoRestricted
     ? "仅支持 doubao-seed-evolving / doubao-seed-2.1-turbo / doubao-seed-2.0-lite"
@@ -4252,7 +4253,11 @@ function renderDiscoveredModels() {
       : doubaoRestricted
         ? '<option value="">未发现受支持的豆包模型，可手动填写白名单模型 ID</option>'
         : '<option value="">暂无已发现模型，可使用下方手动兜底</option>';
-  if (selectable.length) select.value = selectable[0].model;
+  if (selectable.length) {
+    select.value = selectable.some((item) => item.model === previousSelection)
+      ? previousSelection
+      : selectable[0].model;
+  }
   const selected = selectedDiscoveredModel();
   if (!selected) {
     summary.textContent = state.modelDiscovery.loading

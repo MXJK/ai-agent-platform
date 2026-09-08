@@ -71,8 +71,61 @@ Open http://127.0.0.1:8000, add a Provider connection and register/enable a tool
 register your mounted project under `/workspaces`, create a session and select that workspace.
 Persistent model catalogs start empty; Fake bootstrap is limited to memory tests.
 Try `/help`, `/status` or `/plan` before a coding task. The default permission mode asks before writes.
-User Cogent settings/memory survive container recreation in the `cogent_user_state` volume.
+User Cogent settings, Skills, and file memory are bind-mounted from host `~/.cogent`,
+survive App recreation, and remain available to host-side CLI processes.
 Explicit `-f docker-compose.yml` avoids machine-specific development overrides.
+
+### Optional recommended MCP profile
+
+The opt-in `mcp` profile leaves the default Compose resource footprint unchanged:
+
+```bash
+docker compose --profile mcp up -d --build --wait \
+  mcp-playwright mcp-postgres mcp-qdrant
+python3 scripts/install_recommended_mcp.py \
+  --api-url http://127.0.0.1:8000/api/v1
+```
+
+The installer idempotently registers five configurations through the local MCP
+Registry API. It never accepts, reads, or writes credentials:
+
+- GitHub uses the official remote endpoint with the
+  `repos,pull_requests,issues,actions` toolsets plus read-only and lockdown headers.
+  It starts disabled. Edit `github` under Capability Management → MCP Connections,
+  save `Authorization=Bearer ...` as a secret header, then enable it. Use a narrowly
+  scoped fine-grained PAT.
+- Context7 uses its official Streamable HTTP endpoint without requiring a key. For
+  higher limits, add its bearer credential as a secret header in the same UI.
+- Playwright is pinned to `v0.0.80` with headless Chromium, an in-memory isolated
+  profile, and the project App origin allowlist. Its `/mcp` endpoint is private to
+  the Compose network. Browse the product through
+  `http://host.docker.internal:${SELF_HOSTED_PORT}` so Chromium does not upgrade a
+  container short hostname to HTTPS.
+- PostgreSQL MCP Pro is pinned to `v0.3.0`, forced into restricted read-only
+  transaction mode, and connected through legacy SSE at `/sse`. It reuses the
+  Compose database credential without publishing a host port.
+- Qdrant MCP is pinned to `v0.8.1` with compatible `qdrant-client 1.17.0`, runs
+  with `QDRANT_READ_ONLY=true`, and uses the canonical `/mcp/` Streamable HTTP
+  endpoint. Its FastEmbed runtime does not support the product's default
+  `BAAI/bge-m3`, so it targets a separate `mcp_context` collection and remains
+  disabled. Enable it only after that collection was built with the same
+  `MCP_QDRANT_EMBEDDING_MODEL`; it does not replace the product RAG retrieval,
+  fusion, or citation path.
+
+None of the sidecars declares `ports`. Private and insecure HTTP targets still need
+exact Registry host allowlists and explicit private-network/insecure-HTTP opt-ins.
+Remote read-only annotations never grant permission: calls remain subject to the
+effective tool pool, PermissionResolver, and approval. Stop the optional services
+with `docker compose --profile mcp stop mcp-playwright mcp-postgres mcp-qdrant`;
+registrations remain in `~/.ai-agent-platform/mcp.json`.
+
+Container runtimes such as OrbStack may map public domains into the synthetic
+`198.18.0.0/15` DNS range, which the platform correctly rejects as non-public.
+After verifying that the answer belongs to the local container DNS proxy rather
+than a changed target, rerun
+`scripts/install_recommended_mcp.py --allow-container-dns-proxy`. The flag enables
+private-network resolution only for the two exactly allowlisted GitHub and Context7
+hosts; it does not change any other Server.
 
 ## CLI, REPL, SDK, and process entrypoints
 
@@ -204,10 +257,10 @@ tool Schemas, headers, credentials, and sensitive arguments are not persisted.
 
 ## Skill discovery and slash commands
 
-Priority: project .cogent/skills > ~/.cogent/skills >
-read-only compatibility with ~/.ai-agent-platform/skills > built-ins.
-The existing CRUD API/UI remains; new files target ~/.cogent/skills.
-Existing Skills are not moved automatically.
+Priority: project .cogent/skills > ~/.cogent/skills > built-ins.
+The runtime no longer reads ~/.ai-agent-platform/skills. The existing CRUD API/UI
+uses ~/.cogent/skills for all user-level reads and writes, so deleting a Skill
+from the new directory cannot resurrect an old copy.
 
 .md, SKILL.md, skill.yaml + prompt.md, argument substitution, hot reload and
 slash commands are supported. Only inline execution is supported; fork requests
@@ -218,7 +271,9 @@ The bundled `/skill-creator` turns repeatable workflows into project-local
 `.cogent/skills/<name>/SKILL.md` packages and guides updates, behavior checks,
 and packaging. Its deterministic helper creates only inside the current Workspace
 and never replaces an existing Skill. Validation rejects name mismatches,
-unfinished placeholders, symlinks, and unsafe package entries. `metadata`,
+unfinished placeholders, symlinks, and unsafe package entries. `description`
+must be non-empty but has no separate 500-character limit; the 64 KiB per-file,
+128 KiB total discovery, and context budgets still apply. `metadata`,
 `compatibility`, and `license` are accepted as inert descriptive fields and do
 not change authorization.
 

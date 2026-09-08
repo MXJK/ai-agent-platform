@@ -121,15 +121,26 @@ def test_input_resume_reaches_next_model_request_without_reasking(tmp_path):
     registry = ToolRegistry(PermissionResolver())
     registry.register('agent.request_user_input', lambda **kwargs: {})
     runtime = runtime_for(tmp_path, ScriptedClient(
-        response('', ToolCall('AskUserQuestion', {'questions': [{'id': 'name', 'question': 'Name?'}]}, 'question-1')),
+        response('I need one choice before I can continue.', ToolCall('AskUserQuestion', {'questions': [{'id': 'name', 'question': 'Name?'}]}, 'question-1')),
         response('Hello.'),
     ), registry=registry)
     record = start(runtime, tmp_path)
     assert execute(runtime, tmp_path, record).status == 'waiting_input'
     assert runtime.get_run(record.run_id).result.tool_calls
+    waiting_events = runtime.list_events(record.run_id)
+    assert [event.type for event in waiting_events if event.type in {
+        'answer_delta', 'answer_reset', 'permission_required'
+    }] == ['answer_delta', 'answer_reset', 'permission_required']
     result = runtime.resume(run_id=record.run_id, approved=True, input_response={'name': 'Sam'}, approved_by='owner')
     assert result.status == 'completed' and result.answer == 'Hello.'
     assert len(result.tool_results) == 1
+    visible_answer = ''
+    for event in runtime.list_events(record.run_id):
+        if event.type == 'answer_reset':
+            visible_answer = ''
+        elif event.type == 'answer_delta':
+            visible_answer += str(event.output.get('text') or '')
+    assert visible_answer == 'Hello.'
 
 
 def test_context_overflow_without_compactable_history_is_partial(tmp_path):
