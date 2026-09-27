@@ -191,6 +191,7 @@ _ROOT_SECTIONS = frozenset({"process_security", "runtime", "project_session"})
 # same value.
 PROCESS_SECURITY_FIELDS = frozenset(
     {
+        "cogent_hooks_path",
         "app_name",
         "api_prefix",
         "log_level",

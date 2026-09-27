@@ -26,6 +26,7 @@ from ai_agent_platform.agents.coding.models import (
     AgentToolExecution,
 )
 from ai_agent_platform.agents.coding.tool_access import ToolAccessCoordinator
+from ai_agent_platform.cogent.hooks import Hook, HookContext, HookEngine
 from ai_agent_platform.cogent.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -90,6 +91,7 @@ class CogentRuntime:
         max_parallel_reads: int = 4,
         tool_result_max_chars: int = 50_000,
         memory_service: Any = None,
+        hooks: list[Hook] | None = None,
     ) -> None:
         self._tools = tool_registry
         self._run_store = run_store
@@ -105,6 +107,7 @@ class CogentRuntime:
         self._max_parallel_reads = max(1, max_parallel_reads)
         self._tool_result_max_chars = max(2_000, tool_result_max_chars)
         self._memory_service = memory_service
+        self._hooks = HookEngine(hooks)
         self._locks: dict[str, RLock] = {}
         self._locks_guard = RLock()
 
@@ -140,6 +143,7 @@ class CogentRuntime:
         context_snapshot: RunContextSnapshot | None = None,
     ) -> AgentRunRecord:
         state = CogentState(
+            hook_state=self._hooks.initial_state(),
             permission_mode=self._permission_mode(context_snapshot),
             sandbox=self._sandbox_state(context_snapshot),
         )
@@ -326,6 +330,9 @@ class CogentRuntime:
             return self._loop(record, state, adapter, context)
 
     def _run_command(self, record, state, adapter, context, command):
+        state.hook_state["local_command"] = command
+        self._run_hooks(record, state, "session_start", "run")
+        self._run_hooks(record, state, "command_execute", "command", message=str(command))
         name = command['name']
         arguments = str(command.get('arguments') or '').strip()
         if name == 'help':
@@ -383,6 +390,7 @@ class CogentRuntime:
             if record.status not in QueryLifecycle.SUSPENDED_STATUSES and not resume_pending:
                 raise AgentRunInvalidStateError(run_id, record.status)
             state = CogentState.from_mapping(record.runtime_state)
+            self._hooks.validate_state(state.hook_state)
             snapshot = record.context_snapshot
             tool_access = self._restore_tools(record, snapshot)
             adapter = self._adapter(record, state, tool_access)
@@ -460,6 +468,8 @@ class CogentRuntime:
             context = self._base_tool_context(
                 record, record.context_snapshot, actor_user_id=self._actor(record)
             )
+            if state.hook_state.get("local_command"):
+                return self._run_command(record, state, adapter, context, state.hook_state["local_command"])
             if state.retry_on_resume:
                 self._reset_answer_stream(
                     run_id,
@@ -522,6 +532,9 @@ class CogentRuntime:
         if record.status in QueryLifecycle.TERMINAL_STATUSES:
             return record
         state = CogentState.from_mapping(record.runtime_state)
+        if state.hook_state.get("config_hash", self._hooks.fingerprint) == self._hooks.fingerprint:
+            self._run_hooks(record, state, "error", "failure", error=error)
+            self._run_hooks(record, state, "session_end", "run", error=error)
         failed = replace(
             record,
             status="failed",
@@ -635,6 +648,13 @@ class CogentRuntime:
         adapter: CogentToolAdapter,
         context: ToolUseContext,
     ) -> AgentRunResult:
+        self._run_hooks(record, state, "session_start", "run")
+        command = record.context_snapshot.metadata.entrypoint_metadata.get("cogent_command") if record.context_snapshot else None
+        if command:
+            self._run_hooks(record, state, "command_execute", "command", message=str(command))
+        self._input_result_hooks(record, state)
+        if state.request_count and not state.pending_calls and not state.response_ready:
+            self._run_hooks(record, state, "turn_end", str(state.request_count))
         while True:
             controlled = self._control_boundary(record, state, adapter, context)
             if controlled is not None:
@@ -662,6 +682,17 @@ class CogentRuntime:
                 def on_delta(text: str) -> None:
                     self._emit(record.run_id, "answer_delta", "running", text, {"text": text})
 
+                turn = str(state.request_count + 1)
+                self._run_hooks(record, state, "turn_start", turn)
+                self._run_hooks(record, state, "pre_send", turn)
+                active = state.hook_state.setdefault("active_prompts", {})
+                if active.get("turn") != turn:
+                    active.clear()
+                    active.update(turn=turn, messages=[])
+                active["messages"].extend(state.hook_state.pop("prompts", []))
+                if active.get("messages"):
+                    state.system_prompt += "\n\nConfigured Hook instructions:\n" + "\n".join(active["messages"])
+                    state.messages[0] = {"role": "system", "content": state.system_prompt}
                 state.retry_on_resume = True
                 record = self._persist(record, state, boundary="model_request")
                 visible_summary = []
@@ -684,6 +715,7 @@ class CogentRuntime:
                         on_thinking=on_summary, offline_evaluation=self._is_offline_eval(record),
                     )
                 except LLMProviderError as exc:
+                    self._run_hooks(record, state, "error", f"model:{state.request_count + 1}", error=str(exc))
                     if exc.retryable and exc.code in {
                         "tool_output_truncated",
                         "tool_arguments_truncated",
@@ -802,7 +834,10 @@ class CogentRuntime:
                 else:
                     self._emit_displayable_thinking(record.run_id, decision.provider, decision.provider_items or [])
 
+            self._run_hooks(record, state, "post_receive", str(state.request_count),
+                            message=str(state.messages[-1].get("content") or ""))
             if not state.pending_calls:
+                self._run_hooks(record, state, "turn_end", str(state.request_count))
                 if state.last_stop_reason.casefold() in {"length", "max_tokens", "max_output_tokens"} and state.recovery_count < MAX_MODEL_OUTPUT_RETRIES:
                     state.recovery_count += 1
                     state.response_ready = False
@@ -900,6 +935,10 @@ class CogentRuntime:
         adapter: CogentToolAdapter,
         context: ToolUseContext,
     ) -> AgentRunResult | None:
+        self._hooks.validate_state(state.hook_state)
+        self._input_result_hooks(record, state)
+        self._run_hooks(record, state, "post_receive", str(state.request_count),
+                        message=str(state.messages[-1].get("content") or ""))
         calls = [ToolCall(**item) for item in state.pending_calls]
         tool_call_ids(state.pending_calls)
         prepared: list[PreparedCall] = []
@@ -911,6 +950,13 @@ class CogentRuntime:
                 cached = self._run_store.get_tool_execution(record.run_id, call.call_id)
                 if cached is None or cached.name != call.name or cached.arguments_hash != canonical_arguments_hash(call.arguments):
                     raise PermissionError("completed tool call binding changed")
+                self._post_tool_hooks(record, state, call, cached.response or {})
+                continue
+            rejection = self._run_hooks(record, state, "pre_tool_use", self._approval_key(call), call=call)
+            if rejection is not None:
+                result = ToolResult(call_id=call.call_id, name=call.name, ok=False,
+                                    error=rejection, provider="cogent", error_code="hook_rejected")
+                record = self._accept_tool_result(record, state, call, result)
                 continue
             try:
                 if call.name == 'EditFile':
@@ -964,6 +1010,8 @@ class CogentRuntime:
                 )
 
         if asks:
+            self._run_hooks(record, state, "permission_request", str(state.request_count),
+                            message="Tool batch requires approval")
             required = [
                 {
                     "name": item.visible_call.name,
@@ -1098,8 +1146,52 @@ class CogentRuntime:
             if item.get("visible_key") not in approved_keys
             and item.get("call_id") not in {call.call_id for call in calls}
         ]
+        self._run_hooks(record, state, "turn_end", str(state.request_count))
         self._persist(record, state, boundary="tool_batch_completed")
         return None
+
+    def _run_hooks(self, record, state, event, boundary, *, call=None, message="", error="", result=None):
+        self._hooks.validate_state(state.hook_state)
+        if event not in self._hooks.events:
+            return None
+        args = dict(call.arguments) if call is not None else {}
+        if event == "session_start" and not message:
+            message = (record.context_snapshot.session.user_message if record.context_snapshot else
+                       next((str(item.get("content") or "") for item in reversed(state.messages)
+                             if item.get("role") == "user"), ""))
+        ctx = HookContext(event_name=event, run_id=record.run_id,
+                          workspace_root=record.workspace_root,
+                          tool_name=call.name if call is not None else "",
+                          tool_args=args, file_path=str(args.get("file_path") or args.get("path") or ""),
+                          message=message, error=error, tool_result=result or {})
+        return self._hooks.run(
+            ctx, boundary, state.hook_state,
+            checkpoint=lambda: self._persist(record, state, boundary=f"hook:{event}:{boundary}"),
+            notify=lambda payload: self._notify_hook(record, payload),
+        )
+
+    def _notify_hook(self, record, payload):
+        identity = hashlib.sha256(json.dumps([payload["event"], payload["boundary"], payload["hook_id"]]).encode()).hexdigest()
+        self._run_store.append_event_once(record.run_id, f"hook:{identity}", AgentRunEvent(
+            sequence=0, type="hook_executed", status=record.status, node="agent_loop",
+            summary=f"Hook {payload['hook_id']}: {payload['status']}.", output=payload,
+        ))
+
+    def _input_result_hooks(self, record, state):
+        if "post_tool_use" not in self._hooks.events:
+            return
+        # AskUserQuestion results are supplied by the user, outside _execute_one.
+        calls = {item["call_id"]: item for item in state.all_tool_calls if item["name"] == "AskUserQuestion"}
+        for response in state.all_tool_results:
+            if response.get("call_id") in calls:
+                self._post_tool_hooks(record, state, ToolCall(**calls[response["call_id"]]), response)
+
+    def _post_tool_hooks(self, record, state, call, response):
+        if "post_tool_use" not in self._hooks.events:
+            return
+        self._run_hooks(record, state, "post_tool_use", self._approval_key(call), call=call,
+                        message=json.dumps(response, ensure_ascii=False, default=str),
+                        error=str(response.get("error") or ""), result=response)
 
     def _accept_tool_result(
         self, record: AgentRunRecord, state: CogentState, call: ToolCall, result: ToolResult
@@ -1127,7 +1219,9 @@ class CogentRuntime:
                 output=response,
             ),
         )
-        return self._persist(record, state, boundary=f"tool_result:{call.call_id}")
+        record = self._persist(record, state, boundary=f"tool_result:{call.call_id}")
+        self._post_tool_hooks(record, state, call, response)
+        return self.get_run(record.run_id)
 
     def _execute_one(
         self,
@@ -1337,6 +1431,8 @@ class CogentRuntime:
         state: CogentState,
         call: ToolCall,
     ) -> AgentRunResult:
+        self._run_hooks(record, state, "permission_request", self._approval_key(call),
+                        call=call, message="User input required")
         questions = call.arguments.get("questions") or []
         pending = {
             "type": "input_required",
@@ -1455,6 +1551,8 @@ class CogentRuntime:
                 state.compact_failures += 1
                 boundary["error"] = "summary_failed_history_preserved"
         state.compact_boundaries.append(boundary)
+        self._run_hooks(record, state, "compact", str(len(state.compact_boundaries)),
+                        message=json.dumps(boundary, ensure_ascii=False))
         self._emit(record.run_id, "compact_completed", record.status,
                    "Context compaction completed." if boundary["changed"] else "Context history was preserved.",
                    boundary)
@@ -1470,6 +1568,8 @@ class CogentRuntime:
         tool_access: Any,
         context: ToolUseContext,
     ) -> AgentRunResult:
+        self._run_hooks(record, state, "session_end", "run", message=answer,
+                        error=terminal_reason if status != "completed" else "")
         change_set_id = None
         changed_files: list[str] = []
         workspace_mode = context.execution_workspace_mode or "patch_only"

@@ -156,6 +156,7 @@ class Settings:
     qdrant_api_key: str | None = field(default=None, repr=False)
     qdrant_collection_name: str = "knowledge_chunks"
     workspace_access_store: str = "memory"
+    cogent_hooks_path: str = ""
     cogent_user_memory_root: str = "~/.cogent/memory"
     embedding_provider: str = "local"
     embedding_model: str = "gemini-embedding-001"
@@ -410,6 +411,8 @@ class Settings:
         )
         if not self.single_user_id.strip() or len(self.single_user_id) > 256:
             raise ValueError("single_user_id must contain 1-256 non-blank characters")
+        if self.cogent_hooks_path and not Path(self.cogent_hooks_path).expanduser().is_absolute():
+            raise ValueError("cogent_hooks_path must be absolute")
         if not self.cogent_user_memory_root.strip():
             raise ValueError("cogent_user_memory_root must not be empty")
         _require_choice(
@@ -1000,6 +1003,7 @@ class Settings:
             workspace_access_store=_env(
                 "WORKSPACE_ACCESS_STORE", cls.workspace_access_store, dotenv
             ),
+            cogent_hooks_path=_env("COGENT_HOOKS_PATH", cls.cogent_hooks_path, dotenv),
             cogent_user_memory_root=_env(
                 "COGENT_USER_MEMORY_ROOT", cls.cogent_user_memory_root, dotenv
             ),

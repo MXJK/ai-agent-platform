@@ -17,6 +17,7 @@ Cogent 是一个本地优先、自托管的 Coding Agent 平台。Web、终端�
   `default`、`acceptEdits`、`plan`、`bypassPermissions` 权限模式。
 - **统一模型管理**：集中管理 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、
   MiniMax 与豆包连接和模型。
+- **生命周期 Hook**：参考 mewcode 的条件与动作配置，支持提示词注入、命令、HTTP 通知和工具前置拒绝；执行账本随 Run 持久化，默认关闭，详见 [Hook 配置与恢复语义](docs/hooks.md)。
 - **MCP 与 Skill**：共享工具目录、中央权限裁决、项目/用户级 Skill 发现和 slash command。
 - **分层上下文**：项目指令、Markdown 用户/项目记忆、会话与附件统一装配，并控制 Token 预算。
 - **独立知识库**：文档摄取、混合检索、引用与评测独立于 Coding Agent 运行时。

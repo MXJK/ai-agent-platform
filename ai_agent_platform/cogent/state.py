@@ -11,6 +11,7 @@ RUNTIME_STATE_VERSION = 1
 
 @dataclass
 class CogentState:
+    hook_state: dict[str, Any] = field(default_factory=dict)
     started_at: float = 0.0
     visible_tool_count: int = 0
     tool_schema_tokens: int = 0
@@ -46,6 +47,7 @@ class CogentState:
 
     def to_dict(self) -> dict[str, Any]:
         return deepcopy({
+            "hook_state": self.hook_state,
             "started_at": self.started_at,
             "visible_tool_count": self.visible_tool_count,
             "tool_schema_tokens": self.tool_schema_tokens,
@@ -84,6 +86,7 @@ class CogentState:
     def from_mapping(cls, value: Mapping[str, Any] | None) -> "CogentState":
         raw = deepcopy(dict(value or {}))
         return cls(
+            hook_state=dict(raw.get("hook_state") or {}),
             started_at=float(raw.get("started_at") or 0),
             visible_tool_count=int(raw.get("visible_tool_count") or 0),
             tool_schema_tokens=int(raw.get("tool_schema_tokens") or 0),            messages=list(raw.get("messages") or []),

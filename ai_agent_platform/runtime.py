@@ -963,6 +963,7 @@ class ApplicationFactory:
     ) -> CogentRuntime:
         from ai_agent_platform.cogent.client import RegistryClient
         from ai_agent_platform.cogent.memory.service import MemoryService
+        from ai_agent_platform.cogent.hooks import load_hooks_file
         del metrics
         cogent_client = RegistryClient(llm_client)
         return CogentRuntime(
@@ -975,6 +976,7 @@ class ApplicationFactory:
             execution_workspace_runtime=execution_workspace_runtime,
             max_parallel_reads=settings.agent_max_parallel_tools_per_step,
             tool_result_max_chars=50_000,
+            hooks=load_hooks_file(settings.cogent_hooks_path),
             memory_service=MemoryService(
                 client=cogent_client,
                 run_store=run_store,
