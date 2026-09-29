@@ -719,6 +719,25 @@ class PostgresAgentRunRepository:
         with self._connect() as conn:
             self.save_in_transaction(conn, record)
 
+    def update_runtime_state(
+        self,
+        run_id: str,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        Jsonb = _require_jsonb()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                UPDATE agent_runs
+                SET runtime_state_json = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (Jsonb(runtime_state), run_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+
     def save_in_transaction(self, conn, record: AgentRunRecord) -> None:
         Jsonb = _require_jsonb()
         stored_status = conn.execute(

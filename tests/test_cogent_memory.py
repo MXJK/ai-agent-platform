@@ -43,6 +43,15 @@ def test_memory_extraction_recall_and_internal_durable_runs(tmp_path):
     assert service.store.get_latest_for_conversation(record.conversation_id).run_id == record.run_id
 
 
+def test_memory_accepts_redundant_scope_and_markdown_suffix(tmp_path):
+    service, record = service_for(tmp_path)
+    written = service.apply(record, {
+        'memories': [entry('project/mini-games-project.md', 'project')],
+    })
+    assert written == ['project/mini-games-project.md']
+    assert service.roots(record)['project'].read('mini-games-project.md') is not None
+
+
 @pytest.mark.parametrize('bad', [entry('../escape'), entry(body='api_key: sk-abcdefghijklmnop'), entry(kind='system')])
 def test_memory_batch_rejects_before_any_content_write(tmp_path, bad):
     service, record = service_for(tmp_path)
@@ -313,6 +322,33 @@ def test_background_memory_request_inherits_parent_model_and_usage_scope(tmp_pat
     assert observed['model'].preferred_model_id == 'model-1'
     assert observed['usage'].session_id == record.conversation_id
     assert observed['usage'].workspace_id == record.workspace_id
+    assert observed['usage'].operation == 'cogent_memory_extract'
+
+
+def test_subagent_memory_request_uses_parent_usage_session(tmp_path):
+    observed = {}
+
+    def inspect_scope(*_args):
+        observed['usage'] = current_model_usage_context()
+        return response('{"memories": []}')
+
+    service, parent = service_for(tmp_path, ScriptedClient(inspect_scope))
+    child = replace(
+        parent,
+        run_id='run-child',
+        thread_id='run-child',
+        conversation_id=parent.conversation_id + ':subagent:task-1',
+        runtime_state={
+            **parent.runtime_state,
+            'collaboration': {
+                'internal': True,
+                'parent_run_id': parent.run_id,
+                'usage_session_id': parent.conversation_id,
+            },
+        },
+    )
+    service.extract(child, 'nothing durable', 'acknowledged')
+    assert observed['usage'].session_id == parent.conversation_id
     assert observed['usage'].operation == 'cogent_memory_extract'
 
 

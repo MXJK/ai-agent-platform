@@ -1,6 +1,7 @@
 """Agent-run storage implementations used by the coding runtime."""
 
 from contextlib import contextmanager
+from dataclasses import replace
 from threading import Lock, RLock
 from typing import Any
 
@@ -65,6 +66,21 @@ class InMemoryAgentRunStore:
                 )
                 events.append(stored)
                 self._events_by_key[(record.run_id, key)] = stored
+
+    def update_runtime_state(
+        self,
+        run_id: str,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        with self._lock:
+            try:
+                record = self._runs[run_id]
+            except KeyError:
+                raise KeyError(run_id) from None
+            self._runs[run_id] = replace(
+                record,
+                runtime_state=dict(runtime_state),
+            )
 
     def get(self, run_id: str) -> AgentRunRecord:
         with self._lock:

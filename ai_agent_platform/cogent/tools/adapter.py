@@ -22,11 +22,26 @@ class PreparedCall:
 
 
 class CogentToolAdapter:
-    def __init__(self, tool_access: Any, *, mcp_loading_mode: str = "dispatch", result_files=None) -> None:
+    def __init__(
+        self,
+        tool_access: Any,
+        *,
+        mcp_loading_mode: str = "dispatch",
+        result_files=None,
+        allowed_visible_tools: set[str] | None = None,
+        disabled_visible_tools: set[str] | None = None,
+    ) -> None:
         self._tools = tool_access
         self.mcp_loading_mode = mcp_loading_mode
         self.loaded_mcp_tools: set[str] = set()
         self.result_files = result_files
+        self.allowed_visible_tools = allowed_visible_tools
+        self.disabled_visible_tools = disabled_visible_tools or set()
+
+    def _visible(self, name: str) -> bool:
+        if name in self.disabled_visible_tools:
+            return False
+        return self.allowed_visible_tools is None or name in self.allowed_visible_tools
 
     def mcp_specs(self) -> dict[str, ToolSpec]:
         result = {}
@@ -46,10 +61,14 @@ class CogentToolAdapter:
         specs = {item.name: item for item in self._tools.list_specs()}
         result: list[ToolSpec] = []
         for visible, actual in _ALIASES.items():
+            if not self._visible(visible):
+                continue
             source = specs.get(actual)
             if source is not None:
                 result.append(_visible_spec(visible, source))
-        if any(item.name.startswith("mcp.") for item in specs.values()):
+        if self._visible("mcp_call") and any(
+            item.name.startswith("mcp.") for item in specs.values()
+        ):
             if self.mcp_loading_mode == "eager":
                 result.extend(replace(spec, name=name) for name, spec in self.mcp_specs().items())
             elif self.mcp_loading_mode == 'native':
@@ -60,7 +79,8 @@ class CogentToolAdapter:
                 result.append(_tool_search_spec())
                 result.extend(replace(spec, name=name) for name, spec in self.mcp_specs().items() if name in self.loaded_mcp_tools)
             result.append(_mcp_call_spec())
-        result.append(_exit_plan_spec())
+        if self._visible("ExitPlanMode"):
+            result.append(_exit_plan_spec())
         return result
 
     def prepare(self, call: ToolCall, *, context: ToolUseContext) -> PreparedCall:
@@ -331,6 +351,18 @@ _ALIASES = {
     "Diff": "sandbox.git_diff",
     "AskUserQuestion": "agent.request_user_input",
     "LoadSkill": "agent.load_skill",
+    "Agent": "agent.spawn",
+    "TaskGet": "collaboration.task_get",
+    "TaskList": "collaboration.task_list",
+    "TaskStop": "collaboration.task_stop",
+    "TeamCreate": "team.create",
+    "TeamDelete": "team.delete",
+    "SendMessage": "team.send_message",
+    "TaskCreate": "team.task_create",
+    "TaskUpdate": "team.task_update",
+    "EnterWorktree": "worktree.enter",
+    "ExitWorktree": "worktree.exit",
+    "WorktreeList": "worktree.list",
 }
 
 
@@ -417,8 +449,8 @@ def _visible_spec(name: str, source: ToolSpec) -> ToolSpec:
     }
     return ToolSpec(
         name=name,
-        description=descriptions[name],
-        input_schema=schemas[name],
+        description=descriptions.get(name, source.description),
+        input_schema=schemas.get(name, source.input_schema),
         output_schema=source.output_schema,
         provider=source.provider,
         permission_level=source.permission_level,

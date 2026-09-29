@@ -44,6 +44,29 @@ def test_sqlite_atomic_admission_preserves_engine_and_rejects_concurrent_turn(tm
         assert conn.execute('SELECT COUNT(*) FROM messages WHERE session_id = ?', (session.id,)).fetchone()[0] == 1
 
 
+def test_sqlite_terminal_run_allows_runtime_state_metadata_update(tmp_path):
+    store = SQLiteAgentRunRepository(
+        database=LocalStateDatabase(str(tmp_path / 'state.sqlite3'))
+    )
+    runtime = runtime_for(tmp_path, ScriptedClient(), store=store)
+    record = runtime.create_queued_record(
+        run_id='run-child',
+        conversation_id='session-child',
+        workspace_id='workspace',
+        workspace_root=str(tmp_path),
+    )
+    store.save(record)
+    store.save(replace(record, status='failed', error='boom', next_nodes=[]))
+    runtime.update_runtime_state(
+        run_id=record.run_id,
+        runtime_state={'collaboration': {'internal': True, 'finalized': True}},
+    )
+    reloaded = store.get(record.run_id)
+    assert reloaded.status == 'failed'
+    assert reloaded.error == 'boom'
+    assert reloaded.runtime_state['collaboration']['finalized'] is True
+
+
 def test_postgres_atomic_start_writes_versioned_state_and_locks_before_insert(tmp_path):
     sql = []
 

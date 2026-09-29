@@ -6,7 +6,12 @@ build-backend = "setuptools.build_meta"
 include = ["ai_agent_platform*"]
 
 [tool.setuptools.package-data]
-ai_agent_platform = ["static/*", "evaluation/*.json", "bundled_skills/**/*"]
+ai_agent_platform = [
+    "static/*",
+    "evaluation/*.json",
+    "bundled_skills/**/*",
+    "cogent/agents/builtins/*.md",
+]
 
 [project]
 name = "cogent"

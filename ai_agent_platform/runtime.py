@@ -14,6 +14,7 @@ from ai_agent_platform.agents.coding.tools import create_coding_tool_registry
 from ai_agent_platform.agents.coding import InMemoryAgentRunStore
 from ai_agent_platform.cogent import AgentRuntime
 from ai_agent_platform.cogent.runtime import CogentRuntime
+from ai_agent_platform.cogent.collaboration import CollaborationManager
 from ai_agent_platform.core import (
     InProcessTaskQueue,
     MetricsRegistry,
@@ -157,6 +158,7 @@ class RuntimeContainer:
     session_service: SessionService | None = None
     execution_context_factory: ExecutionContextFactory | None = None
     execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None
+    collaboration_manager: CollaborationManager | None = field(default=None, repr=False)
     query_uow: Any = None
     query_service: QueryService | None = None
     eval_service: Any = None
@@ -339,6 +341,16 @@ class ApplicationFactory:
                 branch_prefix=settings.change_set_branch_prefix,
                 command_timeout_seconds=settings.sandbox_command_timeout_seconds,
             )
+            cogent_home = Path(settings.cogent_user_memory_root).expanduser().parent
+            container.collaboration_manager = CollaborationManager(
+                teams_root=cogent_home / "teams",
+                worktree_parent=container.execution_workspace_runtime.runtime_parent,
+                execution_workspaces=container.execution_workspace_runtime,
+                branch_prefix=settings.change_set_branch_prefix,
+                command_timeout_seconds=settings.sandbox_command_timeout_seconds,
+                max_workers=settings.background_task_workers,
+                user_agents_root=cogent_home / "agents",
+            )
             container.change_set_service = ChangeSetService(
                 repository=container.change_set_store,
                 workspace_service=container.workspace_service,
@@ -415,6 +427,12 @@ class ApplicationFactory:
                 tool_factory_kwargs["session_repository"] = (
                     container.session_repository
                 )
+            if "collaboration_manager" in inspect.signature(
+                self.create_tool_registry
+            ).parameters:
+                tool_factory_kwargs["collaboration_manager"] = (
+                    container.collaboration_manager
+                )
             container.tool_registry = self.create_tool_registry(
                 settings,
                 **tool_factory_kwargs,
@@ -437,6 +455,10 @@ class ApplicationFactory:
             container.register_cleanup(
                 "tool_registry",
                 container.tool_registry.close,
+            )
+            container.register_cleanup(
+                "collaboration_manager",
+                container.collaboration_manager.close,
             )
             container.tool_pool_builder = ToolPoolBuilder(
                 container.tool_registry
@@ -467,17 +489,26 @@ class ApplicationFactory:
             container.checkpoint("skills_ready")
 
             if coding_agent_runtime is None:
-                container.cogent_runtime = self.create_cogent_runtime(
-                    settings,
-                    tool_registry=container.tool_registry,
-                    run_store=container.agent_run_store,
-                    llm_client=container.llm_client,
-                    change_set_service=container.change_set_service,
-                    tool_pool_builder=container.tool_pool_builder,
-                    execution_workspace_runtime=(
+                cogent_factory_kwargs: dict[str, Any] = {
+                    "tool_registry": container.tool_registry,
+                    "run_store": container.agent_run_store,
+                    "llm_client": container.llm_client,
+                    "change_set_service": container.change_set_service,
+                    "tool_pool_builder": container.tool_pool_builder,
+                    "execution_workspace_runtime": (
                         container.execution_workspace_runtime
                     ),
-                    metrics=container.metrics,
+                    "metrics": container.metrics,
+                }
+                if "collaboration_manager" in inspect.signature(
+                    self.create_cogent_runtime
+                ).parameters:
+                    cogent_factory_kwargs["collaboration_manager"] = (
+                        container.collaboration_manager
+                    )
+                container.cogent_runtime = self.create_cogent_runtime(
+                    settings,
+                    **cogent_factory_kwargs,
                 )
                 container.coding_agent_runtime = container.cogent_runtime
             else:
@@ -871,6 +902,7 @@ class ApplicationFactory:
         mcp_providers: list[MCPToolProvider],
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
         session_repository: Any | None = None,
+        collaboration_manager: CollaborationManager | None = None,
     ) -> ToolRegistry:
         registry = create_coding_tool_registry(
             mcp_providers=mcp_providers,
@@ -884,6 +916,7 @@ class ApplicationFactory:
             sandbox_workspace_ttl_seconds=settings.sandbox_workspace_ttl_seconds,
             sandbox_allowed_commands=settings.sandbox_allowed_commands,
             execution_workspace_runtime=execution_workspace_runtime,
+            collaboration_manager=collaboration_manager,
         )
         if session_repository is not None:
             from ai_agent_platform.tools.memory import register_memory_tools
@@ -960,6 +993,7 @@ class ApplicationFactory:
         tool_pool_builder: ToolPoolBuilder,
         execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
         metrics: MetricsRegistry | None = None,
+        collaboration_manager: CollaborationManager | None = None,
     ) -> CogentRuntime:
         from ai_agent_platform.cogent.client import RegistryClient
         from ai_agent_platform.cogent.memory.service import MemoryService
@@ -982,6 +1016,7 @@ class ApplicationFactory:
                 run_store=run_store,
                 user_root=Path(settings.cogent_user_memory_root).expanduser(),
             ),
+            collaboration_manager=collaboration_manager,
         )
 
 

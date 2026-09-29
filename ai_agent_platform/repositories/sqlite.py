@@ -616,6 +616,23 @@ class SQLiteAgentRunRepository:
         with self.database.transaction(immediate=True) as conn:
             self.save_in_transaction(conn, record)
 
+    def update_runtime_state(
+        self,
+        run_id: str,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        with self.database.transaction(immediate=True) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agent_runs
+                SET runtime_state_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (_json(runtime_state), _iso(_now()), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(run_id)
+
     def save_in_transaction(self, conn: sqlite3.Connection, record: AgentRunRecord) -> None:
         current = conn.execute(
             "SELECT status, created_at FROM agent_runs WHERE id = ?", (record.run_id,)

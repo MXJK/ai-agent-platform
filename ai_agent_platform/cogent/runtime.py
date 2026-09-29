@@ -92,6 +92,7 @@ class CogentRuntime:
         tool_result_max_chars: int = 50_000,
         memory_service: Any = None,
         hooks: list[Hook] | None = None,
+        collaboration_manager: Any = None,
     ) -> None:
         self._tools = tool_registry
         self._run_store = run_store
@@ -108,6 +109,9 @@ class CogentRuntime:
         self._tool_result_max_chars = max(2_000, tool_result_max_chars)
         self._memory_service = memory_service
         self._hooks = HookEngine(hooks)
+        self._collaboration_manager = collaboration_manager
+        if collaboration_manager is not None:
+            collaboration_manager.bind_runtime(self)
         self._locks: dict[str, RLock] = {}
         self._locks_guard = RLock()
 
@@ -189,6 +193,14 @@ class CogentRuntime:
     def restore_record(self, record: AgentRunRecord) -> None:
         self._run_store.save(record)
 
+    def update_runtime_state(
+        self,
+        *,
+        run_id: str,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        self._run_store.update_runtime_state(run_id, runtime_state)
+
     def get_run(self, run_id: str) -> AgentRunRecord:
         try:
             record = self._run_store.get(run_id)
@@ -236,8 +248,18 @@ class CogentRuntime:
         return self.get_run(record.run_id)
 
     def list_recent_runs(self, *, limit: int = 50) -> list[AgentRunRecord]:
-        return [self.get_run(item.run_id) for item in self._run_store.list_recent(limit=max(limit * 4, 100))
-                if not item.runtime_state.get('internal_maintenance')][:limit]
+        return [self.get_run(item.run_id) for item in self._run_store.list_recent(limit=max(limit * 20, 1000))
+                if not item.runtime_state.get('internal_maintenance')
+                and not (item.runtime_state.get('collaboration') or {}).get('internal')][:limit]
+
+    def list_recoverable_runs(self, *, limit: int = 1000) -> list[AgentRunRecord]:
+        """Return maintenance-filtered Runs, including internal child Runs."""
+
+        return [
+            self.get_run(item.run_id)
+            for item in self._run_store.list_recent(limit=limit)
+            if not item.runtime_state.get("internal_maintenance")
+        ]
 
     def list_events(self, run_id: str, *, after: int = 0) -> list[AgentRunEvent]:
         self.get_run(run_id)
@@ -550,7 +572,13 @@ class CogentRuntime:
                 },
             ],
         )
-        return self._persist(failed, state, boundary="failed")
+        persisted = self._persist(failed, state, boundary="failed")
+        if self._collaboration_manager is not None and state.collaboration.get("internal"):
+            try:
+                self._collaboration_manager.child_failed(persisted, error)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        return persisted
 
     def request_control(self, *, run_id: str, action: str, message: str = "") -> AgentRunRecord:
         record = self.get_run(run_id)
@@ -662,6 +690,38 @@ class CogentRuntime:
             record = self.get_run(record.run_id)
             if not state.response_ready:
                 self._finish_tool_messages(state)
+                if self._collaboration_manager is not None:
+                    notifications = self._collaboration_manager.drain_notifications(
+                        record.run_id
+                    )
+                    if notifications:
+                        state.messages.append(
+                            {
+                                "role": "user",
+                                "content": "\n\n".join(notifications),
+                            }
+                        )
+                        self._emit(
+                            record.run_id,
+                            "collaboration_notification",
+                            record.status,
+                            "Agent collaboration notification received.",
+                            {"count": len(notifications)},
+                        )
+                max_turns = int(state.collaboration.get("max_turns") or 0)
+                if max_turns and state.request_count >= max_turns:
+                    return self._complete(
+                        record,
+                        state,
+                        status="blocked",
+                        answer=(
+                            "Subagent stopped after reaching its configured "
+                            f"maxTurns limit ({max_turns})."
+                        ),
+                        terminal_reason="subagent_max_turns",
+                        tool_access=adapter._tools,
+                        context=context,
+                    )
                 specs = adapter.list_specs()
                 state.visible_tool_count = len(specs)
                 state.tool_schema_tokens = token_estimate([{'role': 'system', 'content': json.dumps(
@@ -837,6 +897,14 @@ class CogentRuntime:
             self._run_hooks(record, state, "post_receive", str(state.request_count),
                             message=str(state.messages[-1].get("content") or ""))
             if not state.pending_calls:
+                latest = self.get_run(record.run_id)
+                if (
+                    latest.control_action
+                    or latest.steering_messages
+                    or latest.pending_compaction
+                ):
+                    state.response_ready = False
+                    continue
                 self._run_hooks(record, state, "turn_end", str(state.request_count))
                 if state.last_stop_reason.casefold() in {"length", "max_tokens", "max_output_tokens"} and state.recovery_count < MAX_MODEL_OUTPUT_RETRIES:
                     state.recovery_count += 1
@@ -1573,7 +1641,8 @@ class CogentRuntime:
         change_set_id = None
         changed_files: list[str] = []
         workspace_mode = context.execution_workspace_mode or "patch_only"
-        if self._change_set_service is not None:
+        internal_collaboration = bool(state.collaboration.get("internal"))
+        if self._change_set_service is not None and not internal_collaboration:
             try:
                 snapshot = tool_access.export_context("sandbox", context)
                 changed_files = [str(item) for item in snapshot.get("changed_files") or []]
@@ -1628,7 +1697,19 @@ class CogentRuntime:
                 tool_access.cleanup_context(context)
             except (OSError, RuntimeError, ValueError):
                 pass
-        if status == 'completed' and terminal_reason == 'model_completed' and self._memory_service is not None:
+        if internal_collaboration and self._collaboration_manager is not None:
+            try:
+                self._collaboration_manager.child_completed(terminal, result)
+            except (OSError, RuntimeError, ValueError):
+                self._emit(
+                    record.run_id,
+                    "collaboration_notification_failed",
+                    status,
+                    "Child Run completed, but collaboration cleanup was deferred.",
+                    {},
+                )
+        if (status == 'completed' and terminal_reason == 'model_completed'
+                and self._memory_service is not None and not internal_collaboration):
             try:
                 self._memory_service.schedule_extract(terminal,
                     record.context_snapshot.session.user_message if record.context_snapshot is not None else '', answer)
@@ -1768,8 +1849,19 @@ class CogentRuntime:
     def _adapter(self, record, state, tools):
         from .tool_results import ToolResultFiles
         from .mcp.loading_strategy import decide_and_apply
-        adapter = CogentToolAdapter(tools, result_files=ToolResultFiles(
-            record.workspace_root, state.tool_result_files, record.conversation_id))
+        allowed = state.collaboration.get("allowed_visible_tools")
+        adapter = CogentToolAdapter(
+            tools,
+            result_files=ToolResultFiles(
+                record.workspace_root,
+                state.tool_result_files,
+                record.conversation_id,
+            ),
+            allowed_visible_tools=(set(allowed) if allowed else None),
+            disabled_visible_tools=set(
+                state.collaboration.get("disabled_visible_tools") or []
+            ),
+        )
         if not state.mcp_loading_mode:
             resolver = getattr(self._llm, 'resolve_context_budget', None)
             budget = resolver() if callable(resolver) else None
@@ -1798,6 +1890,7 @@ class CogentRuntime:
         tool_access = self._restore_tools(record, snapshot)
         process_tools = tuple(spec.name for spec in self._tools.list_specs())
         execution = snapshot.execution_workspace if snapshot is not None else None
+        self._restore_execution_workspace(record, execution)
         sandbox = record.runtime_state.get("sandbox") or {}
         return ToolUseContext(
             conversation_id=record.conversation_id,
@@ -1814,6 +1907,34 @@ class CogentRuntime:
             project_allowed_tools=tuple(tool_access.allowed_names),
             os_sandbox_enabled=bool(sandbox.get("enabled", True)),
             os_sandbox_network_enabled=bool(sandbox.get("network_enabled", False)),
+        )
+
+    def _restore_execution_workspace(self, record, execution) -> None:
+        if self._execution_workspace_runtime is None or execution is None:
+            return
+        collaboration = (record.runtime_state or {}).get("collaboration") or {}
+        parent_run_id = str(collaboration.get("parent_run_id") or "")
+        if collaboration.get("internal") and parent_run_id and execution.mode != "worktree":
+            parent = self.get_run(parent_run_id)
+            parent_snapshot = parent.context_snapshot
+            parent_execution = (
+                parent_snapshot.execution_workspace
+                if parent_snapshot is not None
+                else None
+            )
+            if parent_execution is None:
+                raise RuntimeError(
+                    "foreground Subagent parent execution workspace is unavailable"
+                )
+            self._execution_workspace_runtime.restore_shared(
+                parent_execution.to_dict(),
+                child_run_id=record.run_id,
+                authorized_source_root=record.workspace_root,
+            )
+            return
+        self._execution_workspace_runtime.restore(
+            execution.to_dict(),
+            authorized_source_root=record.workspace_root,
         )
 
     @staticmethod

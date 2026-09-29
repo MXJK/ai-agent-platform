@@ -16,6 +16,9 @@ trusted code repositories.
   model turn is reset in the presentation layer; only the final model turn remains as the answer.
 - **Controlled code execution** with workspace-scoped read, write, search, patch,
   and command tools plus `default`, `acceptEdits`, `plan`, and `bypassPermissions` modes.
+- **Subagents and Agent Teams** adapted from mewcode definitions, mailboxes, shared
+  tasks, and worktree lifecycles. Foreground work uses durable child Runs; background
+  and team workers run in process with isolated Git worktrees and report back to the lead.
 - **Central model management** for OpenAI, DeepSeek, Anthropic, Google, Zhipu GLM,
   MiniMax, and Doubao connections and models.
 - **MCP and Skills** through a shared tool catalogue, central permission decisions,
@@ -38,7 +41,8 @@ docker compose -f docker-compose.yml ps
 ```
 
 Compose bind-mounts host `~/.cogent` at `/home/app/.cogent`; user memory, Skills,
-and Cogent settings remain available to host-side CLI processes and survive App recreation.
+`agents/*.md`, and Agent Team mailboxes/task boards remain available to host-side CLI
+processes and survive App recreation.
 
 Open <http://127.0.0.1:8000>, then:
 
@@ -114,6 +118,18 @@ implementations have been removed.
 Execution-workspace copies, baselines, and file-history snapshots skip `.venv-*`
 virtual-environment directories. FileHistory verifies content-addressed blobs with SHA-256
 and reads this rewind data without the default 8 MB limit used for ordinary managed files.
+
+Subagents load project `.cogent/agents/*.md`, user `~/.cogent/agents/*.md`, and built-in
+definitions, with project definitions taking precedence. `Agent`, task/team messaging,
+and named-worktree tools remain inside the frozen tool pool and the existing permission
+chain. `EnterWorktree` never changes the current Run's immutable execution root; named
+worktrees isolate child Runs only. Child Runs keep internal conversation identities, while
+model budgets and actual usage are charged to the parent Session and distinguished by the
+child Run resource ID; a failed foreground child is returned as a failed `Agent` tool call.
+New worktrees do not copy `.env` files or link `.venv`
+or `node_modules`. Clean worktrees are removed automatically, while committed or
+uncommitted changes are retained and reported. Team workers use only the in-process
+executor; Cogent does not start or emulate tmux/iTerm2 panes.
 
 ## Documentation
 

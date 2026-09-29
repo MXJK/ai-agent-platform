@@ -18,6 +18,9 @@ Cogent 是一个本地优先、自托管的 Coding Agent 平台。Web、终端�
 - **统一模型管理**：集中管理 OpenAI、DeepSeek、Anthropic、Google、智谱 GLM、
   MiniMax 与豆包连接和模型。
 - **生命周期 Hook**：参考 mewcode 的条件与动作配置，支持提示词注入、命令、HTTP 通知和工具前置拒绝；执行账本随 Run 持久化，默认关闭，详见 [Hook 配置与恢复语义](docs/hooks.md)。
+- **Subagent 与 Agent Teams**：参考 mewcode 的 Agent 定义、邮箱、共享任务和
+  worktree 生命周期；前台子任务使用持久子 Run，后台/团队队友使用进程内执行器与
+  独立 Git worktree，结果通过任务状态和通知回到 lead Run。
 - **MCP 与 Skill**：共享工具目录、中央权限裁决、项目/用户级 Skill 发现和 slash command。
 - **分层上下文**：项目指令、Markdown 用户/项目记忆、会话与附件统一装配，并控制 Token 预算。
 - **独立知识库**：文档摄取、混合检索、引用与评测独立于 Coding Agent 运行时。
@@ -33,8 +36,8 @@ docker compose -f docker-compose.yml up -d --build
 docker compose -f docker-compose.yml ps
 ```
 
-Compose 将宿主机 `~/.cogent` 绑定到容器 `/home/app/.cogent`；用户级记忆、Skills 与
-Cogent 配置可被宿主机 CLI 共用，并在 App 重建后保留。
+Compose 将宿主机 `~/.cogent` 绑定到容器 `/home/app/.cogent`；用户级记忆、Skills、
+`agents/*.md` 与 Agent Team 邮箱/任务板可被宿主机 CLI 共用，并在 App 重建后保留。
 
 打开 <http://127.0.0.1:8000>，然后依次完成：
 
@@ -99,6 +102,16 @@ Compose 私有网络监听，不发布宿主机端口；MCP 调用仍经过平�
 
 执行工作区复制、基线和文件历史快照会跳过 `.venv-*` 虚拟环境目录。FileHistory
 以 SHA-256 校验内容寻址 blob，读取这些回滚数据时不受普通受管文件的 8 MB 默认上限限制。
+
+Subagent 从项目 `.cogent/agents/*.md`、用户 `~/.cogent/agents/*.md` 和内置定义加载，
+项目定义优先。`Agent`、`TaskGet/List/Stop`、`TeamCreate/Delete`、`SendMessage`、
+`TaskCreate/Update` 与 `Enter/ExitWorktree` 都经过冻结工具池和现有权限链。当前 Run 的
+execution root 不会被 `EnterWorktree` 中途替换；命名 worktree 只用于隔离子 Run。
+子 Run 保留独立的内部会话标识，但模型预算和实际 usage 归属 parent Session，并以
+child Run ID 作为 resource 区分；前台子任务失败会作为失败的 `Agent` 工具结果返回。
+新 worktree 不复制 `.env`，也不链接 `.venv` 或 `node_modules`。干净 worktree 自动清理，
+有提交或未提交改动的 worktree 保留并在任务结果中报告。团队执行仅支持本进程执行器，
+不启动或伪装 tmux/iTerm2 窗格。
 
 ## 文档
 

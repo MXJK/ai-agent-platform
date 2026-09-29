@@ -28,6 +28,7 @@ def create_coding_tool_registry(
     sandbox_allowed_commands: tuple[str, ...] | None = None,
     permission_resolver: PermissionResolver | None = None,
     execution_workspace_runtime: ExecutionWorkspaceRuntime | None = None,
+    collaboration_manager: Any | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry(permission_resolver=permission_resolver)
     register_repository_tools(registry)
@@ -45,6 +46,12 @@ def create_coding_tool_registry(
     )
     if mcp_providers:
         register_mcp_tools(registry, mcp_providers)
+    if collaboration_manager is not None:
+        from ai_agent_platform.cogent.collaboration_tools import (
+            register_collaboration_tools,
+        )
+
+        register_collaboration_tools(registry, collaboration_manager)
     register_run_artifact_tool(registry)
     registry.register(
         "agent.request_user_input",

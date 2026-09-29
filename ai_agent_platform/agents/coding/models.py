@@ -258,6 +258,13 @@ class AgentRunStore(Protocol):
     def save(self, record: AgentRunRecord) -> None:
         ...
 
+    def update_runtime_state(
+        self,
+        run_id: str,
+        runtime_state: dict[str, Any],
+    ) -> None:
+        ...
+
     def get(self, run_id: str) -> AgentRunRecord:
         ...
 

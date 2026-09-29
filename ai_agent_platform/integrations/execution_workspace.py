@@ -354,6 +354,102 @@ class ExecutionWorkspaceRuntime:
             self._records[key] = record
             return record
 
+    def share(
+        self,
+        *,
+        parent_context: Any,
+        child_run_id: str,
+    ) -> ExecutionWorkspaceRecord:
+        """Let a foreground child Run borrow the parent's frozen workspace.
+
+        Both keys reference the same record so mutation hashes, the journal and
+        the writer lease stay coherent. Cleanup of the child key never retires a
+        workspace that is still referenced by its parent Run.
+        """
+
+        parent = self.for_context(parent_context)
+        key = (parent.workspace_id, child_run_id)
+        with self._records_lock:
+            existing = self._records.get(key)
+            if existing is not None and existing is not parent:
+                raise ExecutionWorkspaceError(
+                    "child Run execution workspace is already frozen differently"
+                )
+            self._records[key] = parent
+        return parent
+
+    def restore_shared(
+        self,
+        parent_snapshot: Mapping[str, object],
+        *,
+        child_run_id: str,
+        authorized_source_root: str | Path,
+    ) -> ExecutionWorkspaceRecord:
+        """Restore a parent workspace and reattach a foreground child to it."""
+
+        parent = self.restore(
+            parent_snapshot,
+            authorized_source_root=authorized_source_root,
+        )
+        key = (parent.workspace_id, child_run_id)
+        with self._records_lock:
+            existing = self._records.get(key)
+            if existing is not None and existing is not parent:
+                raise ExecutionWorkspaceError(
+                    "child Run execution workspace is already frozen differently"
+                )
+            self._records[key] = parent
+        return parent
+
+    def adopt_worktree(
+        self,
+        *,
+        run_id: str,
+        workspace_id: str,
+        source_root: str | Path,
+        worktree_path: str | Path,
+        branch_name: str,
+        base_git_head: str,
+    ) -> ExecutionWorkspaceRecord:
+        """Register a named, server-owned worktree created for collaboration."""
+
+        source = Path(source_root).expanduser().resolve(strict=True)
+        worktree = Path(worktree_path).expanduser().resolve(strict=True)
+        if not _is_owned_child(worktree, self._worktree_parent, WORKTREE_DIRECTORY_PREFIX):
+            raise ExecutionWorkspaceError("collaboration worktree is not server-owned")
+        head = _git_head(worktree)
+        if head is None:
+            raise ExecutionWorkspaceError("collaboration worktree has no Git HEAD")
+        key = (workspace_id, run_id)
+        with self._records_lock:
+            existing = self._records.get(key)
+            if existing is not None:
+                if existing.execution_root != worktree or existing.mode != "worktree":
+                    raise ExecutionWorkspaceError(
+                        "child Run execution workspace is already frozen differently"
+                    )
+                return existing
+            baseline = _snapshot_files(worktree)
+            record = ExecutionWorkspaceRecord(
+                run_id=run_id,
+                workspace_id=workspace_id,
+                source_root=source,
+                execution_root=worktree,
+                mode="worktree",
+                baseline=baseline,
+                baseline_digest=_baseline_digest(baseline),
+                base_git_head=base_git_head,
+                branch_name=branch_name,
+                worktree_path=worktree,
+                cleanup_policy="retain_worktree",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                known_hashes={path: _sha256(value) for path, value in baseline.items()},
+                journal_path=self._journal_path(run_id),
+                command_scratch=self._scratch_parent / _safe_key(run_id),
+            )
+            self._records[key] = record
+            return record
+
     def for_context(self, context: Any) -> ExecutionWorkspaceRecord:
         if context is None or not context.run_id or not context.workspace_id:
             raise ExecutionWorkspaceError("workspace context is required")
@@ -641,6 +737,10 @@ class ExecutionWorkspaceRuntime:
             record = self._records.pop(key, None)
         if record is None:
             return False
+        with self._records_lock:
+            shared = any(value is record for value in self._records.values())
+        if shared:
+            return True
         self._release_direct_writer(record)
         if record.command_scratch is not None:
             _remove_owned_directory(record.command_scratch, self._scratch_parent)
@@ -655,7 +755,7 @@ class ExecutionWorkspaceRuntime:
 
     def cleanup_all(self) -> None:
         with self._records_lock:
-            records = list(self._records.values())
+            records = list({id(record): record for record in self._records.values()}.values())
             self._records.clear()
         for record in records:
             self._release_direct_writer(record)

@@ -835,7 +835,8 @@ class QueryService:
     ) -> AgentRunRecord:
         record = self.get_run(run_id)
         self._assert_actor(record, actor_user_id)
-        if record.runtime_engine == 'cogent-v1' and record.result is not None:
+        if (record.runtime_engine == 'cogent-v1' and record.result is not None
+                and not _is_internal_collaboration_record(record)):
             self._record_assistant_message(record.result)
         return record
 
@@ -1188,13 +1189,19 @@ class QueryService:
     def recover_incomplete_runs(self) -> int:
         """Requeue durable work after API/CLI startup; suspended runs stay suspended."""
         recovered = 0
-        for record in self._runtime.list_recent_runs(limit=1000):
+        list_recoverable = getattr(
+            self._runtime,
+            "list_recoverable_runs",
+            self._runtime.list_recent_runs,
+        )
+        for record in list_recoverable(limit=1000):
             if record.runtime_engine != 'cogent-v1':
                 continue
             if record.context_snapshot is None or record.runtime_state.get('internal_maintenance'):
                 continue
             if record.status in QueryLifecycle.TERMINAL_STATUSES and record.result is not None:
-                self._record_assistant_message(record.result)
+                if not _is_internal_collaboration_record(record):
+                    self._record_assistant_message(record.result)
                 continue
             if record.status not in {'queued', 'running'}:
                 continue
@@ -1260,7 +1267,7 @@ class QueryService:
             return
         if record.status != "queued" and not recovery:
             self._metrics.increment("agent_run_duplicate_deliveries_total")
-            if record.result is not None:
+            if record.result is not None and not _is_internal_collaboration_record(record):
                 self._record_assistant_message(record.result)
             logger.info(
                 "agent run delivery skipped",
@@ -1321,7 +1328,10 @@ class QueryService:
                 started_at=started_at,
             )
             logger.info("agent run finished", extra={"status": result.status})
-            if not _is_evaluation_record(record):
+            if (
+                not _is_evaluation_record(record)
+                and not _is_internal_collaboration_record(record)
+            ):
                 self._record_assistant_message(
                     result,
                     user_message=message,
@@ -1353,7 +1363,7 @@ class QueryService:
             self._metrics.increment(
                 "agent_checkpoint_restore_duplicate_deliveries_total"
             )
-            if record.result is not None:
+            if record.result is not None and not _is_internal_collaboration_record(record):
                 self._record_assistant_message(record.result)
             return
         with log_context(
@@ -1405,15 +1415,16 @@ class QueryService:
                 status=result.status,
                 started_at=started_at,
             )
-            self._record_assistant_message(
-                result,
-                user_message=(
-                    record.context_snapshot.session.user_message
-                    if record.context_snapshot is not None
-                    else None
-                ),
-                actor_user_id=actor_user_id,
-            )
+            if not _is_internal_collaboration_record(record):
+                self._record_assistant_message(
+                    result,
+                    user_message=(
+                        record.context_snapshot.session.user_message
+                        if record.context_snapshot is not None
+                        else None
+                    ),
+                    actor_user_id=actor_user_id,
+                )
 
     def execute_resume_task(
         self,
@@ -1454,7 +1465,7 @@ class QueryService:
             and not recovery
         ):
             self._metrics.increment("agent_resume_duplicate_deliveries_total")
-            if record.result is not None:
+            if record.result is not None and not _is_internal_collaboration_record(record):
                 self._record_assistant_message(record.result)
             logger.info(
                 "agent resume delivery skipped",
@@ -1539,7 +1550,8 @@ class QueryService:
                 "agent run resume finished",
                 extra={"status": result.status},
             )
-            self._record_assistant_message(result)
+            if not _is_internal_collaboration_record(record):
+                self._record_assistant_message(result)
 
     @staticmethod
     def _approval_requires_editor(record: AgentRunRecord) -> bool:
@@ -1888,6 +1900,11 @@ def _is_evaluation_record(record: AgentRunRecord) -> bool:
         return False
     evaluation = snapshot.metadata.entrypoint_metadata.get("evaluation")
     return bool(isinstance(evaluation, dict) and evaluation.get("isolated"))
+
+
+def _is_internal_collaboration_record(record: AgentRunRecord) -> bool:
+    value = (record.runtime_state or {}).get("collaboration") or {}
+    return bool(isinstance(value, dict) and value.get("internal"))
 
 
 def _snapshot_approval_policy(snapshot: object) -> str:

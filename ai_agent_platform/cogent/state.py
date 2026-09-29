@@ -44,6 +44,7 @@ class CogentState:
     mcp_loading_mode: str = ''
     loaded_mcp_tools: list[str] = field(default_factory=list)
     tool_result_files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    collaboration: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return deepcopy({
@@ -80,6 +81,7 @@ class CogentState:
             "mcp_loading_mode": self.mcp_loading_mode,
             "loaded_mcp_tools": self.loaded_mcp_tools,
             "tool_result_files": self.tool_result_files,
+            "collaboration": self.collaboration,
         })
 
     @classmethod
@@ -118,4 +120,5 @@ class CogentState:
             mcp_loading_mode=str(raw.get("mcp_loading_mode") or ""),
             loaded_mcp_tools=list(raw.get("loaded_mcp_tools") or []),
             tool_result_files=dict(raw.get("tool_result_files") or {}),
+            collaboration=dict(raw.get("collaboration") or {}),
         )

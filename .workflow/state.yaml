@@ -1,9 +1,9 @@
 project_id: "ai-agent-platform"
 status: "blocked"
-active_task: "COGENT-HOOKS"
-next_action: "Align the existing ManagedFiles symlink exception contract and rerun full pytest to close COGENT-HOOKS."
+active_task: "COGENT-SUBAGENTS-TEAMS-WORKTREES"
+next_action: "Align the pre-existing ManagedFiles symlink exception contract, then rerun the full pytest suite."
 blockers:
-  - "Required full pytest has one pre-existing failure: test_result_storage_never_follows_symlinked_parent expects OSError but ManagedFiles raises ValueError; 865 passed, 12 skipped, 108 subtests passed. All 36 Hook tests passed."
+  - "Required full pytest has one pre-existing unrelated failure: test_result_storage_never_follows_symlinked_parent expects OSError but ManagedFiles.read raises ValueError."
 last_verified_commit: "a99917a54d477ed5e885cb271a2e0e63cd875e32"
-updated_at: "2026-09-27T10:44:37+08:00"
+updated_at: "2026-09-29T11:27:30+08:00"
 vault_note: "10 Projects/ai-agent-platform/Home.md"

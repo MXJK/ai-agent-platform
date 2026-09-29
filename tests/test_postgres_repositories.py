@@ -462,6 +462,25 @@ class PostgresRepositoryTests(unittest.TestCase):
         self.assertIn("RETURNING status", sql)
         self.assertIn("WHERE EXISTS", connection.calls[1][0])
 
+    def test_agent_run_updates_runtime_state_after_terminal_transition(self) -> None:
+        connection = FakeConnection([("run_1",)])
+        state = {"collaboration": {"internal": True, "finalized": True}}
+        with patch(
+            "ai_agent_platform.repositories.postgres._require_psycopg",
+            return_value=object(),
+        ), patch(
+            "ai_agent_platform.repositories.postgres._require_jsonb",
+            return_value=lambda value: value,
+        ):
+            repository = PostgresAgentRunRepository(database_url="postgresql://test")
+            repository._connect = lambda: connection
+            repository.update_runtime_state("run_1", state)
+
+        sql, params = connection.calls[0]
+        self.assertIn("UPDATE agent_runs", sql)
+        self.assertIn("runtime_state_json", sql)
+        self.assertEqual(params, (state, "run_1"))
+
     def test_agent_run_repository_round_trips_artifact_through_jsonb_save_and_get(self) -> None:
         artifact = build_run_tool_result_artifact(
             {

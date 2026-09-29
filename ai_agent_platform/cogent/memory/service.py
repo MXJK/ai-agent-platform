@@ -49,6 +49,20 @@ class MemoryConflictError(RuntimeError):
     pass
 
 
+def _normalized_memory_name(value, kind: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError('Invalid memory name or type')
+    name = value.strip()
+    scope = 'user' if kind in {'user', 'feedback'} else 'project'
+    if name.startswith(scope + '/'):
+        name = name[len(scope) + 1:]
+    if name.endswith('.md'):
+        name = name[:-3]
+    if '/' in name or '\\' in name or not _NAME.fullmatch(name):
+        raise ValueError('Invalid memory name or type')
+    return name
+
+
 class MemoryService:
     def __init__(self, *, client, run_store, user_root: Path | None = None,
                  session_service=None, task_queue=None, clock=time.time,
@@ -441,7 +455,7 @@ class MemoryService:
     def _decide(self, parent, operation, resource_id, messages, tools, *, timeout_seconds=None):
         def invoke():
             with model_selection_scope(self._parent_model_selection(parent)):
-                with model_usage_scope(session_id=parent.conversation_id,
+                with model_usage_scope(session_id=self._usage_session_id(parent),
                         workspace_id=parent.workspace_id,
                         operation='cogent_memory_' + operation,
                         resource_id=resource_id):
@@ -466,6 +480,19 @@ class MemoryService:
         if not ok:
             raise value
         return value
+
+    def _usage_session_id(self, record):
+        collaboration = (record.runtime_state or {}).get('collaboration') or {}
+        session_id = str(collaboration.get('usage_session_id') or '')
+        if session_id:
+            return session_id
+        parent_run_id = str(collaboration.get('parent_run_id') or '')
+        if parent_run_id:
+            try:
+                return str(self.store.get(parent_run_id).conversation_id)
+            except (KeyError, AttributeError):
+                pass
+        return str(record.conversation_id)
 
     @staticmethod
     def _parent_model_selection(parent):
@@ -659,8 +686,9 @@ class MemoryService:
             if not isinstance(row, dict):
                 raise ValueError('Invalid memory entry')
             name, kind = row.get('name'), row.get('type')
-            if not isinstance(name, str) or not _NAME.fullmatch(name) or kind not in {'user', 'feedback', 'project', 'reference'}:
+            if kind not in {'user', 'feedback', 'project', 'reference'}:
                 raise ValueError('Invalid memory name or type')
+            name = _normalized_memory_name(name, kind)
             body, desc = str(row.get('body') or '').strip(), str(row.get('description') or '').strip()
             if not body or not desc or '\n' in desc or len(desc) > 200 or _SECRET.search(body + '\n' + desc):
                 raise ValueError('Memory content is empty, sensitive, or unbounded')
