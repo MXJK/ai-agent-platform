@@ -170,6 +170,12 @@ class ExecutionWorkspaceRuntime:
     def runtime_parent(self) -> Path:
         return self._runtime_parent
 
+    @property
+    def worktree_parent(self) -> Path:
+        """Return the canonical parent accepted for server-owned worktrees."""
+
+        return self._worktree_parent
+
     def prepare(
         self,
         *,

@@ -1,3 +1,4 @@
+from frontend_sources import frontend_sources
 from pathlib import Path
 
 import yaml
@@ -120,10 +121,7 @@ def test_compose_locks_reused_single_process_backends_and_workspace_boundary() -
 
 def test_user_skill_path_is_consistent_across_config_and_web_fallbacks() -> None:
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
-    app_js = (ROOT / "ai_agent_platform/static/app.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "ai_agent_platform/static/index.html").read_text(
-        encoding="utf-8"
-    )
+    index_html, app_js, _ = frontend_sources()
 
     assert "SKILLS_DIRECTORY_PATH=~/.cogent/skills" in example
     assert "SKILLS_DIRECTORY_PATH=~/.ai-agent-platform/skills" not in example

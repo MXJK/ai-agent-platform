@@ -157,6 +157,28 @@ class RuntimeBootstrapTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_collaboration_uses_execution_runtime_worktree_parent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = build_runtime(
+                self.settings(
+                    sandbox_workspace_parent=str(root / "sandboxes"),
+                    change_set_worktree_parent=str(root / "worktrees"),
+                ),
+                role="cli",
+            )
+            try:
+                self.assertEqual(
+                    runtime.collaboration_manager.worktrees.parent,
+                    runtime.execution_workspace_runtime.worktree_parent,
+                )
+                self.assertNotEqual(
+                    runtime.collaboration_manager.worktrees.parent,
+                    runtime.execution_workspace_runtime.runtime_parent,
+                )
+            finally:
+                runtime.close()
+
     def test_runtime_configuration_rejects_non_atomic_query_store_pair(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

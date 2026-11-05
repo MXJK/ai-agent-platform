@@ -90,3 +90,33 @@ README 中英文、Interview Notes、事实索引和三处来源说明已同步�
 
 功能验收已完成；按仓库 closeout 合同，工作流状态仍标为 `blocked`，唯一 blocker 是上面
 单独记录的既存全量测试失败，并非本任务实现缺口。
+
+### 2026-09-30 浏览器人工复验更正
+
+上述“功能验收已完成 / 唯一 blocker”结论被本次真实 Compose 浏览器测试推翻。
+Worktree 创建、同名复用、干净删除通过；Teams 创建和共享任务读取通过，但团队队友
+启动稳定报 `collaboration worktree is not server-owned`，且失败后残留孤立 Worktree。
+显式传与省略 isolation 的两次最小复现结果一致。根因为协作创建与执行接管使用了
+不同父目录，失败路径又没有资源回滚；本次仅诊断记录，未修复源码。
+
+完整步骤、Run ID、覆盖范围、自动检查及限制见
+[浏览器验收记录](COGENT-TEAMS-WORKTREE-UI-QA-20260930.md)。
+两次测试资源已使用工具清理，WorktreeList 最终 count=0。当前不能宣称 Teams 端到端可用。
+
+### 2026-09-30 浏览器问题修复
+
+已修复人工复验发现的两个实现缺陷：Composition root 不再把协作 Worktree 指向
+`sandbox_workspace_parent`，而是复用 `ExecutionWorkspaceRuntime` 解析后的
+`worktree_parent`，确保创建目录与 `adopt_worktree` 的 server-owned 校验一致；若
+Worktree 已创建但接管仍失败，协作层会立即自动清理干净 Worktree，且不会注册团队成员。
+
+新增两个回归：启动装配在 `sandboxes` 与 `worktrees` 不同父目录时验证二者使用同一
+Worktree 根目录；故意配置不一致触发接管失败时验证 Worktree、分支和未注册成员均不残留。
+聚焦测试 `42 passed`。全量测试为 `881 passed, 12 skipped, 108 subtests passed, 2 failed`；
+HTTP Hook 单项在沙箱外复跑 `1 passed`，剩余失败仍是既存 ManagedFiles symlink 异常合同。
+
+当前 Compose 服务未运行；启动会执行 Alembic migration，因未获用户显式迁移授权，未做
+本轮真实网页复验。这不影响自动化修复证据，但在获得授权并重跑 Teams 消息、完成通知、
+任务更新和清理链路前，不把 Compose 端到端复验标记为完成。README 与 Interview Notes
+已经描述目标行为，本次恢复既有合同而未改变公开 API、配置项或能力边界，因此没有做
+装饰性正文修改；由于事实索引映射了变更源码，仍执行 Interview Notes 校验。

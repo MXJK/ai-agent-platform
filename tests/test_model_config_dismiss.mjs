@@ -1,9 +1,9 @@
+import { readRuntimeSource } from "./frontend_runtime_source.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const APP_PATH = new URL("../ai_agent_platform/static/app.js", import.meta.url);
+const APP_PATH = new URL("../frontend/src/runtime/bootstrap.js", import.meta.url);
 
 function loadDismissalHarness() {
   const listeners = new Map();
@@ -55,7 +55,7 @@ function loadDismissalHarness() {
     navigator: {},
     window: {},
   });
-  const source = readFileSync(APP_PATH, "utf8").replace(/\ninit\(\);\s*$/, "\n");
+  const source = readRuntimeSource().replace(/\ninit\(\);\s*$/, "\n");
   vm.runInContext(source, context, { filename: APP_PATH.pathname });
   vm.runInContext("bindComposerConfigDismissal()", context);
 
@@ -103,7 +103,7 @@ function loadDiscoveryHarness() {
     navigator: {},
     window: {},
   });
-  const source = readFileSync(APP_PATH, "utf8").replace(/\ninit\(\);\s*$/, "\n");
+  const source = readRuntimeSource().replace(/\ninit\(\);\s*$/, "\n");
   vm.runInContext(source, context, { filename: APP_PATH.pathname });
 
   return {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from frontend_sources import frontend_sources
+
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -890,9 +892,7 @@ class ModelRegistryApiTests(unittest.TestCase):
                 completed = wait_for_run(client, chat.json()['run_id'])
                 registry = client.get("/api/v1/model-registry").json()
                 session = client.get(f"/api/v1/sessions/{session_id}").json()
-                frontend = client.get("/").text
-                frontend_js = client.get("/static/app.js").text
-                frontend_css = client.get("/static/styles.css").text
+                frontend, frontend_js, frontend_css = frontend_sources()
 
         self.assertEqual(saved.status_code, 200)
         self.assertNotIn("api_key", saved.json())
@@ -913,7 +913,7 @@ class ModelRegistryApiTests(unittest.TestCase):
         self.assertIn('id="auto-model-toggle"', frontend)
         self.assertIn('id="model-picker-trigger"', frontend)
         self.assertIn('id="model-picker-menu"', frontend)
-        self.assertIn('data-view-panel="models"', frontend)
+        self.assertIn('view="models"', frontend)
         self.assertIn('id="discovered-model-select"', frontend)
         self.assertIn('id="manual-model-id-input"', frontend)
         self.assertNotIn('id="registered-model-output-limit-input"', frontend)

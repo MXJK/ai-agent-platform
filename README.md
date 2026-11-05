@@ -118,9 +118,30 @@ child Run ID 作为 resource 区分；前台子任务失败会作为失败的 `A
 - [完整技术参考](docs/reference.zh-CN.md)：配置、协议、权限、存储、迁移和评测说明。
 - [English README](README.en.md) / [English reference](docs/reference.en.md)
 - [架构与事实边界](INTERVIEW_NOTES.md)
+- [React 前端迁移验证与边界](docs/verification/frontend-react-2026-11-04.md)
 - [查询完整链路](docs/architecture/query-full-chain.html)
 - [独立 RAG 架构](docs/architecture/rag-architecture.html)
 - [Agent 评测说明](evals/README.md)
+
+## 前端结构
+
+工作台采用 **React + TypeScript + Vite**，源码位于 `frontend/`，生产构建仍由 FastAPI
+托管，不需要额外的 Node 服务。九个页面的骨架与导航，以及模型、Skill/MCP、知识库文档、
+会话列表已组件化；聊天流、审批、ChangeSet、记忆、评测和审计仍保留按领域拆分的 JavaScript
+控制器与部分 DOM 渲染，属于渐进迁移，尚非全量 TypeScript/React 状态管理。
+
+开发前需要 Node 22.18+：
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run dev
+# 后端另行启动在 127.0.0.1:8000；前端打开 http://127.0.0.1:5173/static/
+npm --prefix frontend run build
+```
+
+构建产物写入 `ai_agent_platform/static/`，与源码一起维护。Docker 在独立 Node 构建阶段
+生成静态资源，Python 包包含带哈希的 JS/CSS。组件与控制器的 DOM 所有权边界见
+[前端开发说明](frontend/README.md)。
 
 ## 开发与验证
 
@@ -130,7 +151,9 @@ child Run ID 作为 resource 区分；前台子任务失败会作为失败的 `A
 .venv/bin/python -m pytest -q
 .venv/bin/python -m compileall ai_agent_platform tests evals
 .venv/bin/python INTERVIEW_NOTES/validate.py
-node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs
+npm --prefix frontend run build
+npm --prefix frontend test
+node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs tests/test_trace_audit_ui.mjs
 docker compose --env-file .env.example config --quiet
 git diff --check
 ```

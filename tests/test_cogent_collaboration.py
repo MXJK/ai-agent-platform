@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from ai_agent_platform.agents.coding import InMemoryAgentRunStore
 from ai_agent_platform.core import Settings
 from ai_agent_platform.cogent.agents import AgentLoader
@@ -16,7 +18,10 @@ from ai_agent_platform.cogent.teams import Mailbox, TeamManager, TeammateInfo, c
 from ai_agent_platform.cogent.tools import CogentToolAdapter
 from ai_agent_platform.cogent.worktree import WorktreeManager
 from ai_agent_platform.domain import Session
-from ai_agent_platform.integrations.execution_workspace import ExecutionWorkspaceRuntime
+from ai_agent_platform.integrations.execution_workspace import (
+    ExecutionWorkspaceError,
+    ExecutionWorkspaceRuntime,
+)
 from ai_agent_platform.integrations.llm import LLMToolDecision
 from ai_agent_platform.integrations.permissions import PermissionResolver, ToolUseContext
 from ai_agent_platform.integrations.tool_pool import ToolPoolBuilder
@@ -362,10 +367,13 @@ def test_foreground_execution_workspace_share_survives_runtime_restart(tmp_path)
 
 def test_foreground_subagent_is_a_hidden_durable_child_run(tmp_path):
     repo = _repository(tmp_path)
-    execution = ExecutionWorkspaceRuntime(runtime_parent=tmp_path / "execution")
+    execution = ExecutionWorkspaceRuntime(
+        runtime_parent=tmp_path / "execution",
+        worktree_parent=tmp_path / "worktrees",
+    )
     manager = CollaborationManager(
         teams_root=tmp_path / "teams",
-        worktree_parent=tmp_path / "execution",
+        worktree_parent=execution.worktree_parent,
         execution_workspaces=execution,
         user_agents_root=tmp_path / "agents",
     )
@@ -444,7 +452,7 @@ def test_foreground_subagent_is_a_hidden_durable_child_run(tmp_path):
     }
     restored_manager = CollaborationManager(
         teams_root=tmp_path / "teams",
-        worktree_parent=tmp_path / "execution",
+        worktree_parent=execution.worktree_parent,
         execution_workspaces=execution,
         user_agents_root=tmp_path / "agents",
     )
@@ -479,6 +487,90 @@ def test_foreground_subagent_is_a_hidden_durable_child_run(tmp_path):
     assert not Path(finished["worktree"]["path"]).exists()
     assert manager.team_delete(team_name=team["name"], context=tool_context)["deleted"]
     manager.close()
+
+
+def test_failed_worktree_adoption_rolls_back_unregistered_team_worktree(tmp_path):
+    repo = _repository(tmp_path)
+    execution = ExecutionWorkspaceRuntime(
+        runtime_parent=tmp_path / "execution",
+        worktree_parent=tmp_path / "owned-worktrees",
+    )
+    manager = CollaborationManager(
+        teams_root=tmp_path / "teams",
+        worktree_parent=tmp_path / "collaboration-worktrees",
+        execution_workspaces=execution,
+        user_agents_root=tmp_path / "agents",
+    )
+    registry = ToolRegistry(PermissionResolver())
+    register_collaboration_tools(registry, manager)
+    pool_builder = ToolPoolBuilder(registry)
+    runtime = CogentRuntime(
+        tool_registry=registry,
+        run_store=InMemoryAgentRunStore(),
+        llm_client=_Client(),
+        tool_pool_builder=pool_builder,
+        execution_workspace_runtime=execution,
+        collaboration_manager=manager,
+    )
+    workspaces = WorkspaceService(
+        store=InMemoryWorkspaceRepository(),
+        allowed_roots=(str(repo),),
+    )
+    workspaces.register(workspace_id="workspace", root_path=str(repo))
+    snapshot = ExecutionContextFactory(
+        session_service=_SessionService(),
+        workspace_service=workspaces,
+        auth_mode="disabled",
+        tool_registry=registry,
+        tool_pool_builder=pool_builder,
+        execution_workspace_runtime=execution,
+    ).create(
+        conversation_id="conversation-parent",
+        user_message="lead request",
+        workspace_id="workspace",
+        model_selection=ModelSelection(),
+        actor_user_id="owner",
+        run_id="run-parent",
+    )
+    parent = runtime.create_queued_run(
+        conversation_id="conversation-parent",
+        workspace_id="workspace",
+        workspace_root=str(repo),
+        run_id="run-parent",
+        context_snapshot=snapshot,
+    )
+    tool_context = ToolUseContext(
+        conversation_id=parent.conversation_id,
+        workspace_id=parent.workspace_id,
+        workspace_root=parent.workspace_root,
+        run_id=parent.run_id,
+        actor_user_id="owner",
+        workspace_role="admin",
+        authorized_workspace_root=parent.workspace_root,
+        execution_root=snapshot.execution_workspace.execution_root,
+        execution_workspace_mode=snapshot.execution_workspace.mode,
+    )
+    team = manager.team_create(team_name="rollback-team", context=tool_context)
+
+    try:
+        with pytest.raises(
+            ExecutionWorkspaceError,
+            match="collaboration worktree is not server-owned",
+        ):
+            manager.spawn(
+                prompt="Inspect the API surface.",
+                description="API review",
+                subagent_type="general-purpose",
+                team_name=team["name"],
+                name="reviewer",
+                context=tool_context,
+            )
+
+        assert manager.worktrees.list_worktrees(repo_root=repo) == []
+        assert manager.teams.get(team["name"]).members == []
+        assert not list((tmp_path / "collaboration-worktrees").glob("agent-worktree-*"))
+    finally:
+        manager.close()
 
 
 def test_subagent_usage_is_charged_to_existing_parent_session(tmp_path):

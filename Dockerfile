@@ -1,3 +1,10 @@
+FROM node:22-slim AS frontend-build
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
+RUN npm ci --no-audit --no-fund
+COPY frontend ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,6 +25,7 @@ RUN python -m pip install --upgrade pip \
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY ai_agent_platform ./ai_agent_platform
+COPY --from=frontend-build /ai_agent_platform/static ./ai_agent_platform/static
 COPY pyproject.toml ./
 
 RUN python -m pip install --no-deps --no-build-isolation .

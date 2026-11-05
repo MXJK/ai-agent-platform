@@ -22,5 +22,11 @@ harness讲义.pdf
 .agents/skills/
 mcp.json
 
+# Frontend dependency and test caches; built static assets are shipped with Python.
+frontend/node_modules/
+frontend/coverage/
+frontend/.vite/
+ai_agent_platform/static/.vite/
+
 # Local dev overrides (uvicorn reload + source bind mount)
 docker-compose.override.yml

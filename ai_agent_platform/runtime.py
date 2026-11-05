@@ -344,7 +344,7 @@ class ApplicationFactory:
             cogent_home = Path(settings.cogent_user_memory_root).expanduser().parent
             container.collaboration_manager = CollaborationManager(
                 teams_root=cogent_home / "teams",
-                worktree_parent=container.execution_workspace_runtime.runtime_parent,
+                worktree_parent=container.execution_workspace_runtime.worktree_parent,
                 execution_workspaces=container.execution_workspace_runtime,
                 branch_prefix=settings.change_set_branch_prefix,
                 command_timeout_seconds=settings.sandbox_command_timeout_seconds,

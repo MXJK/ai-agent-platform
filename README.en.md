@@ -156,3 +156,22 @@ git diff --check
 
 See the [full technical reference](docs/reference.en.md) for local configuration,
 API, Provider protocol, and evaluation details.
+
+## React workbench
+
+The workbench uses React, TypeScript and Vite in `frontend/`. FastAPI serves the
+compiled assets; production does not need another Node service. Nine page shells,
+navigation, registry, document and session lists use React. Domain controllers and
+some chat/approval, memory, evaluation and audit DOM rendering remain JavaScript
+during this incremental migration. See [frontend development](frontend/README.md).
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run dev
+npm --prefix frontend run build
+npm --prefix frontend test
+```
+
+Node 22.18+ is required to build. The development URL is
+`http://127.0.0.1:5173/static/`, with `/api` proxied to `127.0.0.1:8000`.
+Commit generated `ai_agent_platform/static` assets alongside source changes.

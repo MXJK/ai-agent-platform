@@ -1,0 +1,34 @@
+/* Keep conversation navigation overrides last in the cascade. */
+.nav-item.mobile-more-nav {
+  display: none;
+}
+
+@media (max-width: 1120px) {
+  .create-session-action {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0;
+  }
+
+  .create-session-label {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .primary-nav {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .primary-nav > .mobile-more-nav {
+    display: grid;
+  }
+}
+
+@media (max-width: 430px) {
+  .primary-nav .nav-item strong {
+    font-size: 9.5px;
+  }
+}
+

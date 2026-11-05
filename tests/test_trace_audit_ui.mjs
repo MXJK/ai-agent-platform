@@ -1,8 +1,8 @@
+import { readRuntimeSource } from "./frontend_runtime_source.mjs";
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
-const source = readFileSync(new URL('../ai_agent_platform/static/app.js', import.meta.url), 'utf8');
+const source = readRuntimeSource();
 class Element {
   children = []; dataset = {}; listeners = {}; _html = ''; textContent = '';
   set innerHTML(value) { this._html = value; this.children = []; }
@@ -26,13 +26,13 @@ function harness() {
   const elements = new Map();
   const state = {auditEvents: [], auditStoredEvents: [], auditCursor: 0, auditPage: 0,
     auditCategory: 'all', auditRunId: 'a', auditRequestGeneration: 0, auditRuns: []};
-  const context = vm.createContext({state, document: {createElement: () => new Element()},
+  const context = vm.createContext({state, listen: (target, type, listener) => target.addEventListener(type, listener), document: {createElement: () => new Element()},
     $: (id) => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
     escapeHtml: String, jsonPretty: JSON.stringify, humanizeAgentNode: String,
     humanizeStatus: String, formatDuration: String, formatTokenCount: String,
     humanizeError: String, iconMarkup: () => '', window: {clearTimeout() {}},
   });
-  vm.runInContext(source.slice(source.indexOf('function auditEventMatches('), source.indexOf('function parseErrorDetail(')), context);
+  vm.runInContext(source.slice(source.indexOf('function auditEventMatches('), source.indexOf('const apiClient =')), context);
   context.renderAuditRuns = () => {};
   context.renderAuditDetail = () => context.renderAuditTimeline();
   context.scheduleAuditPoll = () => {};

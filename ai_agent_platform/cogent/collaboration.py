@@ -615,14 +615,24 @@ class CollaborationManager:
                 name=worktree_name,
                 base_ref="HEAD",
             )
-            execution = self.execution_workspaces.adopt_worktree(
-                run_id=child_run_id,
-                workspace_id=parent.workspace_id,
-                source_root=parent.workspace_root,
-                worktree_path=worktree.path,
-                branch_name=worktree.branch,
-                base_git_head=worktree.head_commit,
-            )
+            try:
+                execution = self.execution_workspaces.adopt_worktree(
+                    run_id=child_run_id,
+                    workspace_id=parent.workspace_id,
+                    source_root=parent.workspace_root,
+                    worktree_path=worktree.path,
+                    branch_name=worktree.branch,
+                    base_git_head=worktree.head_commit,
+                )
+            except Exception as exc:
+                try:
+                    self.worktrees.auto_cleanup(worktree)
+                except Exception as cleanup_exc:
+                    exc.add_note(
+                        "collaboration worktree rollback failed: "
+                        f"{cleanup_exc}"
+                    )
+                raise
         else:
             execution = self.execution_workspaces.share(
                 parent_context=parent_context,

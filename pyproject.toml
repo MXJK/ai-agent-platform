@@ -8,6 +8,7 @@ include = ["ai_agent_platform*"]
 [tool.setuptools.package-data]
 ai_agent_platform = [
     "static/*",
+    "static/assets/*",
     "evaluation/*.json",
     "bundled_skills/**/*",
     "cogent/agents/builtins/*.md",

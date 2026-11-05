@@ -1034,7 +1034,8 @@ UserMemory、Chroma、OS keyring、规则式 GameAgent、旧 `AgentRunService` �
 node --test tests/test_chat_message_ui.mjs tests/test_model_config_dismiss.mjs
 docker compose --env-file .env.example config --quiet
 bash -n scripts/start.sh
-node --check ai_agent_platform/static/app.js
+npm --prefix frontend run build
+npm --prefix frontend test
 git diff --check
 ```
 

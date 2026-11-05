@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from frontend_sources import frontend_sources
+
 from contextlib import redirect_stderr
 import httpx2
 import io
@@ -502,13 +504,12 @@ class MCPLifecycleTests(unittest.TestCase):
                     client.get("/api/v1/mcp/servers").json()["servers"],
                     [],
                 )
-                frontend = client.get("/").text
-                frontend_js = client.get("/static/app.js").text
+                frontend, frontend_js, _ = frontend_sources()
 
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn(secret_value, persisted)
             self.assertNotIn("frontend_demo", persisted)
-            self.assertIn('data-view-panel="tools"', frontend)
+            self.assertIn('view="tools"', frontend)
             self.assertIn('id="skill-form"', frontend)
             self.assertIn('id="mcp-server-form"', frontend)
             self.assertIn("/mcp/servers/${encodeURIComponent(name)}", frontend_js)

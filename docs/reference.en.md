@@ -1098,7 +1098,8 @@ security and persistence contracts rather than revive these unverified adapters.
 .venv/bin/python -m compileall ai_agent_platform tests evals
 docker compose --env-file .env.example config --quiet
 bash -n scripts/start.sh
-node --check ai_agent_platform/static/app.js
+npm --prefix frontend run build
+npm --prefix frontend test
 git diff --check
 ```
 
