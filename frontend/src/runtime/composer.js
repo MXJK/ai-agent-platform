@@ -29,7 +29,7 @@ export function saveUiPreferences() {
       JSON.stringify({
         view: state.currentView,
         sidebarHidden: document.body.classList.contains("sidebar-hidden"),
-        inspectorHidden: document.body.classList.contains("inspector-hidden"),
+        inspectorHidden: !state.inspectorPreferred,
         sidebarWidth: panelWidth("sidebar"),
         inspectorWidth: panelWidth("inspector"),
         rerankEnabled: state.rerankEnabled,
@@ -67,9 +67,10 @@ export function resizeComposerInput() {
   const input = $("chat-message-input");
   if (!input) return;
   input.style.height = "0px";
-  const nextHeight = Math.min(180, Math.max(44, input.scrollHeight));
+  const maxHeight = Math.max(80, Math.floor(window.innerHeight * 0.35));
+  const nextHeight = Math.min(maxHeight, Math.max(44, input.scrollHeight));
   input.style.height = `${nextHeight}px`;
-  input.style.overflowY = input.scrollHeight > 180 ? "auto" : "hidden";
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 export function setComposerValue(value, { save = true, focus = false } = {}) {

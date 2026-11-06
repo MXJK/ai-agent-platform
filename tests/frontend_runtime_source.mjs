@@ -12,7 +12,7 @@ const withoutImports = source => source
  * React components and real ES module wiring are covered by frontend/tests.
  */
 export function readRuntimeSource() {
-  const libraries = ['lib/store.ts', 'lib/resources.ts', 'lib/api.ts', 'lib/sse.ts', 'app/navigation.ts']
+  const libraries = ['lib/store.ts', 'lib/resources.ts', 'lib/api.ts', 'lib/sse.ts', 'app/navigation.ts', 'lib/inspector.ts']
     .map(file => withoutImports(stripTypeScriptTypes(readFileSync(new URL(file, root), 'utf8'), { mode: 'transform' })));
   return [...libraries, ...order.map(name => withoutImports(readFileSync(new URL(`runtime/${name}.js`, root), 'utf8')))].join('\n');
 }

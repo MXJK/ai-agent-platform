@@ -17,11 +17,11 @@ export function SessionList({ sessions, selectedId }: Props) {
 export function RecentSessions({ sessions, selectedId }: Props) {
   if (!sessions.length) return <div className="empty-state compact">暂无会话</div>;
   const groups = new Map<string, Session[]>();
-  for (const session of sessions) {
+  for (const session of sessions.slice(0, 5)) {
     const label = recentSessionGroup(session.updated_at);
     groups.set(label, [...(groups.get(label) || []), session]);
   }
-  return [...groups].map(([label, items]) => <section key={label} className="recent-session-group"><h3>{label}</h3>{items.map(session => <button key={session.id} type="button" className={`recent-session-item ${session.id === selectedId ? 'active' : ''}`} data-session-id={session.id}><strong>{session.title || '新会话'}</strong><small>{formatDate(session.updated_at)}</small></button>)}</section>);
+  return [...groups].map(([label, items]) => <section key={label} className="recent-session-group"><h3>{label}</h3>{items.map(session => <button key={session.id} type="button" className={`recent-session-item ${session.id === selectedId ? 'active' : ''}`} data-session-id={session.id} title={session.title || '新会话'}><strong>{session.title || '新会话'}</strong><small>{formatDate(session.updated_at)}</small></button>)}</section>);
 }
 
 export const renderSessionCards = (sessions: Session[], selectedId: string) => publishSlot('sessions', <SessionList sessions={sessions} selectedId={selectedId} />);

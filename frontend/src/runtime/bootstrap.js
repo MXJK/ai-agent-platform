@@ -1,3 +1,6 @@
+import { bindMemoryDraftProtection } from './memory.js';
+import { bindTheme } from '../app/theme';
+import { bindWorkbenchInteractions } from './workbench.js';
 import { state } from './state.js';
 import { $ } from './format.js';
 import { humanizeError, setTrace, showToast } from './feedback.js';
@@ -61,6 +64,9 @@ export async function init() {
   updateMCPTransportFields();
   resetSkillForm();
   bindEvents();
+  bindTheme();
+  bindWorkbenchInteractions();
+  bindMemoryDraftProtection();
   bindConversationFollow();
   resizeComposerInput();
   const requestedHashView = location.hash.replace("#", "");
@@ -87,8 +93,8 @@ export async function init() {
   renderRerankControl();
   updateComposer();
   switchView(initialView, !location.hash);
-  setSidebarVisible(!preferences.sidebarHidden);
-  setInspectorVisible(!preferences.inspectorHidden && window.innerWidth > 1120);
+  setSidebarVisible(window.innerWidth >= 900 && !preferences.sidebarHidden);
+  setInspectorVisible(!preferences.inspectorHidden && window.innerWidth >= 1200);
   setTrace([]);
   renderRequestLog();
   renderSessions();

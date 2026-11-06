@@ -14,10 +14,27 @@ import { appendChatMessage, failureRecoveryMarkup, setMessageDeliveryState } fro
 import { agentChangeSetId, agentRunConversationId, agentRunId, agentRunStatus, agentRunTrace, chatContentForRun, loadInlineChangeSet, renderInlineAgentCheckpoint, setChatStatusFromRun } from './checkpoints.js';
 import { renderAgentRun, renderInlineRunFooter, runAgent, watchRunUntilTerminal } from './runs.js';
 
-export function stopChat() {
-  if (state.chatController) {
-    state.chatController.abort();
-  }
+export async function stopChat() {
+  const runId = state.latestRunId;
+  const conversationId = state.conversationId;
+  const active = runId && state.latestRunConversationId === conversationId
+    && !FINAL_RUN_STATUSES.has(state.latestRunStatus);
+  if (!active) { state.chatController?.abort(); return; }
+  if (state.composerCancelBusy || state.currentSession?.archived_at) return;
+  state.composerCancelBusy = true;
+  updateComposerAvailability();
+  try {
+    const body = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: "POST", body: JSON.stringify({ message: "用户取消运行" }),
+    });
+    if (runId !== state.latestRunId || conversationId !== state.conversationId) return;
+    renderAgentRun(body);
+    const content = chatContentForRun(runId);
+    if (content) renderAgentChatResponse(content, body, performance.now() - (body.result?.metrics?.elapsed_ms || 0));
+    setChatStatusFromRun(body);
+    showToast("取消请求已发送", "warning");
+  } catch (error) { showToast(humanizeError(error), "error"); }
+  finally { state.composerCancelBusy = false; updateComposerAvailability(); }
 }
 
 export async function handleComposerRunControl() {

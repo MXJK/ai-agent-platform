@@ -6,7 +6,7 @@ export const SessionsView = memo(function SessionsView() {
  return (<ViewPanel id="sessions-view" aria-labelledby="sessions-title" view="sessions" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Conversation Memory"}</p>
+
               <h1 id="sessions-title">{"会话记录"}</h1>
               <p >{"选择会话，在本页查看历史消息与摘要；支持搜索、归档和恢复。"}</p>
             </div>

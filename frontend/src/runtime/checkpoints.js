@@ -1,3 +1,4 @@
+import { syncRunInspector, openInspectorChanges } from '../lib/inspector';
 import { listen, managedRequestAnimationFrame } from '../lib/resources';
 import { FINAL_RUN_STATUSES, SUSPENDED_RUN_STATUSES, TERMINAL_RUN_STATUSES } from './config.js';
 import { state } from './state.js';
@@ -385,6 +386,7 @@ export function renderInlineChangeReview(contentNode, changeSet) {
   const card = ensureInlineChangeReview(contentNode);
   if (!card) return;
   delete card.dataset.loading;
+  if (changeSet.run_id === state.latestRunId) syncRunInspector();
   const files = changeSetFileStats(changeSet);
   const ready = changeSet.status === "ready";
   const patchOnly = changeSet.apply_mode === "patch_only";
@@ -447,12 +449,12 @@ export function renderInlineChangeReview(contentNode, changeSet) {
       ${files.map((file) => `
         <div class="change-file-row" role="listitem">
           <span class="change-file-mark ${file.kind === "A" ? "added" : file.kind === "D" ? "deleted" : ""}" aria-hidden="true">${file.kind}</span>
-          <code title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</code>
+          <button class="change-file-open text-button" type="button" data-change-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</button>
           <span><b class="diff-addition">+${file.additions}</b><b class="diff-deletion">−${file.deletions}</b></span>
         </div>
       `).join("")}
     </div>
-    <details class="change-diff-details">
+    <details class="change-diff-details" ${changeSet.run_id === state.latestRunId ? "hidden" : ""}>
       <summary>查看完整 Diff</summary>
       <pre class="change-set-patch"><code>${escapeHtml(changeSet.patch || "没有可显示的补丁")}</code></pre>
     </details>
@@ -475,6 +477,12 @@ export function renderInlineChangeReview(contentNode, changeSet) {
       </div>
     </div>
   `;
+  card.querySelectorAll("[data-change-path]").forEach(button => {
+    listen(button, "click", () => {
+      if (changeSet.run_id === state.latestRunId) { state.currentChangeSet = changeSet; syncRunInspector(); openInspectorChanges(button.dataset.changePath); }
+      else { const details = card.querySelector(".change-diff-details"); if (details) details.open = true; }
+    });
+  });
   card.querySelectorAll("[data-inline-change-action]").forEach((button) => {
     listen(button, "click", () => {
       handleInlineChangeAction(contentNode, changeSet, button.dataset.inlineChangeAction, card);
@@ -501,7 +509,7 @@ export async function loadInlineChangeSet(runId, contentNode, { force = false } 
     return state.currentChangeSet;
   }
   const requestedConversationId = state.conversationId;
-  const generation = ++state.changeSetRequestGeneration;
+  const generation = state.changeSetRequestGeneration;
   const loadingCard = renderInlineChangeLoading(contentNode);
   try {
     const changeSet = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}/changes`);
@@ -511,7 +519,7 @@ export async function loadInlineChangeSet(runId, contentNode, { force = false } 
       || changeSet.conversation_id !== state.conversationId
       || !contentNode.isConnected
     ) return null;
-    state.currentChangeSet = changeSet;
+    if (runId === state.latestRunId) state.currentChangeSet = changeSet;
     renderInlineChangeReview(contentNode, changeSet);
     return changeSet;
   } catch (error) {
@@ -548,7 +556,8 @@ export async function handleInlineChangeAction(contentNode, changeSet, action, c
           : { change_set_id: changeSet.id }),
       },
     );
-    state.currentChangeSet = updated;
+    if (changeSet.conversation_id !== state.conversationId) return;
+    if (changeSet.run_id === state.latestRunId) state.currentChangeSet = updated;
     renderInlineChangeReview(contentNode, updated);
     showToast(
       action === "apply"

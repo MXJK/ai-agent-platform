@@ -1,3 +1,5 @@
+import { EditorDialog } from '../components/EditorDialog';
+import { SectionTabs } from '../components/SectionTabs';
 import { memo } from 'react';
 import { ReactSlot } from '../components/ReactSlot';
 import { ViewPanel } from '../components/ViewPanel';
@@ -6,24 +8,26 @@ export const ModelsView = memo(function ModelsView() {
  return (<ViewPanel id="models-view" aria-labelledby="models-title" view="models" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Global Model Registry"}</p>
+
               <h1 id="models-title">{"模型管理"}</h1>
-              <p >{"全局配置一次，所有本地 Workspace 共用。密钥写入系统钥匙串，不会回显。"}</p>
+              <p >{"全局配置一次，所有本地 Workspace 共用。密钥写入 Secret Store，配置只保存引用，不会回显。"}</p>
             </div>
             <button id="refresh-model-registry-btn" className="button secondary" type="button">{"刷新状态"}</button>
           </header>
 
-          <article className="surface">
+          <SectionTabs id="models" tabs={[
+            { label: 'Provider', content: <>          <article className="surface">
             <div className="surface-heading">
-              <div ><span className="step-kicker">{"01 · 连接"}</span><h2 >{"Provider 凭证"}</h2><p id="model-probe-policy-note">{"页面状态会自动刷新；周期探测默认关闭，单次测速会产生一次最短模型调用。"}</p></div>
+              <div ><h2 >{"Provider 凭证"}</h2><p id="model-probe-policy-note">{"页面状态会自动刷新；周期探测默认关闭，单次测速会产生一次最短模型调用。"}</p></div>
             </div>
             <div id="provider-connection-grid" className="provider-connection-grid"><ReactSlot name="providers" /></div>
           </article>
 
-          <div className="content-grid model-registry-grid">
-            <article className="surface">
+</> },
+            { label: '已注册模型', content: <>          <div className="content-grid model-registry-grid">
+<EditorDialog id="model-registration-editor" title="注册模型">            <article className="surface">
               <div className="surface-heading">
-                <div ><span className="step-kicker">{"02 · 注册"}</span><h2 >{"选择模型"}</h2><p >{"保存 Provider 后发现当前 API Key 可用的文本生成模型。"}</p></div>
+                <div ><h2 >{"选择模型"}</h2><p >{"保存 Provider 后发现当前 API Key 可用的文本生成模型。"}</p></div>
                 <button id="discover-provider-models-btn" className="text-button" type="button">{"重新发现"}</button>
               </div>
               <div className="model-registration-flow">
@@ -57,12 +61,14 @@ export const ModelsView = memo(function ModelsView() {
                 <p >{"模型输出统一使用普通 8,192 / thinking 与截断恢复 64,000 token；冷启动使用后端先验，产生真实请求后路由自动采用实测延迟。"}</p>
                 <button id="save-registered-model-btn" className="button primary" type="button">{"注册所选模型"}</button>
               </div>
-            </article>
+            </article></EditorDialog>
 
             <article className="surface">
-              <div className="surface-heading"><div ><span className="step-kicker">{"03 · 状态"}</span><h2 >{"已注册模型"}</h2></div><span id="registered-model-count" className="meta-badge">{"0"}</span></div>
+              <div className="surface-heading"><div ><h2 >{"已注册模型"}</h2></div><span id="registered-model-count" className="meta-badge">{"0"}</span></div>
               <div id="registered-model-list" className="registered-model-list"><ReactSlot name="models" /></div>
             </article>
           </div>
+</> },
+          ]} />
         </ViewPanel>);
 });

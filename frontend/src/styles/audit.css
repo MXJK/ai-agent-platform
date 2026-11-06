@@ -50,7 +50,7 @@
 .trace-run-browser-heading p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .trace-run-filters {
@@ -63,7 +63,7 @@
 
 .trace-run-filters label {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 680;
 }
 
@@ -71,7 +71,7 @@
 .trace-run-filters select {
   min-width: 0;
   min-height: 36px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .trace-run-list {
@@ -103,7 +103,7 @@
 }
 
 .trace-run-item.active {
-  border-color: rgba(143, 166, 255, 0.34);
+  border-color: color-mix(in srgb, var(--accent-text) 34%, transparent);
   background: var(--brand-pale);
   color: var(--ink);
 }
@@ -125,7 +125,7 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -134,13 +134,13 @@
   flex: 0 0 auto;
   min-height: 20px;
   padding: 2px 6px;
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .trace-run-item-node {
   overflow: hidden;
   color: var(--ink-soft);
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -150,7 +150,7 @@
   gap: 8px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .trace-run-item-meta span {
@@ -168,13 +168,13 @@
 
 .trace-run-empty strong {
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .trace-run-empty p {
   margin: 6px auto 0;
   max-width: 27ch;
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -192,7 +192,7 @@
 .trace-audit-skeleton span {
   height: 68px;
   border-radius: 9px;
-  background: linear-gradient(100deg, var(--surface-tint) 20%, var(--surface-raised) 42%, var(--surface-tint) 64%);
+  background: var(--bg-raised);
   background-size: 220% 100%;
   animation: trace-skeleton 1.4s ease-in-out infinite;
 }
@@ -232,7 +232,7 @@
 .trace-audit-empty p {
   max-width: 50ch;
   margin: 8px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.65;
 }
 
@@ -258,7 +258,7 @@
 .trace-audit-detail-header > div > p {
   margin: 7px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .trace-live-indicator {
@@ -270,7 +270,7 @@
   border-radius: 999px;
   background: var(--signal-soft);
   color: var(--signal);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 680;
   white-space: nowrap;
 }
@@ -298,7 +298,7 @@
 .trace-audit-meta dt {
   margin-bottom: 5px;
   color: var(--muted);
-  font-size: 8px;
+  font-size: 12px;
   font-weight: 680;
   text-transform: uppercase;
 }
@@ -308,7 +308,7 @@
   overflow: hidden;
   color: var(--ink-soft);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -319,7 +319,7 @@
   gap: 8px 20px;
   padding: 13px 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .trace-audit-counts span {
@@ -343,7 +343,7 @@
   padding: 14px 0 12px;
   border-top: 1px solid var(--line);
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .trace-audit-category-filter {
@@ -359,7 +359,7 @@
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .trace-audit-category-filter button:hover {
@@ -368,7 +368,7 @@
 }
 
 .trace-audit-category-filter button.active {
-  border-color: rgba(143, 166, 255, 0.4);
+  border-color: color-mix(in srgb, var(--accent-text) 40%, transparent);
   background: var(--brand-soft);
   color: var(--brand-strong);
 }
@@ -434,7 +434,7 @@
   display: block;
   margin-bottom: 4px;
   color: var(--muted);
-  font-size: 8px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -447,7 +447,7 @@
 .trace-audit-sequence {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -455,7 +455,7 @@
   margin: 6px 0 0;
   overflow-wrap: anywhere;
   color: var(--ink-soft);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -471,7 +471,7 @@
   background: var(--surface-tint);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .trace-audit-payload {
@@ -485,7 +485,7 @@
   padding: 8px 10px;
   color: var(--brand-strong);
   cursor: pointer;
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 650;
 }
 
@@ -496,7 +496,7 @@
   overflow: auto;
   border-top: 1px solid var(--line);
   color: var(--code-ink);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -505,7 +505,7 @@
 .trace-audit-placeholder {
   padding: 42px 12px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   text-align: center;
 }
 

@@ -5,9 +5,9 @@ export const ChatView = memo(function ChatView() {
  return (<ViewPanel id="chat-view" aria-labelledby="chat-title" view="chat" className="view-panel chat-workbench">
           <header id="chat-welcome-header" className="view-header chat-welcome-header">
             <div >
-              <p className="eyebrow">{"Agent Command Deck"}</p>
-              <h1 id="chat-title">{"把任务交给 Agent，"}<br  />{"每一步仍由你掌控。"}</h1>
-              <p >{"从问题、计划到执行与验证，全部保留在同一个可追溯会话中。"}</p>
+
+              <h1 id="chat-title">{"新建任务"}</h1>
+              <p >{"选择工作区，描述你要完成的任务。"}</p>
             </div>
           </header>
 
@@ -23,24 +23,13 @@ export const ChatView = memo(function ChatView() {
               <span id="chat-meta" className="status-pill neutral" role="status" aria-live="polite">
                 <span className="status-dot" aria-hidden="true"></span><span >{"等待输入"}</span>
               </span>
-              <button id="rename-current-session-btn" className="icon-button small" type="button" aria-label="重命名当前会话" title="重命名当前会话">
-                <svg className="app-icon" aria-hidden="true"><use href="#icon-edit"></use></svg>
-              </button>
+
             </div>
           </header>
 
           <div id="chat-output" className="conversation" aria-label="对话内容" tabIndex={0}>
             <div className="welcome-state">
-              <div className="welcome-signal" aria-hidden="true">
-                <span className="active"><i ></i><b >{"ASK"}</b></span>
-                <span ><i ></i><b >{"PLAN"}</b></span>
-                <span ><i ></i><b >{"ACT"}</b></span>
-                <span ><i ></i><b >{"VERIFY"}</b></span>
-              </div>
-              <div className="welcome-content">
-                <div className="welcome-mark" aria-hidden="true"><strong >{"AGENT"}</strong><span >{"READY"}</span></div>
-                <h2 >{"从一个具体问题开始"}</h2>
-                <p >{"由 Cogent 理解上下文并完成任务；需要确认的操作会在执行前暂停。"}</p>
+              <div className="welcome-content"><h2>从一个具体问题开始</h2><p>查看项目、修改代码或排查问题。需要确认时，Agent 会在这里等待。</p>
                 <div className="prompt-grid" aria-label="推荐问题">
                   <button type="button" className="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链">
                     <span >{"理解项目"}</span><strong >{"解释核心架构和请求调用链"}</strong>
@@ -64,11 +53,7 @@ export const ChatView = memo(function ChatView() {
               <button id="restore-current-session-btn" className="text-button" type="button">{"恢复并继续"}</button>
             </div>
             <div id="composer-scope-strip" className="composer-scope-strip" aria-label="当前执行上下文">
-              <button id="composer-workspace-btn" className="scope-chip workspace-scope" type="button">
-                <span id="composer-workspace-status-dot" className="workspace-status-dot is-missing" aria-hidden="true"></span>
-                <span className="scope-chip-copy"><small >{"Workspace"}</small><strong id="composer-workspace-label">{"未选择工作区"}</strong></span>
-                <em id="composer-workspace-role">{"选择"}</em>
-              </button>
+
               <button id="composer-model-btn" className="scope-chip model-scope" type="button">
                 <svg className="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg>
                 <span className="scope-chip-copy"><small >{"Model"}</small><strong id="composer-model-label">{"默认配置"}</strong></span>
@@ -102,8 +87,19 @@ export const ChatView = memo(function ChatView() {
                 <div id="slash-command-options" className="slash-command-options"></div>
                 <p id="slash-command-status" className="slash-command-status" role="status" aria-live="polite"></p>
               </div>
+              <label className="sr-only" htmlFor="chat-message-input">{"输入消息"}</label>
+              <textarea id="chat-message-input" rows={2} maxLength={8000} placeholder="输入消息，键入 / 使用 Skill 或 MCP，Enter 发送…" aria-autocomplete="list" aria-controls="slash-command-menu" aria-expanded="false"></textarea>
               <div className="composer-mode-bar">
-                <div className="composer-tools">
+                <div className="composer-tools">                      <label id="approval-mode-control" className="composer-mode-control approval-mode-control" htmlFor="permission-mode-input">
+                        <span >{"权限模式"}</span>
+                        <select id="permission-mode-input" aria-label="Cogent 权限模式">
+                          <option value="default">{"逐次确认"}</option>
+                          <option value="acceptEdits">{"接受文件编辑"}</option>
+                          <option value="plan">{"只读规划"}</option>
+                          <option value="bypassPermissions">{"跳过普通确认"}</option>
+                        </select>
+                        <em id="permission-mode-hint" className="approval-mode-hint">{"只读自动执行；写入和命令逐次确认"}</em>
+                      </label>
                   <details id="composer-config" className="composer-config">
                     <summary >
                       <svg className="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>{"\n                      运行配置\n                    "}</summary>
@@ -137,23 +133,12 @@ export const ChatView = memo(function ChatView() {
                         <input id="model-fallback-toggle" type="checkbox" defaultChecked={true} />
                         <span >{"不可用时 fallback"}</span>
                       </label>
-                      <label id="approval-mode-control" className="composer-mode-control approval-mode-control" htmlFor="permission-mode-input">
-                        <span >{"权限模式"}</span>
-                        <select id="permission-mode-input" aria-label="Cogent 权限模式">
-                          <option value="default">{"逐次确认"}</option>
-                          <option value="acceptEdits">{"接受文件编辑"}</option>
-                          <option value="plan">{"只读规划"}</option>
-                          <option value="bypassPermissions">{"跳过普通确认"}</option>
-                        </select>
-                        <em id="permission-mode-hint" className="approval-mode-hint">{"只读自动执行；写入和命令逐次确认"}</em>
-                      </label>
+
                     </div>
                   </details>
                 </div>
                 <span id="composer-mode-description">{"Cogent 统一处理对话和代码任务；权限边界始终生效。"}</span>
               </div>
-              <label className="sr-only" htmlFor="chat-message-input">{"输入消息"}</label>
-              <textarea id="chat-message-input" rows={2} maxLength={8000} placeholder="输入消息，键入 / 使用 Skill 或 MCP，Enter 发送…" aria-autocomplete="list" aria-controls="slash-command-menu" aria-expanded="false"></textarea>
               <div className="composer-footer">
                 <div className="composer-hints">
                   <span id="composer-context">{"默认模型"}</span>
@@ -162,7 +147,7 @@ export const ChatView = memo(function ChatView() {
                 </div>
                 <div className="button-row">
                   <button id="stop-chat-btn" className="button ghost hidden" type="button">
-                    <svg className="app-icon" aria-hidden="true"><use href="#icon-stop"></use></svg>{"\n                    停止\n                  "}</button>
+                    <svg className="app-icon" aria-hidden="true"><use href="#icon-stop"></use></svg>{"取消运行"}</button>
                   <button id="agent-run-control-btn" className="icon-button composer-run-control" type="button" aria-label="暂停 Agent" title="暂停 Agent" hidden={true}>
                     <svg className="app-icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
                   </button>

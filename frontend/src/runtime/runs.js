@@ -1,3 +1,4 @@
+import { syncRunInspector } from '../lib/inspector';
 import { managedSetTimeout } from '../lib/resources';
 import { API_BASE, FINAL_RUN_STATUSES, TERMINAL_RUN_STATUSES } from './config.js';
 import { state } from './state.js';
@@ -322,10 +323,13 @@ export async function restoreSelectedCheckpoint(mode) {
 
 export function renderAgentRun(body) {
   const result = body.result || {};
-  state.latestRunId = body.run_id || result.run_id || "";
+  const nextRunId = body.run_id || result.run_id || "";
+  if (state.latestRunId !== nextRunId) state.currentChangeSet = null;
+  state.latestRunId = nextRunId;
   state.latestRunStatus = body.status || result.status || "";
   state.latestRunConversationId = agentRunConversationId(body);
   state.latestRunBody = body;
+  syncRunInspector();
   setTrace(body.trace || result.trace || []);
   setRaw(body);
   renderOverview();
@@ -364,6 +368,8 @@ export async function refreshEvents(
   const isCurrentRun = runId === state.latestRunId
     && conversationId === state.conversationId;
   if (render && isCurrentRun) {
+    state.latestRunBody = { ...(state.latestRunBody || {}), stream_events: body.events || [] };
+    syncRunInspector();
     setTrace(agentProgressBodyFromEvents(body.events || [], runId).trace);
     renderOverview();
   }
@@ -424,6 +430,7 @@ export function renderStreamedAgentProgress(events, runId = state.latestRunId) {
     ...body,
     conversation_id: state.latestRunConversationId || state.conversationId,
   };
+  syncRunInspector();
   setTrace(body.trace);
   renderOverview();
   updateComposerAvailability();

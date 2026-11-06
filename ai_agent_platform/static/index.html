@@ -4,10 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Cogent — 面向代码、知识库与智能工作流的统一工作台" />
-    <meta name="theme-color" content="#08131f" />
+    <meta name="theme-color" content="#19191c" />
+    <script>
+      (() => { let theme = "system"; try { theme = localStorage.getItem("cogent.appearance") || theme; } catch {} const dark = theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches); document.documentElement.dataset.theme = dark ? "dark" : "light"; document.documentElement.style.colorScheme = dark ? "dark" : "light"; })();
+    </script>
     <title>Cogent</title>
-    <script type="module" crossorigin src="/static/assets/index-BHED_1la.js"></script>
-    <link rel="stylesheet" crossorigin href="/static/assets/index-Ms4AUZyQ.css">
+    <script type="module" crossorigin src="/static/assets/index-CAWmz5K2.js"></script>
+    <link rel="stylesheet" crossorigin href="/static/assets/index-CcggxNPC.css">
   </head>
   <body>
     <div id="root"></div>

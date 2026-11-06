@@ -89,6 +89,11 @@ export function switchView(viewName, updateHash = true) {
     return;
   }
   state.currentView = normalizedView;
+  document.body.dataset.activeView = normalizedView;
+  const labels = { chat: '对话', sessions: '会话记录', rag: '知识库', memory: '记忆', models: '模型', tools: '工具', evals: '评测', 'trace-audit': '审计', activity: '运行中心' };
+  $("header-view-label").textContent = labels[normalizedView];
+  setInspectorVisible(state.inspectorPreferred && window.innerWidth >= 1200, { persist: false });
+  if (window.innerWidth < 900) setSidebarVisible(false);
   if (normalizedView !== "trace-audit") clearAuditPoll();
   syncModelRegistryRefresh();
   setMobileMoreOpen(false);
@@ -130,7 +135,12 @@ export function switchView(viewName, updateHash = true) {
 }
 
 export function syncInspectorPresentation(visible) {
-  const drawer = window.innerWidth <= 1120;
+  const drawer = window.innerWidth < 1200;
+  const entering = visible && drawer && !document.body.classList.contains("inspector-drawer-open");
+  const panel = $("inspector-panel");
+  if (visible && drawer) { panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); }
+  else { panel.removeAttribute("role"); panel.removeAttribute("aria-modal"); }
+  if (entering) managedRequestAnimationFrame(() => $("close-inspector-btn").focus());
   $("inspector-backdrop").hidden = !visible || !drawer;
   document.body.classList.toggle("inspector-drawer-open", visible && drawer);
 }
@@ -138,7 +148,12 @@ export function syncInspectorPresentation(visible) {
 export function clampPanelWidth(name, value) {
   const config = PANEL_WIDTHS[name];
   const numeric = Number(value);
-  return Math.min(config.max, Math.max(config.min, Number.isFinite(numeric) ? numeric : config.defaultValue));
+  let max = config.max;
+  if (name === "inspector" && window.innerWidth >= 1200) {
+    const sidebar = document.body.classList.contains("sidebar-hidden") ? 0 : panelWidth("sidebar");
+    max = Math.min(max, window.innerWidth - sidebar - 560);
+  }
+  return Math.min(max, Math.max(config.min, Number.isFinite(numeric) ? numeric : config.defaultValue));
 }
 
 export function panelWidth(name) {
@@ -152,6 +167,7 @@ export function setPanelWidth(name, value, { persist = false } = {}) {
   const config = PANEL_WIDTHS[name];
   document.documentElement.style.setProperty(config.cssVariable, `${width}px`);
   $(`${name}-resizer`).setAttribute("aria-valuenow", String(width));
+  if (name === "sidebar" && window.innerWidth >= 1200) setPanelWidth("inspector", panelWidth("inspector"));
   if (persist) saveUiPreferences();
   return width;
 }
@@ -163,7 +179,14 @@ export function applyPanelPreferences(preferences) {
 
 export function syncSidebarPresentation() {
   const panel = $("primary-sidebar");
-  const hidden = document.body.classList.contains("sidebar-hidden") && window.innerWidth > 900;
+  const hidden = document.body.classList.contains("sidebar-hidden");
+  const drawer = window.innerWidth < 900 && !hidden;
+  $("sidebar-backdrop").hidden = !drawer;
+  const entering = drawer && !document.body.classList.contains("sidebar-drawer-open");
+  document.body.classList.toggle("sidebar-drawer-open", drawer);
+  if (drawer) { panel.setAttribute("role", "dialog"); panel.setAttribute("aria-modal", "true"); }
+  else { panel.removeAttribute("role"); panel.removeAttribute("aria-modal"); }
+  if (entering) managedRequestAnimationFrame(() => $("create-session-btn").focus());
   panel.setAttribute("aria-hidden", String(hidden));
   panel.inert = hidden;
 }
@@ -177,26 +200,32 @@ export function setSidebarVisible(visible) {
   saveUiPreferences();
 }
 
-export function setInspectorVisible(visible) {
+export function setInspectorVisible(visible, { persist = true } = {}) {
+  if (persist) state.inspectorPreferred = visible;
+  visible = visible && state.currentView === "chat";
   const panel = $("inspector-panel");
   document.body.classList.toggle("inspector-hidden", !visible);
   $("toggle-inspector-btn").setAttribute("aria-expanded", String(visible));
   $("toggle-inspector-btn").setAttribute(
     "aria-label",
-    visible ? "隐藏最近会话" : "显示最近会话",
+    visible ? "收起详情" : "展开详情",
   );
-  $("toggle-inspector-btn").title = visible ? "隐藏最近会话" : "显示最近会话";
+  $("toggle-inspector-btn").title = visible ? "收起详情" : "展开详情";
+  $("inspector-toggle-label").textContent = visible ? "收起详情" : "展开详情";
+  $("toggle-inspector-btn").hidden = state.currentView !== "chat";
   panel.setAttribute("aria-hidden", String(!visible));
   panel.inert = !visible;
+  const restoreFocus = !visible && panel.contains(document.activeElement);
   panel.hidden = !visible;
+  if (restoreFocus) $("toggle-inspector-btn").focus();
   syncInspectorPresentation(visible);
-  saveUiPreferences();
+  if (persist) saveUiPreferences();
 }
 
 export function bindPanelResizer(name) {
   const handle = $(`${name}-resizer`);
   const config = PANEL_WIDTHS[name];
-  const supportsResize = () => window.innerWidth > (name === "sidebar" ? 900 : 1120);
+  const supportsResize = () => window.innerWidth > (name === "sidebar" ? 899 : 1199);
   const widthFromPointer = (clientX) => name === "sidebar" ? clientX : window.innerWidth - clientX;
 
   listen(handle, "pointerdown", (event) => {

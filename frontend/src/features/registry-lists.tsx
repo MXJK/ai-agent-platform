@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { EditorDialog } from '../components/EditorDialog';
 import { publishSlot } from '../components/ReactSlot';
 import { EmptyState, Status } from '../components/Status';
 import type { Skill, McpServer, ProviderConnection, RegisteredModel } from './registry-types';
@@ -18,7 +19,7 @@ export function SkillList({ skills }: { skills: Skill[] }) {
     <div className="mcp-server-meta"><span>/{skill.command?.name || skill.name}</span><span>{skill.source}</span><span>{skill.editable ? '全局用户目录' : '系统内置'}</span></div>
     <div className="mcp-tool-chips">{skill.required_tools?.length ? skill.required_tools.map(name => <code key={name}>{name}</code>) : <small>不声明额外工具</small>}</div>
     <div className="mcp-server-actions">{skill.editable ? <>
-      <button className="button ghost" type="button" data-skill-action="edit" onClick={event => void handleSkillAction(event.currentTarget)}>编辑</button>
+      <button className="button ghost" type="button" data-skill-action="edit" onClick={event => { (document.getElementById("skills-editor") as HTMLDialogElement).showModal(); void handleSkillAction(event.currentTarget); }}>编辑</button>
       <button className="button ghost" type="button" data-skill-action="toggle" onClick={event => void handleSkillAction(event.currentTarget)}>{skill.enabled ? '停用' : '启用'}</button>
       <button className="text-button danger" type="button" data-skill-action="delete" onClick={event => void handleSkillAction(event.currentTarget)}>删除</button>
     </> : <span className="meta-badge">只读</span>}</div>
@@ -26,7 +27,7 @@ export function SkillList({ skills }: { skills: Skill[] }) {
 }
 
 export function McpList({ servers, runtimeEnabled }: { servers: McpServer[]; runtimeEnabled: boolean }) {
-  if (!servers.length) return <EmptyState>尚未注册 MCP Server。填写左侧配置即可开始发现工具。</EmptyState>;
+  if (!servers.length) return <EmptyState>尚未注册 MCP Server。打开“添加 / 编辑 MCP Server”即可配置并发现工具。</EmptyState>;
   return servers.map(server => {
     const tools = server.registered_tools || [];
     return <article key={server.name} className={`mcp-server-card ${mcpCardState(server.state)}`} data-mcp-server={server.name}>
@@ -37,7 +38,7 @@ export function McpList({ servers, runtimeEnabled }: { servers: McpServer[]; run
       <div className="mcp-server-actions">{(['edit', 'test', 'toggle', 'delete'] as const).map(action => <button key={action} type="button" data-mcp-action={action}
         className={action === 'delete' ? 'text-button danger' : 'button ghost'}
         disabled={action === 'test' && (!runtimeEnabled || !server.enabled)}
-        onClick={event => void handleMCPServerAction(event.currentTarget)}>
+        onClick={event => { if (action === "edit") (document.getElementById("mcp-editor") as HTMLDialogElement).showModal(); void handleMCPServerAction(event.currentTarget); }}>
         {{ edit: '编辑', test: '测试 / 刷新', toggle: server.enabled ? '停用' : '启用', delete: '删除' }[action]}
       </button>)}</div>
     </article>;
@@ -51,13 +52,13 @@ function ProviderCard({ provider, displayName, connection }: { provider: string;
   const [enabledDraft, setEnabledDraft] = useState<boolean | null>(null);
   return <article className="provider-card" data-provider={provider}>
     <div className="provider-card-heading"><div><strong>{displayName}</strong><small>{provider}</small></div><Status tone={modelStatusClass(status)}>{modelStatusLabel(status)}</Status></div>
-    <label>API Key<input data-provider-key type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={configured ? '已安全保存；输入新值可替换' : '输入 API Key'} /></label>
+    <EditorDialog id={`provider-editor-${provider}`} title={`配置 ${displayName}`}><label>API Key<input data-provider-key type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={configured ? '已安全保存；输入新值可替换' : '输入 API Key'} /></label>
     <label className="check-field"><input data-provider-enabled type="checkbox" checked={enabledDraft ?? connection?.enabled !== false} onChange={event => setEnabledDraft(event.target.checked)} /> 启用连接</label>
     <div className="button-row"><button className="button secondary" type="button" data-provider-action="save" onClick={async event => {
       // Only clear a credential draft after a successful save, never on telemetry refresh.
       if (await handleProviderAction(event.currentTarget)) { setApiKey(''); setEnabledDraft(null); }
     }}>{configured ? '更新配置' : '保存配置'}</button>
-      <button className="button ghost" type="button" data-provider-action="test" disabled={!connection} onClick={event => void handleProviderAction(event.currentTarget)}>测试连接</button></div>
+      <button className="button ghost" type="button" data-provider-action="test" disabled={!connection} onClick={event => void handleProviderAction(event.currentTarget)}>测试连接</button></div></EditorDialog>
     <p>{connection?.credential_error || (configured ? '凭证已安全保存' : '尚未配置凭证，请重新输入 API Key')} · {connection?.model_count || 0} 个模型</p>
   </article>;
 }
@@ -67,7 +68,7 @@ export function ProviderList({ connections }: { connections: ProviderConnection[
 }
 
 export function ModelList({ models }: { models: RegisteredModel[] }) {
-  if (!models.length) return <EmptyState>保存 Provider 后，在左侧注册第一个模型。</EmptyState>;
+  if (!models.length) return <EmptyState>保存 Provider 后，打开“注册模型”添加第一个模型。</EmptyState>;
   return models.map(model => {
     const telemetry = model.telemetry || {};
     const probe = telemetry.probe || {};

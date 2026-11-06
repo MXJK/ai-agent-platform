@@ -5,7 +5,7 @@ export const EvaluationsView = memo(function EvaluationsView() {
  return (<ViewPanel id="evals-view" aria-labelledby="evals-title" view="evals" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Trajectory Evaluation"}</p>
+
               <h1 id="evals-title">{"评测"}</h1>
               <p >{"按约束判定 Agent 的执行过程，并程序化校验引用真实性。fake 免费，真实模型按 Token 计费。"}</p>
             </div>

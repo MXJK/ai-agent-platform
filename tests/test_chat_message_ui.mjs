@@ -434,6 +434,7 @@ test("session restore hydrates historical Runs and tolerates a missing Run", asy
         result: { answer: "历史回答", metrics: { elapsed_ms: 10 }, trace: [] },
       };
     }
+    if (path === "/agent/runs/run_latest/events") return { events: [] };
     if (path === "/agent/runs/run_missing") throw new Error("not found");
     throw new Error(`Unexpected request: ${path}`);
   });
@@ -460,6 +461,7 @@ test("session restore hydrates historical Runs and tolerates a missing Run", asy
   ])`, context);
 
   assert.equal(result.run_id, "run_latest");
+  assert.ok(events.includes("request:/agent/runs/run_latest/events"));
   assert.ok(events.includes("request:/agent/runs/run_old"));
   assert.ok(events.includes("request:/agent/runs/run_missing"));
   assert.ok(events.includes("hydrate:old:run_old"));

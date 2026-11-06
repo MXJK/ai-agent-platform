@@ -43,8 +43,18 @@ the Python wheel includes `static/assets/*`. Do not edit generated assets by han
 - `lib/resources.ts` owns listener/timer cleanup; `app/lifecycle.ts` connects the
   committed shell to controller startup and disposal. No document-global boot
   script or production `/static/app.js` compatibility copy is maintained.
-- `styles/workbench.css` imports the existing tokens and feature styles in their
-  original cascade order. The migration preserves the visual design.
+- `styles/tokens.css` defines dark/light semantic colors; domain styles map to those tokens.
+  `styles/compact.css` is loaded last and owns the confirmed split-workbench layout,
+  density and responsive overrides. `design.md` is the approved specification.
+- `app/theme.tsx` and the pre-paint HTML script use `cogent.appearance` for local-only
+  appearance. System changes are live in system mode; explicit choices override them.
+- `lib/inspector.ts` publishes current-session/run snapshots to `RunInspector` without
+  a separate fetch or polling loop. Terminal run restoration fetches its event history
+  once; current Trace renders the latest 100 events, while full audit keeps its existing
+  incremental cursor and page semantics. Session selection clears the projection.
+- `SectionTabs` and `EditorDialog` keep domain islands mounted. Closing an editor hides
+  it without discarding inputs. React actions must call controller-owned ChangeSet
+  nodes, never pass React-owned nodes to imperative mutation helpers.
 
 ## Verification
 
@@ -61,3 +71,5 @@ state and events into typed hooks/components, add user-behavior tests, and remov
 the corresponding DOM renderer and native listeners in the same change.
 
 Local migration results and remaining limits: [verification record](../docs/verification/frontend-react-2026-11-04.md).
+
+Current layout and verification: [2026-11-06 redesign](../docs/verification/frontend-redesign-2026-11-06.md).

@@ -40,5 +40,5 @@ it('boots real controller modules against the React DOM and wires navigation onc
   fireEvent.click(modelButton);
   await waitFor(() => expect(container.querySelector('#models-view')?.hasAttribute('hidden')).toBe(false));
   await waitFor(() => expect(container.querySelectorAll('.provider-card').length).toBe(7));
-  expect(screen.getByText('保存 Provider 后，在左侧注册第一个模型。')).toBeTruthy();
+  expect(screen.getByText('保存 Provider 后，打开“注册模型”添加第一个模型。')).toBeTruthy();
 });

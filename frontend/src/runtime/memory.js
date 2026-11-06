@@ -1,8 +1,39 @@
+import { listen } from '../lib/resources';
 import { state } from './state.js';
 import { $, escapeHtml, formatDate, numberValue } from './format.js';
 import { humanizeError, showToast, truncate } from './feedback.js';
 import { currentWorkspace, workspaceIsReady } from './context.js';
 import { fetchJson } from './http.js';
+
+// Draft baselines never contain credentials and live only in memory.
+const memoryDraftBaselines = new Map();
+function memoryEditorValue(scope) {
+  const prefix = scope === 'user' ? 'user-memory' : 'memory';
+  return ['name', 'kind', 'title', 'content'].map(field => document.getElementById(`${prefix}-${field}-input`)?.value || '');
+}
+export function rememberMemoryDraft(scope) { memoryDraftBaselines.set(scope, JSON.stringify(memoryEditorValue(scope))); }
+export function memoryDraftDirty(scope) {
+  const values = memoryEditorValue(scope);
+  const baseline = memoryDraftBaselines.get(scope);
+  return baseline ? JSON.stringify(values) !== baseline : Boolean(values[0] || values[2] || values[3]);
+}
+function allowMemoryReplacement(scope) {
+  return !memoryDraftDirty(scope) || window.confirm('当前记忆有未保存修改，放弃修改并切换主题？');
+}
+export function bindMemoryDraftProtection() {
+  for (const scope of ['project', 'user']) {
+    rememberMemoryDraft(scope);
+    const prefix = scope === 'user' ? 'user-memory' : 'memory';
+    for (const field of ['name', 'kind', 'title', 'content']) {
+      listen(document.getElementById(`${prefix}-${field}-input`), 'input', () => {
+        document.getElementById(`${prefix}-selection-label`).textContent = memoryDraftDirty(scope) ? '未保存' : '已保存';
+      });
+    }
+  }
+  listen(window, 'beforeunload', event => {
+    if (memoryDraftDirty('project') || memoryDraftDirty('user')) { event.preventDefault(); event.returnValue = ''; }
+  });
+}
 
 export function activeWorkspaceId() {
   return state.activeWorkspaceId;
@@ -159,6 +190,7 @@ export function fileMemoryPayload(scope) {
 }
 
 export function clearMemorySelection() {
+  if (!allowMemoryReplacement("project")) return;
   state.selectedMemoryId = "";
   $("memory-name-input").disabled = false;
   $("memory-name-input").value = "";
@@ -172,11 +204,13 @@ export function clearMemorySelection() {
   $("create-memory-btn").hidden = false;
   $("update-memory-btn").disabled = true;
   $("delete-memory-btn").disabled = true;
+  rememberMemoryDraft("project");
   renderProjectMemories();
 }
 
 export function selectProjectMemory(memory) {
   if (!memory) return clearMemorySelection();
+  if (!allowMemoryReplacement("project")) return;
   state.selectedMemoryId = memory.id;
   $("memory-name-input").value = memory.name;
   $("memory-name-input").disabled = true;
@@ -191,6 +225,7 @@ export function selectProjectMemory(memory) {
   $("update-memory-btn").disabled = false;
   $("delete-memory-btn").disabled = false;
   $("memory-evidence").innerHTML = `<div class="memory-evidence-summary"><span><small>文件</small><strong>${escapeHtml(memory.id)}</strong></span><span><small>SHA-256</small><strong title="${escapeHtml(memory.sha256)}">${escapeHtml(memory.sha256.slice(0, 12))}</strong></span><span><small>修改时间</small><strong>${escapeHtml(formatDate(memory.mtime_ms))}</strong></span></div>`;
+  rememberMemoryDraft("project");
   renderProjectMemories();
 }
 
@@ -230,7 +265,7 @@ export async function refreshProjectMemory() {
   }
   const generation = ++state.projectMemoryRequestGeneration;
   $("memory-list").setAttribute("aria-busy", "true");
-  $("memory-list").innerHTML = memoryLoadingMarkup();
+  if (!state.projectMemories.length) $("memory-list").innerHTML = memoryLoadingMarkup();
   try {
     const workspace = encodeURIComponent(requireActiveWorkspace());
     const [files, jobs] = await Promise.all([
@@ -242,7 +277,7 @@ export async function refreshProjectMemory() {
     if (!state.projectMemories.some((item) => item.id === state.selectedMemoryId)) state.selectedMemoryId = "";
     renderProjectMemories();
     renderMemoryJobs(jobs.jobs || []);
-    if (!state.selectedMemoryId && state.projectMemories.length) selectProjectMemory(state.projectMemories[0]);
+    if (!memoryDraftDirty("project") && !state.selectedMemoryId && state.projectMemories.length) selectProjectMemory(state.projectMemories[0]);
     await loadMemoryIndex("project", "memory-evidence");
     setMemoryRuntimeStatus("项目文件记忆已连接");
   } catch (error) {
@@ -269,6 +304,7 @@ export async function saveFileMemory(scope, creating) {
       method: creating ? "POST" : "PUT",
       body: JSON.stringify(payload),
     });
+    rememberMemoryDraft(scope);
     if (scope === "user") {
       await refreshUserMemory();
       selectUserMemory(saved);
@@ -290,6 +326,7 @@ export async function forgetProjectMemory() {
   if (!current || !window.confirm(`删除项目主题 ${current.name}？会话证据仍保留。`)) return;
   try {
     await fetchJson("/memory/files", { method: "DELETE", body: JSON.stringify({ workspace_id: requireActiveWorkspace(), scope: "project", name: current.name, expected_hash: current.sha256 }) });
+    rememberMemoryDraft("project");
     clearMemorySelection();
     await refreshProjectMemory();
     showToast("项目主题已删除");
@@ -297,6 +334,7 @@ export async function forgetProjectMemory() {
 }
 
 export function clearUserMemorySelection() {
+  if (!allowMemoryReplacement("user")) return;
   state.selectedUserMemoryId = "";
   $("user-memory-name-input").disabled = false;
   $("user-memory-name-input").value = "";
@@ -310,11 +348,13 @@ export function clearUserMemorySelection() {
   $("create-user-memory-btn").hidden = false;
   $("update-user-memory-btn").disabled = true;
   $("delete-user-memory-btn").disabled = true;
+  rememberMemoryDraft("user");
   renderUserMemories();
 }
 
 export function selectUserMemory(memory) {
   if (!memory) return clearUserMemorySelection();
+  if (!allowMemoryReplacement("user")) return;
   state.selectedUserMemoryId = memory.id;
   $("user-memory-name-input").value = memory.name;
   $("user-memory-name-input").disabled = true;
@@ -329,6 +369,7 @@ export function selectUserMemory(memory) {
   $("update-user-memory-btn").disabled = false;
   $("delete-user-memory-btn").disabled = false;
   $("user-memory-evidence").innerHTML = `<div class="memory-evidence-summary"><span><small>文件</small><strong>${escapeHtml(memory.id)}</strong></span><span><small>SHA-256</small><strong title="${escapeHtml(memory.sha256)}">${escapeHtml(memory.sha256.slice(0, 12))}</strong></span></div>`;
+  rememberMemoryDraft("user");
   renderUserMemories();
 }
 
@@ -345,7 +386,7 @@ export function renderUserMemories() {
 export async function refreshUserMemory() {
   if (!workspaceIsReady(currentWorkspace())) return;
   const generation = ++state.userMemoryRequestGeneration;
-  $("user-memory-list").innerHTML = memoryLoadingMarkup();
+  if (!state.userMemories.length) $("user-memory-list").innerHTML = memoryLoadingMarkup();
   $("user-memory-list").setAttribute("aria-busy", "true");
   try {
     const workspace = encodeURIComponent(requireActiveWorkspace());
@@ -354,7 +395,7 @@ export async function refreshUserMemory() {
     state.userMemories = files.files || [];
     if (!state.userMemories.some((item) => item.id === state.selectedUserMemoryId)) state.selectedUserMemoryId = "";
     renderUserMemories();
-    if (!state.selectedUserMemoryId && state.userMemories.length) selectUserMemory(state.userMemories[0]);
+    if (!memoryDraftDirty("user") && !state.selectedUserMemoryId && state.userMemories.length) selectUserMemory(state.userMemories[0]);
     await loadMemoryIndex("user", "user-memory-evidence");
     setMemoryRuntimeStatus("用户文件记忆已连接");
   } catch (error) {
@@ -372,6 +413,7 @@ export async function forgetUserMemory() {
   if (!current || !window.confirm(`删除用户主题 ${current.name}？`)) return;
   try {
     await fetchJson("/memory/files", { method: "DELETE", body: JSON.stringify({ workspace_id: requireActiveWorkspace(), scope: "user", name: current.name, expected_hash: current.sha256 }) });
+    rememberMemoryDraft("user");
     clearUserMemorySelection();
     await refreshUserMemory();
     showToast("用户主题已删除");

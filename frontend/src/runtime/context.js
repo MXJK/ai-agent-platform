@@ -1,3 +1,4 @@
+import { syncRunInspector } from '../lib/inspector';
 import { listen } from '../lib/resources';
 import { runtimeRefs } from './config.js';
 import { state } from './state.js';
@@ -184,12 +185,14 @@ export function updateContextSummary() {
   $("composer-context").textContent = modelLabel;
   $("header-session-id").textContent = state.currentSession?.title
     || state.conversationId
-    || "尚未创建";
+    || "新会话";
+  $("header-session-id").title = $("header-session-id").textContent;
   $("active-session-title").textContent = state.currentSession?.title
     || state.conversationId
     || "当前会话";
   $("rename-current-session-btn").disabled = !state.currentSession?.id;
   updateComposerScopeSummary();
+  syncRunInspector();
 }
 
 export function currentWorkspace() {
@@ -268,6 +271,12 @@ export function updateComposerAvailability() {
   $("chat-message-input").disabled = archived;
   $("permission-mode-input").disabled = archived || streaming;
   const runControl = updateComposerRunControl({ archived });
+  const cancellable = !archived && state.latestRunId && state.latestRunConversationId === state.conversationId
+    && ["queued", "running", "paused", "waiting_approval", "waiting_input"].includes(state.latestRunStatus);
+  const cancel = $("stop-chat-btn");
+  cancel.classList.toggle("hidden", !cancellable && !streaming);
+  cancel.disabled = state.composerCancelBusy;
+  cancel.setAttribute("aria-busy", String(state.composerCancelBusy));
   $("send-chat-btn").disabled = Boolean(runControl)
     || archived
     || streaming

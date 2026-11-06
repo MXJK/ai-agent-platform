@@ -61,12 +61,12 @@
 
 .eval-metric-hint {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .eval-delta {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -107,7 +107,7 @@
 
 .eval-alert-kind {
   flex: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--ink-soft);
   letter-spacing: 0.02em;
@@ -152,7 +152,7 @@
 .eval-case-verdict {
   flex: none;
   min-width: 42px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--signal);
@@ -175,7 +175,7 @@
 .eval-case-stats {
   margin-left: auto;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   text-align: right;
 }
 
@@ -209,7 +209,7 @@
 
 .eval-case-trace {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   word-break: break-word;
 }
@@ -256,7 +256,7 @@
 }
 
 .eval-history-alerts {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -266,7 +266,7 @@
 
 .eval-history-meta {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 

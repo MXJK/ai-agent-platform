@@ -715,6 +715,7 @@ export function renderDocumentDrawer(documentItem) {
 }
 
 export async function openDocumentDrawer(documentId, returnFocus = document.activeElement) {
+  if (documentMetadataDirty() && !window.confirm("文档详情有未保存修改，放弃修改并切换？")) return;
   const knowledgeBaseId = $("kb-id-input").value;
   state.documentDrawerReturnFocus = returnFocus;
   const documentItem = await fetchJson(
@@ -727,9 +728,18 @@ export async function openDocumentDrawer(documentId, returnFocus = document.acti
   $("close-document-drawer").focus();
 }
 
+export function documentMetadataDirty() {
+  const item = state.activeKnowledgeDocument;
+  return Boolean(item && ($("document-title-input").value !== item.title
+    || $("document-description-input").value !== (item.description || "")
+    || $("document-tags-input").value !== (item.tags || []).join(", ")
+    || $("replace-document-file").files?.length));
+}
+
 export function closeDocumentDrawer({ restoreFocus = true } = {}) {
   const drawer = $("document-drawer");
   if (!drawer || drawer.hidden) return;
+  if (documentMetadataDirty() && !window.confirm("文档详情有未保存修改，放弃修改并关闭？")) return;
   drawer.hidden = true;
   document.body.style.overflow = "";
   state.activeKnowledgeDocument = null;

@@ -1,5 +1,7 @@
 import { ReactSlot } from '../components/ReactSlot';
 import { memo } from 'react';
+import { ThemeControl } from './theme';
+import { RunInspector } from '../features/run-inspector';
 import { ChatView } from '../features/chat-view';
 import { KnowledgeView } from '../features/rag-view';
 import { MemoryView } from '../features/memory-view';
@@ -48,33 +50,25 @@ export const Workbench = memo(function Workbench() {
         <button id="toggle-sidebar-btn" className="icon-button panel-toggle panel-toggle-left" type="button" aria-label="隐藏主导航" aria-controls="primary-sidebar" aria-expanded="true" title="隐藏主导航">
           <svg className="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
         </button>
-        <a className="brand" href="#chat" aria-label="Cogent 首页">
-          <span className="brand-mark" aria-hidden="true">{"C"}</span>
-          <span >
-            <strong >{"Cogent"}</strong>
-            <small >{"Agent engineering console"}</small>
-          </span>
-        </a>
+
       </div>
 
       <div className="topbar-context" aria-label="当前工作上下文">
-        <span className="context-label">{"当前会话"}</span>
-        <strong id="header-session-id">{"尚未创建"}</strong>
+        <span id="header-view-label" className="context-label">{"对话"}</span>
+        <strong id="header-session-id">{"新会话"}</strong>              <button id="rename-current-session-btn" className="icon-button small" type="button" aria-label="重命名当前会话" title="重命名当前会话">
+                <svg className="app-icon" aria-hidden="true"><use href="#icon-edit"></use></svg>
+              </button>
       </div>
 
-      <div className="topbar-actions">
-        <div id="health-pill" className="status-pill neutral" role="status" aria-live="polite">
-          <span className="status-dot" aria-hidden="true"></span>
-          <span >{"连接中"}</span>
-        </div>
-        <button id="create-session-btn" className="button secondary create-session-action" type="button" aria-label="新建会话">
-          <svg className="app-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
-          <span className="create-session-label">{"新建会话"}</span>
-        </button>
-        <button id="open-settings-btn" className="icon-button" type="button" aria-label="打开设置" title="设置">
-          <svg className="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>
-        </button>
-        <button id="toggle-inspector-btn" className="icon-button panel-toggle" type="button" aria-label="显示最近会话" aria-controls="inspector-panel" aria-expanded="true" title="显示最近会话">
+      <div className="topbar-actions">              <button id="composer-workspace-btn" className="scope-chip workspace-scope" type="button">
+                <span id="composer-workspace-status-dot" className="workspace-status-dot is-missing" aria-hidden="true"></span>
+                <span className="scope-chip-copy"><small >{"Workspace"}</small><strong id="composer-workspace-label">{"未选择工作区"}</strong></span>
+                <em id="composer-workspace-role">{"选择"}</em>
+              </button><span id="workbench-run-status" className="status-pill neutral">等待输入</span>
+
+
+
+        <button id="toggle-inspector-btn" className="button ghost panel-toggle" type="button" aria-label="收起详情" aria-controls="inspector-panel" aria-expanded="true" title="收起详情"><span id="inspector-toggle-label">收起详情</span>
           <svg className="app-icon" aria-hidden="true"><use href="#icon-panel"></use></svg>
         </button>
         <a className="icon-button docs-action" href="/docs" aria-label="打开 API 文档" title="API 文档">
@@ -83,41 +77,51 @@ export const Workbench = memo(function Workbench() {
       </div>
     </header>
 
+    <button id="sidebar-backdrop" className="sidebar-backdrop" type="button" aria-label="关闭主导航" hidden />
     <div className="app-shell">
-      <aside className="sidebar" id="primary-sidebar">
-        <div id="sidebar-resizer" className="panel-resizer panel-resizer-left" role="separator" aria-label="调整主导航宽度" aria-orientation="vertical" aria-valuemin={188} aria-valuemax={360} aria-valuenow={220} tabIndex={0}></div>
-        <nav className="primary-nav" aria-label="主要功能">
+      <aside className="sidebar" id="primary-sidebar" aria-label="主导航"><div className="sidebar-brand">        <a className="brand" href="#chat" aria-label="Cogent 首页">
+          <span className="brand-mark" aria-hidden="true">{"C"}</span>
+          <span >
+            <strong >{"Cogent"}</strong>
+
+          </span>
+        </a></div>        <button id="create-session-btn" className="button secondary create-session-action" type="button" aria-label="新建会话">
+          <svg className="app-icon" aria-hidden="true"><use href="#icon-plus"></use></svg>
+          <span className="create-session-label">{"新建会话"}</span>
+        </button>
+        <div id="sidebar-resizer" className="panel-resizer panel-resizer-left" role="separator" aria-label="调整主导航宽度" aria-orientation="vertical" aria-valuemin={188} aria-valuemax={260} aria-valuenow={208} tabIndex={0}></div>
+        <nav className="primary-nav" aria-label="主要功能"><span className="nav-group-label">工作</span>
           <button className="nav-item mobile-primary active" type="button" data-view="chat" aria-current="page">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-message"></use></svg></span>
-            <span ><strong >{"对话工作台"}</strong><small >{"Cogent 统一任务入口"}</small></span>
+            <span ><strong >{"对话"}</strong><small >{"Cogent 统一任务入口"}</small></span>
           </button>
-          <button className="nav-item mobile-primary" type="button" data-view="rag">
+          <button className="nav-item mobile-primary" type="button" data-view="sessions">
+            <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-history"></use></svg></span>
+            <span ><strong >{"会话记录"}</strong><small >{"历史消息与摘要"}</small></span>
+          </button>          <button className="nav-item mobile-primary" type="button" data-view="rag">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-knowledge"></use></svg></span>
             <span ><strong >{"知识库"}</strong><small >{"检索与问答"}</small></span>
           </button>
           <button className="nav-item mobile-overflow-nav" type="button" data-view="memory">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-history"></use></svg></span>
-            <span ><strong >{"记忆工作台"}</strong><small >{"项目、个人与对话记忆"}</small></span>
+            <span ><strong >{"记忆"}</strong><small >{"项目、个人与对话记忆"}</small></span>
           </button>
-          <button className="nav-item mobile-overflow-nav" type="button" data-view="models">
+<span className="nav-group-label">管理</span>          <button className="nav-item mobile-overflow-nav" type="button" data-view="models">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-model"></use></svg></span>
-            <span ><strong >{"模型管理"}</strong><small >{"Provider、模型与连接状态"}</small></span>
+            <span ><strong >{"模型"}</strong><small >{"Provider、模型与连接状态"}</small></span>
           </button>
           <button className="nav-item mobile-overflow-nav" type="button" data-view="tools">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-network"></use></svg></span>
             <span ><strong >{"工具"}</strong><small >{"Skill 与 MCP 管理"}</small></span>
           </button>
-          <button className="nav-item mobile-primary" type="button" data-view="sessions">
-            <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-history"></use></svg></span>
-            <span ><strong >{"会话记录"}</strong><small >{"历史消息与摘要"}</small></span>
-          </button>
+
           <button className="nav-item mobile-overflow-nav" type="button" data-view="evals">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-gauge"></use></svg></span>
             <span ><strong >{"评测"}</strong><small >{"轨迹约束、指标与预警"}</small></span>
           </button>
           <button className="nav-item mobile-overflow-nav" type="button" data-view="trace-audit">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-shield"></use></svg></span>
-            <span ><strong >{"Trace 审计"}</strong><small >{"工具、审批与状态转移"}</small></span>
+            <span ><strong >{"审计"}</strong><small >{"工具、审批与状态转移"}</small></span>
           </button>
           <button className="nav-item mobile-primary" type="button" data-view="activity">
             <span className="nav-icon" aria-hidden="true"><svg className="app-icon"><use href="#icon-activity"></use></svg></span>
@@ -132,26 +136,22 @@ export const Workbench = memo(function Workbench() {
         <button id="mobile-nav-backdrop" className="mobile-nav-backdrop" type="button" aria-label="关闭更多导航" hidden={true}></button>
         <div id="mobile-more-menu" className="mobile-more-menu" role="dialog" aria-label="更多工作台" hidden={true}>
           <div className="mobile-more-heading"><strong >{"更多工作台"}</strong><span >{"选择一个工作区"}</span></div>
-          <button type="button" data-view="memory"><svg className="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span ><strong >{"记忆工作台"}</strong><small >{"项目、个人与对话记忆"}</small></span></button>
-          <button type="button" data-view="models"><svg className="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg><span ><strong >{"模型管理"}</strong><small >{"Provider、模型与连接状态"}</small></span></button>
+          <button type="button" data-view="memory"><svg className="app-icon" aria-hidden="true"><use href="#icon-history"></use></svg><span ><strong >{"记忆"}</strong><small >{"项目、个人与对话记忆"}</small></span></button>
+          <button type="button" data-view="models"><svg className="app-icon" aria-hidden="true"><use href="#icon-model"></use></svg><span ><strong >{"模型"}</strong><small >{"Provider、模型与连接状态"}</small></span></button>
           <button type="button" data-view="tools"><svg className="app-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span ><strong >{"工具"}</strong><small >{"Skill 与 MCP 管理"}</small></span></button>
           <button type="button" data-view="evals"><svg className="app-icon" aria-hidden="true"><use href="#icon-gauge"></use></svg><span ><strong >{"评测"}</strong><small >{"轨迹约束、指标与预警"}</small></span></button>
-          <button type="button" data-view="trace-audit"><svg className="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg><span ><strong >{"Trace 审计"}</strong><small >{"工具、审批与状态转移"}</small></span></button>
+          <button type="button" data-view="trace-audit"><svg className="app-icon" aria-hidden="true"><use href="#icon-shield"></use></svg><span ><strong >{"审计"}</strong><small >{"工具、审批与状态转移"}</small></span></button>
           <button id="mobile-more-settings-btn" type="button"><svg className="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg><span ><strong >{"工作区设置"}</strong><small >{"选择 Agent 操作的文件夹"}</small></span></button>
         </div>
 
-        <div className="sidebar-context">
-          <div className="context-card-heading">
-            <span >{"工作上下文"}</span>
-            <button id="sidebar-settings-btn" className="text-button" type="button">{"编辑"}</button>
-          </div>
-          <dl className="context-list">
-            <div ><dt >{"模型"}</dt><dd id="context-model">{"默认配置"}</dd></div>
-            <div ><dt >{"工作区"}</dt><dd id="context-workspace">{"未选择"}</dd></div>
-          </dl>
-          <p id="session-status" className="context-note">{"创建会话后即可开始工作"}</p>
-        </div>
-      </aside>
+<div className="sidebar-recents"><div className="recent-heading"><span>最近会话</span>            <button id="view-all-sessions-btn" className="text-button" type="button">{"查看全部"}</button></div>        <section className="inspector-recent" aria-label="最近会话">
+          <div id="recent-sessions-list" className="recent-sessions-list" aria-live="polite"><ReactSlot name="recent-sessions" /></div>
+        </section></div><footer className="sidebar-footer">        <button id="open-settings-btn" className="icon-button" type="button" aria-label="打开设置" title="设置">
+          <svg className="app-icon" aria-hidden="true"><use href="#icon-sliders"></use></svg>
+        </button><ThemeControl />        <div id="health-pill" className="status-pill neutral" role="status" aria-live="polite">
+          <span className="status-dot" aria-hidden="true"></span>
+          <span >{"连接中"}</span>
+        </div></footer>      </aside>
 
       <main id="main-workspace" className="workspace" tabIndex={-1}>
         <ChatView />
@@ -173,22 +173,22 @@ export const Workbench = memo(function Workbench() {
         <ActivityView />
       </main>
 
-      <button id="inspector-backdrop" className="inspector-backdrop" type="button" aria-label="关闭最近会话" hidden={true}></button>
-      <aside id="inspector-panel" className="inspector" aria-label="最近会话侧栏">
-        <div id="inspector-resizer" className="panel-resizer panel-resizer-right" role="separator" aria-label="调整最近会话宽度" aria-orientation="vertical" aria-valuemin={240} aria-valuemax={440} aria-valuenow={288} tabIndex={0}></div>
-        <header className="inspector-header">
-          <div ><h2 >{"最近会话"}</h2><p >{"快速回到最近工作"}</p></div>
-          <div className="inspector-header-actions">
-            <button id="view-all-sessions-btn" className="text-button" type="button">{"查看全部"}</button>
-            <button id="close-inspector-btn" className="icon-button small" type="button" aria-label="关闭最近会话">
-              <svg className="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
-            </button>
+      <button id="inspector-backdrop" className="inspector-backdrop" type="button" aria-label="收起详情" hidden={true}></button>
+      <aside id="inspector-panel" className="inspector" aria-label="当前运行详情">
+        <div id="inspector-resizer" className="panel-resizer panel-resizer-right" role="separator" aria-label="调整详情宽度" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={480} aria-valuenow={384} tabIndex={0}></div>
+        <header className="inspector-header"><h2>执行详情</h2><button id="close-inspector-btn" className="icon-button small" type="button" aria-label="收起详情"><svg className="app-icon" aria-hidden="true"><use href="#icon-close" /></svg></button></header>
+        <RunInspector />
+        <div className="inspector-context-summary">
+          <div className="context-card-heading">
+            <span >{"工作上下文"}</span>
+            <button id="sidebar-settings-btn" className="text-button" type="button">{"编辑"}</button>
           </div>
-        </header>
-
-        <section className="inspector-recent" aria-label="最近会话">
-          <div id="recent-sessions-list" className="recent-sessions-list" aria-live="polite"><ReactSlot name="recent-sessions" /></div>
-        </section>
+          <dl className="context-list">
+            <div ><dt >{"模型"}</dt><dd id="context-model">{"默认配置"}</dd></div>
+            <div ><dt >{"工作区"}</dt><dd id="context-workspace">{"未选择"}</dd></div>
+          </dl>
+          <p id="session-status" className="context-note">{"创建会话后即可开始工作"}</p>
+        </div>
       </aside>
     </div>
 
@@ -202,7 +202,7 @@ export const Workbench = memo(function Workbench() {
         <input id="workspace-id-input" type="hidden" />
         <input id="workspace-root-input" type="hidden" />
         <header className="dialog-header">
-          <div ><p className="eyebrow">{"Local Workspaces"}</p><h2 id="settings-title">{"工作区管理"}</h2><p >{"选择 Agent 可以读取和操作的本地文件夹。"}</p></div>
+          <div ><h2 id="settings-title">{"工作区管理"}</h2><p >{"选择 Agent 可以读取和操作的本地文件夹。"}</p></div>
           <button id="close-settings-btn" className="icon-button" type="submit" value="cancel" aria-label="关闭设置">
             <svg className="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
@@ -241,7 +241,7 @@ export const Workbench = memo(function Workbench() {
     <dialog id="workspace-picker-dialog" className="settings-dialog workspace-picker-dialog" aria-labelledby="workspace-picker-title">
       <form method="dialog" className="settings-shell workspace-picker-shell">
         <header className="dialog-header">
-          <div ><p className="eyebrow">{"Local Workspace"}</p><h2 id="workspace-picker-title">{"添加工作区文件夹"}</h2><p id="workspace-picker-description">{"系统窗口不可用时，可在这里选择服务允许访问的项目文件夹。"}</p></div>
+          <div ><h2 id="workspace-picker-title">{"添加工作区文件夹"}</h2><p id="workspace-picker-description">{"系统窗口不可用时，可在这里选择服务允许访问的项目文件夹。"}</p></div>
           <button id="close-workspace-picker-btn" className="icon-button" type="submit" value="cancel" aria-label="关闭文件夹选择器">
             <svg className="app-icon" aria-hidden="true"><use href="#icon-close"></use></svg>
           </button>
@@ -276,7 +276,7 @@ export const Workbench = memo(function Workbench() {
       <section className="settings-shell checkpoint-history-shell">
         <header className="dialog-header checkpoint-history-header">
           <div >
-            <p className="eyebrow">{"Run time travel"}</p>
+
             <h2 id="checkpoint-history-title">{"从检查点继续"}</h2>
             <p >{"选择一个已完成的图节点，在当前会话回到此处，或分叉为一条新的执行路径。"}</p>
           </div>
@@ -342,6 +342,6 @@ export const Workbench = memo(function Workbench() {
 
     <div id="toast-region" className="toast-region" aria-live="polite" aria-atomic="true"></div>
 
-    
+
   </>);
 });

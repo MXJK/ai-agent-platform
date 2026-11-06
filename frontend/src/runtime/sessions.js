@@ -1,3 +1,4 @@
+import { clearInspector, syncRunInspector } from '../lib/inspector';
 import { renderSessionCards, renderRecentSessionCards } from '../features/session-lists';
 import { state } from './state.js';
 import { $, escapeHtml, formatDate, formatTokenCount, latestUserPromptRecord } from './format.js';
@@ -12,7 +13,7 @@ import { loadModelPreference } from './model-actions.js';
 import { appendChatMessage, renderChatHistory, renderMessages } from './conversation.js';
 import { agentRunConversationId, agentRunId, agentRunStatus, agentRunTrace, chatContentForRun, setChatStatusFromRun } from './checkpoints.js';
 import { createAgentProgressPresenter, renderAgentChatResponse } from './chat.js';
-import { renderAgentRun, watchRunUntilTerminal } from './runs.js';
+import { refreshEvents, renderAgentRun, watchRunUntilTerminal } from './runs.js';
 import { formatInputCountMethod, formatUsageOperation } from './workspaces.js';
 
 export async function ensureSession() {
@@ -34,16 +35,7 @@ export function resetChatView() {
   setChatWorkbenchActive(false);
   $("chat-output").innerHTML = `
     <div class="welcome-state">
-      <div class="welcome-signal" aria-hidden="true">
-        <span class="active"><i></i><b>ASK</b></span>
-        <span><i></i><b>PLAN</b></span>
-        <span><i></i><b>ACT</b></span>
-        <span><i></i><b>VERIFY</b></span>
-      </div>
-      <div class="welcome-content">
-        <div class="welcome-mark" aria-hidden="true"><strong>AGENT</strong><span>READY</span></div>
-        <h2>从一个具体问题开始</h2>
-        <p>由 Cogent 理解上下文并完成任务；需要确认的操作会在执行前暂停。</p>
+      <div class="welcome-content"><h2>从一个具体问题开始</h2><p>查看项目、修改代码或排查问题。需要确认时，Agent 会在这里等待。</p>
         <div class="prompt-grid" aria-label="推荐问题">
           <button type="button" class="prompt-card" data-prompt="解释这个项目的核心架构和请求调用链"><span>理解项目</span><strong>解释核心架构和请求调用链</strong></button>
           <button type="button" class="prompt-card" data-prompt="帮我分析 SSE 流式输出的实现与异常处理"><span>分析实现</span><strong>检查 SSE 流式输出</strong></button>
@@ -56,6 +48,7 @@ export function resetChatView() {
 }
 
 export function resetLatestAgentRunState() {
+  clearInspector();
   state.agentPollGeneration += 1;
   state.changeSetRequestGeneration += 1;
   state.latestRunId = "";
@@ -63,6 +56,7 @@ export function resetLatestAgentRunState() {
   state.latestRunConversationId = "";
   state.latestRunBody = null;
   state.composerRunControlBusy = false;
+  state.composerCancelBusy = false;
   state.composerPauseRequestedRunId = "";
   state.checkpointHistory = [];
   state.checkpointRunId = "";
@@ -145,6 +139,7 @@ export async function restoreLatestAgentRun(conversationId, messages = []) {
   const startedAt = performance.now() - (body?.result?.metrics?.elapsed_ms || 0);
   renderAgentChatResponse(contentNode, body, startedAt);
   if (!["queued", "running"].includes(status)) {
+    await refreshEvents(false, runId, { conversationId });
     await historicalRestore;
     return body;
   }
@@ -173,6 +168,8 @@ export async function restoreLatestAgentRun(conversationId, messages = []) {
 }
 
 export async function createSession() {
+  state.sessionLoadGeneration += 1;
+  state.pendingSessionId = "";
   $("session-status").textContent = "正在创建会话…";
   const previousDraftKey = composerDraftKey();
   try {
@@ -337,12 +334,19 @@ export async function loadSession(showRaw = true, requestedSessionId = null, opt
   if (!conversationId) {
     throw new Error("请输入要加载的会话 ID");
   }
+  const loadGeneration = ++state.sessionLoadGeneration;
+  state.pendingSessionId = conversationId;
+  clearInspector();
   const [session, summary, messages, usage] = await Promise.all([
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/summary`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/messages`),
     fetchJson(`/sessions/${encodeURIComponent(conversationId)}/token-usage`),
-  ]);
+  ]).catch(error => {
+    if (loadGeneration === state.sessionLoadGeneration) { state.pendingSessionId = ""; syncRunInspector(); }
+    throw error;
+  });
+  if (loadGeneration !== state.sessionLoadGeneration) return null;
   if (options.requireActive && (session.archived_at || session.message_count === 0)) {
     throw new Error(session.archived_at ? "会话已归档" : "空会话不参与启动恢复");
   }
@@ -352,6 +356,8 @@ export async function loadSession(showRaw = true, requestedSessionId = null, opt
       body: JSON.stringify({ last_active_session_id: session.id }),
     });
   }
+  if (loadGeneration !== state.sessionLoadGeneration) return null;
+  state.pendingSessionId = "";
   const previousConversationId = state.conversationId;
   resetLatestAgentRunState();
   state.currentSession = session;

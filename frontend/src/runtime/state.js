@@ -1,6 +1,9 @@
 
 
 export const state = {
+  sessionLoadGeneration: 0,
+  pendingSessionId: "",
+  inspectorPreferred: true,
   conversationId: "",
   evalCatalogue: null,
   evalHistory: [],
@@ -22,6 +25,7 @@ export const state = {
   latestRunConversationId: "",
   latestRunBody: null,
   composerRunControlBusy: false,
+  composerCancelBusy: false,
   composerPauseRequestedRunId: "",
   checkpointHistory: [],
   checkpointRunId: "",

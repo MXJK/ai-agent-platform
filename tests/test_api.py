@@ -922,7 +922,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="workspace-token-list"', markup_source)
         self.assertIn('id="recent-sessions-list"', markup_source)
         self.assertIn('className="inspector-recent"', markup_source)
-        self.assertIn('aria-label="最近会话侧栏"', markup_source)
+        self.assertIn('aria-label="当前运行详情"', markup_source)
         self.assertIn('id="toggle-sidebar-btn"', markup_source)
         self.assertIn('id="sidebar-resizer"', markup_source)
         self.assertIn('id="inspector-resizer"', markup_source)
@@ -931,8 +931,8 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('id="trace-tab"', markup_source)
         self.assertNotIn('id="raw-tab"', markup_source)
         self.assertLess(
-            markup_source.index('id="inspector-panel"'),
             markup_source.index('id="recent-sessions-list"'),
+            markup_source.index('id="inspector-panel"'),
         )
         self.assertNotIn('className="recent-sessions"', markup_source)
         self.assertIn('id="session-search-input"', markup_source)
@@ -954,8 +954,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('data-audit-filter="tool"', markup_source)
         self.assertIn('id="composer-config" className="composer-config"', markup_source)
         self.assertNotIn('className="conversation" aria-live=', markup_source)
-        self.assertIn('className="welcome-signal"', markup_source)
-        self.assertIn('<b >{"VERIFY"}</b>', markup_source)
+        self.assertNotIn('className="welcome-signal"', markup_source)
+        self.assertIn("开始任务后显示执行详情", markup_source)
         self.assertIn('id="knowledge-base-list"', markup_source)
         self.assertIn('id="document-files-input"', markup_source)
         self.assertIn('id="knowledge-documents-panel"', markup_source)
@@ -1011,7 +1011,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("await reader.cancel()", script_source)
         self.assertIn("空会话不参与启动恢复", script_source)
         self.assertIn("session.message_count > 0", script_source)
-        self.assertIn("隐藏最近会话", script_source)
+        self.assertIn("收起详情", script_source)
         self.assertIn("setSidebarVisible", script_source)
         self.assertIn("bindPanelResizer", script_source)
         self.assertIn("sidebarWidth", script_source)
@@ -1072,7 +1072,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn(".inspector-recent", style_source)
         self.assertIn("body.sidebar-hidden .app-shell", style_source)
         self.assertIn(".panel-resizer", style_source)
-        self.assertIn("--topbar-height: 58px", style_source)
+        self.assertIn("--topbar-height: 48px", style_source)
         self.assertIn("min-height: 44px", style_source)
         self.assertIn(
             "height: calc(100vh - var(--topbar-height) - 70px",
@@ -1121,8 +1121,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('values.push(["模型请求"', script_source)
         self.assertIn('values.push(["模型重试"', script_source)
         self.assertIn('values.push(["总重试"', script_source)
-        self.assertIn('className="welcome-signal"', script_source)
-        self.assertIn("--signal: #62d6c2", style_source)
+        self.assertNotIn('className="welcome-signal"', script_source)
+        self.assertIn("--signal: var(--success-text)", style_source)
         self.assertIn("@keyframes signal-arrive", style_source)
         self.assertIn("--z-overlay: 80", style_source)
         self.assertIn(".chat-workbench.has-conversation", style_source)

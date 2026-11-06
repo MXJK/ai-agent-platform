@@ -5,7 +5,7 @@ export const ActivityView = memo(function ActivityView() {
  return (<ViewPanel id="activity-view" aria-labelledby="activity-title" view="activity" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Operations"}</p>
+
               <h1 id="activity-title">{"运行中心"}</h1>
               <p >{"观察本地服务状态、最近请求与任务运行情况。"}</p>
             </div>

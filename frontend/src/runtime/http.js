@@ -39,10 +39,11 @@ export async function checkHealth() {
     state.healthStatus = body.status;
     state.sessionStorageMode = body.session_storage || "unknown";
     const persistent = body.persistent_sessions !== false;
-    pill.className = `status-pill ${persistent ? "ok" : "warning"}`;
+    pill.className = "status-pill ok";
     pill.innerHTML = `<span class="status-dot" aria-hidden="true"></span><span>${
-      persistent ? "服务正常" : "临时模式 · 重启会丢失"
+      "服务已连接"
     }</span>`;
+    pill.title = persistent ? "会话持久化已启用" : "当前为临时存储模式，重启会丢失会话";
     setRaw(body);
   } catch (error) {
     state.healthStatus = "offline";

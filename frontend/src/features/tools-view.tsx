@@ -1,3 +1,5 @@
+import { EditorDialog } from '../components/EditorDialog';
+import { SectionTabs } from '../components/SectionTabs';
 import { memo } from 'react';
 import { ReactSlot } from '../components/ReactSlot';
 import { ViewPanel } from '../components/ViewPanel';
@@ -6,18 +8,19 @@ export const ToolsView = memo(function ToolsView() {
  return (<ViewPanel id="tools-view" aria-labelledby="tools-title" view="tools" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Capability Registry"}</p>
+
               <h1 id="tools-title">{"工具"}</h1>
               <p >{"统一管理全局 Skill 与 MCP Server；可用项会出现在任意 Workspace 的 "}<code >{"/"}</code>{" 菜单。"}</p>
             </div>
             <button id="refresh-tools-registry-btn" className="button secondary" type="button">{"刷新全部"}</button>
           </header>
 
-          <div id="skill-runtime-note" className="mcp-runtime-note" role="status" aria-live="polite" hidden={true}></div>
+          <SectionTabs id="tools" tabs={[
+            { label: 'Skill', content: <>          <div id="skill-runtime-note" className="mcp-runtime-note" role="status" aria-live="polite" hidden={true}></div>
 
           <article className="surface tool-registry-intro">
             <div >
-              <span className="step-kicker">{"Global Skills"}</span>
+
               <h2 >{"全局 Skill"}</h2>
               <p >{"目录 "}<code id="skill-registry-root">{"~/.cogent/skills"}</code>{" 对所有 Workspace 生效。显式 "}<code >{"/"}</code>{" 选择会直接加载；隐式匹配按需读取正文。"}</p>
             </div>
@@ -25,9 +28,9 @@ export const ToolsView = memo(function ToolsView() {
           </article>
 
           <div className="content-grid mcp-registry-grid skill-registry-grid">
-            <article className="surface mcp-registration-surface">
+<EditorDialog id="skills-editor" title="添加 / 编辑 Skill">            <article className="surface mcp-registration-surface">
               <div className="surface-heading">
-                <div ><span className="step-kicker">{"01 · 注册"}</span><h2 id="skill-form-title">{"添加 Skill"}</h2><p >{"使用兼容的 "}<code >{"SKILL.md"}</code>{" Frontmatter 与 Markdown 正文。"}</p></div>
+                <div ><h2 id="skill-form-title">{"添加 Skill"}</h2><p >{"使用兼容的 "}<code >{"SKILL.md"}</code>{" Frontmatter 与 Markdown 正文。"}</p></div>
                 <button id="reset-skill-form-btn" className="text-button" type="button">{"清空"}</button>
               </div>
               <form id="skill-form" autoComplete="off">
@@ -41,15 +44,16 @@ export const ToolsView = memo(function ToolsView() {
                   <button id="save-skill-btn" className="button primary" type="submit">{"保存 Skill"}</button>
                 </div>
               </form>
-            </article>
+            </article></EditorDialog>
             <article className="surface">
-              <div className="surface-heading"><div ><span className="step-kicker">{"02 · 可用项"}</span><h2 >{"已注册 Skill"}</h2><p >{"系统 Skill 只读，用户 Skill 可编辑和停用。"}</p></div></div>
+              <div className="surface-heading"><div ><h2 >{"已注册 Skill"}</h2><p >{"系统 Skill 只读，用户 Skill 可编辑和停用。"}</p></div></div>
               <div id="skill-list" className="mcp-server-list"><ReactSlot name="skills" /></div>
             </article>
           </div>
 
-          <div className="tool-section-heading">
-            <div ><span className="step-kicker">{"MCP Servers"}</span><h2 >{"MCP 连接"}</h2><p >{"注册外部 Server，验证连接状态，再把发现的工具交给 Agent。"}</p></div>
+</> },
+            { label: 'MCP', content: <>          <div className="tool-section-heading">
+            <div ><h2 >{"MCP 连接"}</h2><p >{"注册外部 Server，验证连接状态，再把发现的工具交给 Agent。"}</p></div>
           </div>
 
           <div id="mcp-runtime-note" className="mcp-runtime-note" role="status" aria-live="polite" hidden={true}></div>
@@ -70,10 +74,10 @@ export const ToolsView = memo(function ToolsView() {
           </article>
 
           <div className="content-grid mcp-registry-grid">
-            <article className="surface mcp-registration-surface">
+<EditorDialog id="mcp-editor" title="添加 / 编辑 MCP Server">            <article className="surface mcp-registration-surface">
               <div className="surface-heading">
                 <div >
-                  <span className="step-kicker">{"01 · 注册"}</span>
+
                   <h2 id="mcp-form-title">{"添加 Server"}</h2>
                   <p >{"凭据会写入 SecretStore；配置文件只保存引用。"}</p>
                 </div>
@@ -142,15 +146,17 @@ export const ToolsView = memo(function ToolsView() {
                   <button id="save-mcp-server-btn" className="button primary" type="submit">{"保存并连接"}</button>
                 </div>
               </form>
-            </article>
+            </article></EditorDialog>
 
             <article className="surface">
               <div className="surface-heading">
-                <div ><span className="step-kicker">{"02 · 发现"}</span><h2 >{"Server 与工具"}</h2><p >{"每条连接独立重试、熔断和关闭。"}</p></div>
+                <div ><h2 >{"Server 与工具"}</h2><p >{"每条连接独立重试、熔断和关闭。"}</p></div>
                 <span id="mcp-list-count" className="meta-badge">{"0"}</span>
               </div>
               <div id="mcp-server-list" className="mcp-server-list"><ReactSlot name="mcp" /></div>
             </article>
           </div>
+</> },
+          ]} />
         </ViewPanel>);
 });

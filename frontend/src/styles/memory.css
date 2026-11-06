@@ -14,23 +14,23 @@
   align-items: center;
   gap: 8px;
   padding: 0 11px;
-  border: 1px solid rgba(98, 214, 194, 0.24);
+  border: 1px solid color-mix(in srgb, var(--success-text) 24%, transparent);
   border-radius: 999px;
   background: var(--signal-soft);
   color: var(--signal);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
 .memory-runtime-status[data-tone="warning"] {
-  border-color: rgba(228, 185, 110, 0.28);
+  border-color: color-mix(in srgb, var(--accent-text) 28%, transparent);
   background: var(--amber-soft);
   color: var(--amber);
 }
 
 .memory-runtime-status[data-tone="error"] {
-  border-color: rgba(245, 138, 157, 0.28);
+  border-color: color-mix(in srgb, var(--danger-text) 28%, transparent);
   background: var(--red-soft);
   color: var(--red);
 }
@@ -40,7 +40,7 @@
   height: 7px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 0 4px rgba(98, 214, 194, 0.1);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success-text) 10%, transparent);
 }
 
 .memory-scope-tabs {
@@ -84,7 +84,7 @@
 
 .memory-scope-tabs .knowledge-tab small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -119,7 +119,7 @@
 .memory-detail-header p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -186,7 +186,7 @@
   display: block;
   margin-top: 8px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -209,7 +209,7 @@
 .memory-layer-gap > span {
   color: var(--amber);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .memory-split-layout,
@@ -257,7 +257,7 @@
   flex: 0 0 auto;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .memory-filter-grid {
@@ -268,13 +268,13 @@
 
 .memory-filter-grid label {
   margin-bottom: 8px;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .memory-filter-grid select {
   min-height: 36px;
   padding-inline: 8px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .memory-new-button {
@@ -333,7 +333,7 @@
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -343,7 +343,7 @@
   flex-wrap: wrap;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-asset-row-meta span + span::before {
@@ -363,31 +363,31 @@
   background: var(--surface-soft);
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
   font-weight: 750;
 }
 
 .memory-status-pill.active {
-  border-color: rgba(98, 214, 194, 0.28);
+  border-color: color-mix(in srgb, var(--success-text) 28%, transparent);
   background: var(--signal-soft);
   color: var(--signal);
 }
 
 .memory-status-pill.candidate,
 .memory-status-pill.stale {
-  border-color: rgba(228, 185, 110, 0.28);
+  border-color: color-mix(in srgb, var(--accent-text) 28%, transparent);
   background: var(--amber-soft);
   color: var(--amber);
 }
 
 .memory-status-pill.rejected {
-  border-color: rgba(245, 138, 157, 0.24);
+  border-color: color-mix(in srgb, var(--danger-text) 24%, transparent);
   background: var(--red-soft);
   color: var(--red);
 }
 
 .memory-status-pill.draft {
-  border-color: rgba(143, 166, 255, 0.28);
+  border-color: color-mix(in srgb, var(--accent-text) 28%, transparent);
   background: var(--brand-pale);
   color: var(--brand-strong);
 }
@@ -406,7 +406,7 @@
 .memory-jobs summary {
   cursor: pointer;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -434,7 +434,7 @@
 .memory-action-bar .button {
   min-height: 36px;
   padding-inline: 11px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .memory-evidence-panel {
@@ -464,13 +464,13 @@
 
 .memory-evidence-summary small {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-evidence-summary strong {
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -491,13 +491,13 @@
   background: var(--blue-soft);
   color: var(--blue);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-evidence-item strong {
   align-self: center;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -506,7 +506,7 @@
   grid-column: 1 / -1;
   margin: 2px 0 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -534,13 +534,13 @@
 
 .memory-empty strong {
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .memory-empty p {
   max-width: 320px;
   margin: 0;
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -552,7 +552,7 @@
 .memory-skeleton-row {
   height: 84px;
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(90deg, transparent, rgba(143, 166, 255, 0.07), transparent);
+  background: var(--bg-raised);
   background-size: 220% 100%;
   animation: memory-skeleton-sweep 1.4s ease-in-out infinite;
 }
@@ -564,15 +564,15 @@
 
 .memory-profile-snapshot {
   padding: 19px;
-  border-color: rgba(143, 166, 255, 0.24);
-  background: linear-gradient(135deg, rgba(143, 166, 255, 0.08), transparent 52%), var(--surface);
+  border-color: color-mix(in srgb, var(--accent-text) 24%, transparent);
+  background: var(--bg-raised), var(--surface);
 }
 
 .memory-profile-stats {
   display: flex;
   gap: 16px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .memory-profile-stats b {
@@ -588,7 +588,7 @@
   padding: 15px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: rgba(5, 12, 19, 0.54);
+  background: var(--bg-raised);
 }
 
 .memory-profile-meta {
@@ -598,7 +598,7 @@
   margin-bottom: 12px;
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-profile-meta span {
@@ -609,7 +609,7 @@
 
 .memory-profile-preview .markdown-body {
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.65;
 }
 
@@ -667,7 +667,7 @@
   flex: 0 0 auto;
   color: var(--signal);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-conversation-meta {
@@ -689,14 +689,14 @@
 
 .memory-conversation-meta dt {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .memory-conversation-meta dd {
   margin: 4px 0 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -910,7 +910,7 @@
 .document-table th {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -964,7 +964,7 @@
 .document-open-button span {
   color: var(--muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .document-tag-summary {
@@ -973,7 +973,7 @@
   margin-top: 4px;
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -983,13 +983,13 @@
 .document-chunk-count {
   color: var(--ink-soft);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .document-pagination {
   padding-top: 14px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .settings-note {
@@ -1009,8 +1009,8 @@
 .drawer-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(2, 8, 14, 0.72);
-  backdrop-filter: blur(4px);
+  background: var(--bg-raised);
+  backdrop-filter: none;
 }
 
 .drawer-panel {
@@ -1067,12 +1067,12 @@
 
 .document-metadata-list div:last-child { border-bottom: 0; }
 .document-metadata-list dt { color: var(--muted); }
-.document-metadata-list dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 10px; }
+.document-metadata-list dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
 
 .document-index-error {
   margin-bottom: 16px;
   padding: 10px 12px;
-  border: 1px solid rgba(245, 138, 157, 0.34);
+  border: 1px solid color-mix(in srgb, var(--danger-text) 34%, transparent);
   border-radius: var(--radius-sm);
   background: var(--red-soft);
   color: var(--red);
@@ -1089,7 +1089,7 @@
 .replace-document-block p {
   margin: 8px 0 12px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 @media (max-width: 1120px) {
@@ -1133,7 +1133,7 @@
   .mobile-kb-selector span {
     color: var(--muted);
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 12px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
@@ -1238,7 +1238,7 @@
     color: var(--muted);
     content: attr(data-label);
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 12px;
   }
 
   .document-table .document-row .document-name-cell::before {

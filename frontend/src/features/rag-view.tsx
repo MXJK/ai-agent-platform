@@ -6,7 +6,7 @@ export const KnowledgeView = memo(function KnowledgeView() {
  return (<ViewPanel id="rag-view" aria-labelledby="rag-title" view="rag" className="view-panel">
           <header className="view-header compact">
             <div >
-              <p className="eyebrow">{"Grounded Knowledge"}</p>
+
               <h1 id="rag-title">{"知识库"}</h1>
               <p >{"选中一个知识库，集中管理文档、索引健康和检索问答。"}</p>
             </div>

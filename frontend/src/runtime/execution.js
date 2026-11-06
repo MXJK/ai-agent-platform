@@ -768,7 +768,7 @@ export function renderResponseMetrics(contentNode, metrics) {
   const bubble = contentNode.closest(".chat-bubble");
   let footer = bubble.querySelector(".response-metrics");
   if (!footer) {
-    footer = document.createElement("div");
+    footer = document.createElement("details");
     footer.className = "response-metrics";
     bubble.appendChild(footer);
   }
@@ -841,7 +841,7 @@ export function renderResponseMetrics(contentNode, metrics) {
   if (metrics.retry_count !== undefined) {
     values.push(["总重试", formatTokenCount(metrics.retry_count)]);
   }
-  footer.innerHTML = values
+  footer.innerHTML = '<summary>用量与运行统计</summary>' + values
     .map(([label, value]) => `<span><small>${escapeHtml(label)}</small>${escapeHtml(value)}</span>`)
     .join("");
   footer.hidden = values.length === 0;

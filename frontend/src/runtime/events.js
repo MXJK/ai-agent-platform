@@ -198,7 +198,7 @@ export function bindEvents() {
     if (window.innerWidth > 900) setMobileMoreOpen(false);
   }, { passive: true });
   listen(document, "keydown", (event) => {
-    if (event.key === "Escape" && !$("inspector-panel").hidden && window.innerWidth <= 1120) {
+    if (event.key === "Escape" && !document.querySelector("dialog[open]") && !$("inspector-panel").hidden && window.innerWidth < 1200) {
       setInspectorVisible(false);
       $("toggle-inspector-btn").focus();
     }
